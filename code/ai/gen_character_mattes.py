@@ -52,7 +52,7 @@ import torchvision.transforms as T
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path("projects/the-pharaoh-who-defied-death/episodes/s01e01/assets")
+OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_character_mattes"
 
 CHARACTERS = [
@@ -97,7 +97,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Remove backgrounds from character portraits using RMBG-1.4."
     )
-    parser.add_argument("--output_dir", type=str, default=str(OUTPUT_DIR))
+    parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--threshold", type=float, default=0.5,
@@ -219,11 +219,26 @@ def remove_background(
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def locale_from_manifest_path(path: str) -> str:
+    """Extract locale from manifest filename.
+    'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
+    'AssetManifest_draft.json'          -> 'en'
+    """
+    stem = Path(path).stem
+    parts = stem.split('.')
+    return parts[-1] if len(parts) > 1 else 'en'
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    out_dir = Path(args.output_dir)
+    locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
+    out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
 
     characters = CHARACTERS

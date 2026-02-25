@@ -58,7 +58,7 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path("projects/the-pharaoh-who-defied-death/episodes/s01e01/assets")
+OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_character_animation"
 
 ANIMATIONS = [
@@ -139,8 +139,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Animate character portraits using AnimateDiff for s01e01."
     )
-    parser.add_argument("--output_dir", type=str, default=str(OUTPUT_DIR))
-    parser.add_argument("--input_dir", type=str, default=str(OUTPUT_DIR),
+    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--input_dir", type=str, default=None,
                         help="Directory containing input portrait PNGs.")
     parser.add_argument("--fps", type=int, default=FPS)
     parser.add_argument("--steps", type=int, default=NUM_INFERENCE_STEPS)
@@ -311,13 +311,24 @@ def generate_animation(pipe, mode: str, anim: dict, input_dir: Path, args) -> li
     return result.frames[0]
 
 
+def locale_from_manifest_path(path: str) -> str:
+    """Extract locale from manifest filename.
+    'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
+    'AssetManifest_draft.json'          -> 'en'
+    """
+    stem = Path(path).stem
+    parts = stem.split('.')
+    return parts[-1] if len(parts) > 1 else 'en'
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    out_dir = Path(args.output_dir)
-    input_dir = Path(args.input_dir)
+    locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
+    out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
+    input_dir = Path(args.input_dir) if args.input_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
 
     animations = ANIMATIONS

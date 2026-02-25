@@ -60,7 +60,7 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path("projects/the-pharaoh-who-defied-death/episodes/s01e01/assets")
+OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_upscale"
 
 UPSCALE_TARGETS = [
@@ -122,7 +122,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Upscale character RGBA PNGs 2× using Real-ESRGAN x4plus."
     )
-    parser.add_argument("--output_dir", type=str, default=str(OUTPUT_DIR))
+    parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--tile", type=int, default=512,
@@ -248,11 +248,26 @@ def upscale_image(upsampler, input_path: Path, output_path: Path, target_scale: 
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def locale_from_manifest_path(path: str) -> str:
+    """Extract locale from manifest filename.
+    'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
+    'AssetManifest_draft.json'          -> 'en'
+    """
+    stem = Path(path).stem
+    parts = stem.split('.')
+    return parts[-1] if len(parts) > 1 else 'en'
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    out_dir = Path(args.output_dir)
+    locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
+    out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
 
     upscale_targets = UPSCALE_TARGETS

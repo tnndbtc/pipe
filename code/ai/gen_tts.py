@@ -44,7 +44,10 @@ import torch
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path("projects/the-pharaoh-who-defied-death/episodes/s01e01/assets")
+# Resolve output dir relative to this script's location so it works regardless
+# of the working directory the script is launched from.
+# code/ai/gen_tts.py -> ../../projects/...  (repo root / projects / ...)
+OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_tts"
 
 # Voice mapping:
@@ -300,7 +303,7 @@ def parse_args():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--output_dir", type=str, default=str(OUTPUT_DIR))
+    parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--item_id", type=str, default=None,
@@ -439,12 +442,23 @@ def synthesise(pipe, text: str, voice: str, speed: float) -> np.ndarray:
     return np.concatenate(chunks)
 
 
+def locale_from_manifest_path(path: str) -> str:
+    """Extract locale from manifest filename.
+    'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
+    'AssetManifest_draft.json'          -> 'en'
+    """
+    stem = Path(path).stem
+    parts = stem.split('.')
+    return parts[-1] if len(parts) > 1 else 'en'
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    out_dir = Path(args.output_dir)
+    locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
+    out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Load voice profiles from --voices file (optional)
