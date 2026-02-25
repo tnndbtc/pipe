@@ -1,0 +1,29 @@
+{
+  "description": "English (en-us) voice profiles — The Pharaoh Who Defied Death s01e01",
+
+  "locale_lang_map": {
+    "en":    "en-us",
+    "en-us": "en-us",
+    "en-gb": "en-gb"
+  },
+
+  "speaker_voice_map": {
+    "amunhotep":     "bm_george",
+    "ramesses_ka":   "bm_lewis",
+    "neferet":       "bf_emma",
+    "khamun":        "bm_daniel",
+    "voice_of_gate": "bm_george"
+  },
+
+  "speaker_speed_overrides": {
+    "voice_of_gate": 0.75
+  },
+
+  "voice_style_rules": [
+    { "keywords": ["young female", "female", "woman", "girl"],          "voice": "bf_emma"   },
+    { "keywords": ["elderly", "aged", "old", "gravelly", "ceremonial"], "voice": "bm_george" },
+    { "keywords": ["military", "soldier", "warrior", "bearing"],        "voice": "bm_daniel" },
+    { "keywords": ["commanding", "resonant", "powerful", "sovereign"],  "voice": "bm_lewis"  },
+    { "keywords": ["supernatural", "distorted", "ancient", "deep"],     "voice": "bm_george" }
+  ]
+}

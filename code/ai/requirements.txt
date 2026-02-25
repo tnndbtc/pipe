@@ -1,0 +1,115 @@
+# =============================================================================
+# requirements.txt — AI Asset Generation Pipeline (s01e01)
+# RTX 4060 8 GB VRAM / CUDA 12.1 / Python 3.10+
+# =============================================================================
+#
+# FULL INSTALL (run in this order):
+#
+#   Step 1 — PyTorch + CUDA (must come first; sets the CUDA ABI for everything else)
+#     pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu121
+#
+#   Step 2 — xformers (must use PyTorch index to match CUDA version)
+#     pip install xformers --index-url https://download.pytorch.org/whl/cu121
+#
+#   Step 3 — AudioCraft special case (its hard-pin av==11.0.0 has no Windows binary)
+#     pip install audiocraft --no-deps
+#     pip install "av==12.0.0" --only-binary=av
+#
+#   Step 4 — everything else
+#     pip install -r requirements.txt
+#
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# PyTorch ecosystem
+# Listed here for reference; install via --index-url as shown above.
+# Plain `pip install torch` pulls the CPU-only build from PyPI.
+# ---------------------------------------------------------------------------
+# torch==2.4.1           # install via: --index-url https://download.pytorch.org/whl/cu121
+# torchvision==0.19.1    # same index
+# torchaudio==2.4.1      # same index
+# xformers               # same index — required by AudioCraft transformer
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace stack
+# ---------------------------------------------------------------------------
+diffusers>=0.32.0          # CogVideoXPipeline, AnimateDiffPipeline, FluxPipeline
+transformers>=4.40.0       # RMBG-1.4, Kokoro, text encoders
+accelerate>=0.30.0         # enable_model_cpu_offload()
+huggingface_hub>=0.21.0    # hf_hub_download(), snapshot_download()
+safetensors>=0.4.0         # fast weight loading
+bitsandbytes>=0.43.0       # 4-bit quantisation for FLUX (gen_character_images)
+sentencepiece>=0.1.99      # tokeniser for CogVideoX text encoder
+
+
+# ---------------------------------------------------------------------------
+# Image / video I/O
+# ---------------------------------------------------------------------------
+Pillow>=10.0.0
+imageio>=2.34.0
+imageio[ffmpeg]            # ffmpeg backend used by diffusers export_to_video()
+av==12.0.0                 # audiocraft hard-pins av==11.0.0 (no Windows binary);
+                           # 12.0.0 is the earliest available Windows wheel.
+                           # Install with: pip install "av==12.0.0" --only-binary=av
+opencv-python>=4.9.0       # used by gen_upscale.py (BGR↔RGB conversion)
+
+
+# ---------------------------------------------------------------------------
+# Numerical / audio I/O
+# ---------------------------------------------------------------------------
+numpy>=1.24.0,<2.0.0       # torch 2.4.x was compiled against NumPy 1.x;
+                           # NumPy 2.x breaks the C extension ABI
+soundfile>=0.12.0          # WAV read/write for TTS, SFX, music output
+
+
+# ---------------------------------------------------------------------------
+# TTS — Kokoro-82M  (gen_tts.py)
+# ---------------------------------------------------------------------------
+kokoro>=0.9.4
+
+
+# ---------------------------------------------------------------------------
+# SFX + Music — Meta AudioCraft  (gen_sfx.py, gen_music.py)
+#
+# AudioCraft itself must be installed with --no-deps (see Step 3 above)
+# to avoid its av==11.0.0 hard-pin conflict. The packages below are
+# AudioCraft's runtime dependencies installed separately.
+# ---------------------------------------------------------------------------
+# audiocraft>=1.3.0     ← installed via: pip install audiocraft --no-deps
+encodec>=0.1.1
+flashy>=0.0.1
+num2words>=0.5.13
+spacy>=3.0.0
+tqdm>=4.0.0
+librosa>=0.10.0
+
+
+# ---------------------------------------------------------------------------
+# Background removal — RMBG-1.4  (gen_character_mattes.py)
+#
+# Uses transformers + torchvision (already pulled in above).
+# No additional packages required.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Super-resolution — Real-ESRGAN x4plus  (gen_upscale.py)
+#
+# If install fails on Windows, add --no-build-isolation:
+#   pip install realesrgan basicsr --no-build-isolation
+# ---------------------------------------------------------------------------
+realesrgan>=0.3.0
+basicsr>=1.4.2
+
+
+# ---------------------------------------------------------------------------
+# Lip-sync — Wav2Lip fallback  (gen_lipsync.py)
+#
+# Wav2Lip itself is installed by cloning the repo (no PyPI package).
+# The two packages below are used by LatentSync's internal pipeline
+# if upgrading to LatentSync 1.5 later.
+# ---------------------------------------------------------------------------
+einops>=0.7.0
+omegaconf>=2.3.0

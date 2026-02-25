@@ -1,0 +1,42 @@
+{
+  "description": "Chinese Mandarin Simplified (zh-Hans) voice profiles — The Pharaoh Who Defied Death s01e01",
+
+  "_notes": [
+    "Kokoro lang_code 'z' = Mandarin Chinese.",
+    "To list all available Chinese voices installed on your system run:",
+    "  python -c \"from kokoro import KPipeline; p=KPipeline('z'); print(sorted(p.voices.keys()))\"",
+    "Known Kokoro-82M Chinese voices (verify against your installed version):",
+    "  Male   : zm_yunxi, zm_yunjian, zm_yunxia, zm_yunyang",
+    "  Female : zf_xiaobei, zf_xiaoni, zf_xiaoyi, zf_yunjian"
+  ],
+
+  "locale_lang_map": {
+    "zh":       "z",
+    "zh-hans":  "z",
+    "zh-hant":  "z",
+    "zh-cn":    "z",
+    "zh-tw":    "z",
+    "zh-Hans":  "z",
+    "zh-Hant":  "z"
+  },
+
+  "speaker_voice_map": {
+    "amunhotep":     "zm_yunxi",
+    "ramesses_ka":   "zm_yunjian",
+    "neferet":       "zf_xiaobei",
+    "khamun":        "zm_yunxia",
+    "voice_of_gate": "zm_yunxi"
+  },
+
+  "speaker_speed_overrides": {
+    "voice_of_gate": 0.75
+  },
+
+  "voice_style_rules": [
+    { "keywords": ["young female", "female", "woman", "girl"],          "voice": "zf_xiaobei" },
+    { "keywords": ["elderly", "aged", "old", "gravelly", "ceremonial"], "voice": "zm_yunxi"   },
+    { "keywords": ["military", "soldier", "warrior", "bearing"],        "voice": "zm_yunxia"  },
+    { "keywords": ["commanding", "resonant", "powerful", "sovereign"],  "voice": "zm_yunjian" },
+    { "keywords": ["supernatural", "distorted", "ancient", "deep"],     "voice": "zm_yunxi"   }
+  ]
+}
