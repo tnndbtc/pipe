@@ -23,6 +23,79 @@ STORY_FILE="${1:-story_2.txt}"
 FROM_STAGE="${2:-0}"
 TO_STAGE="${3:-9}"
 
+# ── Model selection ────────────────────────────────────────────────────
+#
+# Defaults (tuned for speed vs quality):
+#   haiku  — fast/cheap, used for mechanical extraction & JSON assembly
+#   sonnet — balanced,   used for creative writing & complex derivation
+#
+# Override all stages:  MODEL=opus ./run.sh story.txt
+# Override one stage:   STAGE_MODEL_3=opus ./run.sh story.txt
+#
+get_stage_model() {
+  local n="$1"
+  # Global override
+  if [[ -n "${MODEL:-}" ]]; then echo "$MODEL"; return; fi
+  # Per-stage override  (e.g.  STAGE_MODEL_3=opus)
+  local var="STAGE_MODEL_${n}"
+  local val="${!var:-}"
+  if [[ -n "$val" ]]; then echo "$val"; return; fi
+  # Defaults
+  case "$n" in
+    2|3|4|5) echo "sonnet" ;;   # creative writing / complex JSON derivation
+    *)       echo "haiku"  ;;   # variable extraction, diffs, assembly
+  esac
+}
+
+# ── File inlining ──────────────────────────────────────────────────────
+#
+# Pre-embeds referenced input files into the filled prompt so Claude
+# never needs to call the Read tool for them.  Each eliminated Read
+# call saves ~10-20 s of API round-trip time.
+#
+# Detects lines of the form:
+#   "  N. some/path.json  (optional comment)"
+# and appends matching files that exist on disk.
+#
+inline_files_into_prompt() {
+  local src="$1"
+  local dst="$2"
+
+  local files_tmp
+  files_tmp=$(mktemp /tmp/pipe_files_XXXXXX.txt)
+  local found=0
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]+[0-9]+\.[[:space:]]+([^[:space:]]+\.(json|txt|sh))[[:space:]]* ]]; then
+      local fp="${BASH_REMATCH[1]}"
+      if [[ -f "$fp" ]]; then
+        found=1
+        printf '### `%s`\n```\n' "$fp" >> "$files_tmp"
+        cat "$fp"                       >> "$files_tmp"
+        printf '\n```\n\n'             >> "$files_tmp"
+      fi
+    fi
+  done < "$src"
+
+  if [[ "$found" -eq 0 ]]; then
+    cp "$src" "$dst"
+    rm -f "$files_tmp"
+    return
+  fi
+
+  {
+    printf 'NOTE: All input files listed under "Read these files before writing anything"\n'
+    printf 'are pre-embedded at the end of this prompt (## Pre-loaded file contents).\n'
+    printf 'Do NOT call the Read tool for those paths — use the embedded content directly.\n\n'
+    cat "$src"
+    printf '\n---\n\n## Pre-loaded file contents\n\n'
+    printf 'These files are already embedded here. Do NOT use the Read tool for them.\n\n'
+    cat "$files_tmp"
+  } > "$dst"
+
+  rm -f "$files_tmp"
+}
+
 # ── Validate inputs ────────────────────────────────────────────────────
 if [[ ! -f "$STORY_FILE" ]]; then
   echo "✗ ERROR: story file not found: $STORY_FILE" >&2
@@ -40,15 +113,18 @@ fill_and_run() {
   local N="$1"
   local prompt_src="prompts/p_${N}.txt"
   local log_file="stage_logs/stage_${N}.log"
-  local tmp
-  tmp=$(mktemp /tmp/pipe_stage_${N}_XXXXXX.txt)
+  local model
+  model=$(get_stage_model "$N")
+  local tmp tmp2
+  tmp=$(mktemp  /tmp/pipe_stage_${N}_XXXXXX.txt)
+  tmp2=$(mktemp /tmp/pipe_stage_${N}_inlined_XXXXXX.txt)
 
   echo ""
   echo "══════════════════════════════════════════════════════════════"
-  echo "  STAGE ${N}  →  ${prompt_src}"
+  echo "  STAGE ${N}  →  ${prompt_src}  [model: ${model}]"
   echo "══════════════════════════════════════════════════════════════"
 
-  # Substitute all {{PLACEHOLDER}} tokens with current env vars
+  # 1. Substitute all {{PLACEHOLDER}} tokens
   sed \
     -e "s|{{STORY_FILE}}|${STORY_FILE}|g" \
     -e "s|{{PROJECT_SLUG}}|${PROJECT_SLUG:-}|g" \
@@ -61,8 +137,19 @@ fill_and_run() {
     -e "s|{{LOCALES}}|${LOCALES:-en}|g" \
     "$prompt_src" > "$tmp"
 
-  # Run claude and tee output to both stdout and log
-  if claude -p "$tmp" | tee "$log_file"; then
+  # 2. Pre-embed referenced input files → eliminate Read tool calls
+  inline_files_into_prompt "$tmp" "$tmp2"
+  rm -f "$tmp"
+
+  # 3. Run claude with speed-optimised flags
+  #    --append-system-prompt forces immediate execution with no confirmation prompts
+  local exec_directive="You are an automated batch pipeline stage running with no human operator present. Execute the given task IMMEDIATELY and COMPLETELY. NEVER ask for confirmation, permission, or clarification. NEVER describe what you are about to do. NEVER offer choices or options. Complete every instruction from start to finish and then stop."
+  if claude -p \
+       --model                        "$model" \
+       --dangerously-skip-permissions         \
+       --no-session-persistence               \
+       --append-system-prompt         "$exec_directive" \
+       "$tmp2" | tee "$log_file"; then
     echo ""
     echo "✓ Stage ${N} complete  →  log: ${log_file}"
   else
@@ -70,11 +157,11 @@ fill_and_run() {
     echo ""
     echo "✗ Stage ${N} FAILED (exit code ${exit_code})" >&2
     echo "  Full output: ${log_file}" >&2
-    rm -f "$tmp"
+    rm -f "$tmp2"
     exit "$exit_code"
   fi
 
-  rm -f "$tmp"
+  rm -f "$tmp2"
 }
 
 # ── Print pipeline plan ────────────────────────────────────────────────
