@@ -1,0 +1,61 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 1 — Canon Check
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}     →  e.g. "s01e02"
+#
+# 📤 OUTPUT (stdout printed to web UI):
+#     • Canon status report (no new files written in this stage)
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_1_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 1 of a 10-stage AI narrative pipeline.
+Your ONLY job: check whether an existing canon file constrains this
+episode.  Do NOT generate any story content.
+
+---
+
+## Context
+
+Project slug : {{PROJECT_SLUG}}
+Episode ID   : {{EPISODE_ID}}
+Canon file   : projects/{{PROJECT_SLUG}}/canon.json
+
+---
+
+## Task
+
+Print: `▶ [1/9] Stage 1 — Canon check  …`
+
+1. Check whether  projects/{{PROJECT_SLUG}}/canon.json  exists.
+
+2a. If it does NOT exist:
+    Print:
+    ```
+    ── Canon status ──────────────────────────────────────
+    No canon.json found.  This is treated as Episode 1.
+    No prior constraints.
+    ──────────────────────────────────────────────────────
+    ```
+
+2b. If it DOES exist:
+    Read it fully.
+    Print a summary of every constraint that downstream stages must
+    honour (characters with known status/location, world rules,
+    unresolved threads, resolved threads).
+    Print:
+    ```
+    ── Canon status ──────────────────────────────────────
+    canon.json found.  Constraints for episode {{EPISODE_ID}}:
+      Characters : <list id → status, location>
+      World facts: <list facts>
+      Open threads: <list>
+      Resolved   : <list>
+    ──────────────────────────────────────────────────────
+    ```
+
+Print: `✓ [1/9] Stage 1 — Canon check  done`

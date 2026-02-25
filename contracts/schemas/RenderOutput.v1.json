@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RenderOutput",
+  "type": "object",
+  "required": ["schema_id", "schema_version", "output_id", "video_uri", "captions_uri", "hashes"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {"type": "string"},
+    "output_id": {"type": "string"},
+    "video_uri": {"type": "string"},
+    "captions_uri": {"type": "string"},
+    "hashes": {
+      "type": "object",
+      "required": ["video_sha256", "captions_sha256"],
+      "additionalProperties": true,
+      "properties": {
+        "video_sha256": {"type": ["string", "null"]},
+        "captions_sha256": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

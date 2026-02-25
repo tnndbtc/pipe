@@ -1,0 +1,90 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 0 — Read Story File & Extract Pipeline Variables
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDER (replaced by run.sh via sed before calling claude -p):
+#     {{STORY_FILE}}  →  path to the input story file, e.g. "story_2.txt"
+#
+# 📤 OUTPUT (stdout printed to web UI + files written to disk):
+#     • Stdout: variable confirmation block  (web UI sees this)
+#     • pipeline_vars.sh          ← sourced by run.sh for all later stages
+#     • episode_direction.txt     ← full direction text for later stages
+#     • projects/<slug>/                           (directories created)
+#     • projects/<slug>/episodes/<id>/
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_0_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 0 of a 10-stage AI narrative pipeline.
+Your ONLY job: read a story file, extract variables, write two output
+files, create directories, and print a confirmation block.
+Do NOT generate any story content.
+
+---
+
+## Task
+
+Print: `▶ [0/9] Stage 0 — Read story file  …`
+
+Read the story file at path: {{STORY_FILE}}
+
+Extract these variables (the file may use any human-readable format —
+use judgement to map content to each field):
+
+| Variable          | Source rule                                                                |
+|-------------------|----------------------------------------------------------------------------|
+| STORY_TITLE       | "Story title", "Title", or first prominent title line                      |
+| EPISODE_NUMBER    | "Episode", "Episode number", or integer near "episode"                     |
+| EPISODE_ID        | "Episode id" verbatim (e.g. "s01e02"); fall back to ep<zero-padded num>   |
+| EPISODE_DIRECTION | "Direction", "Synopsis", "Summary", or full narrative description block    |
+| LOCALES           | "Locales" / "Languages" field; default to "en" if absent                  |
+| PROJECT_SLUG      | "Project slug" if present; else slugify STORY_TITLE (lowercase, hyphens)  |
+| SERIES_GENRE      | "Genre"; infer from tone/setting if not explicit                           |
+| GENERATION_SEED   | "Seed" if present; else compute int(sha256(STORY_TITLE+EPISODE_ID)[:8])   |
+| RENDER_PROFILE    | "Render profile"; default "preview_local" if absent                        |
+
+After extraction, print this exact confirmation block to stdout:
+
+```
+── Stage 0 complete ────────────────────────────────────────────────────
+STORY_TITLE      : <value>
+EPISODE_NUMBER   : <value>
+EPISODE_ID       : <value>
+EPISODE_DIRECTION: <first 80 chars of value> …
+LOCALES          : <value>
+PROJECT_SLUG     : <value>
+SERIES_GENRE     : <value>
+GENERATION_SEED  : <value>
+RENDER_PROFILE   : <value>
+────────────────────────────────────────────────────────────────────────
+```
+
+Then write these two files:
+
+### File 1 — pipeline_vars.sh
+Path: pipeline_vars.sh  (current working directory)
+Content (fill in actual values, escape any double-quotes inside values):
+```bash
+export STORY_TITLE="<value>"
+export EPISODE_NUMBER="<value>"
+export EPISODE_ID="<value>"
+export LOCALES="<value>"
+export PROJECT_SLUG="<value>"
+export SERIES_GENRE="<value>"
+export GENERATION_SEED="<value>"
+export RENDER_PROFILE="<value>"
+export PROJECT_DIR="projects/<PROJECT_SLUG>"
+export EPISODE_DIR="projects/<PROJECT_SLUG>/episodes/<EPISODE_ID>"
+```
+
+### File 2 — episode_direction.txt
+Path: episode_direction.txt  (current working directory)
+Content: the FULL EPISODE_DIRECTION text, untruncated.
+
+### Directories
+Create if they do not exist:
+  projects/<PROJECT_SLUG>/
+  projects/<PROJECT_SLUG>/episodes/<EPISODE_ID>/
+
+Print: `✓ [0/9] Stage 0 — Read story file  done`

@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CanonDiff",
+  "type": "object",
+  "required": ["episode", "added_characters", "updated_states", "new_world_facts", "new_unresolved_threads", "resolved_threads"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "CanonDiff"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "episode": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Episode identifier this diff applies to, e.g. 'ep001'"
+    },
+    "added_characters": {
+      "type": "array",
+      "description": "New characters introduced in this episode",
+      "items": {
+        "type": "object",
+        "required": ["id", "role", "status", "location", "knows", "relationships"],
+        "additionalProperties": false,
+        "properties": {
+          "id":            { "type": "string", "minLength": 1 },
+          "role":          { "type": "string", "minLength": 1 },
+          "status":        { "type": "string", "minLength": 1 },
+          "location":      { "type": "string", "minLength": 1 },
+          "knows":         { "type": "array", "items": { "type": "string" } },
+          "relationships": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      }
+    },
+    "updated_states": {
+      "type": "array",
+      "description": "State changes to existing characters (status, location, knows, relationships)",
+      "items": {
+        "type": "object",
+        "required": ["character_id", "field", "new_value"],
+        "additionalProperties": false,
+        "properties": {
+          "character_id": { "type": "string", "minLength": 1 },
+          "field":        { "type": "string", "minLength": 1, "description": "e.g. 'status', 'location'" },
+          "new_value":    { "description": "The updated value for the field (any type)" }
+        }
+      }
+    },
+    "new_world_facts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "New immutable facts about the world established in this episode"
+    },
+    "new_unresolved_threads": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "New open plot threads introduced in this episode"
+    },
+    "resolved_threads": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Previously open threads that were resolved in this episode"
+    }
+  }
+}

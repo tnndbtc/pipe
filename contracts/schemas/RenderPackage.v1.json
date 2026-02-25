@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RenderPackage",
+  "type": "object",
+  "required": ["schema_id", "schema_version", "request_id", "idempotency_key", "render_profile", "inputs", "desired_outputs"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0.0"},
+    "request_id": {"type": "string"},
+    "idempotency_key": {"type": "string"},
+    "render_profile": {
+      "type": "string",
+      "enum": ["preview_local", "draft_720p", "final_1080p"]
+    },
+    "inputs": {
+      "type": "object",
+      "required": ["shotlist_ref", "asset_manifest_ref", "render_plan_ref"],
+      "additionalProperties": true,
+      "properties": {
+        "shotlist_ref": {"type": "string"},
+        "asset_manifest_ref": {"type": "string"},
+        "render_plan_ref": {"type": "string"}
+      }
+    },
+    "desired_outputs": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}

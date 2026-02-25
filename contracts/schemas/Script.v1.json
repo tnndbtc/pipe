@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Script",
+  "type": "object",
+  "required": ["schema_id", "schema_version", "script_id", "project_id", "title", "scenes"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "script_id": {"type": "string"},
+    "project_id": {"type": "string"},
+    "title": {"type": "string"},
+    "genre": {"type": "string"},
+    "scenes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["scene_id", "location", "time_of_day", "actions"],
+        "additionalProperties": true,
+        "properties": {
+          "scene_id": {"type": "string"},
+          "location": {"type": "string"},
+          "time_of_day": {"type": "string"},
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

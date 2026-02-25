@@ -1,0 +1,373 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AssetManifest",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "schema_version",
+    "manifest_id",
+    "project_id",
+    "shotlist_ref",
+    "character_packs",
+    "backgrounds",
+    "vo_items"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.1.0"
+    },
+    "manifest_id": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string"
+    },
+    "shotlist_ref": {
+      "type": "string"
+    },
+    "character_packs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "license_type"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "asset_id": {
+            "type": "string"
+          },
+          "license_type": {
+            "type": "string"
+          },
+          "search_prompt": {
+            "type": "string",
+            "description": "5-10 keywords for free library image search"
+          },
+          "search_filters": {
+            "$ref": "#/$defs/SearchFilters"
+          },
+          "ai_prompt": {
+            "type": "string",
+            "description": "Detailed text-to-image generation prompt"
+          },
+          "motion": {
+            "$ref": "#/$defs/MotionIntent"
+          }
+        }
+      }
+    },
+    "backgrounds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "license_type"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "asset_id": {
+            "type": "string"
+          },
+          "license_type": {
+            "type": "string"
+          },
+          "search_prompt": {
+            "type": "string",
+            "description": "5-10 keywords for free library image search"
+          },
+          "search_filters": {
+            "$ref": "#/$defs/SearchFilters"
+          },
+          "ai_prompt": {
+            "type": "string",
+            "description": "Detailed text-to-image generation prompt"
+          },
+          "motion": {
+            "$ref": "#/$defs/MotionIntent"
+          }
+        }
+      }
+    },
+    "vo_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "speaker_id",
+          "text",
+          "license_type"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "speaker_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "license_type": {
+            "type": "string"
+          },
+          "visual": {
+            "type": "boolean",
+            "description": "Set to false for VO-only speakers with no visual representation (e.g. disembodied voices). Renderer holds on the current background instead of looking up a character_pack.",
+            "default": true
+          },
+          "tts_prompt": {
+            "$ref": "#/$defs/TtsPrompt"
+          }
+        }
+      }
+    },
+    "sfx_items": {
+      "type": "array",
+      "description": "One entry per (shot, sfx_tag) pair. Derived from ShotList.shots[].audio_intent.sfx_tags[]. item_id format: 'sfx-{shot_id}-{NNN}' (NNN zero-padded, e.g. sfx-s01-sh01-001). The tag field is the natural-language description passed to the audio generation model (AudioGen). ShotList.AudioIntent.sfx_item_ids[] references these by item_id.",
+      "items": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "shot_id",
+          "tag",
+          "duration_sec",
+          "license_type"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "description": "Format: sfx-{shot_id}-{NNN}"
+          },
+          "shot_id": {
+            "type": "string",
+            "description": "The shot this SFX belongs to"
+          },
+          "tag": {
+            "type": "string",
+            "description": "Natural-language audio description for AudioGen (expanded from ShotList sfx_tags[])"
+          },
+          "duration_sec": {
+            "type": "number",
+            "description": "Clip duration to generate, matching the shot duration"
+          },
+          "license_type": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "music_items": {
+      "type": "array",
+      "description": "One entry per shot that has a non-null music_mood in the ShotList. item_id format: 'music-{shot_id}'. The music_mood field is the natural-language description passed to the music generation model (MusicGen). ShotList.AudioIntent.music_item_id references these by item_id.",
+      "items": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "shot_id",
+          "music_mood",
+          "duration_sec",
+          "license_type"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "description": "Format: music-{shot_id}"
+          },
+          "shot_id": {
+            "type": "string",
+            "description": "The shot this music track belongs to"
+          },
+          "music_mood": {
+            "type": "string",
+            "description": "Natural-language music direction for MusicGen (from ShotList audio_intent.music_mood)"
+          },
+          "duration_sec": {
+            "type": "number",
+            "description": "Track duration to generate, matching the shot duration"
+          },
+          "license_type": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "SearchFilters": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Metadata filters applied when querying free libraries (Pexels, Pixabay, Unsplash, Freesound). Fields map directly to API query params or are used to post-filter returned metadata.",
+      "properties": {
+        "orientation": {
+          "type": "string",
+          "enum": [
+            "landscape",
+            "portrait",
+            "square"
+          ],
+          "description": "Pexels: landscape/portrait/square. Pixabay: horizontal→landscape, vertical→portrait. Unsplash: landscape/portrait/squarish→square."
+        },
+        "media_type": {
+          "type": "string",
+          "enum": [
+            "photo",
+            "illustration",
+            "vector",
+            "video"
+          ],
+          "description": "Pixabay image_type param. Pexels/Unsplash are photo-only; video triggers Pexels video search instead of photo search."
+        },
+        "color_mood": {
+          "type": "string",
+          "enum": [
+            "warm",
+            "cool",
+            "dark",
+            "neutral",
+            "monochrome"
+          ],
+          "description": "Mood-based color hint. Media-agent maps to library color params: warm→orange/yellow, cool→blue/turquoise, dark→black/gray, neutral→white/gray, monochrome→grayscale. Pexels and Unsplash support color filtering natively."
+        },
+        "min_width": {
+          "type": "integer",
+          "description": "Minimum image width in pixels. Maps to Pixabay min_width param; used as post-filter on Pexels/Unsplash width metadata."
+        },
+        "min_height": {
+          "type": "integer",
+          "description": "Minimum image height in pixels. Maps to Pixabay min_height param; used as post-filter on Pexels/Unsplash height metadata."
+        },
+        "min_duration_sec": {
+          "type": "number",
+          "description": "Minimum clip duration in seconds. For Pexels/Pixabay video and Freesound audio. Freesound: maps to filter=duration:[min TO max]."
+        },
+        "max_duration_sec": {
+          "type": "number",
+          "description": "Maximum clip duration in seconds. For Pexels/Pixabay video and Freesound audio."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "backgrounds",
+            "fashion",
+            "nature",
+            "science",
+            "education",
+            "feelings",
+            "health",
+            "people",
+            "religion",
+            "places",
+            "animals",
+            "industry",
+            "computer",
+            "food",
+            "sports",
+            "transportation",
+            "travel",
+            "buildings",
+            "business",
+            "music"
+          ],
+          "description": "Pixabay category param. Ignored by Pexels/Unsplash but used as keyword hint in those queries."
+        }
+      }
+    },
+    "MotionIntent": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "description",
+            "participants",
+            "duration_sec",
+            "style"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "camera",
+                "idle",
+                "walk",
+                "gesture",
+                "fight",
+                "interact"
+              ],
+              "description": "camera=camera move only (no characters); idle=character stationary; walk/gesture/fight/interact=character animation"
+            },
+            "description": {
+              "type": "string",
+              "description": "Human-readable motion description passed to image2video"
+            },
+            "participants": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "character asset_ids involved; empty for camera-only motion"
+            },
+            "duration_sec": {
+              "type": "number",
+              "minimum": 0.5,
+              "description": "Target clip length in seconds"
+            },
+            "style": {
+              "type": "string",
+              "enum": [
+                "slow",
+                "normal",
+                "fast"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "TtsPrompt": {
+      "type": "object",
+      "required": [
+        "voice_style",
+        "emotion",
+        "pace",
+        "locale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "voice_style": {
+          "type": "string",
+          "description": "e.g. 'young female', 'deep male', 'elderly male'"
+        },
+        "emotion": {
+          "type": "string",
+          "description": "e.g. 'tense', 'commanding', 'fearful', 'reverent'"
+        },
+        "pace": {
+          "type": "string",
+          "enum": [
+            "slow",
+            "normal",
+            "fast"
+          ]
+        },
+        "locale": {
+          "type": "string",
+          "description": "BCP-47 locale tag matching the text language, e.g. 'en', 'zh-Hans'"
+        }
+      }
+    }
+  }
+}

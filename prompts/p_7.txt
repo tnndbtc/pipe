@@ -1,0 +1,98 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 7 — Update canon.json
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}     →  e.g. "s01e02"
+#
+# 📥 FILES READ (written by earlier stages):
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json  (Stage 6)
+#     projects/{{PROJECT_SLUG}}/canon.json   (if it exists — prior episodes)
+#     contracts/schemas/Canon.v1.json
+#
+# 📤 OUTPUT:
+#     • Stdout: progress + validation result  (web UI)
+#     • projects/{{PROJECT_SLUG}}/canon.json   (created or updated)
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_7_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 7 of a 10-stage AI narrative pipeline.
+Your ONLY job: merge canon_diff.json into canon.json and write the
+updated canon file.
+
+---
+
+## Context
+
+Episode ID   : {{EPISODE_ID}}
+Project slug : {{PROJECT_SLUG}}
+Diff file    : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
+Canon file   : projects/{{PROJECT_SLUG}}/canon.json
+Schema       : contracts/schemas/Canon.v1.json
+
+Read these files before writing anything:
+  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
+  2. projects/{{PROJECT_SLUG}}/canon.json  (read if it exists)
+  3. contracts/schemas/Canon.v1.json   — inspect all required fields
+
+---
+
+## Task
+
+Print: `▶ [7/9] Stage 7 — Update canon.json  …`
+
+Produce the updated canon.json with this structure:
+```json
+{
+  "project_id"         : "{{PROJECT_SLUG}}",
+  "characters"         : {
+    "<char_id>": {
+      "status"        : "alive",
+      "location"      : "<location>",
+      "knows"         : [],
+      "relationships" : {}
+    }
+  },
+  "world_facts"        : [],
+  "unresolved_threads" : [],
+  "episode_summaries"  : [
+    {
+      "ep"     : "{{EPISODE_ID}}",
+      "summary": "<2–3 sentence summary of what happened this episode>"
+    }
+  ]
+}
+```
+
+Merge rules:
+  • If canon.json did NOT exist: create it fresh from the diff data.
+  • If canon.json DID exist:
+      - Append new characters from canon_diff.added_characters.
+      - Update existing character states from canon_diff.updated_states
+        (update status/location only; never delete prior data).
+      - Append world_facts (no duplicates).
+      - Append unresolved_threads from canon_diff.new_unresolved_threads.
+      - Remove resolved_threads that appear in canon_diff.resolved_threads.
+      - Append a new episode_summaries entry for {{EPISODE_ID}}.
+
+Validate the artifact against contracts/schemas/Canon.v1.json using
+Python + jsonschema.  If validation fails, fix and retry.
+
+Write the validated artifact to:
+  projects/{{PROJECT_SLUG}}/canon.json
+
+Print validation result:
+```
+── Stage 7 validation ───────────────────────────────────────
+canon.json  →  VALID ✓
+Characters      : <count>
+World facts     : <count>
+Open threads    : <count>
+Episodes logged : <count>
+────────────────────────────────────────────────────────────
+```
+
+Print: `✓ [7/9] Stage 7 — Update canon.json  done`

@@ -1,0 +1,180 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AssetManifest_final",
+  "description": "Merged asset manifest produced by stage 4. Combines draft envelope (project_id, shotlist_ref) with resolved items from AssetManifest.media.",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "schema_version",
+    "manifest_id",
+    "project_id",
+    "shotlist_ref",
+    "items"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "AssetManifest_final",
+      "description": "Stable document-type identifier. Always 'AssetManifest_final'."
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "Schema version. Increment when the envelope or item shape changes."
+    },
+    "manifest_id": {
+      "type": "string",
+      "description": "Copied verbatim from AssetManifest_draft.manifest_id for traceability."
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Copied from AssetManifest_draft.project_id."
+    },
+    "shotlist_ref": {
+      "type": "string",
+      "description": "Copied from AssetManifest_draft.shotlist_ref."
+    },
+    "items": {
+      "type": "array",
+      "description": "Resolved assets from AssetManifest.media.items, passed through unchanged.",
+      "items": {
+        "$ref": "#/definitions/ResolvedAsset"
+      }
+    }
+  },
+  "definitions": {
+    "ResolvedAsset": {
+      "type": "object",
+      "description": "A single resolved asset record produced by a resolver.",
+      "required": [
+        "asset_id",
+        "asset_type",
+        "uri",
+        "is_placeholder",
+        "metadata",
+        "source",
+        "license",
+        "schema_id",
+        "schema_version",
+        "producer"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "description": "Original asset identifier from the source AssetManifest."
+        },
+        "asset_type": {
+          "type": "string",
+          "enum": ["character", "background", "prop", "vo", "sfx", "music"],
+          "description": "Asset category."
+        },
+        "uri": {
+          "type": "string",
+          "pattern": "^(file://|placeholder://)",
+          "description": "Resolved URI. 'file://' for real assets; 'placeholder://<type>/<id>' when unresolved."
+        },
+        "is_placeholder": {
+          "type": "boolean",
+          "description": "True when no real asset was found and a placeholder sentinel was emitted."
+        },
+        "metadata": {
+          "$ref": "#/definitions/AssetMetadata"
+        },
+        "rights_warning": {
+          "type": "string",
+          "description": "Non-empty when license_type is outside the approved set."
+        },
+        "source": {
+          "$ref": "#/definitions/AssetSource"
+        },
+        "license": {
+          "$ref": "#/definitions/AssetLicense"
+        },
+        "schema_id": {
+          "type": "string",
+          "const": "urn:media:resolved-asset",
+          "description": "Per-item schema identifier. Always 'urn:media:resolved-asset'."
+        },
+        "schema_version": {
+          "type": "string",
+          "const": "1.0.0",
+          "description": "Per-item schema version."
+        },
+        "producer": {
+          "type": "string",
+          "description": "Resolver component that produced this item."
+        }
+      }
+    },
+    "AssetMetadata": {
+      "type": "object",
+      "description": "Minimum provenance metadata per §25.2 of the pipeline spec.",
+      "required": ["license_type", "retrieval_date"],
+      "additionalProperties": false,
+      "properties": {
+        "license_type": {
+          "type": "string",
+          "description": "License category string."
+        },
+        "attribution": {
+          "type": "string",
+          "description": "Attribution text required by CC-BY and similar licenses."
+        },
+        "purchase_record": {
+          "type": "string",
+          "description": "URI or reference to invoice/license document."
+        },
+        "provider_or_model": {
+          "type": "string",
+          "description": "Source platform, tool, or generative model name."
+        },
+        "retrieval_date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 UTC acquisition date. MUST be '1970-01-01T00:00:00Z' for local/cached assets."
+        }
+      }
+    },
+    "AssetSource": {
+      "type": "object",
+      "description": "Indicates which resolver tier produced this asset.",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "local",
+            "cache",
+            "external_search",
+            "generative",
+            "generated_placeholder"
+          ],
+          "description": "Resolver tier."
+        }
+      }
+    },
+    "AssetLicense": {
+      "type": "object",
+      "description": "SPDX-oriented license block for downstream attribution and rights tracking.",
+      "required": ["spdx_id", "attribution_required"],
+      "additionalProperties": false,
+      "properties": {
+        "spdx_id": {
+          "type": "string",
+          "description": "SPDX license identifier or 'NOASSERTION' when not determined."
+        },
+        "attribution_required": {
+          "type": "boolean",
+          "description": "True when the license mandates attribution in downstream outputs."
+        },
+        "text": {
+          "type": "string",
+          "description": "Full license text. Empty string when not retrieved or not applicable."
+        }
+      }
+    }
+  }
+}

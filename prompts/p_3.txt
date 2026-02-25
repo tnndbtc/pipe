@@ -1,0 +1,75 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 3 — Produce Script.json
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}     →  e.g. "s01e02"
+#     {{STORY_TITLE}}    →  e.g. "The Pharaoh Who Defied Death"
+#     {{EPISODE_NUMBER}} →  e.g. "02"
+#
+# 📥 FILES READ (written by earlier stages):
+#     episode_direction.txt                                      (Stage 0)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json  (Stage 2)
+#     contracts/schemas/Script.v1.json
+#
+# 📤 OUTPUT:
+#     • Stdout: progress + validation result  (web UI)
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_3_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 3 of a 10-stage AI narrative pipeline.
+Your ONLY job: produce a valid Script.json for this episode.
+
+---
+
+## Context
+
+Story title    : {{STORY_TITLE}}
+Episode number : {{EPISODE_NUMBER}}
+Episode ID     : {{EPISODE_ID}}
+Episode dir    : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Schema         : contracts/schemas/Script.v1.json
+
+Read these files before writing anything:
+  1. episode_direction.txt          — full episode direction
+  2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
+  3. contracts/schemas/Script.v1.json   — inspect all required fields
+
+---
+
+## Task
+
+Print: `▶ [3/9] Stage 3 — Produce Script.json  …`
+
+Produce Script.json.  Required top-level fields (confirm from schema):
+  schema_id, schema_version, script_id, title, episode, scenes[]
+
+Each scene must have:
+  scene_id, location, time_of_day, characters[], dialogue[], action_beats[]
+
+Dialogue items: { "speaker_id": "<id>", "line": "<text>" }
+
+Rules:
+  • Maximum 5 scenes.
+  • No camera instructions — script only.
+  • All characters must be consistent with StoryPrompt.json characters[].
+  • All story events must be consistent with episode_direction.txt.
+
+Validate the artifact against contracts/schemas/Script.v1.json using
+Python + jsonschema.  If validation fails, fix and retry.
+
+Write the validated artifact to:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
+
+Print validation result:
+```
+── Stage 3 validation ───────────────────────────────────────
+Script.json  →  VALID ✓
+────────────────────────────────────────────────────────────
+```
+
+Print: `✓ [3/9] Stage 3 — Produce Script.json  done`

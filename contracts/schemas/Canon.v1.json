@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Canon",
+  "type": "object",
+  "required": ["project_id", "characters", "world_facts", "unresolved_threads", "episode_summaries"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "Canon"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "characters": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "location", "knows", "relationships"],
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Current life status, e.g. 'alive', 'dead', 'missing'"
+          },
+          "location": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Last known location of the character"
+          },
+          "knows": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of fact IDs or plain strings this character knows"
+          },
+          "relationships": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Map of character_id -> relationship description"
+          }
+        }
+      }
+    },
+    "world_facts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Accumulated immutable facts about the world established across episodes"
+    },
+    "unresolved_threads": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Open plot threads that have not yet been resolved"
+    },
+    "episode_summaries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ep", "summary"],
+        "additionalProperties": false,
+        "properties": {
+          "ep":      { "type": "string", "minLength": 1 },
+          "summary": { "type": "string", "minLength": 1 }
+        }
+      },
+      "description": "One entry per episode, in order"
+    }
+  }
+}

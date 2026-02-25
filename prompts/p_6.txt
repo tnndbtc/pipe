@@ -1,0 +1,96 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 6 — Write canon_diff.json
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}     →  e.g. "s01e02"
+#
+# 📥 FILES READ (written by earlier stages):
+#     episode_direction.txt                                             (Stage 0)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json    (Stage 3)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json  (Stage 4)
+#     projects/{{PROJECT_SLUG}}/canon.json   (if it exists)
+#     contracts/schemas/CanonDiff.v1.json
+#
+# 📤 OUTPUT:
+#     • Stdout: progress + validation result  (web UI)
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_6_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 6 of a 10-stage AI narrative pipeline.
+Your ONLY job: produce a valid canon_diff.json that records every
+story fact introduced or changed in this episode.
+
+---
+
+## Context
+
+Episode ID  : {{EPISODE_ID}}
+Episode dir : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Schema      : contracts/schemas/CanonDiff.v1.json
+
+Read these files before writing anything:
+  1. episode_direction.txt
+  2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
+  3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
+  4. projects/{{PROJECT_SLUG}}/canon.json  (read if it exists)
+  5. contracts/schemas/CanonDiff.v1.json   — inspect all required fields
+
+---
+
+## Task
+
+Print: `▶ [6/9] Stage 6 — Write canon_diff.json  …`
+
+Produce canon_diff.json with this structure:
+```json
+{
+  "episode"              : "{{EPISODE_ID}}",
+  "added_characters"     : [
+    {
+      "id"            : "<char_id>",
+      "role"          : "<role>",
+      "status"        : "alive",
+      "location"      : "<location at episode end>",
+      "knows"         : [],
+      "relationships" : {}
+    }
+  ],
+  "updated_states"       : [],
+  "new_world_facts"      : ["<fact1>", "<fact2>"],
+  "new_unresolved_threads": ["<open question or thread>"],
+  "resolved_threads"     : []
+}
+```
+
+Rules:
+  • added_characters: only NEW characters introduced in this episode.
+  • updated_states: characters from prior canon whose status/location changed.
+  • new_world_facts: facts established this episode (locations, objects, rules).
+  • new_unresolved_threads: open questions or cliffhangers this episode creates.
+  • resolved_threads: threads closed this episode (reference by prior thread text).
+  • Do NOT contradict anything in canon.json (if it existed).
+
+Validate the artifact against contracts/schemas/CanonDiff.v1.json using
+Python + jsonschema.  If validation fails, fix and retry.
+
+Write the validated artifact to:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
+
+Print validation result:
+```
+── Stage 6 validation ───────────────────────────────────────
+canon_diff.json  →  VALID ✓
+added_characters      : <count>
+updated_states        : <count>
+new_world_facts       : <count>
+new_unresolved_threads: <count>
+resolved_threads      : <count>
+────────────────────────────────────────────────────────────
+```
+
+Print: `✓ [6/9] Stage 6 — Write canon_diff.json  done`

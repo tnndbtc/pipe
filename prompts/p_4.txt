@@ -1,0 +1,109 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 4 — Produce ShotList.json
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}     →  e.g. "s01e02"
+#
+# 📥 FILES READ (written by earlier stages):
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json   (Stage 3)
+#     contracts/schemas/ShotList.v1.json
+#
+# 📤 OUTPUT:
+#     • Stdout: progress + validation result  (web UI)
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_4_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 4 of a 10-stage AI narrative pipeline.
+Your ONLY job: produce a valid ShotList.json derived from Script.json.
+
+---
+
+## Context
+
+Episode ID  : {{EPISODE_ID}}
+Episode dir : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Schema      : contracts/schemas/ShotList.v1.json
+
+Read these files before writing anything:
+  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
+  2. contracts/schemas/ShotList.v1.json   — inspect all required fields
+
+---
+
+## Task
+
+Print: `▶ [4/9] Stage 4 — Produce ShotList.json  …`
+
+Produce ShotList.json.  Required top-level fields (confirm from schema):
+  schema_id, schema_version, shotlist_id, script_ref, timing_lock_hash, shots[]
+
+Each shot must have:
+  shot_id, scene_id, duration_sec, camera_framing, camera_movement,
+  characters[], background_id, audio_intent
+
+### background_id
+Format: "bg-<location-slug>"  (e.g. "bg-karnak-inner-sanctuary")
+Assign now — before the manifest exists.  Multiple scenes may share
+the same background_id.
+
+### audio_intent (required sub-fields)
+```json
+{
+  "sfx_tags"     : ["<sound effect description>", ...],
+  "music_mood"   : "<one-phrase direction or null>",
+  "vo_speaker_id": "<character_id or null>",
+  "vo_text"      : "<verbatim dialogue line or null>",
+  "vo_item_ids"  : ["vo-<scene_id>-<NNN>", ...],
+  "sfx_item_ids" : ["sfx-<shot_id>-001", "sfx-<shot_id>-002"],
+  "music_item_id": "music-<shot_id>"
+}
+```
+
+vo_item_ids rules:
+  • Every VO line in the episode must be assigned to exactly one shot.
+  • Use format "vo-<scene_id>-<NNN>" (NNN = zero-padded line number).
+  • Use [] for shots with no VO.
+  • This array is the explicit shot→VO link used by Stage 9.
+
+sfx_item_ids rules:
+  • One entry per tag in sfx_tags[]. Order must match sfx_tags[].
+  • Format: "sfx-{shot_id}-{NNN}" (NNN zero-padded, e.g. sfx-s01-sh01-001).
+  • Use [] if the shot has no SFX (sfx_tags is empty).
+  • These IDs are the explicit shot→SFX links consumed by Stage 5 and Stage 9.
+
+music_item_id rules:
+  • "music-{shot_id}" when music_mood is not null.
+  • null when music_mood is null.
+  • This ID is the explicit shot→music link consumed by Stage 5 and Stage 9.
+
+### timing_lock_hash
+Compute in Python:
+```python
+import hashlib, json
+shot_ids = sorted([s["shot_id"] for s in shots])
+timing_lock_hash = hashlib.sha256(json.dumps(shot_ids).encode()).hexdigest()
+```
+
+Total episode duration must be 60–120 seconds.
+
+Validate the artifact against contracts/schemas/ShotList.v1.json using
+Python + jsonschema.  If validation fails, fix and retry.
+
+Write the validated artifact to:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
+
+Print validation result:
+```
+── Stage 4 validation ───────────────────────────────────────
+ShotList.json  →  VALID ✓
+Total duration : <N> seconds
+Shots          : <count>
+────────────────────────────────────────────────────────────
+```
+
+Print: `✓ [4/9] Stage 4 — Produce ShotList.json  done`

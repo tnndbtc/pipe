@@ -1,0 +1,60 @@
+# ── Pipeline runtime outputs ───────────────────────────────────────────────────
+# Story input files (user-supplied, never committed)
+story*.txt
+
+# Generated project artifacts (written by the pipeline stages)
+projects/
+
+# Per-run stage logs
+stage_logs/
+
+# Variables file written by Stage 0 (runtime-specific)
+pipeline_vars.sh
+
+# Long-form direction text written by Stage 0 (runtime-specific)
+episode_direction.txt
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+ENV/
+
+# ── OS ─────────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ── Editors ────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ── Misc ───────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+.env.*
+!.env.example

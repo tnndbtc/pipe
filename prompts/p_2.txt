@@ -1,0 +1,92 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 2 — Produce StoryPrompt.json
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}     →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}       →  e.g. "s01e02"
+#     {{STORY_TITLE}}      →  e.g. "The Pharaoh Who Defied Death"
+#     {{SERIES_GENRE}}     →  e.g. "Ancient Egyptian Epic / Mystery"
+#     {{GENERATION_SEED}}  →  integer seed
+#     {{EPISODE_NUMBER}}   →  e.g. "02"
+#
+# 📥 FILES READ (written by earlier stages):
+#     episode_direction.txt   (Stage 0)
+#     contracts/schemas/StoryPrompt.v1.json
+#     projects/{{PROJECT_SLUG}}/canon.json   (if it exists — Stage 1)
+#
+# 📤 OUTPUT:
+#     • Stdout: progress + validation result  (web UI)
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_2_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 2 of a 10-stage AI narrative pipeline.
+Your ONLY job: produce a valid StoryPrompt.json for this episode.
+
+---
+
+## Context
+
+Story title      : {{STORY_TITLE}}
+Episode number   : {{EPISODE_NUMBER}}
+Episode ID       : {{EPISODE_ID}}
+Genre            : {{SERIES_GENRE}}
+Generation seed  : {{GENERATION_SEED}}
+Episode dir      : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Schema           : contracts/schemas/StoryPrompt.v1.json
+
+Read episode_direction.txt now to get the full episode direction.
+If canon.json exists at projects/{{PROJECT_SLUG}}/canon.json, read it
+to ensure no contradictions.
+
+---
+
+## Task
+
+Print: `▶ [2/9] Stage 2 — Produce StoryPrompt.json  …`
+
+Read contracts/schemas/StoryPrompt.v1.json to confirm all required fields.
+
+Produce StoryPrompt.json with at minimum these fields:
+```json
+{
+  "schema_id"       : "StoryPrompt",
+  "schema_version"  : "1.0.0",
+  "prompt_id"       : "{{PROJECT_SLUG}}-{{EPISODE_ID}}",
+  "episode_goal"    : "<one sentence: dramatic goal of this episode>",
+  "generation_seed" : {{GENERATION_SEED}},
+  "series": {
+    "title"         : "{{STORY_TITLE}}",
+    "genre"         : "{{SERIES_GENRE}}",
+    "tone"          : "<appropriate tone derived from direction>"
+  },
+  "setting": {
+    "primary_location": "<main location of this episode>"
+  },
+  "characters": [
+    { "id": "<char_id>", "role": "<role description>" }
+  ],
+  "constraints": {
+    "max_scenes"    : 5
+  }
+}
+```
+characters[] must have at least 2 entries.
+
+Validate the artifact against contracts/schemas/StoryPrompt.v1.json
+using Python + jsonschema.  If validation fails, fix and retry.
+
+Write the validated artifact to:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
+
+Print validation result:
+```
+── Stage 2 validation ───────────────────────────────────────
+StoryPrompt.json  →  VALID ✓
+────────────────────────────────────────────────────────────
+```
+
+Print: `✓ [2/9] Stage 2 — Produce StoryPrompt.json  done`

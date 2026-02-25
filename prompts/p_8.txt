@@ -1,0 +1,115 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 8 — Produce Locale Variants
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}     →  e.g. "s01e02"
+#     {{LOCALES}}        →  e.g. "en, zh-Hans"
+#
+# 📥 FILES READ (written by earlier stages):
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json    (Stage 2)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json         (Stage 3)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json       (Stage 4)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.json (Stage 5)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json     (Stage 6)
+#     projects/{{PROJECT_SLUG}}/canon.json                                   (Stage 7)
+#     contracts/schemas/*.v1.json  (same schemas as English artifacts)
+#
+# 📤 OUTPUT (one file per artifact per non-en locale):
+#     • Stdout: progress per locale  (web UI)
+#     • <artifact>.<locale>.json in the same directory as the English source
+#     • canon.<locale>.json  in the project root
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_8_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 8 of a 10-stage AI narrative pipeline.
+Your ONLY job: create translated locale variants of all artifacts
+for every locale beyond "en".
+
+---
+
+## Context
+
+Locales      : {{LOCALES}}   ("en" is the source; translate all others)
+Episode dir  : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Project dir  : projects/{{PROJECT_SLUG}}/
+
+---
+
+## Task
+
+Print: `▶ [8/9] Stage 8 — Produce locale variants  …`
+
+Parse {{LOCALES}}.  If the only locale is "en", skip all work and print:
+  `ℹ️  Stage 8: only locale is "en" — no variants needed.`
+  `✓ [8/9] Stage 8 — Produce locale variants  done`
+  (then stop)
+
+For each locale OTHER than "en":
+
+  Process each artifact in this order:
+    StoryPrompt   → <episode_dir>/StoryPrompt.<locale>.json
+    Script        → <episode_dir>/Script.<locale>.json
+    ShotList      → <episode_dir>/ShotList.<locale>.json
+    AssetManifest → <episode_dir>/AssetManifest_draft.<locale>.json
+    canon_diff    → <episode_dir>/canon_diff.<locale>.json
+    canon         → <project_dir>/canon.<locale>.json
+
+  Method: copy English artifact as base, then translate ONLY the fields
+  listed below.  All other fields must remain IDENTICAL to English source.
+
+  ### Fields TO translate per artifact
+
+  **StoryPrompt**: episode_goal, series.tone, setting.primary_location,
+                   characters[].role
+
+  **Script**: scenes[].location, scenes[].time_of_day,
+              scenes[].action_beats[], scenes[].dialogue[].line,
+              scenes[].actions[].description
+
+  **ShotList**: shots[].emotional_tag, shots[].environment_notes,
+                shots[].action_beat, shots[].audio_intent.vo_text,
+                shots[].audio_intent.music_mood
+
+  **AssetManifest**: vo_items[].text ONLY
+    ⚠️  DO NOT translate: search_prompt, ai_prompt, motion.description.
+        These are passed verbatim to English-only external APIs.
+    ⚠️  tts_prompt.locale MUST match the artifact locale
+        (e.g. "zh-Hans" in AssetManifest_draft.zh-Hans.json).
+
+  **canon_diff**: added_characters[].role,
+                  added_characters[].relationships (values only),
+                  new_world_facts[], new_unresolved_threads[]
+
+  **canon**: characters[].relationships (values only),
+             world_facts[], unresolved_threads[],
+             episode_summaries[].summary
+
+  ### Fields NEVER to translate (keep identical to English)
+  All *_id fields, schema_id, schema_version, license_type,
+  camera_framing, camera_movement, timing_lock_hash, created_at,
+  series.title, series.genre, knows[],
+  AssetManifest: search_prompt, ai_prompt, motion.description,
+                 search_filters (all subfields), tts_prompt.voice_style,
+                 tts_prompt.emotion, tts_prompt.pace
+
+  ### Validation
+  Validate each locale artifact against its schema using Python + jsonschema.
+  If validation fails, fix and retry.
+
+  After completing each locale, print:
+  ```
+  ── Locale <locale> complete ─────────────────────────────
+    StoryPrompt.<locale>.json     VALID ✓
+    Script.<locale>.json          VALID ✓
+    ShotList.<locale>.json        VALID ✓
+    AssetManifest_draft.<locale>.json  VALID ✓
+    canon_diff.<locale>.json      VALID ✓
+    canon.<locale>.json           VALID ✓
+  ─────────────────────────────────────────────────────────
+  ```
+
+Print: `✓ [8/9] Stage 8 — Produce locale variants  done`

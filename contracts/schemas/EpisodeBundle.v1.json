@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EpisodeBundle",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "schema_version",
+    "producer",
+    "episode_id",
+    "source_run_dir",
+    "run_id",
+    "created_utc",
+    "artifacts",
+    "bundle_hash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {"type": "string"},
+    "schema_version": {"type": "string"},
+    "producer": {
+      "type": "object",
+      "required": ["repo", "component"],
+      "additionalProperties": true,
+      "properties": {
+        "repo": {"type": "string"},
+        "component": {"type": "string"}
+      }
+    },
+    "episode_id": {"type": "string"},
+    "source_run_dir": {"type": "string"},
+    "run_id": {"type": "string"},
+    "created_utc": {"type": "string"},
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["path", "sha256"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"type": "string"}
+        }
+      }
+    },
+    "bundle_hash": {"type": "string"}
+  }
+}

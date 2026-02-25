@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StoryPrompt",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "schema_version",
+    "prompt_id",
+    "episode_goal",
+    "generation_seed",
+    "series",
+    "setting",
+    "characters",
+    "constraints"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "StoryPrompt"
+    },
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "prompt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "episode_goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generation_seed": {
+      "type": "integer"
+    },
+    "series": {
+      "type": "object",
+      "required": ["genre", "title", "tone"],
+      "additionalProperties": false,
+      "properties": {
+        "genre": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "tone":  {"type": "string", "minLength": 1}
+      }
+    },
+    "setting": {
+      "type": "object",
+      "required": ["primary_location"],
+      "additionalProperties": false,
+      "properties": {
+        "primary_location": {"type": "string", "minLength": 1}
+      }
+    },
+    "characters": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["id", "role"],
+        "additionalProperties": false,
+        "properties": {
+          "id":   {"type": "string", "minLength": 1},
+          "role": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "required": ["max_scenes"],
+      "additionalProperties": false,
+      "properties": {
+        "max_scenes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

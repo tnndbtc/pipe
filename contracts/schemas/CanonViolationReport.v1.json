@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CanonViolationReport",
+  "description": "Emitted by world-engine when a story draft contains hard contradictions against the current CanonSnapshot.",
+  "type": "object",
+  "required": ["schema_id", "schema_version", "project_id", "episode_id", "violations"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "CanonViolationReport"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Stable project identifier."
+    },
+    "episode_id": {
+      "type": "string",
+      "description": "Episode identifier of the draft being validated."
+    },
+    "violations": {
+      "type": "array",
+      "description": "List of hard contradictions found. Empty array means no violations.",
+      "items": {
+        "type": "object",
+        "required": ["field", "canon_value", "draft_value", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Dotted path to the contradicted field, e.g. 'characters.char_lena.age'."
+          },
+          "canon_value": {
+            "description": "The value currently held in the CanonSnapshot.",
+            "type": ["string", "number", "boolean", "null"]
+          },
+          "draft_value": {
+            "description": "The value proposed by the story draft.",
+            "type": ["string", "number", "boolean", "null"]
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable error string, e.g. 'CONTRADICTION: characters.char_lena.age — canon=30 vs draft=31'."
+          }
+        }
+      }
+    }
+  }
+}
