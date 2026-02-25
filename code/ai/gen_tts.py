@@ -232,6 +232,19 @@ LOCALE_TO_LANG_CODE = {
 
 PACE_TO_SPEED = {"slow": 0.8, "normal": 1.0, "fast": 1.2}
 
+# Built-in voice maps for non-English lang_codes.
+# Used automatically when the manifest locale maps to a non-English lang_code
+# and no --voices file is provided.  Keys are Kokoro lang_codes.
+LANG_CODE_DEFAULT_VOICES = {
+    "z": {                              # Mandarin Chinese
+        "amunhotep":     "zm_yunxi",    # male, mid-aged
+        "ramesses_ka":   "zm_yunjian",  # male, commanding
+        "neferet":       "zf_xiaobei",  # female, young
+        "khamun":        "zm_yunxia",   # male, deep
+        "voice_of_gate": "zm_yunxi",    # closest available for supernatural
+    },
+}
+
 
 def resolve_voice_from_style(voice_style: str, rules=None) -> tuple:
     """
@@ -371,10 +384,26 @@ def load_from_manifest(manifest_path: str, asset_id_filter, voice_profiles: dict
         pace        = tts.get("pace", "normal")
         locale      = tts.get("locale", "en")
 
-        # --- voice resolution  (profiles win over built-in map) ----------
-        if speaker in eff_speaker_map:
-            voice     = eff_speaker_map[speaker]
-            voice_src = "voices file" if speaker in p.get("speaker_voice_map", {}) else "speaker map"
+        # --- locale -> lang_code (resolve first — needed for voice defaults) --
+        locale_key = locale.lower()
+        lang_code  = eff_locale_map.get(locale_key) or eff_locale_map.get(locale, "en-us")
+
+        # --- voice resolution ---
+        # Priority: explicit voices file > lang-code defaults > English built-ins > style rules
+        locale_voice_defaults = LANG_CODE_DEFAULT_VOICES.get(lang_code, {})
+        effective_speaker_map = {
+            **SPEAKER_TO_VOICE,          # English base (lowest priority)
+            **locale_voice_defaults,     # lang-code defaults (e.g. Chinese voices)
+            **p.get("speaker_voice_map", {}),  # explicit --voices file (highest priority)
+        }
+        if speaker in effective_speaker_map:
+            voice = effective_speaker_map[speaker]
+            if speaker in p.get("speaker_voice_map", {}):
+                voice_src = "voices file"
+            elif speaker in locale_voice_defaults:
+                voice_src = f"lang default ({lang_code})"
+            else:
+                voice_src = "speaker map (en)"
         else:
             # Fall back to keyword matching against voice_style description
             voice, match_reason = resolve_voice_from_style(voice_style, rules=eff_style_rules)
@@ -388,10 +417,6 @@ def load_from_manifest(manifest_path: str, asset_id_filter, voice_profiles: dict
         else:
             speed     = PACE_TO_SPEED.get(pace, 1.0)
             speed_src = f"pace='{pace}' -> {speed}"
-
-        # --- locale -> lang_code  (case-insensitive lookup) ---------------
-        locale_key = locale.lower()
-        lang_code  = eff_locale_map.get(locale_key) or eff_locale_map.get(locale, "en-us")
 
         items.append({
             "item_id":     vo["item_id"],
@@ -460,6 +485,17 @@ def main():
     locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
     out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-detect voices file when --voices is not given and manifest locale is non-English.
+    # e.g. AssetManifest_draft.zh-Hans.json -> looks for voices_zh-Hans.json next to the script.
+    # Falls back gracefully to LANG_CODE_DEFAULT_VOICES built-ins if the file is absent.
+    if not args.voices and locale.lower() not in ('en', 'en-us', 'en-gb'):
+        auto_voices = Path(__file__).resolve().parent / f"voices_{locale}.json"
+        if auto_voices.exists():
+            args.voices = str(auto_voices)
+            print(f"[VOICES] Auto-detected: {auto_voices.name}  (locale={locale})")
+        else:
+            print(f"[VOICES] No voices_{locale}.json found — using built-in lang defaults.")
 
     # Load voice profiles from --voices file (optional)
     voice_profiles = None
