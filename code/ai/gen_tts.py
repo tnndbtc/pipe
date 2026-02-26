@@ -47,7 +47,7 @@
 #        assets/zh-Hans/kokoro/vo-s01-001.wav
 #
 # Model cache locations:
-#   XTTS v2  — code/models/tts_home/   (controlled via TTS_HOME env var)
+#   XTTS v2  — default Coqui TTS cache  (Windows: %LOCALAPPDATA%\tts\)
 #   MeloTTS  — default HuggingFace cache  (~/.cache/huggingface/)
 #   Kokoro   — default HuggingFace cache  (~/.cache/huggingface/)
 #   XTTS reference WAVs — code/models/reference_voices/
@@ -67,9 +67,9 @@ import torch
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
-SCRIPT_NAME = "gen_tts"
+PROJECTS_ROOT = Path(__file__).resolve().parent.parent.parent / "projects"
+MODELS_DIR    = Path(__file__).resolve().parent.parent / "models"
+SCRIPT_NAME   = "gen_tts"
 
 # Voice mapping:
 #   amunhotep    -> bm_george  (deep British male, elderly, gravelly)
@@ -352,6 +352,7 @@ MELO_ACCENT_MAP = {
 }
 
 
+
 # ---------------------------------------------------------------------------
 # Shared utility functions
 # ---------------------------------------------------------------------------
@@ -451,14 +452,15 @@ def parse_args():
     )
     parser.add_argument(
         "--tts_model",
-        choices=["kokoro", "xtts", "melo", "all"],
+        choices=["kokoro", "xtts", "melo", "azure", "all"],
         default="kokoro",
         help=(
             "TTS backend to use. "
             "'kokoro' = Kokoro-82M (default, CPU-only, fast). "
             "'xtts'   = XTTS v2 (voice-cloning, GPU recommended, pip install TTS). "
             "'melo'   = MeloTTS (lightweight, accent-aware, pip install melo-tts). "
-            "'all'    = run all three backends for comparison."
+            "'azure'  = Azure Neural TTS (cloud, requires AZURE_SPEECH_KEY + AZURE_SPEECH_REGION). "
+            "'all'    = run all four backends for comparison."
         ),
     )
     return parser.parse_args()
@@ -561,6 +563,49 @@ def locale_from_manifest_path(path: str) -> str:
     stem = Path(path).stem
     parts = stem.split('.')
     return parts[-1] if len(parts) > 1 else 'en'
+
+
+def assets_dir_from_manifest(path: str) -> Path:
+    """
+    Derive the assets output directory from manifest fields.
+
+    Reads:
+      project_id  → e.g. "the-pharaoh-who-defied-death"
+      manifest_id → e.g. "the-pharaoh-who-defied-death-s01e02-manifest"
+
+    Episode ID is extracted by stripping the project_id prefix and
+    '-manifest' suffix from manifest_id:
+      "the-pharaoh-who-defied-death-s01e02-manifest"
+      → strip "{project_id}-" → "s01e02-manifest"
+      → strip "-manifest"     → "s01e02"
+
+    Returns: PROJECTS_ROOT/{project_id}/episodes/{episode_id}/assets/
+    """
+    with open(path, encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    project_id  = manifest.get("project_id", "")
+    manifest_id = manifest.get("manifest_id", "")
+
+    if not project_id or not manifest_id:
+        raise ValueError(
+            f"Manifest {path!r} is missing 'project_id' or 'manifest_id'. "
+            "Use --output_dir to specify the assets directory explicitly."
+        )
+
+    episode_id = manifest_id
+    if episode_id.startswith(project_id + "-"):
+        episode_id = episode_id[len(project_id) + 1:]
+    if episode_id.endswith("-manifest"):
+        episode_id = episode_id[: -len("-manifest")]
+
+    if not episode_id:
+        raise ValueError(
+            f"Could not parse episode_id from manifest_id={manifest_id!r} "
+            f"with project_id={project_id!r}."
+        )
+
+    return PROJECTS_ROOT / project_id / "episodes" / episode_id / "assets"
 
 
 def write_license_sidecar(wav_path: Path, model_name: str) -> None:
@@ -693,15 +738,10 @@ def load_xtts():
     Load XTTS v2.  Downloads model to MODELS_DIR/tts_home/ on first run
     (~1.8 GB; requires pip install TTS>=0.22.0).
     """
-    # Redirect TTS model download to our code/models/ folder
-    tts_home = str(MODELS_DIR / "tts_home")
-    os.environ.setdefault("TTS_HOME", tts_home)
-
     from TTS.api import TTS  # noqa: PLC0415
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[MODEL] Loading XTTS v2 on {device}  ({XTTS_MODEL_NAME})...")
-    print(f"[MODEL] Model cache : {tts_home}")
     tts = TTS(model_name=XTTS_MODEL_NAME, progress_bar=True).to(device)
     print("[MODEL] XTTS v2 ready.")
     return tts
@@ -990,7 +1030,21 @@ def run_melo_backend(items: list, out_dir: Path) -> list:
 def main():
     args = parse_args()
     locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
-    base_out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
+
+    if args.output_dir:
+        assets_dir = Path(args.output_dir)
+    elif args.manifest:
+        assets_dir = assets_dir_from_manifest(args.manifest)
+    else:
+        raise SystemExit(
+            "[ERROR] No --output_dir and no --manifest provided. "
+            "Pass --manifest <file> so the output path can be derived from project_id/episode_id, "
+            "or pass --output_dir <assets_dir> explicitly."
+        )
+
+    print(f"[OUTPUT] {assets_dir}")
+    base_out_dir = assets_dir / locale   # WAVs:    assets/{locale}/audio/vo/
+    meta_dir     = assets_dir / "meta"   # results: assets/meta/
 
     # Auto-detect voices file when --voices is not given and manifest locale is non-English.
     if not args.voices and locale.lower() not in ('en', 'en-us', 'en-gb'):
@@ -1035,7 +1089,7 @@ def main():
 
     # Determine which backends to run
     if args.tts_model == "all":
-        backends = ["kokoro", "xtts", "melo"]
+        backends = ["kokoro", "xtts", "melo", "azure"]
     else:
         backends = [args.tts_model]
 
@@ -1056,11 +1110,14 @@ def main():
             results = run_xtts_backend(items, out_dir)
         elif backend == "melo":
             results = run_melo_backend(items, out_dir)
+        elif backend == "azure":
+            results = run_azure_backend(items, out_dir)
         else:
             results = []
 
-        # Write per-backend results manifest
-        manifest_path = out_dir / f"{SCRIPT_NAME}_{backend}_results.json"
+        # Write per-backend results manifest to assets/meta/
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = meta_dir / f"{SCRIPT_NAME}_{backend}_results.json"
         with open(manifest_path, "w") as fh:
             json.dump(results, fh, indent=2)
 
@@ -1080,7 +1137,7 @@ def main():
             ok         = sum(1 for r in results if r.get("status") == "success")
             tot_bytes  = sum(r.get("size_bytes", 0) for r in results)
             print(f"  {backend.upper():8s}: {ok}/{len(results)} files | {tot_bytes:,} bytes")
-        print(f"\nListen and compare in: {base_out_dir}")
+        print(f"\nListen and compare in: {assets_dir}")
 
 
 if __name__ == "__main__":
