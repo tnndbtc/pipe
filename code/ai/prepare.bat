@@ -32,6 +32,18 @@ echo [4/5] Installing remaining requirements...
 pip install -r code\requirements.txt
 
 echo.
+echo [4c/5] Installing MeloTTS from GitHub (not on PyPI)...
+echo        Using --no-deps to prevent torch downgrade to CPU build.
+pip install git+https://github.com/myshell-ai/MeloTTS.git --no-deps
+echo.
+echo [4d/5] Downloading unidic dictionary (required by MeloTTS for Japanese)...
+python -m unidic download
+
+echo.
+echo [4e/5] Downloading NLTK data required by MeloTTS...
+python -c "import nltk; nltk.download('averaged_perceptron_tagger_eng'); nltk.download('cmudict')"
+
+echo.
 echo [4b/5] Installing Real-ESRGAN and basicsr (upscaling — gen_upscale.py)...
 echo        If this fails, retry with: pip install realesrgan basicsr --no-build-isolation
 pip install realesrgan basicsr

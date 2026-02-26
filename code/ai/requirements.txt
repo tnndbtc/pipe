@@ -18,18 +18,40 @@
 #   Step 4 — everything else
 #     pip install -r requirements.txt
 #
+#   Optional TTS backends (install to enable --tts_model xtts / melo):
+#     pip install TTS>=0.22.0 --no-deps    # XTTS v2 — prevents torch downgrade to CPU build
+#     pip install git+https://github.com/myshell-ai/MeloTTS.git --no-deps  # MeloTTS
+#     python -m unidic download            # required post-install step for MeloTTS
+#
+#   Kokoro language extras (install what you need):
+#     pip install "misaki[zh]"         # Chinese TTS
+#     pip install "misaki[ja]"         # Japanese TTS
+#
 # =============================================================================
 
 
 # ---------------------------------------------------------------------------
 # PyTorch ecosystem
-# Listed here for reference; install via --index-url as shown above.
-# Plain `pip install torch` pulls the CPU-only build from PyPI.
+# MUST install from the PyTorch wheel server — plain PyPI only has CPU builds.
+# CPU builds break torchvision (RuntimeError: operator torchvision::nms does not exist).
+#
+#   pip install torch==2.10.0+cu126 torchvision==0.25.0+cu126 torchaudio==2.10.0+cu126 \
+#       --index-url https://download.pytorch.org/whl/cu126
+#   pip install xformers --index-url https://download.pytorch.org/whl/cu126
+#
+# Install MeloTTS and TTS with --no-deps to prevent them downgrading torch to CPU build:
+#   pip install git+https://github.com/myshell-ai/MeloTTS.git --no-deps
+#   python -m unidic download
+#   pip install TTS>=0.22.0 --no-deps   (then install missing deps manually)
+#
+# CUDA version notes:
+#   RTX 4060 driver reports CUDA 13.0; forward-compatible with cu126 builds.
+#   cu128 builds also exist but cu126 has the full torch+torchvision+torchaudio trio.
 # ---------------------------------------------------------------------------
-# torch==2.4.1           # install via: --index-url https://download.pytorch.org/whl/cu121
-# torchvision==0.19.1    # same index
-# torchaudio==2.4.1      # same index
-# xformers               # same index — required by AudioCraft transformer
+# torch==2.10.0+cu126        # install via: --index-url https://download.pytorch.org/whl/cu126
+# torchvision==0.25.0+cu126  # same index
+# torchaudio==2.10.0+cu126   # same index
+# xformers                   # same index — required by AnimateDiff / AudioCraft
 
 
 # ---------------------------------------------------------------------------
@@ -65,9 +87,43 @@ soundfile>=0.12.0          # WAV read/write for TTS, SFX, music output
 
 
 # ---------------------------------------------------------------------------
-# TTS — Kokoro-82M  (gen_tts.py)
+# TTS — Kokoro-82M  (gen_tts.py, default backend)
 # ---------------------------------------------------------------------------
 kokoro>=0.9.4
+
+# Language-specific Kokoro grapheme-to-phoneme extras (install what you need):
+#   pip install "misaki[zh]"    # Chinese (zh-Hans / zh-Hant)
+#   pip install "misaki[ja]"    # Japanese
+
+
+# ---------------------------------------------------------------------------
+# TTS — XTTS v2 / Coqui  (gen_tts.py --tts_model xtts)
+#
+# Coqui TTS bundles XTTS v2, Bark, Tortoise, and more.  ~1.8 GB VRAM on GPU;
+# also runs on CPU.  Model (~1.8 GB) downloaded to code/models/tts_home/ on
+# first run (location controlled by TTS_HOME env var set in gen_tts.py).
+#
+# NOTE: TTS pulls in its own version of trainer, coqpit, and other packages.
+# If you hit version conflicts, install in a fresh venv or use:
+#   pip install TTS --no-deps   then install missing deps manually.
+# ---------------------------------------------------------------------------
+TTS>=0.22.0
+
+
+# ---------------------------------------------------------------------------
+# TTS — MeloTTS  (gen_tts.py --tts_model melo)
+#
+# Lightweight multilingual TTS (~200 MB). Supports EN, ZH, JP, KR, FR, ES.
+# Model weights downloaded from HuggingFace cache on first run.
+#
+# melo-tts depends on mecab-python3 and unidic for Japanese; these pull in
+# native binaries and may require additional system packages on some platforms.
+#
+# Not on PyPI — install via prepare.bat or manually:
+#   pip install git+https://github.com/myshell-ai/MeloTTS.git --no-deps
+#   python -m unidic download
+# ---------------------------------------------------------------------------
+# melo-tts  ← see above; cannot be installed via plain pip install
 
 
 # ---------------------------------------------------------------------------

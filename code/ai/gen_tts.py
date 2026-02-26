@@ -1,6 +1,8 @@
 # =============================================================================
 # gen_tts.py
 # Generate spoken voice-over audio for every dialogue line in s01e01.
+# Supports multiple TTS backends: Kokoro (default), XTTS v2, MeloTTS.
+# Use --tts_model [kokoro|xtts|melo|all] to select or compare.
 # =============================================================================
 #
 # requirements.txt (pip install before running):
@@ -9,31 +11,52 @@
 #   numpy>=1.24.0
 #   huggingface_hub>=0.21.0
 #
-# Language-specific extras (install the ones you need):
-#   Chinese  (zh-Hans / zh-Hant):  pip install "misaki[zh]"
-#             pulls in: pypinyin, pypinyin-dict, cn2an, jieba, ordered-set
-#   Japanese (ja):                  pip install "misaki[ja]"
-#   Korean   (ko):                  pip install "misaki[ko]"  (if supported)
+# Optional backends (install the ones you want to compare):
+#   XTTS v2 (Coqui):  pip install TTS>=0.22.0
+#   MeloTTS:          pip install melo-tts
+#
+# Language-specific extras for Kokoro:
+#   Chinese (zh-Hans):  pip install "misaki[zh]"
+#   Japanese (ja):      pip install "misaki[ja]"
 #
 # ---------------------------------------------------------------------------
 # Hardware Target: NVIDIA RTX 4060 8 GB VRAM
 # ---------------------------------------------------------------------------
-# Memory-saving techniques:
-#   Kokoro-82M is a tiny 82-million-parameter TTS model.  It runs entirely
-#   on CPU at real-time speed and consumes well under 1 GB RAM.  No GPU is
-#   required.  No VRAM techniques are needed — the entire model comfortably
-#   fits in system RAM.
+# Backend comparison:
 #
-#   torch.cuda.empty_cache() is still called after the loop as good practice
-#   in case the user is running this script alongside GPU-heavy processes.
+#   kokoro  — 82 M params, CPU-only, very fast, good English/Chinese.
+#             No VRAM required.
 #
-# NOTE: Kokoro downloads model weights from HuggingFace (hexgrad/Kokoro-82M)
-#   automatically on first run.  No licence agreement is required.
+#   xtts    — XTTS v2 (~1.8 GB VRAM on GPU, runs on CPU too).
+#             Multilingual, voice-cloning from a short reference WAV.
+#             Reference WAVs are auto-generated from Kokoro on first run
+#             and cached in code/models/reference_voices/.
+#             Place your own {speaker}.wav there for custom voices.
+#             NOTE: XTTS v2 does not support speed control; prosody is
+#             model-driven and typically more expressive than Kokoro.
+#
+#   melo    — MeloTTS (~200 MB), lightweight, good Chinese/English,
+#             multiple accent options (EN-US, EN-BR, EN-AU, ZH, JP, KR …).
+#             Supports speed control. ~200 MB — trivially fits in VRAM.
+#
+# Output structure:
+#   assets/{locale}/{backend}/vo-*.wav
+#   e.g. assets/en/kokoro/vo-s01-001.wav
+#        assets/en/xtts/vo-s01-001.wav
+#        assets/en/melo/vo-s01-001.wav
+#        assets/zh-Hans/kokoro/vo-s01-001.wav
+#
+# Model cache locations:
+#   XTTS v2  — code/models/tts_home/   (controlled via TTS_HOME env var)
+#   MeloTTS  — default HuggingFace cache  (~/.cache/huggingface/)
+#   Kokoro   — default HuggingFace cache  (~/.cache/huggingface/)
+#   XTTS reference WAVs — code/models/reference_voices/
 # ---------------------------------------------------------------------------
 
 import argparse
 import gc
 import json
+import os
 import re
 from pathlib import Path
 
@@ -44,10 +67,8 @@ import torch
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
-# Resolve output dir relative to this script's location so it works regardless
-# of the working directory the script is launched from.
-# code/ai/gen_tts.py -> ../../projects/...  (repo root / projects / ...)
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 SCRIPT_NAME = "gen_tts"
 
 # Voice mapping:
@@ -222,7 +243,7 @@ LOCALE_TO_LANG_CODE = {
     "zh-cn":    "z",
     "zh-tw":    "z",
     "ja":       "j",        # Japanese
-    "ko":       "k",        # Korean  (if supported by installed Kokoro version)
+    "ko":       "k",        # Korean
     "fr":       "f",        # French
     "es":       "e",        # Spanish
     "pt":       "p",        # Portuguese
@@ -233,8 +254,7 @@ LOCALE_TO_LANG_CODE = {
 PACE_TO_SPEED = {"slow": 0.8, "normal": 1.0, "fast": 1.2}
 
 # Built-in voice maps for non-English lang_codes.
-# Used automatically when the manifest locale maps to a non-English lang_code
-# and no --voices file is provided.  Keys are Kokoro lang_codes.
+# Priority: voices file > these lang defaults > English SPEAKER_TO_VOICE
 LANG_CODE_DEFAULT_VOICES = {
     "z": {                              # Mandarin Chinese
         "amunhotep":     "zm_yunxi",    # male, mid-aged
@@ -245,6 +265,96 @@ LANG_CODE_DEFAULT_VOICES = {
     },
 }
 
+# =============================================================================
+# XTTS v2 backend configuration
+# =============================================================================
+XTTS_MODEL_NAME = "tts_models/multilingual/multi-dataset/xtts_v2"
+XTTS_SAMPLE_RATE = 24000
+
+# Kokoro lang_code -> XTTS language string
+XTTS_LANG_MAP = {
+    "en-us": "en", "en-gb": "en",
+    "z":     "zh-cn",
+    "j":     "ja",
+    "k":     "ko",
+    "f":     "fr",
+    "e":     "es",
+    "p":     "pt",
+    "h":     "hi",
+    "i":     "it",
+}
+
+# Speaker gender — used to pick the gender-default reference WAV
+XTTS_SPEAKER_GENDER = {
+    "amunhotep":     "male",
+    "ramesses_ka":   "male",
+    "neferet":       "female",
+    "khamun":        "male",
+    "voice_of_gate": "male",
+}
+
+# Kokoro voice used when auto-generating a gender-default reference WAV.
+# Nested by xtts_lang so Chinese/Japanese refs use native voices.
+XTTS_REF_KOKORO_VOICE = {
+    "en":    {"male": "bm_george",  "female": "bf_emma"},
+    "zh-cn": {"male": "zm_yunxi",   "female": "zf_xiaobei"},
+    "ja":    {"male": "jm_kumo",    "female": "jf_alpha"},
+}
+
+# Kokoro lang_code to use when generating reference WAVs, keyed by xtts_lang
+XTTS_REF_KOKORO_LANG = {
+    "en":    "en-us",
+    "zh-cn": "z",
+    "ja":    "j",
+}
+
+# Text to synthesise when creating a reference WAV — should be ~6–10 seconds
+XTTS_REF_SAMPLE_TEXT = {
+    "en": (
+        "This is a reference voice sample for speech synthesis. "
+        "The tone should be clear and natural, with appropriate pacing and rhythm. "
+        "A longer sample produces better voice cloning quality."
+    ),
+    "zh-cn": (
+        "这是用于语音合成的参考音频样本。语调应该清晰自然，节奏合适，表达流畅。"
+        "较长的样本能够产生更好的声音克隆质量。"
+    ),
+    "ja": (
+        "これは音声合成用の参照音声サンプルです。"
+        "トーンは明瞭で自然であるべきです。より長いサンプルを使用すると品質が向上します。"
+    ),
+}
+
+# =============================================================================
+# MeloTTS backend configuration
+# =============================================================================
+MELO_SAMPLE_RATE = 44100  # MeloTTS native output sample rate
+
+# Kokoro lang_code -> MeloTTS language string
+MELO_LANG_MAP = {
+    "en-us": "EN", "en-gb": "EN",
+    "z":     "ZH",
+    "j":     "JP",
+    "k":     "KR",
+    "f":     "FR",
+    "e":     "ES",
+}
+
+# speaker_id -> MeloTTS English accent string (used when melo_lang == "EN")
+# NOTE: MeloTTS EN is single-speaker — accent variants differ in accent only, not gender or voice.
+# All EN speakers will sound like the same female voice. Use Kokoro/XTTS for gender differentiation.
+MELO_ACCENT_MAP = {
+    "amunhotep":     "EN-US",
+    "ramesses_ka":   "EN-US",
+    "neferet":       "EN-US",
+    "khamun":        "EN-US",
+    "voice_of_gate": "EN-US",
+}
+
+
+# ---------------------------------------------------------------------------
+# Shared utility functions
+# ---------------------------------------------------------------------------
 
 def resolve_voice_from_style(voice_style: str, rules=None) -> tuple:
     """
@@ -285,10 +395,10 @@ def load_voice_profiles(path: str) -> dict:
         raw = json.load(f)
 
     profiles = {
-        "description":           raw.get("description", ""),
-        "speaker_voice_map":     raw.get("speaker_voice_map", {}),
+        "description":             raw.get("description", ""),
+        "speaker_voice_map":       raw.get("speaker_voice_map", {}),
         "speaker_speed_overrides": raw.get("speaker_speed_overrides", {}),
-        "locale_lang_map":       raw.get("locale_lang_map", {}),
+        "locale_lang_map":         raw.get("locale_lang_map", {}),
     }
 
     # Convert voice_style_rules from JSON list-of-objects to list-of-tuples
@@ -307,12 +417,13 @@ def load_voice_profiles(path: str) -> dict:
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Generate voice-over WAV files using Kokoro-82M.\n"
-            "Supports any language via --voices <profile.json>.\n\n"
+            "Generate voice-over WAV files using selectable TTS backends.\n"
+            "Backends: kokoro (default), xtts, melo, all\n\n"
             "Examples:\n"
             "  python gen_tts.py --manifest AssetManifest_draft.json\n"
-            "  python gen_tts.py --manifest AssetManifest_draft.zh-Hans.json "
-            "--voices voices_zh-Hans.json\n"
+            "  python gen_tts.py --manifest AssetManifest_draft.zh-Hans.json\n"
+            "  python gen_tts.py --manifest AssetManifest_draft.json --tts_model all\n"
+            "  python gen_tts.py --manifest AssetManifest_draft.json --tts_model xtts\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -338,6 +449,18 @@ def parse_args():
             "Use voices_en.json for English, voices_zh-Hans.json for Chinese, etc."
         ),
     )
+    parser.add_argument(
+        "--tts_model",
+        choices=["kokoro", "xtts", "melo", "all"],
+        default="kokoro",
+        help=(
+            "TTS backend to use. "
+            "'kokoro' = Kokoro-82M (default, CPU-only, fast). "
+            "'xtts'   = XTTS v2 (voice-cloning, GPU recommended, pip install TTS). "
+            "'melo'   = MeloTTS (lightweight, accent-aware, pip install melo-tts). "
+            "'all'    = run all three backends for comparison."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -355,18 +478,12 @@ def load_from_manifest(manifest_path: str, asset_id_filter, voice_profiles: dict
       emotion     -> logged at generation time
 
     voice_profiles: dict from load_voice_profiles(), or None to use built-ins.
-      Keys that can be overridden:
-        speaker_voice_map       — wins over built-in SPEAKER_TO_VOICE
-        speaker_speed_overrides — wins over built-in SPEAKER_SPEED_OVERRIDES
-        locale_lang_map         — wins over built-in LOCALE_TO_LANG_CODE
-        voice_style_rules       — replaces built-in VOICE_STYLE_RULES entirely
     """
     p = voice_profiles or {}
 
     # Build effective lookup tables (profiles layer on top of built-ins)
-    eff_speaker_map    = {**SPEAKER_TO_VOICE,         **p.get("speaker_voice_map", {})}
-    eff_speed_override = {**SPEAKER_SPEED_OVERRIDES,  **p.get("speaker_speed_overrides", {})}
-    eff_locale_map     = {**LOCALE_TO_LANG_CODE,      **p.get("locale_lang_map", {})}
+    eff_speed_override = {**SPEAKER_SPEED_OVERRIDES, **p.get("speaker_speed_overrides", {})}
+    eff_locale_map     = {**LOCALE_TO_LANG_CODE,     **p.get("locale_lang_map", {})}
     eff_style_rules    = p.get("voice_style_rules")   # None = use built-in VOICE_STYLE_RULES
 
     with open(manifest_path, encoding="utf-8") as f:
@@ -392,9 +509,9 @@ def load_from_manifest(manifest_path: str, asset_id_filter, voice_profiles: dict
         # Priority: explicit voices file > lang-code defaults > English built-ins > style rules
         locale_voice_defaults = LANG_CODE_DEFAULT_VOICES.get(lang_code, {})
         effective_speaker_map = {
-            **SPEAKER_TO_VOICE,          # English base (lowest priority)
-            **locale_voice_defaults,     # lang-code defaults (e.g. Chinese voices)
-            **p.get("speaker_voice_map", {}),  # explicit --voices file (highest priority)
+            **SPEAKER_TO_VOICE,                  # English base (lowest priority)
+            **locale_voice_defaults,             # lang-code defaults (e.g. Chinese voices)
+            **p.get("speaker_voice_map", {}),    # explicit --voices file (highest priority)
         }
         if speaker in effective_speaker_map:
             voice = effective_speaker_map[speaker]
@@ -405,7 +522,6 @@ def load_from_manifest(manifest_path: str, asset_id_filter, voice_profiles: dict
             else:
                 voice_src = "speaker map (en)"
         else:
-            # Fall back to keyword matching against voice_style description
             voice, match_reason = resolve_voice_from_style(voice_style, rules=eff_style_rules)
             voice_src = f"voice_style ({match_reason})"
 
@@ -435,38 +551,8 @@ def load_from_manifest(manifest_path: str, asset_id_filter, voice_profiles: dict
 
 
 # ---------------------------------------------------------------------------
-# Kokoro pipeline loader
+# Helpers
 # ---------------------------------------------------------------------------
-def load_kokoro(lang_code: str = "en-us"):
-    """Load the Kokoro KPipeline for the given lang_code.  Downloads on first run."""
-    from kokoro import KPipeline
-    print(f"[MODEL] Loading Kokoro-82M  lang_code={lang_code}  (hexgrad/Kokoro-82M)...")
-    pipe = KPipeline(lang_code=lang_code)
-    print("[MODEL] Kokoro ready.")
-    return pipe
-
-
-# ---------------------------------------------------------------------------
-# Audio generation helpers
-# ---------------------------------------------------------------------------
-def synthesise(pipe, text: str, voice: str, speed: float) -> np.ndarray:
-    """
-    Run Kokoro inference and concatenate all audio chunks into one array.
-    Kokoro splits long texts internally; we join the chunks back together.
-    """
-    chunks = []
-    # split_pattern=None lets Kokoro decide sentence boundaries
-    for _gs, _ps, audio_chunk in pipe(text, voice=voice, speed=speed):
-        if audio_chunk is not None and len(audio_chunk) > 0:
-            # audio_chunk is a numpy array or torch tensor at SAMPLE_RATE Hz
-            if hasattr(audio_chunk, "numpy"):
-                audio_chunk = audio_chunk.numpy()
-            chunks.append(np.array(audio_chunk, dtype=np.float32))
-    if not chunks:
-        raise RuntimeError("Kokoro returned no audio chunks.")
-    return np.concatenate(chunks)
-
-
 def locale_from_manifest_path(path: str) -> str:
     """Extract locale from manifest filename.
     'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
@@ -477,18 +563,436 @@ def locale_from_manifest_path(path: str) -> str:
     return parts[-1] if len(parts) > 1 else 'en'
 
 
+def write_license_sidecar(wav_path: Path, model_name: str) -> None:
+    """Write a CC0 license sidecar for a generated WAV file.
+
+    Saved at: {wav_path.parent}/licenses/{wav_path.stem}.license.json
+
+    Fields:
+      spdx_id             — "CC0" (AI-generated audio has no copyright owner)
+      attribution_required — false (CC0 requires none)
+      text                — human-readable provenance string
+      generator_model     — structured model/voice identifier for future resolvers
+    """
+    licenses_dir = wav_path.parent / "licenses"
+    licenses_dir.mkdir(parents=True, exist_ok=True)
+    sidecar = {
+        "spdx_id": "CC0",
+        "attribution_required": False,
+        "text": f"AI-generated voice audio. No copyright claimed. Produced locally by {model_name}.",
+        "generator_model": model_name,
+    }
+    sidecar_path = licenses_dir / f"{wav_path.stem}.license.json"
+    with open(sidecar_path, "w", encoding="utf-8") as f:
+        json.dump(sidecar, f, indent=2, ensure_ascii=False)
+
+
+# =============================================================================
+# Kokoro backend
+# =============================================================================
+
+def load_kokoro(lang_code: str = "en-us"):
+    """Load the Kokoro KPipeline for the given lang_code. Downloads on first run."""
+    from kokoro import KPipeline
+    print(f"[MODEL] Loading Kokoro-82M  lang_code={lang_code}  (hexgrad/Kokoro-82M)...")
+    pipe = KPipeline(lang_code=lang_code)
+    print("[MODEL] Kokoro ready.")
+    return pipe
+
+
+def synthesise_kokoro(pipe, text: str, voice: str, speed: float) -> np.ndarray:
+    """
+    Run Kokoro inference and concatenate all audio chunks into one array.
+    Kokoro splits long texts internally; we join the chunks back together.
+    """
+    chunks = []
+    for _gs, _ps, audio_chunk in pipe(text, voice=voice, speed=speed):
+        if audio_chunk is not None and len(audio_chunk) > 0:
+            if hasattr(audio_chunk, "numpy"):
+                audio_chunk = audio_chunk.numpy()
+            chunks.append(np.array(audio_chunk, dtype=np.float32))
+    if not chunks:
+        raise RuntimeError("Kokoro returned no audio chunks.")
+    return np.concatenate(chunks)
+
+
+# Keep old name as alias so existing callers work
+synthesise = synthesise_kokoro
+
+
+def run_kokoro_backend(items: list, out_dir: Path, args) -> list:
+    """Run Kokoro TTS for all items. Returns result list."""
+    lang_groups: dict[str, list] = {}
+    for item in items:
+        lang_groups.setdefault(item.get("lang_code", "en-us"), []).append(item)
+
+    results = []
+    total = len(items)
+    item_index = 0
+
+    for lang_code, lang_items in lang_groups.items():
+        pipe = load_kokoro(lang_code)
+
+        for vo in lang_items:
+            item_index += 1
+            out_filename = f"{vo['item_id']}.wav"
+            out_path = out_dir / out_filename
+
+            print(f"\n[{item_index}/{total}] {vo['item_id']}")
+            print(f"  Speaker    : {vo['speaker']}")
+            print(f"  Voice style: {vo.get('voice_style') or '(not set)'}")
+            print(f"  Voice ID   : {vo['voice']}  (source: {vo.get('voice_src', 'unknown')})")
+            print(f"  Emotion    : {vo.get('emotion') or '(not set)'}")
+            print(f"  Speed      : {vo['speed']}  ({vo.get('speed_src', '')})")
+            print(f"  Locale     : {vo.get('locale', 'en')}  ->  lang_code={lang_code}")
+            print(f"  Text       : \"{vo['text'][:70]}{'...' if len(vo['text']) > 70 else ''}\"")
+
+
+            try:
+                audio = synthesise_kokoro(pipe, vo["text"], voice=vo["voice"], speed=vo["speed"])
+                sf.write(str(out_path), audio, SAMPLE_RATE, subtype="PCM_16")
+                size = out_path.stat().st_size
+                duration_s = len(audio) / SAMPLE_RATE
+                model_name = f"Kokoro-82M (voice={vo['voice']})"
+                write_license_sidecar(out_path, model_name)
+                print(f"  [OK] {out_path}  ({duration_s:.2f}s, {size:,} bytes)")
+                results.append({
+                    "item_id":      vo["item_id"],
+                    "speaker":      vo["speaker"],
+                    "voice":        vo["voice"],
+                    "voice_style":  vo.get("voice_style", ""),
+                    "emotion":      vo.get("emotion", ""),
+                    "speed":        vo["speed"],
+                    "lang_code":    lang_code,
+                    "output":       str(out_path),
+                    "size_bytes":   size,
+                    "duration_sec": round(duration_s, 3),
+                    "status":       "success",
+                })
+            except Exception as exc:
+                print(f"  [ERROR] {vo['item_id']}: {exc}")
+                results.append({
+                    "item_id": vo["item_id"], "speaker": vo["speaker"],
+                    "voice": vo["voice"], "output": str(out_path),
+                    "size_bytes": 0, "status": "failed", "error": str(exc),
+                })
+
+        del pipe
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    return results
+
+
+# =============================================================================
+# XTTS v2 backend
+# =============================================================================
+
+def load_xtts():
+    """
+    Load XTTS v2.  Downloads model to MODELS_DIR/tts_home/ on first run
+    (~1.8 GB; requires pip install TTS>=0.22.0).
+    """
+    # Redirect TTS model download to our code/models/ folder
+    tts_home = str(MODELS_DIR / "tts_home")
+    os.environ.setdefault("TTS_HOME", tts_home)
+
+    from TTS.api import TTS  # noqa: PLC0415
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"[MODEL] Loading XTTS v2 on {device}  ({XTTS_MODEL_NAME})...")
+    print(f"[MODEL] Model cache : {tts_home}")
+    tts = TTS(model_name=XTTS_MODEL_NAME, progress_bar=True).to(device)
+    print("[MODEL] XTTS v2 ready.")
+    return tts
+
+
+def ensure_xtts_ref_wav(speaker: str, xtts_lang: str) -> "Path | None":
+    """
+    Return path to a reference WAV for XTTS voice cloning.
+
+    Search priority:
+      1. code/models/reference_voices/{speaker}_{xtts_lang}.wav  — language-specific, user-placed
+      2. code/models/reference_voices/{speaker}.wav              — speaker default, user-placed
+      3. code/models/reference_voices/default_{gender}_{xtts_lang}.wav  — auto-generated lang default
+      4. code/models/reference_voices/default_{gender}.wav              — legacy fallback
+      5. Auto-generate default_{gender}_{xtts_lang}.wav from Kokoro using native voices.
+      6. Return None if auto-generation fails (XTTS will skip that item).
+
+    For Chinese: auto-generates from zm_yunxi (male) / zf_xiaobei (female).
+    To provide custom voices, place 6–12 second mono WAVs in code/models/reference_voices/.
+    """
+    ref_dir = MODELS_DIR / "reference_voices"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+
+    gender = XTTS_SPEAKER_GENDER.get(speaker, "male")
+
+    # 1. Speaker + language specific
+    speaker_lang_ref = ref_dir / f"{speaker}_{xtts_lang}.wav"
+    if speaker_lang_ref.exists():
+        return speaker_lang_ref
+
+    # 2. Speaker-specific (language-agnostic)
+    speaker_ref = ref_dir / f"{speaker}.wav"
+    if speaker_ref.exists():
+        return speaker_ref
+
+    # 3. Gender + language default (cached auto-generated)
+    gender_lang_ref = ref_dir / f"default_{gender}_{xtts_lang}.wav"
+    if gender_lang_ref.exists():
+        return gender_lang_ref
+
+    # 4. Legacy gender default (language-agnostic)
+    gender_ref = ref_dir / f"default_{gender}.wav"
+    if gender_ref.exists():
+        return gender_ref
+
+    # 5. Auto-generate language-specific gender default from Kokoro
+    voice_map = XTTS_REF_KOKORO_VOICE.get(xtts_lang) or XTTS_REF_KOKORO_VOICE.get("en", {})
+    kokoro_voice = voice_map.get(gender, "bm_george")
+    kokoro_lang = XTTS_REF_KOKORO_LANG.get(xtts_lang, "en-us")
+    sample_text = XTTS_REF_SAMPLE_TEXT.get(xtts_lang, XTTS_REF_SAMPLE_TEXT["en"])
+    print(f"  [REF] Auto-generating {gender}/{xtts_lang} reference WAV from Kokoro "
+          f"(voice={kokoro_voice}, lang={kokoro_lang})...")
+    try:
+        kpipe = load_kokoro(kokoro_lang)
+        audio = synthesise_kokoro(kpipe, sample_text, voice=kokoro_voice, speed=1.0)
+        sf.write(str(gender_lang_ref), audio, SAMPLE_RATE, subtype="PCM_16")
+        del kpipe
+        gc.collect()
+        torch.cuda.empty_cache()
+        duration_s = len(audio) / SAMPLE_RATE
+        print(f"  [REF] Saved {gender_lang_ref.name}  ({duration_s:.1f}s)")
+        return gender_lang_ref
+    except Exception as exc:
+        print(f"  [WARN] Reference WAV auto-generation failed: {exc}")
+        print(f"  [HINT] Place a 6–12 s WAV at: {gender_lang_ref}")
+        return None
+
+
+def run_xtts_backend(items: list, out_dir: Path) -> list:
+    """Run XTTS v2 for all items. Returns result list."""
+    try:
+        tts_model = load_xtts()
+    except ImportError:
+        print("[ERROR] XTTS backend requires: pip install TTS>=0.22.0")
+        return [{"item_id": v["item_id"], "speaker": v["speaker"],
+                 "output": str(out_dir / f"{v['item_id']}.wav"),
+                 "size_bytes": 0, "status": "failed",
+                 "error": "pip install TTS>=0.22.0"} for v in items]
+    except Exception as exc:
+        print(f"[ERROR] XTTS model load failed: {exc}")
+        return [{"item_id": v["item_id"], "speaker": v["speaker"],
+                 "output": str(out_dir / f"{v['item_id']}.wav"),
+                 "size_bytes": 0, "status": "failed", "error": str(exc)} for v in items]
+
+    results = []
+    total = len(items)
+
+    for idx, vo in enumerate(items, start=1):
+        out_filename = f"{vo['item_id']}.wav"
+        out_path = out_dir / out_filename
+
+        lang_code = vo.get("lang_code", "en-us")
+        xtts_lang = XTTS_LANG_MAP.get(lang_code, "en")
+
+        print(f"\n[{idx}/{total}] {vo['item_id']}")
+        print(f"  Speaker    : {vo['speaker']}")
+        print(f"  XTTS lang  : {xtts_lang}  (from lang_code={lang_code})")
+        print(f"  Emotion    : {vo.get('emotion') or '(not set)'}")
+        print(f"  Speed note : not supported by XTTS v2 — uses model prosody")
+        print(f"  Text       : \"{vo['text'][:70]}{'...' if len(vo['text']) > 70 else ''}\"")
+
+
+        try:
+            ref_wav = ensure_xtts_ref_wav(vo["speaker"], xtts_lang)
+            if ref_wav is None:
+                raise RuntimeError(
+                    "No reference WAV available. Place a WAV in "
+                    f"{MODELS_DIR / 'reference_voices'} and retry."
+                )
+
+            print(f"  Ref WAV    : {ref_wav.name}")
+            wav_list = tts_model.tts(
+                text=vo["text"],
+                speaker_wav=str(ref_wav),
+                language=xtts_lang,
+            )
+            audio = np.array(wav_list, dtype=np.float32)
+            sf.write(str(out_path), audio, XTTS_SAMPLE_RATE, subtype="PCM_16")
+            size = out_path.stat().st_size
+            duration_s = len(audio) / XTTS_SAMPLE_RATE
+            model_name = f"XTTS v2 (coqui-ai/TTS, lang={xtts_lang}, ref={ref_wav.name})"
+            write_license_sidecar(out_path, model_name)
+            print(f"  [OK] {out_path}  ({duration_s:.2f}s, {size:,} bytes)")
+            results.append({
+                "item_id":      vo["item_id"],
+                "speaker":      vo["speaker"],
+                "xtts_lang":    xtts_lang,
+                "ref_wav":      str(ref_wav),
+                "output":       str(out_path),
+                "size_bytes":   size,
+                "duration_sec": round(duration_s, 3),
+                "status":       "success",
+            })
+        except Exception as exc:
+            print(f"  [ERROR] {vo['item_id']}: {exc}")
+            results.append({
+                "item_id": vo["item_id"], "speaker": vo["speaker"],
+                "output": str(out_path), "size_bytes": 0,
+                "status": "failed", "error": str(exc),
+            })
+        finally:
+            torch.cuda.empty_cache()
+            gc.collect()
+
+    del tts_model
+    torch.cuda.empty_cache()
+    gc.collect()
+    return results
+
+
+# =============================================================================
+# MeloTTS backend
+# =============================================================================
+
+def load_melo(melo_lang: str):
+    """
+    Load MeloTTS for the given language.
+    Requires: pip install melo-tts
+    """
+    from melo.api import TTS as MeloTTS  # noqa: PLC0415
+    print(f"[MODEL] Loading MeloTTS  language={melo_lang}...")
+    model = MeloTTS(language=melo_lang, device="auto")
+    print("[MODEL] MeloTTS ready.")
+    return model
+
+
+def get_melo_speaker_id(model, speaker: str, melo_lang: str) -> int:
+    """Resolve MeloTTS integer speaker ID from speaker name and language."""
+    speaker_ids = model.hps.data.spk2id
+    if melo_lang == "EN":
+        accent = MELO_ACCENT_MAP.get(speaker, "EN-US")
+        if accent in speaker_ids:
+            return speaker_ids[accent]
+    # Non-English or accent not found: use first available speaker
+    return next(iter(speaker_ids.values()))
+
+
+def run_melo_backend(items: list, out_dir: Path) -> list:
+    """Run MeloTTS for all items. Returns result list."""
+    # Group by melo_lang so we load one model per language
+    lang_groups: dict[str, list] = {}
+    unsupported = []
+    for item in items:
+        lang_code = item.get("lang_code", "en-us")
+        melo_lang = MELO_LANG_MAP.get(lang_code)
+        if melo_lang is None:
+            print(f"  [WARN] {item['item_id']}: lang_code={lang_code} not supported by MeloTTS — skipping.")
+            unsupported.append({
+                "item_id": item["item_id"], "speaker": item["speaker"],
+                "output": str(out_dir / f"{item['item_id']}.wav"),
+                "size_bytes": 0, "status": "failed",
+                "error": f"lang_code={lang_code} not supported by MeloTTS",
+            })
+        else:
+            lang_groups.setdefault(melo_lang, []).append(item)
+
+    # Warn once per language if the MeloTTS model is single-speaker (EN, JP, KR, FR, ES).
+    # Only ZH is multi-speaker; all others produce the same voice regardless of speaker/gender.
+    MELO_SINGLE_SPEAKER_LANGS = {"EN", "ZH", "JP", "KR", "FR", "ES"}
+    for lang in set(lang_groups.keys()) & MELO_SINGLE_SPEAKER_LANGS:
+        print(f"  [WARN] MeloTTS {lang} is single-speaker — all characters will sound identical "
+              f"(same female voice). Use Kokoro or XTTS for gender/voice differentiation.")
+
+    results = list(unsupported)
+    total = len(items)
+    item_index = 0
+
+    for melo_lang, lang_items in lang_groups.items():
+        try:
+            model = load_melo(melo_lang)
+        except ImportError:
+            print("[ERROR] MeloTTS backend requires: pip install melo-tts")
+            for vo in lang_items:
+                results.append({
+                    "item_id": vo["item_id"], "speaker": vo["speaker"],
+                    "output": str(out_dir / f"{vo['item_id']}.wav"),
+                    "size_bytes": 0, "status": "failed",
+                    "error": "pip install melo-tts",
+                })
+            continue
+        except Exception as exc:
+            print(f"[ERROR] MeloTTS model load failed ({melo_lang}): {exc}")
+            for vo in lang_items:
+                results.append({
+                    "item_id": vo["item_id"], "speaker": vo["speaker"],
+                    "output": str(out_dir / f"{vo['item_id']}.wav"),
+                    "size_bytes": 0, "status": "failed", "error": str(exc),
+                })
+            continue
+
+        for vo in lang_items:
+            item_index += 1
+            out_filename = f"{vo['item_id']}.wav"
+            out_path = out_dir / out_filename
+
+            speaker_id = get_melo_speaker_id(model, vo["speaker"], melo_lang)
+            # Reverse lookup: int -> accent label for logging
+            spk2id = model.hps.data.spk2id
+            accent = next((k for k, v in spk2id.items() if v == speaker_id), str(speaker_id))
+
+            print(f"\n[{item_index}/{total}] {vo['item_id']}")
+            print(f"  Speaker    : {vo['speaker']}")
+            print(f"  MeloTTS    : language={melo_lang}, accent={accent}")
+            print(f"  Emotion    : {vo.get('emotion') or '(not set)'}")
+            print(f"  Speed      : {vo['speed']}  ({vo.get('speed_src', '')})")
+            print(f"  Text       : \"{vo['text'][:70]}{'...' if len(vo['text']) > 70 else ''}\"")
+
+
+            try:
+                model.tts_to_file(vo["text"], speaker_id, str(out_path), speed=vo["speed"])
+                size = out_path.stat().st_size
+                model_name = f"MeloTTS (language={melo_lang}, accent={accent})"
+                write_license_sidecar(out_path, model_name)
+                print(f"  [OK] {out_path}  ({size:,} bytes)")
+                results.append({
+                    "item_id":   vo["item_id"],
+                    "speaker":   vo["speaker"],
+                    "melo_lang": melo_lang,
+                    "accent":    accent,
+                    "speed":     vo["speed"],
+                    "output":    str(out_path),
+                    "size_bytes": size,
+                    "status":    "success",
+                })
+            except Exception as exc:
+                print(f"  [ERROR] {vo['item_id']}: {exc}")
+                results.append({
+                    "item_id": vo["item_id"], "speaker": vo["speaker"],
+                    "output": str(out_path), "size_bytes": 0,
+                    "status": "failed", "error": str(exc),
+                })
+            finally:
+                torch.cuda.empty_cache()
+                gc.collect()
+
+        del model
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
     locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
-    out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
-    out_dir.mkdir(parents=True, exist_ok=True)
+    base_out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
 
     # Auto-detect voices file when --voices is not given and manifest locale is non-English.
-    # e.g. AssetManifest_draft.zh-Hans.json -> looks for voices_zh-Hans.json next to the script.
-    # Falls back gracefully to LANG_CODE_DEFAULT_VOICES built-ins if the file is absent.
     if not args.voices and locale.lower() not in ('en', 'en-us', 'en-gb'):
         auto_voices = Path(__file__).resolve().parent / f"voices_{locale}.json"
         if auto_voices.exists():
@@ -514,7 +1018,7 @@ def main():
             print(f"         Speed overrides   : {voice_profiles['speaker_speed_overrides']}")
         print()
 
-    # Load item list: manifest overrides hardcoded, --asset-id/--item_id both filter
+    # Load item list: manifest overrides hardcoded; --asset-id/--item_id both filter
     if args.manifest:
         items = load_from_manifest(args.manifest, args.asset_id or args.item_id, voice_profiles)
         if not items:
@@ -529,100 +1033,54 @@ def main():
                 print(f"[ERROR] item_id '{filter_id}' not found in VO_ITEMS.")
                 return
 
-    # Group items by lang_code so we load one Kokoro pipeline per locale.
-    # For this manifest all items are "en-us", but this handles mixed-locale
-    # manifests correctly without extra pipeline loads.
-    lang_groups: dict[str, list] = {}
-    for item in items:
-        lang_groups.setdefault(item.get("lang_code", "en-us"), []).append(item)
+    # Determine which backends to run
+    if args.tts_model == "all":
+        backends = ["kokoro", "xtts", "melo"]
+    else:
+        backends = [args.tts_model]
 
-    results = []
-    total = len(items)
-    item_index = 0
+    all_results: dict[str, list] = {}
 
-    for lang_code, lang_items in lang_groups.items():
-        pipe = load_kokoro(lang_code)
+    for backend in backends:
+        out_dir = base_out_dir / "audio" / "vo"
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-        for vo in lang_items:
-            item_index += 1
-            out_filename = f"{vo['item_id']}.wav"
-            out_path = out_dir / out_filename
+        print(f"\n{'='*60}")
+        print(f"BACKEND : {backend.upper()}")
+        print(f"Output  : {out_dir}")
+        print(f"{'='*60}")
 
-            # --- log how tts_prompt drove this generation ---
-            print(f"\n[{item_index}/{total}] {vo['item_id']}")
-            print(f"  Speaker    : {vo['speaker']}")
-            print(f"  Voice style: {vo.get('voice_style') or '(not set)'}")
-            print(f"  Voice ID   : {vo['voice']}  (source: {vo.get('voice_src', 'unknown')})")
-            print(f"  Emotion    : {vo.get('emotion') or '(not set)'}")
-            print(f"  Speed      : {vo['speed']}  ({vo.get('speed_src', '')})")
-            print(f"  Locale     : {vo.get('locale', 'en')}  ->  lang_code={lang_code}")
-            print(f"  Text       : \"{vo['text'][:70]}{'...' if len(vo['text']) > 70 else ''}\"")
+        if backend == "kokoro":
+            results = run_kokoro_backend(items, out_dir, args)
+        elif backend == "xtts":
+            results = run_xtts_backend(items, out_dir)
+        elif backend == "melo":
+            results = run_melo_backend(items, out_dir)
+        else:
+            results = []
 
-            if out_path.exists():
-                print(f"  [SKIP] {out_filename} already exists")
-                results.append({
-                    "item_id":   vo["item_id"],
-                    "speaker":   vo["speaker"],
-                    "voice":     vo["voice"],
-                    "output":    str(out_path),
-                    "size_bytes": out_path.stat().st_size,
-                    "status":    "skipped",
-                })
-                continue
+        # Write per-backend results manifest
+        manifest_path = out_dir / f"{SCRIPT_NAME}_{backend}_results.json"
+        with open(manifest_path, "w") as fh:
+            json.dump(results, fh, indent=2)
 
-            try:
-                audio = synthesise(pipe, vo["text"], voice=vo["voice"], speed=vo["speed"])
-                sf.write(str(out_path), audio, SAMPLE_RATE, subtype="PCM_16")
-                size = out_path.stat().st_size
-                duration_s = len(audio) / SAMPLE_RATE
-                print(f"  [OK] {out_path}  ({duration_s:.2f}s, {size:,} bytes)")
-                results.append({
-                    "item_id":      vo["item_id"],
-                    "speaker":      vo["speaker"],
-                    "voice":        vo["voice"],
-                    "voice_style":  vo.get("voice_style", ""),
-                    "emotion":      vo.get("emotion", ""),
-                    "speed":        vo["speed"],
-                    "lang_code":    lang_code,
-                    "output":       str(out_path),
-                    "size_bytes":   size,
-                    "duration_sec": round(duration_s, 3),
-                    "status":       "success",
-                })
-            except Exception as exc:
-                print(f"  [ERROR] {vo['item_id']}: {exc}")
-                results.append({
-                    "item_id":   vo["item_id"],
-                    "speaker":   vo["speaker"],
-                    "voice":     vo["voice"],
-                    "output":    str(out_path),
-                    "size_bytes": 0,
-                    "status":    "failed",
-                    "error":     str(exc),
-                })
+        all_results[backend] = results
 
-        # Release pipeline before loading the next lang_code's pipeline
-        del pipe
-        gc.collect()
-        torch.cuda.empty_cache()
+        ok_count   = sum(1 for r in results if r.get("status") == "success")
+        total_bytes = sum(r.get("size_bytes", 0) for r in results)
+        print(f"\n{ok_count}/{len(results)} completed | {total_bytes:,} bytes total")
+        print(f"Manifest: {manifest_path}")
 
-    # Write manifest
-    manifest_path = out_dir / f"{SCRIPT_NAME}_results.json"
-    with open(manifest_path, "w") as fh:
-        json.dump(results, fh, indent=2)
-
-    # Summary
-    print("\n" + "=" * 60)
-    print("SUMMARY — gen_tts")
-    print("=" * 60)
-    for r in results:
-        tag = "OK" if r["status"] == "success" else r["status"].upper()
-        dur = f"  {r.get('duration_sec', 0):.2f}s" if "duration_sec" in r else ""
-        print(f"  [{tag}]  {r['output']}{dur}  ({r['size_bytes']:,} bytes)")
-    ok_count = sum(1 for r in results if r["status"] in ("success", "skipped"))
-    total_bytes = sum(r["size_bytes"] for r in results)
-    print(f"\n{ok_count}/{total} completed | {total_bytes:,} bytes total")
-    print(f"Manifest: {manifest_path}")
+    # Cross-backend comparison table (only when running multiple backends)
+    if len(backends) > 1:
+        print(f"\n{'='*60}")
+        print("COMPARISON SUMMARY")
+        print(f"{'='*60}")
+        for backend, results in all_results.items():
+            ok         = sum(1 for r in results if r.get("status") == "success")
+            tot_bytes  = sum(r.get("size_bytes", 0) for r in results)
+            print(f"  {backend.upper():8s}: {ok}/{len(results)} files | {tot_bytes:,} bytes")
+        print(f"\nListen and compare in: {base_out_dir}")
 
 
 if __name__ == "__main__":
