@@ -1020,7 +1020,21 @@ def run_melo_backend(items: list, out_dir: Path) -> list:
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
+
+    if args.manifest:
+        with open(args.manifest, encoding="utf-8") as _f:
+            _m = json.load(_f)
+        locale = _m.get("locale") or locale_from_manifest_path(args.manifest)
+        _locale_scope = _m.get("locale_scope")
+    else:
+        locale = 'en'
+        _locale_scope = None
+
+    if _locale_scope == "shared":
+        raise SystemExit(
+            "[ERROR] gen_tts.py received a shared manifest (locale_scope='shared'). "
+            "Pass a locale manifest (locale_scope='locale') instead."
+        )
 
     if not args.manifest:
         raise SystemExit(
