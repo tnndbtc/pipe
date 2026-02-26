@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+# =============================================================================
+# resolve_assets.py — Generate AssetManifest.media.{locale}.json
+# =============================================================================
+#
+# Reads AssetManifest_merged.{locale}.json and probes the local filesystem
+# for each asset. Emits file:// URIs for found files, placeholder:// for
+# missing ones. No external calls — single-pass, known-path resolver.
+#
+# Bypasses media-agent entirely: we know exactly where every file lives.
+#
+# Usage:
+#   python resolve_assets.py \
+#       --manifest projects/slug/ep/AssetManifest_merged.zh-Hans.json
+#
+#   python resolve_assets.py \
+#       --manifest projects/slug/ep/AssetManifest_merged.zh-Hans.json \
+#       --assets-root /custom/assets \
+#       --out /custom/AssetManifest.media.zh-Hans.json \
+#       --strict
+#
+# File path conventions (relative to assets-root):
+#   VO        : {locale}/audio/vo/{item_id}.{wav|mp3|ogg}
+#   Music     : music/{item_id}.{wav|mp3|ogg}
+#   SFX       : sfx/{item_id}.{wav|mp3|ogg}
+#   Background: {asset_id}.{png|jpg|webp|gif}  (then backgrounds/ subdir)
+#   Character : {asset_id}.{png|jpg|webp|gif}  (then characters/ subdir)
+#
+# Output: AssetManifest.media.{locale}.json in episode directory (or --out)
+#
+# Requirements: stdlib only
+# =============================================================================
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+PRODUCER = "resolve_assets.py"
+DETERMINISTIC_TS = "1970-01-01T00:00:00Z"
+IMAGE_EXTS = ["png", "jpg", "webp", "gif"]
+AUDIO_EXTS = ["wav", "mp3", "ogg"]
+
+# Map manifest license_type → SPDX identifier
+SPDX_MAP: dict[str, str] = {
+    "generated_local":     "LicenseRef-generated",
+    "proprietary_cleared": "LicenseRef-proprietary-cleared",
+    "commercial_licensed": "LicenseRef-commercial-licensed",
+    "CC0":                 "CC0-1.0",
+    "CC0-1.0":             "CC0-1.0",
+    "MIT":                 "MIT",
+}
+
+
+# ── File search ───────────────────────────────────────────────────────────────
+
+def normalise_id(raw: str) -> str:
+    """
+    Normalise an asset ID for filesystem lookup, mirroring media-agent behaviour:
+    strip → lowercase → spaces and underscores → hyphens.
+    """
+    return raw.strip().lower().replace(" ", "-").replace("_", "-")
+
+
+def find_file(directory: Path, stem: str, extensions: list[str]) -> Path | None:
+    """
+    Return first match for directory/stem.ext; None if not found.
+    Tries the raw stem first, then the normalised (hyphenated) stem.
+    """
+    for candidate_stem in _stems(stem):
+        for ext in extensions:
+            candidate = directory / f"{candidate_stem}.{ext}"
+            if candidate.exists() and candidate.is_file():
+                return candidate
+    return None
+
+
+def _stems(raw: str) -> list[str]:
+    """Return [raw, normalised] deduplicated — raw first so exact match wins."""
+    normed = normalise_id(raw)
+    return [raw, normed] if raw != normed else [raw]
+
+
+def search_dirs(
+    dirs: list[Path],
+    stem: str,
+    extensions: list[str],
+) -> Path | None:
+    """Try each directory in order; return first match or None."""
+    for d in dirs:
+        found = find_file(d, stem, extensions)
+        if found:
+            return found
+    return None
+
+
+# ── Item builders ─────────────────────────────────────────────────────────────
+
+def _resolved(
+    asset_id: str,
+    asset_type: str,
+    file_path: Path,
+    license_type: str,
+) -> dict:
+    spdx_id = SPDX_MAP.get(license_type, "NOASSERTION")
+    return {
+        "asset_id":       asset_id,
+        "asset_type":     asset_type,
+        "uri":            file_path.as_uri(),
+        "is_placeholder": False,
+        "metadata": {
+            "license_type":       license_type,
+            "attribution":        "",
+            "purchase_record":    "",
+            "provider_or_model":  "local_library",
+            "retrieval_date":     DETERMINISTIC_TS,
+        },
+        "rights_warning": "",
+        "source":  {"type": "local"},
+        "license": {
+            "spdx_id":             spdx_id,
+            "attribution_required": False,
+            "text":                "",
+        },
+        "schema_id":      "urn:media:resolved-asset",
+        "schema_version": "1.0.0",
+        "producer":       PRODUCER,
+    }
+
+
+def _placeholder(asset_id: str, asset_type: str) -> dict:
+    return {
+        "asset_id":       asset_id,
+        "asset_type":     asset_type,
+        "uri":            f"placeholder://{asset_type}/{asset_id}",
+        "is_placeholder": True,
+        "metadata": {
+            "license_type":       "placeholder",
+            "attribution":        "",
+            "purchase_record":    "",
+            "provider_or_model":  "placeholder_stub_v0",
+            "retrieval_date":     DETERMINISTIC_TS,
+        },
+        "rights_warning": "",
+        "source":  {"type": "generated_placeholder"},
+        "license": {
+            "spdx_id":             "NOASSERTION",
+            "attribution_required": False,
+            "text":                "",
+        },
+        "schema_id":      "urn:media:resolved-asset",
+        "schema_version": "1.0.0",
+        "producer":       PRODUCER,
+    }
+
+
+# ── Main resolver ─────────────────────────────────────────────────────────────
+
+def resolve_all(merged: dict, assets_root: Path) -> list[dict]:
+    """
+    Walk all asset types in the merged manifest and probe the filesystem.
+
+    Returns a list of ResolvedAsset dicts (file:// or placeholder://).
+    """
+    locale = merged.get("locale", "")
+    items: list[dict] = []
+    n_found = 0
+    n_missing = 0
+
+    # ── 1. Characters ────────────────────────────────────────────────────────
+    # Search: assets/{asset_id}.ext  then  assets/characters/{asset_id}.ext
+    char_search = [assets_root, assets_root / "characters"]
+    for pack in merged.get("character_packs", []):
+        aid = pack["asset_id"]
+        lt  = pack.get("license_type", "proprietary_cleared")
+        f   = search_dirs(char_search, aid, IMAGE_EXTS + AUDIO_EXTS)
+        if f:
+            items.append(_resolved(aid, "character", f, lt))
+            n_found += 1
+        else:
+            items.append(_placeholder(aid, "character"))
+            n_missing += 1
+
+    # ── 2. Backgrounds ───────────────────────────────────────────────────────
+    # Search: assets/{asset_id}.ext  then  assets/backgrounds/{asset_id}.ext
+    bg_search = [assets_root, assets_root / "backgrounds"]
+    for bg in merged.get("backgrounds", []):
+        aid = bg["asset_id"]
+        lt  = bg.get("license_type", "proprietary_cleared")
+        f   = search_dirs(bg_search, aid, IMAGE_EXTS + AUDIO_EXTS)
+        if f:
+            items.append(_resolved(aid, "background", f, lt))
+            n_found += 1
+        else:
+            items.append(_placeholder(aid, "background"))
+            n_missing += 1
+
+    # ── 3. VO (locale-specific path) ─────────────────────────────────────────
+    # Path: assets/{locale}/audio/vo/{item_id}.ext
+    if locale:
+        vo_dir = assets_root / locale / "audio" / "vo"
+    else:
+        vo_dir = assets_root / "audio" / "vo"
+    for vo in merged.get("vo_items", []):
+        aid = vo["item_id"]
+        lt  = vo.get("license_type", "generated_local")
+        f   = search_dirs([vo_dir], aid, AUDIO_EXTS)
+        if f:
+            items.append(_resolved(aid, "vo", f, lt))
+            n_found += 1
+        else:
+            items.append(_placeholder(aid, "vo"))
+            n_missing += 1
+
+    # ── 4. SFX ───────────────────────────────────────────────────────────────
+    # Path: assets/sfx/{item_id}.ext
+    sfx_dir = assets_root / "sfx"
+    for sfx in merged.get("sfx_items", []):
+        aid = sfx["item_id"]
+        lt  = sfx.get("license_type", "proprietary_cleared")
+        f   = search_dirs([sfx_dir], aid, AUDIO_EXTS)
+        if f:
+            items.append(_resolved(aid, "sfx", f, lt))
+            n_found += 1
+        else:
+            items.append(_placeholder(aid, "sfx"))
+            n_missing += 1
+
+    # ── 5. Music ─────────────────────────────────────────────────────────────
+    # Path: assets/music/{item_id}.ext
+    music_dir = assets_root / "music"
+    for music in merged.get("music_items", []):
+        aid = music["item_id"]
+        lt  = music.get("license_type", "generated_local")
+        f   = search_dirs([music_dir], aid, AUDIO_EXTS)
+        if f:
+            items.append(_resolved(aid, "music", f, lt))
+            n_found += 1
+        else:
+            items.append(_placeholder(aid, "music"))
+            n_missing += 1
+
+    print(f"  Total items   : {len(items)}")
+    print(f"  Resolved (✓)  : {n_found}")
+    print(f"  Placeholder (✗): {n_missing}")
+    return items
+
+
+# ── Output path ───────────────────────────────────────────────────────────────
+
+def derive_output_path(manifest_path: Path, locale: str) -> Path:
+    """Default: AssetManifest.media.{locale}.json next to the merged manifest."""
+    return manifest_path.parent / f"AssetManifest.media.{locale}.json"
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Resolve AssetManifest_merged.{locale}.json into "
+                    "AssetManifest.media.{locale}.json using local file paths only.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+File path conventions (relative to --assets-root):
+  VO        : {locale}/audio/vo/{item_id}.wav
+  Music     : music/{item_id}.wav
+  SFX       : sfx/{item_id}.wav
+  Background: {asset_id}.png  (also searched in backgrounds/ subdir)
+  Character : {asset_id}.png  (also searched in characters/ subdir)
+""",
+    )
+    p.add_argument(
+        "--manifest", required=True, metavar="PATH",
+        help="Path to AssetManifest_merged.{locale}.json (locale_scope='merged').",
+    )
+    p.add_argument(
+        "--assets-root", default=None, metavar="PATH",
+        help="Root directory containing resolved asset files. "
+             "Default: {episode_dir}/assets/",
+    )
+    p.add_argument(
+        "--out", default=None, metavar="PATH",
+        help="Output path. Default: AssetManifest.media.{locale}.json "
+             "next to the input manifest.",
+    )
+    p.add_argument(
+        "--strict", action="store_true",
+        help="Exit 1 if any asset is a placeholder (useful in CI).",
+    )
+    return p.parse_args()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    args = parse_args()
+
+    manifest_path = Path(args.manifest).resolve()
+    if not manifest_path.exists():
+        print(f"[ERROR] Manifest not found: {manifest_path}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(manifest_path, encoding="utf-8") as f:
+        merged = json.load(f)
+
+    # Guard: must be a merged manifest
+    locale_scope = merged.get("locale_scope")
+    if locale_scope != "merged":
+        raise SystemExit(
+            f"[ERROR] --manifest has locale_scope='{locale_scope}'. "
+            "Expected 'merged'. Pass AssetManifest_merged.{{locale}}.json."
+        )
+
+    locale = merged.get("locale", "")
+    if not locale:
+        raise SystemExit(
+            "[ERROR] Merged manifest is missing 'locale' field. "
+            "Cannot derive output filename."
+        )
+
+    # Paths
+    episode_dir = manifest_path.parent
+    assets_root = Path(args.assets_root).resolve() if args.assets_root \
+                  else (episode_dir / "assets")
+    out_path    = Path(args.out).resolve() if args.out \
+                  else derive_output_path(manifest_path, locale)
+
+    if not assets_root.is_dir():
+        print(f"[WARN] assets-root does not exist: {assets_root} — all assets will be placeholders")
+
+    print("=" * 60)
+    print("  resolve_assets")
+    print(f"  Manifest    : {manifest_path.name}")
+    print(f"  Locale      : {locale}")
+    print(f"  Assets root : {assets_root}")
+    print(f"  Output      : {out_path}")
+    print("=" * 60)
+
+    # Resolve
+    items = resolve_all(merged, assets_root)
+
+    # Build output document
+    output = {
+        "schema_id":      "AssetManifest.media",
+        "schema_version": "1.0.0",
+        "manifest_id":    merged.get("manifest_id", ""),
+        "project_id":     merged.get("project_id", ""),
+        "producer":       PRODUCER,
+        "generated_at":   DETERMINISTIC_TS,
+        "items":          items,
+    }
+
+    # Write
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    print(f"\n  [OK] Written: {out_path}")
+
+    # Strict mode: fail on any placeholder
+    if args.strict:
+        placeholders = [i for i in items if i["is_placeholder"]]
+        if placeholders:
+            print(
+                f"[ERROR] --strict: {len(placeholders)} placeholder(s) found:",
+                file=sys.stderr,
+            )
+            for item in placeholders[:10]:
+                print(f"  {item['uri']}", file=sys.stderr)
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
