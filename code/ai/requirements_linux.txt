@@ -1,0 +1,45 @@
+# =============================================================================
+# requirements_linux.txt — CPU-only tools for Linux server deployment
+# Linux server (4-core, 8 GB RAM) / Python 3.10+ / no GPU required
+# =============================================================================
+#
+# INSTALL (run in this order):
+#
+#   Step 1 — PyTorch CPU-only build (much smaller than the CUDA wheel)
+#     pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+#   Step 2 — everything else
+#     pip install -r requirements_linux.txt
+#
+# These packages are NOT in requirements.txt because they are:
+#   - CPU-only (no CUDA build needed)
+#   - Intended for the Linux server, not the RTX 4060 dev machine
+#
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# PyTorch CPU build
+# Listed here for reference; install via --index-url as shown above.
+# Plain `pip install torch` pulls a CUDA-bundled wheel (~2 GB) from PyPI;
+# the CPU-only wheel is ~200 MB and sufficient for this server.
+# ---------------------------------------------------------------------------
+# torch          ← install via: --index-url https://download.pytorch.org/whl/cpu
+# torchaudio     ← same index (required by laion-clap)
+# torchvision    ← same index (required by laion-clap internals)
+
+
+# ---------------------------------------------------------------------------
+# Music tagging + clip extraction — CLAP  (tag_music.py, gen_music_clip.py)
+#
+# CPU-only — no GPU required.  CLAP checkpoint (~400 MB) is downloaded
+# automatically to ~/.cache/laion_clap/ on first run.
+#
+# Also requires librosa and soundfile — install those first if not present:
+#   pip install librosa soundfile
+# ---------------------------------------------------------------------------
+laion-clap>=1.1.4
+mutagen>=1.47.0
+scipy>=1.11.0          # required by laion-clap internally
+librosa>=0.10.0        # audio loading (may already be installed)
+soundfile>=0.12.0      # WAV writing (may already be installed)

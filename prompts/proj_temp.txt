@@ -244,8 +244,8 @@ Validate against ShotList.v1.json before proceeding.
 Write to: <episode_dir>/AssetManifest_draft.json
 
 Required fields (AssetManifest.v1.json — inspect the schema first):
-  schema_id, schema_version ("1.1.0"), manifest_id, project_id, shotlist_ref,
-  character_packs[], backgrounds[], vo_items[]
+  schema_id, schema_version ("1.0.0"), manifest_id, project_id, episode_id,
+  shotlist_ref, character_packs[], backgrounds[], vo_items[]
 
 Derive directly from ShotList.json:
   - character_packs : one entry per unique character (pack_id, asset_id, license_type)
@@ -557,7 +557,7 @@ Validate against RenderPlan.v1.json before writing.
 - [ ] StoryPrompt.json written and schema-valid
 - [ ] Script.json written and schema-valid
 - [ ] ShotList.json written and schema-valid
-- [ ] AssetManifest_draft.json written and schema-valid (schema_version 1.1.0)
+- [ ] AssetManifest_draft.json written and schema-valid (schema_version 1.0.0)
 - [ ] canon_diff.json written and schema-valid
 - [ ] canon.json written / updated and schema-valid
 - [ ] Locale variants written and schema-valid for each locale beyond "en"

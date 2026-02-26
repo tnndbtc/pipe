@@ -7,6 +7,7 @@
     "schema_version",
     "manifest_id",
     "project_id",
+    "episode_id",
     "shotlist_ref",
     "character_packs",
     "backgrounds",
@@ -16,13 +17,19 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "1.1.0"
+      "const": "1.0.0"
     },
     "manifest_id": {
       "type": "string"
     },
     "project_id": {
-      "type": "string"
+      "type": "string",
+      "description": "Matches the project directory slug under projects/"
+    },
+    "episode_id": {
+      "type": "string",
+      "description": "Episode identifier (e.g. s01e02). Together with project_id forms the canonical asset path: projects/{project_id}/episodes/{episode_id}/assets/{locale}/",
+      "pattern": "^s[0-9]{2}e[0-9]{2}$"
     },
     "shotlist_ref": {
       "type": "string"
