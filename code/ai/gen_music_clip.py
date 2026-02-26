@@ -22,7 +22,6 @@
 #   python gen_music_clip.py --manifest ...  --output-dir /path/to/assets/en/
 #   python gen_music_clip.py --manifest ...  --item-id music-s01-sh02
 #   python gen_music_clip.py --manifest ...  --hop 1.0   # finer scan
-#   python gen_music_clip.py --manifest ...  --force     # redo existing clips
 #
 # Requirements (CPU-only — no GPU needed):
 #   pip install laion-clap mutagen librosa soundfile numpy scipy
@@ -294,17 +293,11 @@ def parse_args():
     p.add_argument("--resources", default=None, metavar="DIR",
                    help="Directory containing tagged source music files. "
                         "Default: <repo_root>/projects/resources/music/")
-    p.add_argument("--output-dir", default=None, metavar="DIR",
-                   help="Base output directory. Audio is written to <DIR>/audio/ "
-                        "and license sidecars to <DIR>/licenses/. "
-                        "Default: <episode_dir>/assets/<locale>/")
     p.add_argument("--item-id", default=None, metavar="ID",
                    help="Process only this music item_id (e.g. music-s01-sh02).")
     p.add_argument("--hop", type=float, default=2.0, metavar="SEC",
                    help="Sliding-window hop in seconds (default: 2.0). "
                         "Smaller = more precise but slower.")
-    p.add_argument("--force", action="store_true",
-                   help="Re-process items whose output clip already exists.")
     p.add_argument("--ckpt-dir", default=None, metavar="DIR",
                    help="Directory for CLAP checkpoint. "
                         "Default: ~/.cache/laion_clap/")
@@ -339,20 +332,25 @@ def main():
     # assets land in the right place even when --manifest points outside the
     # repo tree (e.g. /tmp/).  Falls back to manifest file location for old
     # manifests that pre-date the episode_id field.
-    project_id  = manifest.get("project_id")
-    episode_id  = manifest.get("episode_id")
-    if args.output_dir:
-        out_dir = Path(args.output_dir).resolve()
-    elif project_id and episode_id:
-        out_dir = (PIPE_DIR / "projects" / project_id
-                   / "episodes" / episode_id / "assets" / locale)
-    else:
-        # Fallback: put assets next to the manifest (old behaviour)
-        out_dir = manifest_path.parent / "assets" / locale
-    audio_dir    = out_dir / "audio"
-    licenses_dir = out_dir / "licenses"
+    #
+    # Music is locale-free (language-independent), so no locale subdirectory.
+    # Final layout:
+    #   assets/music/{item_id}.wav
+    #   assets/music/licenses/{item_id}.license.json
+    #   assets/meta/gen_music_clip_results.json
+    project_id = manifest.get("project_id")
+    episode_id = manifest.get("episode_id")
+    if not project_id or not episode_id:
+        raise SystemExit(
+            f"[ERROR] Manifest {manifest_path} is missing 'project_id' or 'episode_id'."
+        )
+    out_dir = PIPE_DIR / "projects" / project_id / "episodes" / episode_id / "assets"
+    audio_dir    = out_dir / "music"
+    licenses_dir = out_dir / "music" / "licenses"
+    meta_dir     = out_dir / "meta"
     audio_dir.mkdir(parents=True, exist_ok=True)
     licenses_dir.mkdir(parents=True, exist_ok=True)
+    meta_dir.mkdir(parents=True, exist_ok=True)
 
     music_items = manifest.get("music_items", [])
     if not music_items:
@@ -373,6 +371,7 @@ def main():
     print(f"  Resources : {resources_dir}")
     print(f"  Audio out : {audio_dir}")
     print(f"  Licenses  : {licenses_dir}")
+    print(f"  Meta      : {meta_dir}")
     print(f"  Items     : {len(music_items)}")
     print(f"  Hop       : {args.hop}s")
     print("=" * 60)
@@ -405,22 +404,11 @@ def main():
         print(f"\n[{idx}/{total}] {item_id}  ({duration}s)")
         print(f"  Mood : \"{music_mood}\"")
 
-        # Skip if already done (gen_music.py also respects this)
-        if out_path.exists() and not args.force:
-            print(f"  [SKIP] {out_path.name} already exists")
-            # Ensure sidecar exists even for skipped clips (idempotent)
-            if not license_path.exists():
-                write_license_sidecar(license_path)
-                print(f"  [SIDECAR] {license_path.name}  ← written (was missing)")
-            results.append({
-                "item_id":      item_id,
-                "shot_id":      shot_id,
-                "output":       str(out_path),
-                "license":      str(license_path),
-                "size_bytes":   out_path.stat().st_size,
-                "status":       "skipped",
-            })
-            continue
+        # Always overwrite — delete existing clip and sidecar before writing
+        if out_path.exists():
+            out_path.unlink()
+        if license_path.exists():
+            license_path.unlink()
 
         try:
             # ── Step 1: pick best matching source file ────────────────────────
@@ -448,8 +436,8 @@ def main():
             # ── Step 4: extract, save, and write license sidecar ─────────────
             size = extract_clip(audio, start_sample, duration, out_path)
             write_license_sidecar(license_path)
-            print(f"  [OK]      {out_path.name}  ({size:,} bytes)")
-            print(f"  [LICENSE] {license_path.name}")
+            print(f"  [OK]      {out_path}  ({size:,} bytes)")
+            print(f"  [LICENSE] {license_path}")
 
             results.append({
                 "item_id":      item_id,
@@ -481,7 +469,7 @@ def main():
             })
 
     # ── Write results manifest ────────────────────────────────────────────────
-    results_path = out_dir / "gen_music_clip_results.json"
+    results_path = meta_dir / "gen_music_clip_results.json"
     with open(results_path, "w") as fh:
         json.dump(results, fh, indent=2)
 
@@ -492,9 +480,9 @@ def main():
     for r in results:
         stem = Path(r["output"]).name
         if r["status"] == "success":
-            print(f"  [OK]      audio/{stem}"
+            print(f"  [OK]      music/{stem}"
                   f"  ← {r['source_file']} @ {r['start_sec']}s")
-            print(f"            licenses/{Path(r['license']).name}")
+            print(f"            music/licenses/{Path(r['license']).name}")
         elif r["status"] == "skipped":
             print(f"  [SKIPPED] audio/{stem}")
         else:

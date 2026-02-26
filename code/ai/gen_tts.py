@@ -428,7 +428,6 @@ def parse_args():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--item_id", type=str, default=None,
@@ -569,40 +568,32 @@ def assets_dir_from_manifest(path: str) -> Path:
     """
     Derive the assets output directory from manifest fields.
 
-    Reads:
-      project_id  → e.g. "the-pharaoh-who-defied-death"
-      manifest_id → e.g. "the-pharaoh-who-defied-death-s01e02-manifest"
-
-    Episode ID is extracted by stripping the project_id prefix and
-    '-manifest' suffix from manifest_id:
-      "the-pharaoh-who-defied-death-s01e02-manifest"
-      → strip "{project_id}-" → "s01e02-manifest"
-      → strip "-manifest"     → "s01e02"
+    Prefers the direct episode_id field (schema v2+).
+    Falls back to parsing episode_id from manifest_id for legacy manifests.
 
     Returns: PROJECTS_ROOT/{project_id}/episodes/{episode_id}/assets/
     """
     with open(path, encoding="utf-8") as f:
         manifest = json.load(f)
 
-    project_id  = manifest.get("project_id", "")
-    manifest_id = manifest.get("manifest_id", "")
+    project_id = manifest.get("project_id", "")
+    if not project_id:
+        raise ValueError(f"Manifest {path!r} is missing 'project_id'.")
 
-    if not project_id or not manifest_id:
-        raise ValueError(
-            f"Manifest {path!r} is missing 'project_id' or 'manifest_id'. "
-            "Use --output_dir to specify the assets directory explicitly."
-        )
-
-    episode_id = manifest_id
-    if episode_id.startswith(project_id + "-"):
-        episode_id = episode_id[len(project_id) + 1:]
-    if episode_id.endswith("-manifest"):
-        episode_id = episode_id[: -len("-manifest")]
+    # Prefer direct field; fall back to parsing from manifest_id
+    episode_id = manifest.get("episode_id", "")
+    if not episode_id:
+        manifest_id = manifest.get("manifest_id", "")
+        episode_id = manifest_id
+        if episode_id.startswith(project_id + "-"):
+            episode_id = episode_id[len(project_id) + 1:]
+        if episode_id.endswith("-manifest"):
+            episode_id = episode_id[: -len("-manifest")]
 
     if not episode_id:
         raise ValueError(
-            f"Could not parse episode_id from manifest_id={manifest_id!r} "
-            f"with project_id={project_id!r}."
+            f"Manifest {path!r} is missing 'episode_id' and episode_id could "
+            f"not be parsed from manifest_id. Add an 'episode_id' field."
         )
 
     return PROJECTS_ROOT / project_id / "episodes" / episode_id / "assets"
@@ -1031,16 +1022,12 @@ def main():
     args = parse_args()
     locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
 
-    if args.output_dir:
-        assets_dir = Path(args.output_dir)
-    elif args.manifest:
-        assets_dir = assets_dir_from_manifest(args.manifest)
-    else:
+    if not args.manifest:
         raise SystemExit(
-            "[ERROR] No --output_dir and no --manifest provided. "
-            "Pass --manifest <file> so the output path can be derived from project_id/episode_id, "
-            "or pass --output_dir <assets_dir> explicitly."
+            "[ERROR] --manifest is required. "
+            "Pass --manifest <file> so the output path is derived from project_id/episode_id."
         )
+    assets_dir = assets_dir_from_manifest(args.manifest)
 
     print(f"[OUTPUT] {assets_dir}")
     base_out_dir = assets_dir / locale   # WAVs:    assets/{locale}/audio/vo/
