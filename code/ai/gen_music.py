@@ -280,4 +280,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # -------------------------------------------------------------------------
+    # DISABLED — music is being created manually for now.
+    # To re-enable, remove this block and uncomment the main() call below.
+    # -------------------------------------------------------------------------
+    raise SystemExit(
+        "[gen_music.py] Disabled: music creation is handled manually. "
+        "Edit this file and call main() to re-enable."
+    )
+    # main()

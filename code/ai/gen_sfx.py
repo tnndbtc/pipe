@@ -18,7 +18,8 @@
 # ---------------------------------------------------------------------------
 # Hardware targets:
 #   audiogen       — NVIDIA RTX 4060 8 GB VRAM (medium), 4 GB (small)
-#   stable_audio_2 — NVIDIA RTX 4080 / 4090 / A5000+ (>=16 GB VRAM)
+#   stable_audio_2 — REQUIRES RTX 4090 OR BETTER (>=16 GB VRAM)
+#                    RTX 4060 (8 GB) is insufficient for this backend.
 #                    Uses torch.float16 on CUDA automatically.
 # ---------------------------------------------------------------------------
 # Memory-saving techniques (AudioGen):
