@@ -196,6 +196,22 @@ def merge_manifests(
     # Deep-copy music_items from shared so we can add duck_intervals
     music_items = json.loads(json.dumps(shared.get("music_items", [])))
 
+    # Patch duration_sec for shots that overflowed (locale VO longer than shot).
+    # background_overrides carries the extended duration; the music clip must
+    # match so it doesn't end before the shot does.
+    override_durations: dict[str, float] = {
+        o["shot_id"]: float(o["duration_sec"])
+        for o in merged["background_overrides"]
+        if o.get("shot_id") and o.get("duration_sec") is not None
+    }
+    for music_item in music_items:
+        sid = music_item.get("shot_id", "")
+        if sid in override_durations:
+            old_dur = music_item.get("duration_sec")
+            music_item["duration_sec"] = override_durations[sid]
+            print(f"  [OVERFLOW PATCH] {music_item['item_id']}: "
+                  f"duration_sec {old_dur} → {override_durations[sid]}")
+
     # Index vo_items by shot_id for duck interval computation.
     # vo_items in the locale manifest may not carry a shot_id field; use the
     # ShotList-derived reverse mapping (vo_shot_map) as the authoritative source.

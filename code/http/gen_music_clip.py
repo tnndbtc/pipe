@@ -11,15 +11,15 @@
 #   4. Extracts the clip and writes it to the episode's assets directory
 #
 # Run tag_music.py FIRST to populate the MOOD tags in your source files.
-# Run this script BEFORE gen_music.py — gen_music.py will skip any
-# music_*.wav that already exists in the output directory.
+#
+# music_items live in the SHARED manifest (locale-free) — always pass the
+# shared manifest, not a locale or merged variant.
 #
 # Usage:
 #   python gen_music_clip.py \
-#       --manifest projects/slug/episodes/ep/AssetManifest_draft.json
+#       --manifest projects/slug/episodes/ep/AssetManifest_draft.shared.json
 #
 #   python gen_music_clip.py --manifest ...  --resources projects/resources/music/
-#   python gen_music_clip.py --manifest ...  --output-dir /path/to/assets/en/
 #   python gen_music_clip.py --manifest ...  --item-id music-s01-sh02
 #   python gen_music_clip.py --manifest ...  --hop 1.0   # finer scan
 #
@@ -283,13 +283,13 @@ def parse_args():
             "workflow:\n"
             "  1. Drop MP3/WAV files into projects/resources/music/\n"
             "  2. python tag_music.py --dir projects/resources/music/\n"
-            "  3. python gen_music_clip.py --manifest <path>\n"
-            "  4. python gen_music.py --manifest <path>    "
-            "# generates only items not yet covered\n"
+            "  3. python gen_music_clip.py --manifest AssetManifest_draft.shared.json\n"
         ),
     )
     p.add_argument("--manifest", required=True, metavar="PATH",
-                   help="Path to AssetManifest_draft.json (or locale variant).")
+                   help="Path to the SHARED AssetManifest draft "
+                        "(locale_scope='shared'). music_items live in the "
+                        "shared manifest, not in locale or merged variants.")
     p.add_argument("--resources", default=None, metavar="DIR",
                    help="Directory containing tagged source music files. "
                         "Default: <repo_root>/projects/resources/music/")
@@ -326,6 +326,13 @@ def main():
 
     # ── Load manifest ─────────────────────────────────────────────────────────
     manifest    = load_manifest(manifest_path)
+    locale_scope = manifest.get("locale_scope")
+    if locale_scope in ("locale", "merged"):
+        raise SystemExit(
+            f"[ERROR] --manifest has locale_scope='{locale_scope}'. "
+            "music_items live in the shared manifest only.\n"
+            "Pass AssetManifest_draft.shared.json instead."
+        )
     locale      = locale_from_path(manifest_path)
 
     # Derive canonical output path from manifest's project_id + episode_id so
