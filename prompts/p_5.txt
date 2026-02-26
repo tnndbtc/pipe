@@ -1,5 +1,5 @@
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 5 — Produce AssetManifest_draft.json
+# STAGE 5 — Produce AssetManifest_draft.shared.json + AssetManifest_draft.en.json
 # ══════════════════════════════════════════════════════════════════════
 #
 # 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
@@ -12,15 +12,16 @@
 #
 # 📤 OUTPUT:
 #     • Stdout: progress + validation result  (web UI)
-#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.json
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json
 #
 # ▶ Invoked by run.sh as:
 #     claude -p prompts/p_5_filled.txt
 # ══════════════════════════════════════════════════════════════════════
 
 You are Stage 5 of a 10-stage AI narrative pipeline.
-Your ONLY job: produce a valid AssetManifest_draft.json derived from
-ShotList.json.
+Your ONLY job: produce two valid draft manifests derived from ShotList.json —
+one shared (locale-free assets) and one locale (English VO items).
 
 ---
 
@@ -39,21 +40,33 @@ Read these files before writing anything:
 
 ## Task
 
-Print: `▶ [5/9] Stage 5 — Produce AssetManifest_draft.json  …`
+Print: `▶ [5/9] Stage 5 — Produce AssetManifest drafts  …`
 
-Produce AssetManifest_draft.json.
-Required top-level fields (confirm from schema):
-  schema_id, schema_version ("1.0.0"), manifest_id, project_id, episode_id,
-  shotlist_ref, character_packs[], backgrounds[], vo_items[]
+Produce TWO files:
+
+### File 1: AssetManifest_draft.shared.json  (locale-free assets)
+
+Required top-level fields:
+  schema_id       : "AssetManifest"
+  schema_version  : "1.0.0"
+  manifest_id     : "{{PROJECT_SLUG}}-{{EPISODE_ID}}-shared-manifest"
+  project_id      : "{{PROJECT_SLUG}}"
+  episode_id      : "{{EPISODE_ID}}"
+  shotlist_ref    : "ShotList.json"
+  locale_scope    : "shared"
+  vo_items        : []   ← always empty; VO lives in locale manifests
+  character_packs : [...]
+  backgrounds     : [...]
+  sfx_items       : [...]   ← optional; include if any SFX in ShotList
+  music_items     : [...]   ← optional; include if any music in ShotList
 
 Derive directly from ShotList.json:
   character_packs : one entry per unique character across all shots
   backgrounds     : one entry per unique background_id across all shots
-  vo_items        : one entry per dialogue line (from audio_intent.vo_item_ids)
 
 license_type for all entries: "proprietary_cleared"
 
-### Per character_pack and background entry — extra fields required
+#### Per character_pack and background entry — extra fields required
 
 **search_prompt** (5–10 keywords for free library image search):
   Derive from character role / scene location and period.
@@ -99,24 +112,12 @@ license_type for all entries: "proprietary_cleared"
   Characters:  { "type": "walk|idle|gesture|...", "description": "...",
                  "participants": ["<char_id>"], "duration_sec": <n>, "style": "..." }
 
-### Per vo_item entry — extra field required
-
-**tts_prompt**:
-```json
-{
-  "voice_style" : "<derive from character role>",
-  "emotion"     : "<derive from scene context>",
-  "pace"        : "<slow|medium|fast>",
-  "locale"      : "en"
-}
-```
-
-### sfx_items[] — one entry per (shot, sfx_tag) pair
+#### sfx_items[] — one entry per (shot, sfx_tag) pair
 
 Derive from ShotList.shots[].audio_intent.sfx_item_ids.
 For each shot, iterate sfx_item_ids in order (parallel with sfx_tags[]):
 
-Required fields per entry (sfx_items schema):
+Required fields per entry:
   item_id      : the id from sfx_item_ids (e.g. "sfx-s01-sh01-001")
   shot_id      : the shot's shot_id
   tag          : expand the corresponding sfx_tags[] string into a full
@@ -129,36 +130,96 @@ Required fields per entry (sfx_items schema):
 
 Skip shots where sfx_item_ids is absent or [].
 
-### music_items[] — one entry per shot with non-null music_item_id
+#### music_items[] — one entry per shot with non-null music_item_id
 
 Derive from ShotList.shots[].audio_intent.music_item_id.
 For each shot where music_item_id is not null:
 
-Required fields per entry (music_items schema):
+Required fields per entry:
   item_id      : the shot's music_item_id (e.g. "music-s01-sh02")
   shot_id      : the shot's shot_id
   music_mood   : copy from shot.audio_intent.music_mood
   duration_sec : copy from shot.duration_sec
   license_type : "proprietary_cleared"
 
+Optional timing fields per entry (author these with editorial intent):
+  start_sec    : when music starts within the shot, in seconds — almost always 0.0
+  duck_db      : music attenuation in dB during VO (e.g. -12.0; deeper = -18.0 for
+                 intimate scenes; 0 = no ducking for action/ambience-only shots)
+  fade_sec     : ramp duration at each duck boundary (e.g. 0.15)
+
+Note: duck_intervals are NOT included here — they are computed by manifest_merge.py
+after post_tts_analysis.py has measured actual WAV durations.
+
 Skip shots where music_item_id is null or absent.
 
-Validate the artifact against contracts/schemas/AssetManifest.v1.json
+---
+
+### File 2: AssetManifest_draft.en.json  (English locale — VO only)
+
+Required top-level fields:
+  schema_id        : "AssetManifest"
+  schema_version   : "1.0.0"
+  manifest_id      : "{{PROJECT_SLUG}}-{{EPISODE_ID}}-en-manifest"
+  project_id       : "{{PROJECT_SLUG}}"
+  episode_id       : "{{EPISODE_ID}}"
+  locale           : "en"
+  locale_scope     : "locale"
+  shared_ref       : "AssetManifest_draft.shared.json"
+  shotlist_ref     : "ShotList.json"
+  vo_items         : [...]   ← English VO items (see below)
+  background_overrides : []  ← always empty at draft time; populated by post_tts_analysis.py
+  character_packs  : []      ← empty; lives in shared manifest
+  backgrounds      : []      ← empty; lives in shared manifest
+
+#### vo_items[] — one entry per dialogue line
+
+Derive from ShotList.shots[].audio_intent.vo_item_ids.
+
+Required fields per entry:
+  item_id      : the id from vo_item_ids (e.g. "vo-s01e02-sc01-001")
+  speaker_id   : the character id who speaks this line
+  text         : the English dialogue text (from shot.audio_intent.vo_text)
+  license_type : "proprietary_cleared"
+
+**tts_prompt** per entry:
+```json
+{
+  "voice_style" : "<derive from character role>",
+  "emotion"     : "<derive from scene context>",
+  "pace"        : "<slow|normal|fast>",
+  "locale"      : "en"
+}
+```
+
+DO NOT add start_sec, end_sec, or duration_sec to vo_items —
+those are written by post_tts_analysis.py after WAV generation.
+
+---
+
+## Validation and writing
+
+Validate both artifacts against contracts/schemas/AssetManifest.v1.json
 using Python + jsonschema.  If validation fails, fix and retry.
 
-Write the validated artifact to:
-  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.json
+Write the validated shared artifact to:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json
+
+Write the validated locale artifact to:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json
 
 Print validation result:
 ```
 ── Stage 5 validation ───────────────────────────────────────
-AssetManifest_draft.json  →  VALID ✓
-character_packs : <count>
-backgrounds     : <count>
-vo_items        : <count>
-sfx_items       : <count>
-music_items     : <count>
+AssetManifest_draft.shared.json  →  VALID ✓
+  character_packs : <count>
+  backgrounds     : <count>
+  sfx_items       : <count>
+  music_items     : <count>
+
+AssetManifest_draft.en.json      →  VALID ✓
+  vo_items        : <count>
 ────────────────────────────────────────────────────────────
 ```
 
-Print: `✓ [5/9] Stage 5 — Produce AssetManifest_draft.json  done`
+Print: `✓ [5/9] Stage 5 — Produce AssetManifest drafts  done`

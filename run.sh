@@ -23,6 +23,10 @@ STORY_FILE="${1:-story_2.txt}"
 FROM_STAGE="${2:-0}"
 TO_STAGE="${3:-9}"
 
+# Per-story vars file — keyed by story filename so concurrent runs don't clobber each other.
+# e.g. story_2.txt → pipeline_vars.story_2.sh
+VARS_FILE="pipeline_vars.${STORY_FILE%.txt}.sh"
+
 # ── Model selection ────────────────────────────────────────────────────
 #
 # Defaults (tuned for speed vs quality):
@@ -42,7 +46,7 @@ get_stage_model() {
   if [[ -n "$val" ]]; then echo "$val"; return; fi
   # Defaults
   case "$n" in
-    2|3|4|5) echo "sonnet" ;;   # creative writing / complex JSON derivation
+    2|3|4|5|8) echo "sonnet" ;;   # creative writing / complex JSON derivation
     *)       echo "haiku"  ;;   # variable extraction, diffs, assembly
   esac
 }
@@ -192,21 +196,24 @@ if [[ "$FROM_STAGE" -le 0 && "$TO_STAGE" -ge 0 ]]; then
     echo "✗ ERROR: Stage 0 did not produce pipeline_vars.sh" >&2
     exit 1
   fi
+  # Rename to per-story file so concurrent runs don't clobber each other
+  mv pipeline_vars.sh "$VARS_FILE"
   # shellcheck disable=SC1091
-  source pipeline_vars.sh
+  source "$VARS_FILE"
   echo "  Loaded vars: PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
+  echo "  Vars file  : $VARS_FILE"
 fi
 
 # ── If starting from stage > 0, load vars from prior run ──────────────
 if [[ "$FROM_STAGE" -gt 0 ]]; then
-  if [[ ! -f pipeline_vars.sh ]]; then
-    echo "✗ ERROR: pipeline_vars.sh not found." >&2
+  if [[ ! -f "$VARS_FILE" ]]; then
+    echo "✗ ERROR: $VARS_FILE not found." >&2
     echo "  Run stage 0 first:  ./run.sh $STORY_FILE 0 0" >&2
     exit 1
   fi
   # shellcheck disable=SC1091
-  source pipeline_vars.sh
-  echo "  Loaded vars from pipeline_vars.sh"
+  source "$VARS_FILE"
+  echo "  Loaded vars from $VARS_FILE"
   echo "  PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
 fi
 

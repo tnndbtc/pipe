@@ -11,7 +11,7 @@
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json    (Stage 2)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json         (Stage 3)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json       (Stage 4)
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.json (Stage 5)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json (Stage 5)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json     (Stage 6)
 #     projects/{{PROJECT_SLUG}}/canon.json                                   (Stage 7)
 #     contracts/schemas/*.v1.json  (same schemas as English artifacts)
@@ -37,6 +37,15 @@ Locales      : {{LOCALES}}   ("en" is the source; translate all others)
 Episode dir  : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
 Project dir  : projects/{{PROJECT_SLUG}}/
 
+Read these files before writing anything:
+  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
+  2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
+  3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
+  4. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json
+  5. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
+  6. projects/{{PROJECT_SLUG}}/canon.json
+  7. contracts/schemas/AssetManifest.v1.json
+
 ---
 
 ## Task
@@ -61,6 +70,9 @@ For each locale OTHER than "en":
   Method: copy English artifact as base, then translate ONLY the fields
   listed below.  All other fields must remain IDENTICAL to English source.
 
+  **Exception — AssetManifest**: do NOT copy the full English manifest.
+  Instead produce a brand-new locale-scoped manifest (see below).
+
   ### Fields TO translate per artifact
 
   **StoryPrompt**: episode_goal, series.tone, setting.primary_location,
@@ -74,11 +86,36 @@ For each locale OTHER than "en":
                 shots[].action_beat, shots[].audio_intent.vo_text,
                 shots[].audio_intent.music_mood
 
-  **AssetManifest**: vo_items[].text ONLY
-    ⚠️  DO NOT translate: search_prompt, ai_prompt, motion.description.
-        These are passed verbatim to English-only external APIs.
-    ⚠️  tts_prompt.locale MUST match the artifact locale
-        (e.g. "zh-Hans" in AssetManifest_draft.zh-Hans.json).
+  **AssetManifest** — locale-scoped manifest (DO NOT copy full English source):
+
+  Produce a NEW file with ONLY these top-level fields:
+  ```json
+  {
+    "schema_id":           "AssetManifest",
+    "schema_version":      "1.0.0",
+    "manifest_id":         "{{PROJECT_SLUG}}-{{EPISODE_ID}}-<locale>-manifest",
+    "project_id":          "{{PROJECT_SLUG}}",
+    "episode_id":          "{{EPISODE_ID}}",
+    "locale":              "<locale>",
+    "locale_scope":        "locale",
+    "shared_ref":          "AssetManifest_draft.shared.json",
+    "shotlist_ref":        "ShotList.json",
+    "character_packs":     [],
+    "backgrounds":         [],
+    "background_overrides": [],
+    "vo_items":            [...]
+  }
+  ```
+
+  For vo_items[]: copy every entry from AssetManifest_draft.en.json, then:
+    - translate text field into the target locale
+    - set tts_prompt.locale to the target locale (e.g. "zh-Hans")
+    - keep all other fields identical (item_id, speaker_id, license_type,
+      tts_prompt.voice_style, tts_prompt.emotion, tts_prompt.pace)
+    - DO NOT add start_sec, end_sec — those are written by post_tts_analysis.py
+
+  ⚠️  DO NOT include: music_items, sfx_items — those live in the shared manifest.
+  ⚠️  DO NOT translate: search_prompt, ai_prompt, motion.description.
 
   **canon_diff**: added_characters[].role,
                   added_characters[].relationships (values only),
@@ -96,9 +133,30 @@ For each locale OTHER than "en":
                  search_filters (all subfields), tts_prompt.voice_style,
                  tts_prompt.emotion, tts_prompt.pace
 
-  ### Validation
-  Validate each locale artifact against its schema using Python + jsonschema.
+  ### Validation and writing
+
+  For each artifact, after producing and validating it:
+
+  Validate against its schema using Python + jsonschema.
   If validation fails, fix and retry.
+
+  Write the validated StoryPrompt artifact to:
+    projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.<locale>.json
+
+  Write the validated Script artifact to:
+    projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.<locale>.json
+
+  Write the validated ShotList artifact to:
+    projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.<locale>.json
+
+  Write the validated AssetManifest artifact to:
+    projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.<locale>.json
+
+  Write the validated canon_diff artifact to:
+    projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.<locale>.json
+
+  Write the validated canon artifact to:
+    projects/{{PROJECT_SLUG}}/canon.<locale>.json
 
   After completing each locale, print:
   ```

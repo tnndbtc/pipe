@@ -43,3 +43,9 @@ mutagen>=1.47.0
 scipy>=1.11.0          # required by laion-clap internally
 librosa>=0.10.0        # audio loading (may already be installed)
 soundfile>=0.12.0      # WAV writing (may already be installed)
+
+
+# ---------------------------------------------------------------------------
+# Azure Neural TTS — cloud synthesis, no GPU required  (gen_tts_cloud.py)
+# ---------------------------------------------------------------------------
+azure-cognitiveservices-speech>=1.38.0

@@ -131,6 +131,14 @@
           },
           "tts_prompt": {
             "$ref": "#/$defs/TtsPrompt"
+          },
+          "start_sec": {
+            "type": "number",
+            "description": "Start time of this VO line within the shot, in seconds. Written by post_tts_analysis.py after WAV durations are measured. Absent in draft manifests."
+          },
+          "end_sec": {
+            "type": "number",
+            "description": "End time of this VO line within the shot, in seconds. Written by post_tts_analysis.py after WAV durations are measured. Absent in draft manifests."
           }
         }
       }
@@ -203,9 +211,55 @@
           },
           "license_type": {
             "type": "string"
+          },
+          "start_sec": {
+            "type": "number",
+            "description": "Music start time within the shot, in seconds. LLM-authored editorial intent (always 0.0 unless intentionally delayed)."
+          },
+          "duck_db": {
+            "type": "number",
+            "description": "Music attenuation in dB during VO playback (e.g. -12.0). LLM-authored editorial intent."
+          },
+          "fade_sec": {
+            "type": "number",
+            "description": "Linear ramp duration in seconds at each duck interval boundary (e.g. 0.15). LLM-authored editorial intent."
+          },
+          "duck_intervals": {
+            "type": "array",
+            "description": "List of [t0, t1] intervals (seconds) during which music is ducked. Computed by manifest_merge.py from VO start_sec/end_sec. Absent in draft manifests.",
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": { "type": "number" }
+            }
           }
         }
       }
+    },
+    "locale_scope": {
+      "type": "string",
+      "enum": ["monolithic", "shared", "locale", "merged"],
+      "description": "Absent or 'monolithic' = legacy flat manifest (all assets + VO in one file). 'shared' = locale-free assets only (character_packs, backgrounds, sfx_items, music_items; no vo_items). 'locale' = VO items and overrides only for one locale. 'merged' = manifest_merge.py output combining shared + locale."
+    },
+    "locale": {
+      "type": "string",
+      "description": "BCP-47 locale tag (e.g. 'en', 'zh-Hans'). Required when locale_scope is 'locale' or 'merged'. Absent for shared manifests."
+    },
+    "shared_ref": {
+      "type": "string",
+      "description": "Relative path to the shared manifest this locale manifest is paired with. Present only when locale_scope is 'locale'."
+    },
+    "background_overrides": {
+      "type": "array",
+      "description": "Locale-specific background video overrides for shots where VO duration exceeds the shared background clip duration. Written by post_tts_analysis.py. Empty array in draft manifests.",
+      "items": {
+        "$ref": "#/$defs/BackgroundOverrideItem"
+      }
+    },
+    "timing_lock_hash": {
+      "type": "string",
+      "description": "SHA-256 of the canonical per-shot duration list used to generate background overrides. Computed per-locale by manifest_merge.py. Used to detect if shared background assets need regeneration."
     }
   },
   "$defs": {
@@ -344,6 +398,34 @@
         }
       ]
     },
+    "BackgroundOverrideItem": {
+      "type": "object",
+      "required": ["item_id", "shot_id", "duration_sec", "uri"],
+      "additionalProperties": true,
+      "description": "A locale-specific background video clip that replaces the shared background for one shot because the locale VO duration overflows the shared clip.",
+      "properties": {
+        "item_id": {
+          "type": "string",
+          "description": "Format: bg-override-{shot_id}-{locale}"
+        },
+        "shot_id": {
+          "type": "string",
+          "description": "The shot this override applies to"
+        },
+        "duration_sec": {
+          "type": "number",
+          "description": "Required clip duration, equal to total VO duration + buffer for this locale"
+        },
+        "uri": {
+          "type": "string",
+          "description": "Relative path to the generated override video file, e.g. assets/{locale}/video/bg/bg-override-{shot_id}-{locale}.mp4"
+        },
+        "description": {
+          "type": "string",
+          "description": "Visual description for the video generation prompt"
+        }
+      }
+    },
     "TtsPrompt": {
       "type": "object",
       "required": [
@@ -373,6 +455,10 @@
         "locale": {
           "type": "string",
           "description": "BCP-47 locale tag matching the text language, e.g. 'en', 'zh-Hans'"
+        },
+        "azure_voice": {
+          "type": "string",
+          "description": "Azure TTS voice name, e.g. 'zh-CN-Xiaoxiao:DragonHDFlashLatestNeural' or 'zh-CN-XiaoxiaoNeural'. Ignored by non-Azure TTS backends."
         }
       }
     }

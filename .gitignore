@@ -8,8 +8,8 @@ projects/
 # Per-run stage logs
 stage_logs/
 
-# Variables file written by Stage 0 (runtime-specific)
-pipeline_vars.sh
+# Variables files written by Stage 0 (runtime-specific, one per story file)
+pipeline_vars*.sh
 
 # Long-form direction text written by Stage 0 (runtime-specific)
 episode_direction.txt

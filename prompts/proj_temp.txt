@@ -20,7 +20,7 @@ canon.json.  Write no source code.  Write JSON files directly to disk.
   [2]  Produce StoryPrompt.json
   [3]  Produce Script.json
   [4]  Produce ShotList.json
-  [5]  Produce AssetManifest_draft.json
+  [5]  Produce AssetManifest_draft.shared.json + AssetManifest_draft.en.json
   [6]  Write canon_diff.json
   [7]  Update canon.json
   [8]  Produce locale variants  (one pass per non-en locale)
@@ -237,99 +237,74 @@ Validate against ShotList.v1.json before proceeding.
 
 ---
 
-## Step 5 — Produce AssetManifest_draft.json
+## Step 5 — Produce AssetManifest drafts (shared + locale)
 
-**Print:** `▶ [5/9] Step 5 — Produce AssetManifest_draft.json  …`
+**Print:** `▶ [5/9] Step 5 — Produce AssetManifest drafts  …`
 
-Write to: <episode_dir>/AssetManifest_draft.json
+Produce TWO files:
 
-Required fields (AssetManifest.v1.json — inspect the schema first):
-  schema_id, schema_version ("1.0.0"), manifest_id, project_id, episode_id,
-  shotlist_ref, character_packs[], backgrounds[], vo_items[]
+### File 1 — Shared manifest (locale-free assets)
 
-Derive directly from ShotList.json:
-  - character_packs : one entry per unique character (pack_id, asset_id, license_type)
-  - backgrounds     : one entry per unique background_id (bg_id, asset_id, license_type)
-  - vo_items        : one entry per dialogue line (item_id, speaker_id, text, license_type)
+Write to: <episode_dir>/AssetManifest_draft.shared.json
 
-license_type for all local assets: "proprietary_cleared"
+Required top-level fields:
+  schema_id       : "AssetManifest"
+  schema_version  : "1.0.0"
+  manifest_id     : "<project_id>-<episode_id>-shared-manifest"
+  project_id, episode_id, shotlist_ref : "ShotList.json"
+  locale_scope    : "shared"
+  vo_items        : []   ← always empty
+
+Derive from ShotList.json:
+  - character_packs : one entry per unique character (license_type: "proprietary_cleared")
+  - backgrounds     : one entry per unique background_id (license_type: "proprietary_cleared")
 
 For every character_pack and background entry, also populate:
   - search_prompt  : 5-10 keywords for free library image search
-                     (derive from character role / scene location and period)
-  - search_filters : metadata criteria for filtering free library results.
-                     Derive from scene context. Rules per asset type:
-
-                     Backgrounds (static image):
-                       orientation  → always "landscape"
-                       media_type   → "photo"
-                       min_width    → 1920
-                       min_height   → 1080
-                       color_mood   → derive from scene: night/underground → "dark",
-                                      torchlight/desert/daytime → "warm",
-                                      supernatural/water → "cool",
-                                      palace/clean interior → "neutral"
-                       category     → derive from setting: temple/palace/interior → "buildings",
-                                      desert/outdoors → "nature", city/town → "places"
-
-                     Characters (portrait image):
-                       orientation  → always "portrait"
-                       media_type   → "photo"
-                       min_width    → 512
-                       min_height   → 512
-                       category     → always "people"
-
-                     Backgrounds with motion (camera move):
-                       same as static background + media_type → "video"
-                       min_duration_sec → shot duration_sec
-                       max_duration_sec → shot duration_sec + 10
-
-                     Characters with motion (walk/gesture/etc.):
-                       same as character + media_type → "video"
-                       min_duration_sec → motion.duration_sec
-                       max_duration_sec → motion.duration_sec + 5
-  - ai_prompt      : detailed text-to-image prompt (period, appearance, lighting,
-                     mood, style — use full story context)
-  - motion         : null for static; or { type, description, participants,
-                     duration_sec, style } when animation is needed
-                     backgrounds use type "camera"; characters use walk/idle/gesture etc.
-
-For every vo_item entry, also populate:
-  - tts_prompt : { voice_style, emotion, pace, locale }
-                 locale must match the artifact's language
-                 (e.g. "en" for AssetManifest_draft.json,
-                       "zh-Hans" for AssetManifest_draft.zh-Hans.json)
-                 derive voice_style and emotion from character role and scene context
+  - search_filters : metadata criteria (orientation, media_type, min_width/height,
+                     color_mood, category — same rules as before)
+  - ai_prompt      : detailed text-to-image prompt
+  - motion         : null for static; { type, description, participants, duration_sec, style } for animated
 
 sfx_items[] — one entry per (shot, sfx_tag) pair:
-
-  Derive from ShotList.shots[].audio_intent.sfx_item_ids.
-  For each shot, iterate sfx_item_ids in order (parallel with sfx_tags[]):
-    - item_id      : the id from sfx_item_ids (e.g. "sfx-s01-sh01-001")
-    - shot_id      : the shot's shot_id
-    - tag          : expand the corresponding sfx_tags[] string into a full
-                     natural-language description for an audio generation model
-                     — add acoustic context from the scene setting
-                     (e.g. "stone scraping" → "stone scraping echoing in an
-                     ancient stone chamber with distant torchlight ambience")
-    - duration_sec : copy from shot.duration_sec
-    - license_type : "proprietary_cleared"
+  item_id, shot_id, tag (expanded), duration_sec, license_type: "proprietary_cleared"
   Skip shots where sfx_item_ids is absent or [].
 
 music_items[] — one entry per shot with non-null music_item_id:
-
-  Derive from ShotList.shots[].audio_intent.music_item_id.
-  For each shot where music_item_id is not null:
-    - item_id      : the shot's music_item_id (e.g. "music-s01-sh02")
-    - shot_id      : the shot's shot_id
-    - music_mood   : copy from shot.audio_intent.music_mood
-    - duration_sec : copy from shot.duration_sec
-    - license_type : "proprietary_cleared"
+  item_id, shot_id, music_mood, duration_sec, license_type: "proprietary_cleared"
+  Also author these optional timing fields (editorial intent):
+    start_sec : when music starts within the shot (almost always 0.0)
+    duck_db   : attenuation in dB during VO (e.g. -12.0; use -18.0 for intimate scenes;
+                0.0 for action/ambience-only shots with no VO)
+    fade_sec  : ramp duration at duck boundaries (e.g. 0.15)
+  Note: duck_intervals are NOT included here — computed later by manifest_merge.py.
   Skip shots where music_item_id is null or absent.
 
-Validate against AssetManifest.v1.json before proceeding.
+### File 2 — Locale manifest (English VO only)
 
-**Print:** `✓ [5/9] Step 5 — Produce AssetManifest_draft.json  done`
+Write to: <episode_dir>/AssetManifest_draft.en.json
+
+Required top-level fields:
+  schema_id        : "AssetManifest"
+  schema_version   : "1.0.0"
+  manifest_id      : "<project_id>-<episode_id>-en-manifest"
+  project_id, episode_id, shotlist_ref : "ShotList.json"
+  locale           : "en"
+  locale_scope     : "locale"
+  shared_ref       : "AssetManifest_draft.shared.json"
+  character_packs  : []
+  backgrounds      : []
+  background_overrides : []   ← always empty at draft time
+  vo_items         : [...]    ← English VO items
+
+vo_items[] — one entry per dialogue line:
+  item_id, speaker_id, text (English), license_type: "proprietary_cleared"
+  tts_prompt: { voice_style, emotion, pace, locale: "en" }
+  DO NOT add start_sec, end_sec, or duration_sec — written by post_tts_analysis.py.
+
+Validate both artifacts against AssetManifest.v1.json before proceeding.
+
+**Print:** `✓ [5/9] Step 5 — Produce AssetManifest drafts  done`
 
 ---
 
@@ -401,14 +376,23 @@ For each locale in {{LOCALES}} other than "en":
                   scenes[].dialogue[].line, scenes[].actions[].description
     ShotList    : shots[].emotional_tag, shots[].environment_notes, shots[].action_beat,
                   shots[].audio_intent.vo_text, shots[].audio_intent.music_mood
-    AssetManifest : vo_items[].text ONLY
-                    ── DO NOT translate search_prompt, ai_prompt, or
-                       motion.description in any locale variant. These
-                       fields are passed verbatim to English-only external
-                       APIs (Pexels, Pixabay, Unsplash, image/video AI
-                       generators). Translating them will break API calls.
-                    ── tts_prompt.locale must match the artifact locale
-                       (e.g. "zh-Hans" in AssetManifest_draft.zh-Hans.json).
+    AssetManifest : produce a NEW locale manifest (do NOT copy the shared manifest):
+                    Write to <episode_dir>/AssetManifest_draft.<locale>.json
+                    Required top-level fields:
+                      schema_id, schema_version: "1.0.0",
+                      manifest_id: "<project_id>-<episode_id>-<locale>-manifest"
+                      project_id, episode_id, shotlist_ref
+                      locale: "<locale>"
+                      locale_scope: "locale"
+                      shared_ref: "AssetManifest_draft.shared.json"
+                      character_packs: [], backgrounds: [], background_overrides: []
+                    vo_items[]: copy from AssetManifest_draft.en.json, then:
+                      ── Translate text to the target locale
+                      ── Set tts_prompt.locale to target locale (e.g. "zh-Hans")
+                      ── Keep all other fields identical (item_id, speaker_id,
+                         license_type, tts_prompt.voice_style/emotion/pace)
+                    DO NOT include search_prompt, ai_prompt, motion.description —
+                    those live in the shared manifest and are never translated.
     canon_diff  : added_characters[].role, added_characters[].relationships (values only),
                   new_world_facts[], new_unresolved_threads[]
     canon       : characters[].relationships (values only), world_facts[],
@@ -422,7 +406,6 @@ For each locale in {{LOCALES}} other than "en":
                    search_filters (all subfields), tts_prompt.voice_style,
                    tts_prompt.emotion, tts_prompt.pace
 
-  AssetManifest_draft.<locale>.json follows the same naming convention.
   canon.<locale>.json writes to the project root (same as canon.json).
 
 **Print:** `✓ [8/9] Step 8 — Produce locale variants  done`
@@ -445,9 +428,9 @@ Write to: <episode_dir>/AssetManifest_final.json
 Merge the draft envelope with the resolved items from the media manifest:
   schema_id      : "AssetManifest_final"
   schema_version : "1.0.0"
-  manifest_id    : copied from AssetManifest_draft.json → manifest_id
-  project_id     : copied from AssetManifest_draft.json → project_id
-  shotlist_ref   : copied from AssetManifest_draft.json → shotlist_ref
+  manifest_id    : copied from AssetManifest_draft.shared.json → manifest_id
+  project_id     : copied from AssetManifest_draft.shared.json → project_id
+  shotlist_ref   : copied from AssetManifest_draft.shared.json → shotlist_ref
   items[]        : passthrough from AssetManifest.media.json → items[]
                    (includes all asset types: character, background, vo,
                    sfx, music). Pass all items through unchanged.
@@ -484,7 +467,7 @@ Write to: <episode_dir>/RenderPlan.json
                       per-shot asset assignments and VO lines; replaces the
                       background-grouping heuristic previously used by the renderer.
 
-                      Build lookup dicts from AssetManifest_draft.json
+                      Build lookup dicts from AssetManifest_draft.shared.json
                       and AssetManifest.media.json:
                         char_map  = { c.character_id : c.asset_id }
                                     (derive character_id by stripping "pack-" prefix
@@ -557,7 +540,8 @@ Validate against RenderPlan.v1.json before writing.
 - [ ] StoryPrompt.json written and schema-valid
 - [ ] Script.json written and schema-valid
 - [ ] ShotList.json written and schema-valid
-- [ ] AssetManifest_draft.json written and schema-valid (schema_version 1.0.0)
+- [ ] AssetManifest_draft.shared.json written and schema-valid (schema_version 1.0.0)
+- [ ] AssetManifest_draft.en.json written and schema-valid (locale_scope "locale")
 - [ ] canon_diff.json written and schema-valid
 - [ ] canon.json written / updated and schema-valid
 - [ ] Locale variants written and schema-valid for each locale beyond "en"

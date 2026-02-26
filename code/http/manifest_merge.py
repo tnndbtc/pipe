@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+# =============================================================================
+# manifest_merge.py — Merge shared + locale AssetManifest drafts
+# =============================================================================
+#
+# Runs AFTER post_tts_analysis.py (vo_items have start_sec/end_sec).
+# Produces AssetManifest_merged.{locale}.json consumed by the renderer.
+#
+# What it does:
+#   1. Loads the shared manifest  (character_packs, backgrounds, sfx, music)
+#   2. Loads the locale manifest  (vo_items with start_sec/end_sec)
+#   3. Merges them into a single resolved view
+#   4. Computes duck_intervals per shot from VO positions + music fade_sec
+#   5. Computes a per-locale timing_lock_hash
+#   6. Writes AssetManifest_merged.{locale}.json (locale_scope: "merged")
+#
+# Usage:
+#   python manifest_merge.py \
+#       --shared  projects/slug/ep/AssetManifest_draft.shared.json \
+#       --locale  projects/slug/ep/AssetManifest_draft.zh-Hans.json
+#
+#   python manifest_merge.py --shared ... --locale ... --out /custom/out.json
+#
+# Requirements: stdlib only (json, hashlib, pathlib)
+# =============================================================================
+
+import argparse
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+PIPE_DIR = Path(__file__).resolve().parent.parent.parent
+
+
+# ── Manifest helpers ──────────────────────────────────────────────────────────
+
+def load_manifest(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_manifest(manifest: dict, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+# ── Duck interval computation ─────────────────────────────────────────────────
+
+def merge_overlapping(intervals: list[tuple[float, float]]) -> list[list[float]]:
+    """Merge a list of (t0, t1) intervals into non-overlapping sorted ranges."""
+    if not intervals:
+        return []
+    sorted_ivs = sorted(intervals, key=lambda x: x[0])
+    merged = [list(sorted_ivs[0])]
+    for t0, t1 in sorted_ivs[1:]:
+        if t0 <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], t1)
+        else:
+            merged.append([t0, t1])
+    return [[round(a, 3), round(b, 3)] for a, b in merged]
+
+
+def compute_duck_intervals(
+    vo_items_for_shot: list[dict],
+    fade_sec: float,
+) -> list[list[float]]:
+    """
+    Compute music duck intervals from VO line positions.
+
+    For each VO line with start_sec + end_sec, the music is ducked from
+    (start_sec - fade_sec) to (end_sec + fade_sec), clamped to >= 0.
+    Overlapping intervals are merged.
+    """
+    raw = []
+    for item in vo_items_for_shot:
+        start = item.get("start_sec")
+        end   = item.get("end_sec")
+        if start is None or end is None:
+            continue
+        t0 = max(0.0, start - fade_sec)
+        t1 = end + fade_sec
+        raw.append((t0, t1))
+    return merge_overlapping(raw)
+
+
+# ── ShotList helpers ──────────────────────────────────────────────────────────
+
+def load_shotlist(manifest: dict, manifest_path: Path) -> list[dict]:
+    """
+    Load the ShotList referenced by shotlist_ref.
+    Uses the same three-candidate resolution as post_tts_analysis.py.
+    Returns [] if not found (non-fatal — duck_intervals will be empty).
+    """
+    shotlist_ref = manifest.get("shotlist_ref", "")
+    if not shotlist_ref:
+        return []
+
+    candidates = [
+        manifest_path.parent / shotlist_ref,
+        manifest_path.parent.parent / shotlist_ref,
+        manifest_path.parent / "ShotList.json",  # conventional fallback
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            try:
+                with open(candidate, encoding="utf-8") as f:
+                    return json.load(f).get("shots", [])
+            except Exception as exc:
+                print(f"[WARN] Could not parse ShotList {candidate}: {exc}")
+                return []
+
+    print(f"[WARN] ShotList not found: {shotlist_ref} — duck_intervals will be empty")
+    return []
+
+
+def build_vo_shot_map(shots: list[dict]) -> dict[str, str]:
+    """
+    Build reverse mapping {vo_item_id → shot_id} from ShotList shots.
+    Reads shots[].audio_intent.vo_item_ids for each shot.
+    """
+    mapping: dict[str, str] = {}
+    for shot in shots:
+        shot_id = shot.get("shot_id", "")
+        if not shot_id:
+            continue
+        vo_ids = shot.get("audio_intent", {}).get("vo_item_ids", [])
+        for vid in vo_ids:
+            mapping[vid] = shot_id
+    return mapping
+
+
+# ── timing_lock_hash computation ──────────────────────────────────────────────
+
+def compute_timing_lock_hash(shots: list[dict]) -> str:
+    """
+    SHA-256 of the canonical JSON array of [shot_id, duration_ms] pairs
+    sorted by shot_id, using locale-adjusted duration_ms values.
+
+    duration_ms = round(duration_sec * 1000)
+
+    This is the same algorithm used by the ShotList timing_lock_hash;
+    the only difference is the input durations (locale-adjusted vs canonical).
+    """
+    pairs = sorted(
+        [[s["shot_id"], round(s["duration_sec"] * 1000)]
+         for s in shots
+         if "shot_id" in s and "duration_sec" in s],
+        key=lambda x: x[0],
+    )
+    canonical = json.dumps(pairs, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ── Merge logic ───────────────────────────────────────────────────────────────
+
+def merge_manifests(
+    shared: dict,
+    locale: dict,
+    vo_shot_map: dict[str, str] | None = None,
+) -> dict:
+    """
+    Merge shared + locale manifests into a single resolved view.
+
+    - Shared contributes: character_packs, backgrounds, sfx_items, music_items
+    - Locale contributes: vo_items (with start_sec/end_sec), background_overrides
+    - duck_intervals computed here and injected into each music_item
+    - timing_lock_hash computed from locale-adjusted shot durations
+    - locale_scope set to "merged"
+
+    vo_shot_map: reverse mapping {vo_item_id → shot_id} built from the ShotList.
+                 When provided, overrides the (usually absent) shot_id field on
+                 vo_items so that duck_intervals are computed per shot correctly.
+    """
+    merged = {
+        "schema_id":      "AssetManifest_merged",
+        "schema_version": "1.0.0",
+        "manifest_id":    locale.get("manifest_id", shared.get("manifest_id", "")),
+        "project_id":     shared.get("project_id", ""),
+        "episode_id":     shared.get("episode_id", ""),
+        "locale_scope":   "merged",
+        "locale":         locale.get("locale", ""),
+        "shotlist_ref":   shared.get("shotlist_ref", locale.get("shotlist_ref", "")),
+        # Shared assets
+        "character_packs":     shared.get("character_packs", []),
+        "backgrounds":         shared.get("backgrounds", []),
+        "sfx_items":           shared.get("sfx_items", []),
+        # Locale VO
+        "vo_items":            locale.get("vo_items", []),
+        # Background overrides from locale (post_tts_analysis.py populated these)
+        "background_overrides": locale.get("background_overrides", []),
+    }
+
+    # Deep-copy music_items from shared so we can add duck_intervals
+    music_items = json.loads(json.dumps(shared.get("music_items", [])))
+
+    # Index vo_items by shot_id for duck interval computation.
+    # vo_items in the locale manifest may not carry a shot_id field; use the
+    # ShotList-derived reverse mapping (vo_shot_map) as the authoritative source.
+    _map = vo_shot_map or {}
+    vo_by_shot: dict[str, list[dict]] = {}
+    for item in merged["vo_items"]:
+        item_id = item.get("item_id", "")
+        sid = _map.get(item_id) or item.get("shot_id") or "__no_shot__"
+        vo_by_shot.setdefault(sid, []).append(item)
+
+    for music_item in music_items:
+        shot_id  = music_item.get("shot_id", "")
+        fade_sec = float(music_item.get("fade_sec", 0.15))
+        vo_lines = vo_by_shot.get(shot_id, [])
+        music_item["duck_intervals"] = compute_duck_intervals(vo_lines, fade_sec)
+
+    merged["music_items"] = music_items
+
+    # Compute per-locale timing_lock_hash
+    # Use background_overrides to get locale-adjusted durations.
+    # For non-overriding shots, we need durations from the ShotList.
+    # We include what we can: override durations are explicit; others are
+    # filled in from shared manifest's music_items.duration_sec as a proxy
+    # (music_items have one entry per shot with the shot's duration).
+    shot_durations: dict[str, float] = {}
+    for mi in shared.get("music_items", []):
+        sid = mi.get("shot_id")
+        dur = mi.get("duration_sec")
+        if sid and dur is not None:
+            shot_durations[sid] = float(dur)
+    for override in merged["background_overrides"]:
+        sid = override.get("shot_id")
+        dur = override.get("duration_sec")
+        if sid and dur is not None:
+            shot_durations[sid] = float(dur)
+
+    shots_for_hash = [
+        {"shot_id": sid, "duration_sec": dur}
+        for sid, dur in sorted(shot_durations.items())
+    ]
+    merged["timing_lock_hash"] = compute_timing_lock_hash(shots_for_hash)
+
+    return merged
+
+
+# ── Output path derivation ────────────────────────────────────────────────────
+
+def derive_output_path(locale_manifest_path: Path, locale: str) -> Path:
+    """
+    Default output: same directory as the locale manifest,
+    named AssetManifest_merged.{locale}.json.
+    """
+    return locale_manifest_path.parent / f"AssetManifest_merged.{locale}.json"
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Merge shared + locale AssetManifest drafts into a single "
+                    "resolved manifest with computed duck_intervals and timing_lock_hash.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--shared", required=True, metavar="PATH",
+                   help="Path to the shared AssetManifest draft "
+                        "(locale_scope='shared').")
+    p.add_argument("--locale", required=True, metavar="PATH",
+                   help="Path to the locale AssetManifest draft "
+                        "(locale_scope='locale'). Must have vo_items with "
+                        "start_sec/end_sec populated by post_tts_analysis.py.")
+    p.add_argument("--out", default=None, metavar="PATH",
+                   help="Output path for merged manifest. "
+                        "Default: AssetManifest_merged.{locale}.json "
+                        "in the same directory as the locale manifest.")
+    return p.parse_args()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    args = parse_args()
+
+    shared_path = Path(args.shared).resolve()
+    locale_path = Path(args.locale).resolve()
+
+    for label, path in [("shared", shared_path), ("locale", locale_path)]:
+        if not path.exists():
+            print(f"[ERROR] {label} manifest not found: {path}", file=sys.stderr)
+            sys.exit(1)
+
+    shared = load_manifest(shared_path)
+    locale = load_manifest(locale_path)
+
+    # Guards
+    shared_scope = shared.get("locale_scope")
+    if shared_scope not in ("shared", None):
+        raise SystemExit(
+            f"[ERROR] --shared manifest has locale_scope='{shared_scope}'. "
+            "Expected 'shared'."
+        )
+
+    locale_scope = locale.get("locale_scope")
+    if locale_scope not in ("locale", "monolithic", None):
+        raise SystemExit(
+            f"[ERROR] --locale manifest has locale_scope='{locale_scope}'. "
+            "Expected 'locale' or 'monolithic'."
+        )
+
+    locale_tag = locale.get("locale", "")
+    if not locale_tag:
+        raise SystemExit(
+            "[ERROR] locale manifest is missing 'locale' field. "
+            "Cannot derive output filename."
+        )
+
+    # Derive output path
+    if args.out:
+        out_path = Path(args.out).resolve()
+    else:
+        out_path = derive_output_path(locale_path, locale_tag)
+
+    print("=" * 60)
+    print("  manifest_merge")
+    print(f"  Shared   : {shared_path.name}")
+    print(f"  Locale   : {locale_path.name}  ({locale_tag})")
+    print(f"  Output   : {out_path}")
+    print("=" * 60)
+
+    # Check vo_items have start_sec/end_sec
+    vo_items    = locale.get("vo_items", [])
+    missing_timing = [
+        v["item_id"] for v in vo_items
+        if "start_sec" not in v or "end_sec" not in v
+    ]
+    if missing_timing:
+        print(f"[WARN] {len(missing_timing)} vo_items missing start_sec/end_sec — "
+              f"run post_tts_analysis.py first.")
+        print(f"       First missing: {missing_timing[:3]}")
+
+    # Load ShotList and build VO → shot reverse mapping for duck_intervals.
+    # Try shared path first, then locale path (shared manifest has shotlist_ref).
+    shots = load_shotlist(shared, shared_path)
+    if not shots:
+        shots = load_shotlist(locale, locale_path)
+    vo_shot_map = build_vo_shot_map(shots)
+    print(f"  ShotList shots    : {len(shots)}  "
+          f"(vo→shot mappings: {len(vo_shot_map)})")
+
+    # Merge
+    merged = merge_manifests(shared, locale, vo_shot_map=vo_shot_map)
+
+    # Print stats
+    print(f"\n  character_packs   : {len(merged.get('character_packs', []))}")
+    print(f"  backgrounds       : {len(merged.get('backgrounds', []))}")
+    print(f"  sfx_items         : {len(merged.get('sfx_items', []))}")
+    print(f"  music_items       : {len(merged.get('music_items', []))}")
+    print(f"  vo_items          : {len(merged.get('vo_items', []))}")
+    print(f"  background_overrides: {len(merged.get('background_overrides', []))}")
+    print(f"  timing_lock_hash  : {merged.get('timing_lock_hash', '')[:16]}…")
+
+    # Duck intervals summary
+    shots_with_duck = sum(
+        1 for mi in merged.get("music_items", [])
+        if mi.get("duck_intervals")
+    )
+    print(f"  shots with duck   : {shots_with_duck}")
+
+    # Write
+    save_manifest(merged, out_path)
+    print(f"\n  [OK] Written: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

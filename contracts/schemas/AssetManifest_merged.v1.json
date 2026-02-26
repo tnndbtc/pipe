@@ -1,0 +1,164 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AssetManifest_merged",
+  "description": "Output schema of manifest_merge.py. Combines a shared manifest (locale-free assets) with a locale draft manifest (vo_items + background_overrides) into a single file the renderer reads. start_sec/end_sec are required on vo_items; duck_intervals are required on music_items; locale_scope is locked to 'merged'; shared_ref is forbidden.",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "schema_version",
+    "manifest_id",
+    "project_id",
+    "episode_id",
+    "locale",
+    "locale_scope",
+    "shotlist_ref",
+    "character_packs",
+    "backgrounds",
+    "vo_items",
+    "background_overrides",
+    "timing_lock_hash"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "AssetManifest_merged"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "manifest_id": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string"
+    },
+    "episode_id": {
+      "type": "string",
+      "pattern": "^s[0-9]{2}e[0-9]{2}$"
+    },
+    "locale": {
+      "type": "string",
+      "description": "BCP-47 locale tag (e.g. 'en', 'zh-Hans')"
+    },
+    "locale_scope": {
+      "type": "string",
+      "const": "merged",
+      "description": "Always 'merged' for files produced by manifest_merge.py"
+    },
+    "shared_ref": false,
+    "shotlist_ref": {
+      "type": "string"
+    },
+    "timing_lock_hash": {
+      "type": "string",
+      "description": "SHA-256 of canonical per-locale per-shot duration list. Computed by manifest_merge.py."
+    },
+    "character_packs": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "backgrounds": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "vo_items": {
+      "type": "array",
+      "description": "VO items from the locale draft manifest. start_sec and end_sec are required (written by post_tts_analysis.py before merge).",
+      "items": {
+        "type": "object",
+        "required": ["item_id", "speaker_id", "text", "license_type", "start_sec", "end_sec"],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": { "type": "string" },
+          "speaker_id": { "type": "string" },
+          "text": { "type": "string" },
+          "license_type": { "type": "string" },
+          "start_sec": {
+            "type": "number",
+            "description": "Start time of this VO line within the shot, in seconds"
+          },
+          "end_sec": {
+            "type": "number",
+            "description": "End time of this VO line within the shot, in seconds"
+          },
+          "tts_prompt": {
+            "type": "object",
+            "properties": {
+              "voice_style":          { "type": "string" },
+              "emotion":              { "type": "string" },
+              "pace":                 { "type": "string", "enum": ["slow", "normal", "fast"] },
+              "locale":               { "type": "string" },
+              "azure_voice":          { "type": "string" },
+              "azure_style":          { "type": "string" },
+              "azure_style_degree":   { "type": "number", "minimum": 0.01, "maximum": 2.0 },
+              "azure_rate":           { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "sfx_items": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "music_items": {
+      "type": "array",
+      "description": "Music items from the shared manifest with duck_intervals computed by manifest_merge.py.",
+      "items": {
+        "type": "object",
+        "required": ["item_id", "shot_id", "music_mood", "duration_sec", "license_type"],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": { "type": "string" },
+          "shot_id": { "type": "string" },
+          "music_mood": { "type": "string" },
+          "duration_sec": { "type": "number" },
+          "license_type": { "type": "string" },
+          "start_sec": {
+            "type": "number",
+            "description": "Music start time within the shot. Default 0.0."
+          },
+          "duck_db": {
+            "type": "number",
+            "description": "Music attenuation in dB during VO playback"
+          },
+          "fade_sec": {
+            "type": "number",
+            "description": "Linear ramp duration in seconds at each duck interval boundary"
+          },
+          "duck_intervals": {
+            "type": "array",
+            "description": "List of [t0, t1] intervals (seconds) during which music is ducked. Required; computed by manifest_merge.py.",
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "background_overrides": {
+      "type": "array",
+      "description": "Locale-specific background overrides for overflow shots. Empty array if no overflows.",
+      "items": {
+        "type": "object",
+        "required": ["item_id", "shot_id", "duration_sec", "uri"],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": { "type": "string" },
+          "shot_id": { "type": "string" },
+          "duration_sec": { "type": "number" },
+          "uri": {
+            "type": "string",
+            "description": "Relative path to the override video file"
+          },
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}
