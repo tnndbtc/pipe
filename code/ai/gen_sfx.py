@@ -1,6 +1,9 @@
 # =============================================================================
 # gen_sfx.py
-# Generate short sound-effect audio clips from text descriptions for s01e01.
+# Generate short sound-effect audio clips from text descriptions.
+# Supports two backends selected via --backend:
+#   audiogen       — Meta AudioGen (default, MIT licence, 4–8 GB VRAM)
+#   stable_audio_2 — Stability AI Stable Audio 2.0 (>=16 GB VRAM recommended)
 # =============================================================================
 #
 # requirements.txt (pip install before running):
@@ -9,11 +12,16 @@
 #   torchaudio>=2.1.0
 #   soundfile>=0.12.0
 #   huggingface_hub>=0.21.0
+#   diffusers>=0.30.0        # Stable Audio 2.0 backend only
+#   transformers>=4.40.0     # Stable Audio 2.0 backend only
 #
 # ---------------------------------------------------------------------------
-# Hardware Target: NVIDIA RTX 4060 8 GB VRAM
+# Hardware targets:
+#   audiogen       — NVIDIA RTX 4060 8 GB VRAM (medium), 4 GB (small)
+#   stable_audio_2 — NVIDIA RTX 4080 / 4090 / A5000+ (>=16 GB VRAM)
+#                    Uses torch.float16 on CUDA automatically.
 # ---------------------------------------------------------------------------
-# Memory-saving techniques:
+# Memory-saving techniques (AudioGen):
 #   AudioGen medium (~8 GB VRAM) is used when available; if it OOMs, the
 #   script catches the exception and reloads AudioGen small (~4 GB).
 #
@@ -27,6 +35,8 @@
 #
 # NOTE: AudioCraft models are downloaded automatically from HuggingFace
 #   (facebook/audiogen-medium or facebook/audiogen-small, MIT licence).
+#   Stable Audio 2.0 requires a HuggingFace account with model access granted
+#   at https://huggingface.co/stabilityai/stable-audio-2
 # ---------------------------------------------------------------------------
 
 import argparse
@@ -133,7 +143,8 @@ SFX_JOBS = [
 ]
 
 AUDIOGEN_MEDIUM = "facebook/audiogen-medium"
-AUDIOGEN_SMALL = "facebook/audiogen-small"
+AUDIOGEN_SMALL  = "facebook/audiogen-small"
+STABLE_AUDIO_2  = "stabilityai/stable-audio-open-1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +184,7 @@ def build_output_filename(shot_id: str, tag: str) -> str:
 # ---------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate SFX WAV files for s01e01 using AudioGen."
+        description="Generate SFX WAV files using AudioGen or Stable Audio 2.0."
     )
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -184,11 +195,38 @@ def parse_args():
         help="Compute device (cuda / cpu).",
     )
     parser.add_argument(
+        "--backend",
+        choices=["audiogen", "stable_audio_2"],
+        default="audiogen",
+        help="TTS backend. 'audiogen' (default) or 'stable_audio_2'.",
+    )
+    # AudioGen-specific
+    parser.add_argument(
         "--model",
         choices=["medium", "small", "auto"],
         default="auto",
-        help="AudioGen model size. 'auto' tries medium, falls back to small.",
+        help="AudioGen model size. 'auto' tries medium, falls back to small. (audiogen backend only)",
     )
+    # Stable Audio 2.0-specific
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=10.0,
+        help="Default clip duration in seconds. (stable_audio_2 backend; per-job duration overrides this)",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=50,
+        help="Number of diffusion inference steps. (stable_audio_2 backend only)",
+    )
+    parser.add_argument(
+        "--guidance",
+        type=float,
+        default=7.5,
+        help="Classifier-free guidance scale. (stable_audio_2 backend only)",
+    )
+    # Shared
     parser.add_argument(
         "--manifest", type=str, default=None,
         help="Path to AssetManifest JSON. Uses sfx_items section if present; "
@@ -230,6 +268,29 @@ def load_audiogen(preference: str, device: str):
         return model
 
 
+def load_stable_audio_model(device: str):
+    """Load Stable Audio 2.0 pipeline. Requires >=16 GB VRAM on CUDA."""
+    from diffusers import StableAudioPipeline  # noqa: PLC0415
+
+    dtype = torch.float16 if "cuda" in device else torch.float32
+    print(f"[MODEL] Loading Stable Audio 2.0 ({STABLE_AUDIO_2}) on {device} dtype={dtype}...")
+    try:
+        pipe = StableAudioPipeline.from_pretrained(STABLE_AUDIO_2, torch_dtype=dtype)
+        pipe = pipe.to(device)
+        print("[MODEL] Stable Audio 2.0 loaded.")
+        return pipe
+    except (RuntimeError, torch.cuda.OutOfMemoryError) as exc:
+        raise RuntimeError(
+            f"Stable Audio 2.0 requires >=16 GB VRAM. Original error: {exc}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not load {STABLE_AUDIO_2}. "
+            "If the model is gated, log in first: huggingface-cli login\n"
+            f"Original error: {exc}"
+        ) from exc
+
+
 def locale_from_manifest_path(path: str) -> str:
     """Extract locale from manifest filename.
     'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
@@ -241,11 +302,140 @@ def locale_from_manifest_path(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Shared iteration helper
+# ---------------------------------------------------------------------------
+def _iter_sfx_tags(sfx_jobs, default_duration: float = 10.0):
+    """
+    Yield (shot_id, tag, duration_sec) for every clip to generate.
+    Handles both formats:
+      hardcoded SFX_JOBS — {shot_id, duration, tags: [...]}
+      manifest sfx_items — {shot_id, tag, duration_sec}
+    """
+    for job in sfx_jobs:
+        shot_id  = job.get("shot_id", "unknown")
+        duration = job.get("duration") or job.get("duration_sec") or default_duration
+        tags     = job.get("tags") or ([job["tag"]] if "tag" in job else [])
+        for tag in tags:
+            yield shot_id, tag, float(duration)
+
+
+# ---------------------------------------------------------------------------
+# Backend runners
+# ---------------------------------------------------------------------------
+def run_audiogen(sfx_jobs: list, out_dir: Path, model, args) -> list[dict]:
+    """Generate SFX clips with AudioGen. Returns list of result dicts."""
+    import soundfile as sf  # noqa: PLC0415
+
+    all_tags  = list(_iter_sfx_tags(sfx_jobs, default_duration=args.duration))
+    total     = len(all_tags)
+    results   = []
+    model_id  = AUDIOGEN_MEDIUM  # label only; actual loaded id varies
+
+    for counter, (shot_id, tag, duration) in enumerate(all_tags, start=1):
+        filename = build_output_filename(shot_id, tag)
+        out_path = out_dir / filename
+        print(f"\n[{counter}/{total}] {shot_id} — \"{tag}\"")
+
+        if out_path.exists():
+            print(f"  [SKIP] {filename} already exists")
+            results.append({
+                "shot_id": shot_id, "tag": tag,
+                "output": str(out_path), "output_path": str(out_path),
+                "size_bytes": out_path.stat().st_size, "duration_sec": duration,
+                "model": model_id, "status": "skipped",
+            })
+            continue
+
+        try:
+            model.set_generation_params(duration=duration)
+            wav      = model.generate([tag])   # [1, channels, samples]
+            audio_np = wav[0, 0].cpu().numpy() # mono: channel 0
+            sf.write(str(out_path), audio_np, model.sample_rate, subtype="PCM_16")
+            size = out_path.stat().st_size
+            print(f"  [OK] {out_path}  ({duration}s, {size:,} bytes)")
+            results.append({
+                "shot_id": shot_id, "tag": tag,
+                "output": str(out_path), "output_path": str(out_path),
+                "size_bytes": size, "duration_sec": duration,
+                "model": model_id, "status": "success",
+            })
+        except Exception as exc:
+            print(f"  [ERROR] {filename}: {exc}")
+            results.append({
+                "shot_id": shot_id, "tag": tag,
+                "output": str(out_path), "output_path": str(out_path),
+                "size_bytes": 0, "duration_sec": duration,
+                "model": model_id, "status": "failed", "error": str(exc),
+            })
+        finally:
+            torch.cuda.empty_cache()
+            gc.collect()
+
+    return results
+
+
+def run_stable_audio_2(sfx_jobs: list, out_dir: Path, pipe, args) -> list[dict]:
+    """Generate SFX clips with Stable Audio 2.0. Returns list of result dicts."""
+    import soundfile as sf  # noqa: PLC0415
+
+    sample_rate = pipe.vae.config.sampling_rate
+    all_tags    = list(_iter_sfx_tags(sfx_jobs, default_duration=args.duration))
+    total       = len(all_tags)
+    results     = []
+
+    for counter, (shot_id, tag, duration) in enumerate(all_tags, start=1):
+        filename = build_output_filename(shot_id, tag)
+        out_path = out_dir / filename
+        print(f"\n[{counter}/{total}] {shot_id} — \"{tag}\"")
+        print(f"  steps={args.steps}  guidance={args.guidance}  duration={duration}s")
+
+        if out_path.exists():
+            print(f"  [SKIP] {filename} already exists")
+            results.append({
+                "shot_id": shot_id, "tag": tag,
+                "output": str(out_path), "output_path": str(out_path),
+                "size_bytes": out_path.stat().st_size, "duration_sec": duration,
+                "model": STABLE_AUDIO_2, "status": "skipped",
+            })
+            continue
+
+        try:
+            audio = pipe(
+                prompt=tag,
+                audio_length_in_s=duration,
+                num_inference_steps=args.steps,
+                guidance_scale=args.guidance,
+            ).audios[0]                          # numpy [channels, samples]
+            sf.write(str(out_path), audio.T, samplerate=sample_rate)
+            size = out_path.stat().st_size
+            print(f"  [OK] {out_path}  ({duration}s, {size:,} bytes)")
+            results.append({
+                "shot_id": shot_id, "tag": tag,
+                "output": str(out_path), "output_path": str(out_path),
+                "size_bytes": size, "duration_sec": duration,
+                "model": STABLE_AUDIO_2, "status": "success",
+            })
+        except Exception as exc:
+            print(f"  [ERROR] {filename}: {exc}")
+            results.append({
+                "shot_id": shot_id, "tag": tag,
+                "output": str(out_path), "output_path": str(out_path),
+                "size_bytes": 0, "duration_sec": duration,
+                "model": STABLE_AUDIO_2, "status": "failed", "error": str(exc),
+            })
+        finally:
+            torch.cuda.empty_cache()
+            gc.collect()
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
+    locale  = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
     out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -261,91 +451,39 @@ def main():
         else:
             sfx_jobs = manifest_jobs
 
-    # Set global seed for reproducibility
     torch.manual_seed(args.seed)
 
-    model = load_audiogen(args.model, args.device)
+    print(f"[BACKEND] {args.backend}  device={args.device}")
 
-    results = []
+    if args.backend == "audiogen":
+        model   = load_audiogen(args.model, args.device)
+        results = run_audiogen(sfx_jobs, out_dir, model, args)
 
-    # Count total SFX clips to generate (one per tag per shot)
-    all_jobs = [
-        (job, tag)
-        for job in sfx_jobs
-        for tag in job["tags"]
-    ]
-    total = len(all_jobs)
-    counter = 0
+    elif args.backend == "stable_audio_2":
+        try:
+            pipe = load_stable_audio_model(args.device)
+        except RuntimeError as exc:
+            raise SystemExit(f"[ERROR] {exc}") from exc
+        results = run_stable_audio_2(sfx_jobs, out_dir, pipe, args)
 
-    for job in sfx_jobs:
-        for tag in job["tags"]:
-            counter += 1
-            filename = build_output_filename(job["shot_id"], tag)
-            out_path = out_dir / filename
-            print(f"\n[{counter}/{total}] {job['shot_id']} — \"{tag}\"")
+    else:
+        raise SystemExit(f"[ERROR] Unknown backend: {args.backend!r}")
 
-            if out_path.exists():
-                print(f"  [SKIP] {filename} already exists")
-                results.append({
-                    "shot_id": job["shot_id"],
-                    "tag": tag,
-                    "output": str(out_path),
-                    "size_bytes": out_path.stat().st_size,
-                    "status": "skipped",
-                })
-                continue
-
-            try:
-                # Configure duration for this specific clip
-                model.set_generation_params(
-                    duration=job["duration"],
-                    # top_k=250 and temperature=1.0 are AudioGen defaults
-                )
-                # Generate one clip (batch size = 1)
-                wav = model.generate([tag])  # shape: [1, channels, samples]
-
-                # Save using soundfile for reliable WAV writing
-                import soundfile as sf
-                audio_np = wav[0, 0].cpu().numpy()  # mono: take channel 0
-                sf.write(str(out_path), audio_np, model.sample_rate, subtype="PCM_16")
-
-                size = out_path.stat().st_size
-                print(f"  [OK] {out_path}  ({job['duration']}s, {size:,} bytes)")
-                results.append({
-                    "shot_id": job["shot_id"],
-                    "tag": tag,
-                    "output": str(out_path),
-                    "size_bytes": size,
-                    "status": "success",
-                })
-            except Exception as exc:
-                print(f"  [ERROR] {filename}: {exc}")
-                results.append({
-                    "shot_id": job["shot_id"],
-                    "tag": tag,
-                    "output": str(out_path),
-                    "size_bytes": 0,
-                    "status": "failed",
-                    "error": str(exc),
-                })
-            finally:
-                torch.cuda.empty_cache()
-                gc.collect()
-
-    # Write manifest
+    # Write results manifest
     manifest_path = out_dir / f"{SCRIPT_NAME}_results.json"
     with open(manifest_path, "w") as fh:
         json.dump(results, fh, indent=2)
 
     # Summary
+    total       = len(results)
+    ok_count    = sum(1 for r in results if r["status"] in ("success", "skipped"))
+    total_bytes = sum(r["size_bytes"] for r in results)
     print("\n" + "=" * 60)
-    print("SUMMARY — gen_sfx")
+    print(f"SUMMARY — gen_sfx ({args.backend})")
     print("=" * 60)
     for r in results:
-        tag = "OK" if r["status"] == "success" else r["status"].upper()
-        print(f"  [{tag}]  {r['output']}  ({r['size_bytes']:,} bytes)")
-    ok_count = sum(1 for r in results if r["status"] in ("success", "skipped"))
-    total_bytes = sum(r["size_bytes"] for r in results)
+        label = "OK" if r["status"] == "success" else r["status"].upper()
+        print(f"  [{label}]  {r['output']}  ({r['size_bytes']:,} bytes)")
     print(f"\n{ok_count}/{total} completed | {total_bytes:,} bytes total")
     print(f"Manifest: {manifest_path}")
 
