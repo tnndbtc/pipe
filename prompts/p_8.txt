@@ -14,6 +14,7 @@
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json (Stage 5)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json     (Stage 6)
 #     projects/{{PROJECT_SLUG}}/canon.json                                   (Stage 7)
+#     projects/{{PROJECT_SLUG}}/VoiceCast.json                              (Stage 0)
 #     contracts/schemas/*.v1.json  (same schemas as English artifacts)
 #
 # 📤 OUTPUT (one file per artifact per non-en locale):
@@ -44,7 +45,8 @@ Read these files before writing anything:
   4. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json
   5. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
   6. projects/{{PROJECT_SLUG}}/canon.json
-  7. contracts/schemas/AssetManifest.v1.json
+  7. projects/{{PROJECT_SLUG}}/VoiceCast.json
+  8. contracts/schemas/AssetManifest.v1.json
 
 ---
 
@@ -107,12 +109,55 @@ For each locale OTHER than "en":
   }
   ```
 
-  For vo_items[]: copy every entry from AssetManifest_draft.en.json, then:
-    - translate text field into the target locale
-    - set tts_prompt.locale to the target locale (e.g. "zh-Hans")
-    - keep all other fields identical (item_id, speaker_id, license_type,
-      tts_prompt.voice_style, tts_prompt.emotion, tts_prompt.pace)
-    - DO NOT add start_sec, end_sec — those are written by post_tts_analysis.py
+  For vo_items[]: copy every entry from AssetManifest_draft.en.json, then apply
+  the following changes per item:
+
+  **Always change:**
+    - text                    → translate into the target locale (Duration Matching Rule below)
+    - tts_prompt.locale       → set to target locale (e.g. "zh-Hans")
+    - tts_prompt.azure_voice  → character[<locale>].azure_voice from VoiceCast.json
+    - tts_prompt.azure_pitch  → character[<locale>].azure_pitch from VoiceCast.json
+    - tts_prompt.azure_break_ms → character[<locale>].azure_break_ms from VoiceCast.json
+    - tts_prompt.azure_style  → apply Emotion Policy (see below)
+
+  **Keep unchanged:**
+    - item_id, speaker_id, license_type
+    - tts_prompt.voice_style  (gender hint — still valid across locales)
+    - tts_prompt.emotion      (English label kept for debugging)
+    - tts_prompt.pace         (same pace intent)
+    - tts_prompt.azure_style_degree  (same dramatic intensity)
+    - tts_prompt.azure_rate   (same pace intent)
+
+  **Whisper special case:**
+    When azure_style resolves to "whispering":
+      set tts_prompt.azure_break_ms = 0  (overrides character base value;
+      breaks inside whispers sound robotic)
+
+  **DO NOT add** start_sec, end_sec — those are written by post_tts_analysis.py
+
+  ### Emotion Policy for azure_style (locale voice replacement)
+
+  Do NOT re-derive emotion from the translated text (Chinese translations can
+  shift tone unpredictably).  Instead:
+
+    1. Read the English tts_prompt.azure_style from the source vo_item.
+    2. Check if that exact style name exists in
+       VoiceCast.json character[<locale>].available_styles.
+       If yes → use it directly.
+    3. If not → walk the fallback chain below against the locale's
+       available_styles until a match is found:
+         angry     → shouting → unfriendly → serious → (omit)
+         fearful   → terrified → whispering → sad → (omit)
+         cheerful  → excited → friendly → hopeful → (omit)
+         sad       → disgruntled → (omit)
+         excited   → cheerful → friendly → (omit)
+         serious   → calm → (omit)
+    4. If no fallback matches → omit azure_style entirely (no express-as element).
+
+  Example:
+    English vo_item: azure_style = "terrified"
+    zh-Hans character available_styles: ["angry", "fearful", "sad", "excited", ...]
+    Fallback chain: terrified → fearful (found) → use "fearful"
 
   Duration Matching Rule — applies to every vo_item.text translation:
 
@@ -164,7 +209,8 @@ For each locale OTHER than "en":
   series.title, series.genre, knows[],
   AssetManifest: search_prompt, ai_prompt, motion.description,
                  search_filters (all subfields), tts_prompt.voice_style,
-                 tts_prompt.emotion, tts_prompt.pace
+                 tts_prompt.emotion, tts_prompt.pace,
+                 tts_prompt.azure_style_degree, tts_prompt.azure_rate
 
   ### Validation and writing
 

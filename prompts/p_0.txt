@@ -4,11 +4,17 @@
 #
 # 📥 PLACEHOLDER (replaced by run.sh via sed before calling claude -p):
 #     {{STORY_FILE}}  →  path to the input story file, e.g. "story_2.txt"
+#     {{LOCALES}}     →  e.g. "en, zh-Hans"
+#
+# 📥 FILES READ:
+#     {{STORY_FILE}}                            (the story)
+#     projects/azure_tts_styles.txt             (inlined by run.sh)
 #
 # 📤 OUTPUT (stdout printed to web UI + files written to disk):
 #     • Stdout: variable confirmation block  (web UI sees this)
-#     • pipeline_vars.sh          ← sourced by run.sh for all later stages
-#     • episode_direction.txt     ← full direction text for later stages
+#     • pipeline_vars.sh                  ← sourced by run.sh for all later stages
+#     • episode_direction.txt             ← full direction text for later stages
+#     • projects/<slug>/VoiceCast.json    ← voice casting (append-only across episodes)
 #     • projects/<slug>/                           (directories created)
 #     • projects/<slug>/episodes/<id>/
 #
@@ -17,8 +23,8 @@
 # ══════════════════════════════════════════════════════════════════════
 
 You are Stage 0 of a 10-stage AI narrative pipeline.
-Your ONLY job: read a story file, extract variables, write two output
-files, create directories, and print a confirmation block.
+Your ONLY job: read a story file, extract variables, cast voices,
+write output files, create directories, and print a confirmation block.
 Do NOT generate any story content.
 
 ---
@@ -26,6 +32,10 @@ Do NOT generate any story content.
 ## Task
 
 Print: `▶ [0/9] Stage 0 — Read story file  …`
+
+Read these files before doing anything:
+  1. {{STORY_FILE}}
+  2. projects/azure_tts_styles.txt
 
 Read the story file at path: {{STORY_FILE}}
 
@@ -60,11 +70,117 @@ RENDER_PROFILE   : <value>
 ────────────────────────────────────────────────────────────────────────
 ```
 
-Then write these two files:
+Then write these two files (File 1 format is detailed in the sub-task below):
 
-### File 1 — pipeline_vars.sh
+### File 2 — episode_direction.txt
+Path: episode_direction.txt  (current working directory)
+Content: the FULL EPISODE_DIRECTION text, untruncated.
+
+### Directories
+Create if they do not exist:
+  projects/<PROJECT_SLUG>/
+  projects/<PROJECT_SLUG>/episodes/<EPISODE_ID>/
+
+---
+
+### Sub-task: Cast voices for each locale
+
+Run this AFTER extracting variables and creating directories,
+BEFORE writing pipeline_vars.sh.
+
+Using the story file and projects/azure_tts_styles.txt you already read:
+
+#### Step 1 — Identify main characters
+
+List the main characters (protagonist, antagonist, narrator, supporting —
+typically 2–5 roles).
+
+MANDATORY: Always include a "narrator" entry.  Every episode has narrator VO
+(off-screen narration lines).  Narrator is not a story character but must
+appear in VoiceCast.json with its own voice.
+
+#### Step 2 — For each character × each locale in {{LOCALES}}
+
+  a. Note gender and personality traits (commanding, fearful, ancient, young, etc.).
+
+  b. From azure_tts_styles.txt, pick the BEST matching Azure voice:
+       - Narrator             → prefer voices with "narration-professional"
+                                or "newscast" style
+       - Emotional lead       → prefer voices with wide style coverage
+                                (en: AriaNeural; zh: XiaoxiaoNeural)
+       - Villain/antagonist   → prefer voices with angry/disgruntled/serious
+       - zh-CN leads          → prefer DragonHDFlashLatest voices (richer range)
+       - Match gender strictly (male/female/neutral)
+       - Every character MUST get a DIFFERENT azure_voice per locale.
+         Narrator and protagonist especially must never share a voice.
+         If fewer distinct voices exist than characters, prioritise:
+         protagonist → antagonist → narrator → minor characters (minor may share).
+
+  c. List the styles that voice actually supports (copy from azure_tts_styles.txt).
+
+  d. Set base azure_pitch and azure_break_ms for the character archetype:
+       - Narrator:    pitch "-5%",  break_ms 600
+       - Elder/Wise:  pitch "-10%", break_ms 800
+       - Young hero:  pitch "0%",   break_ms 400
+       - Villain:     pitch "-5%",  break_ms 500
+       - Young child: pitch "+5%",  break_ms 350
+
+#### Step 3 — Write VoiceCast.json
+
+Path: projects/<PROJECT_SLUG>/VoiceCast.json
+
+If this file already exists, READ it first.  Only ADD entries whose
+character_id is not already present — NEVER overwrite existing entries
+(preserves voice consistency across episodes of the same series).
+
+Format:
+```json
+{
+  "schema_id": "VoiceCast",
+  "schema_version": "1.0.0",
+  "project_id": "<PROJECT_SLUG>",
+  "characters": [
+    {
+      "character_id":   "narrator",
+      "role":           "narrator",
+      "gender":         "neutral",
+      "personality":    "authoritative, cinematic",
+      "en": {
+        "azure_voice":        "en-US-GuyNeural",
+        "available_styles":   ["newscast", "angry", "cheerful", ...],
+        "azure_pitch":        "-5%",
+        "azure_break_ms":     600,
+        "azure_style_degree": 1.3
+      },
+      "zh-Hans": {
+        "azure_voice":        "zh-CN-YunxiNeural",
+        "available_styles":   ["angry", "cheerful", "sad", ...],
+        "azure_pitch":        "-5%",
+        "azure_break_ms":     600,
+        "azure_style_degree": 1.3
+      }
+    }
+  ]
+}
+```
+
+Rules:
+  • character_id must be a lowercase slug (e.g. "narrator", "pharaoh", "anubis").
+    Stage 3 MUST use these exact IDs as cast[].character_id in Script.json.
+  • Include ONLY locales present in {{LOCALES}}.
+  • available_styles: copy exactly from azure_tts_styles.txt for the chosen voice.
+
+#### Step 4 — Add to pipeline_vars.sh
+
+Append this line to pipeline_vars.sh (written in the next step):
+  export VOICE_CAST_FILE="projects/<PROJECT_SLUG>/VoiceCast.json"
+
+---
+
+### File 1 — pipeline_vars.sh  (updated)
+
 Path: pipeline_vars.sh  (current working directory)
-Content (fill in actual values, escape any double-quotes inside values):
+Content — fill in actual values, include the VOICE_CAST_FILE line:
 ```bash
 export STORY_TITLE="<value>"
 export EPISODE_NUMBER="<value>"
@@ -76,15 +192,7 @@ export GENERATION_SEED="<value>"
 export RENDER_PROFILE="<value>"
 export PROJECT_DIR="projects/<PROJECT_SLUG>"
 export EPISODE_DIR="projects/<PROJECT_SLUG>/episodes/<EPISODE_ID>"
+export VOICE_CAST_FILE="projects/<PROJECT_SLUG>/VoiceCast.json"
 ```
-
-### File 2 — episode_direction.txt
-Path: episode_direction.txt  (current working directory)
-Content: the FULL EPISODE_DIRECTION text, untruncated.
-
-### Directories
-Create if they do not exist:
-  projects/<PROJECT_SLUG>/
-  projects/<PROJECT_SLUG>/episodes/<EPISODE_ID>/
 
 Print: `✓ [0/9] Stage 0 — Read story file  done`

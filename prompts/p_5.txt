@@ -9,6 +9,7 @@
 # 📥 FILES READ (written by earlier stages):
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json  (Stage 4)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json    (Stage 3 — cast[].gender)
+#     projects/{{PROJECT_SLUG}}/VoiceCast.json                         (Stage 0)
 #     contracts/schemas/AssetManifest.v1.json
 #
 # 📤 OUTPUT:
@@ -35,8 +36,9 @@ Schema      : contracts/schemas/AssetManifest.v1.json
 Read these files before writing anything:
   1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
   2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json   — read cast[] for character gender
-  3. episode_direction.txt   (for ai_prompt context)
-  4. contracts/schemas/AssetManifest.v1.json   — inspect all required fields
+  3. projects/{{PROJECT_SLUG}}/VoiceCast.json   — voice casting + azure parameters
+  4. episode_direction.txt   (for ai_prompt context)
+  5. contracts/schemas/AssetManifest.v1.json   — inspect all required fields
 
 ---
 
@@ -191,17 +193,71 @@ Required fields per entry:
   text         : the English dialogue text (from shot.audio_intent.vo_text)
   license_type : "proprietary_cleared"
 
-**tts_prompt** per entry:
+**tts_prompt** per entry — set ALL fields below:
 ```json
 {
-  "voice_style" : "<gender + role quality — MUST start with gender, e.g. 'young female, fierce', 'deep male, commanding', 'elderly male, weary'>",
-  "emotion"     : "<derive from scene context>",
-  "pace"        : "<slow|normal|fast>",
-  "locale"      : "en"
+  "voice_style"        : "<gender + role quality — MUST start with gender, e.g. 'young female, fierce', 'deep male, commanding', 'elderly male, weary'>",
+  "emotion"            : "<human-readable emotion label, kept for debugging>",
+  "pace"               : "<slow|normal|fast — set to match azure_rate intent>",
+  "locale"             : "en",
+  "azure_voice"        : "<character[en].azure_voice from VoiceCast.json>",
+  "azure_style"        : "<chosen per style selection rules below — omit if no match>",
+  "azure_style_degree" : <chosen per style selection rules below>,
+  "azure_rate"         : "<derived per pace rules below>",
+  "azure_pitch"        : "<character[en].azure_pitch from VoiceCast.json>",
+  "azure_break_ms"     : <character[en].azure_break_ms from VoiceCast.json>
 }
 ```
+
 voice_style MUST lead with the character's gender word ("female", "male", or "neutral")
 followed by their vocal qualities. This is the primary signal for TTS voice selection.
+
+NOTE on pace: retained for legacy compatibility.  When azure_rate is set,
+gen_tts_cloud.py uses azure_rate and ignores pace entirely.  Set pace to match
+the rate intent (slow/normal/fast) for human readability.
+
+### Style selection rules (applied per vo_item)
+
+  Step 1  Consult character[en].available_styles from VoiceCast.json.
+          NEVER choose a style not in this list.
+
+  Step 2  Pick the closest available style for the VO line's emotion.
+          If no style fits after the fallback chain (Step 3), omit azure_style.
+
+  Step 3  Fallback chain — walk until a style in available_styles is found:
+            angry     → shouting → unfriendly → serious → (omit)
+            fearful   → terrified → whispering → sad → (omit)
+            cheerful  → excited → friendly → hopeful → (omit)
+            sad       → disgruntled → (omit)
+            excited   → cheerful → friendly → (omit)
+            serious   → calm → (omit)
+
+  Step 4  Style degree:
+            Mild/background emotion    1.2–1.4
+            Normal dialogue            1.5  (default)
+            Heightened tension         1.6–1.7
+            Peak dramatic moment       1.8  (cap — avoid over-acting)
+
+  Step 5  Rate derivation:
+            pace=slow              → azure_rate "-25%"
+            pace=normal            → azure_rate "0%"
+            pace=fast              → azure_rate "+25%"
+            Contemplative/grief    → nudge -10% (e.g. "-10%" for normal grief)
+            Action/urgent          → nudge +10% (e.g. "+10%" for normal urgent)
+
+  Step 6  Whisper special case:
+            When azure_style is "whispering":
+              set azure_break_ms = 0  (breaks inside whispers sound robotic)
+              override the character's base azure_break_ms for this item only.
+
+  Step 7  Narrator lines (speaker_id "narrator"):
+            Use narrator entry from VoiceCast.json.
+            Prefer azure_style "narration-professional" or "newscast" if available.
+            Narrator style_degree: 1.3 (authoritative, not theatrical).
+
+  Step 8  No VoiceCast match (character_id not in VoiceCast.json):
+            Omit all azure_* fields except azure_voice.
+            Log: "⚠ No VoiceCast entry for <speaker_id> — using gender default"
 
 DO NOT add start_sec, end_sec, or duration_sec to vo_items —
 those are written by post_tts_analysis.py after WAV generation.

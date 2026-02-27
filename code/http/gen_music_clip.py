@@ -66,7 +66,11 @@ def load_clap(ckpt_dir: Path):
 
     print(f"[CLAP] Loading {CKPT_FILENAME} …")
     model = laion_clap.CLAP_Module(enable_fusion=False, amodel="HTSAT-base")
-    model.load_ckpt(str(ckpt_path))
+    # load_ckpt() prints every tensor name ("audio_branch.layers.N... Loaded")
+    # which floods the output box — suppress stdout during load only.
+    import io, contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+        model.load_ckpt(str(ckpt_path))
     model.eval()
     print("[CLAP] Model ready.\n")
     return model

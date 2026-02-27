@@ -582,6 +582,27 @@ HTML = r"""<!DOCTYPE html>
     font-family: var(--mono); transition: background .15s, color .15s;
   }
   .btn-substep:hover { background: #ffffff18; color: var(--text); }
+  /* ── Voice Cast viewer ────────────────────────────────────────────── */
+  #pipe-voicecast-wrap {
+    flex-shrink: 0; border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; background: var(--surface);
+  }
+  .vc-char-row {
+    padding: 8px 14px; border-bottom: 1px solid #1a1a26;
+  }
+  .vc-char-row:last-child { border-bottom: none; }
+  .vc-char-name { font-weight: 700; font-size: 0.83em; color: var(--text); }
+  .vc-char-role { font-size: 0.75em; color: var(--dim); margin-left: 8px; }
+  .vc-char-voice {
+    font-family: var(--mono); font-size: 0.78em; color: var(--blue); margin-top: 3px;
+  }
+  .vc-char-params { font-size: 0.74em; color: var(--dim); margin-top: 2px; }
+  .vc-style-chip {
+    display: inline-block; background: #ffffff08;
+    border: 1px solid var(--border); border-radius: 3px;
+    padding: 1px 5px; font-size: 0.70em; color: #8a9ab8;
+    margin: 2px 2px 0 0;
+  }
 </style>
 </head>
 <body>
@@ -708,6 +729,15 @@ Direction    : …"></textarea>
       <div class="video-locale-tabs" id="audio-locale-tabs"></div>
     </div>
     <audio id="pipe-audio" controls style="width:100%;margin-top:6px;border-radius:6px"></audio>
+  </div>
+
+  <!-- Voice cast viewer -->
+  <div id="pipe-voicecast-wrap" style="display:none">
+    <div class="pipe-section-hdr">
+      🎙 Voice Cast
+      <div style="margin-left:auto" id="voicecast-locale-tabs"></div>
+    </div>
+    <div id="voicecast-body"></div>
   </div>
 </div>
 
@@ -1597,6 +1627,97 @@ Direction    : …"></textarea>
     } else {
       audioWrap.style.display = 'none';
     }
+
+    // ── Voice Cast viewer ─────────────────────────────────────────────────────
+    const vcWrap  = document.getElementById('pipe-voicecast-wrap');
+    const vcBody  = document.getElementById('voicecast-body');
+    const vcTabs  = document.getElementById('voicecast-locale-tabs');
+    const vc      = status.voice_cast;
+    const vcChars = vc && vc.characters && vc.characters.length ? vc.characters : null;
+
+    if (vcChars) {
+      vcWrap.style.display = '';
+      vcTabs.innerHTML = '';
+      vcBody.innerHTML  = '';
+
+      // Collect locales present in the first character entry
+      const vcLocales = Object.keys(vcChars[0]).filter(
+        k => !['character_id', 'role', 'gender', 'personality'].includes(k)
+      );
+      let activeVcLocale = vcLocales[0] || 'en';
+
+      function renderVcLocale(locale) {
+        vcBody.innerHTML = '';
+        vcChars.forEach(char => {
+          const loc = char[locale];
+          if (!loc) return;
+
+          const row = document.createElement('div');
+          row.className = 'vc-char-row';
+
+          // Name + role
+          const hdr = document.createElement('div');
+          hdr.innerHTML =
+            `<span class="vc-char-name">👤 ${char.character_id}</span>` +
+            `<span class="vc-char-role">${char.role || ''}</span>`;
+          row.appendChild(hdr);
+
+          // Voice name
+          if (loc.azure_voice) {
+            const v = document.createElement('div');
+            v.className = 'vc-char-voice';
+            v.textContent = loc.azure_voice;
+            row.appendChild(v);
+          }
+
+          // Params: pitch · break · degree
+          const paramParts = [];
+          if (loc.azure_pitch)        paramParts.push('pitch: ' + loc.azure_pitch);
+          if (loc.azure_break_ms != null) paramParts.push('break: ' + loc.azure_break_ms + 'ms');
+          if (loc.azure_style_degree) paramParts.push('degree: ' + loc.azure_style_degree);
+          if (paramParts.length) {
+            const p = document.createElement('div');
+            p.className = 'vc-char-params';
+            p.textContent = paramParts.join('  ·  ');
+            row.appendChild(p);
+          }
+
+          // Style chips
+          const styles = loc.available_styles || [];
+          if (styles.length) {
+            const chips = document.createElement('div');
+            chips.style.marginTop = '4px';
+            styles.forEach(s => {
+              const chip = document.createElement('span');
+              chip.className = 'vc-style-chip';
+              chip.textContent = s;
+              chips.appendChild(chip);
+            });
+            row.appendChild(chips);
+          }
+
+          vcBody.appendChild(row);
+        });
+      }
+
+      // Locale tab buttons
+      vcLocales.forEach((l, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'btn-locale-tab' + (i === 0 ? ' active' : '');
+        btn.textContent = l;
+        btn.onclick = () => {
+          activeVcLocale = l;
+          document.querySelectorAll('#voicecast-locale-tabs .btn-locale-tab')
+            .forEach(b => b.classList.toggle('active', b === btn));
+          renderVcLocale(l);
+        };
+        vcTabs.appendChild(btn);
+      });
+
+      renderVcLocale(activeVcLocale);
+    } else {
+      vcWrap.style.display = 'none';
+    }
   }
 
   function playLocaleVideo(locale) {
@@ -1992,6 +2113,16 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         except Exception:
             pass
 
+    # ── VoiceCast.json (project-level, written by Stage 0) ───────────────
+    voice_cast = None
+    vc_path = os.path.join(PIPE_DIR, "projects", slug, "VoiceCast.json")
+    if os.path.isfile(vc_path):
+        try:
+            with open(vc_path, encoding="utf-8") as _f:
+                voice_cast = json.load(_f)
+        except Exception:
+            pass
+
     return {
         "slug": slug, "ep_id": ep_id,
         "llm_stages": llm_stages,
@@ -2000,6 +2131,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "ready_videos": ready_videos,
         "ready_dubbed": ready_dubbed,
         "story_file": story_file_detected,
+        "voice_cast": voice_cast,
     }
 
 

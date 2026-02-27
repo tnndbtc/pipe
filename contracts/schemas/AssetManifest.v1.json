@@ -440,7 +440,6 @@
         "pace",
         "locale"
       ],
-      "additionalProperties": false,
       "properties": {
         "voice_style": {
           "type": "string",
@@ -465,6 +464,30 @@
         "azure_voice": {
           "type": "string",
           "description": "Azure TTS voice name, e.g. 'zh-CN-Xiaoxiao:DragonHDFlashLatestNeural' or 'zh-CN-XiaoxiaoNeural'. Ignored by non-Azure TTS backends."
+        },
+        "azure_style": {
+          "type": "string",
+          "description": "Azure express-as style name. Must be a style supported by azure_voice. e.g. 'sad', 'excited', 'newscast', 'whispering'. Omit to suppress express-as entirely. Ignored by non-Azure TTS backends."
+        },
+        "azure_style_degree": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 2.0,
+          "description": "Style intensity multiplier. 1.0 = subtle, 2.0 = maximum. Practical range: 1.0–1.8. Default 1.5. Ignored by non-Azure TTS backends."
+        },
+        "azure_rate": {
+          "type": "string",
+          "description": "Speech rate override, e.g. '-25%', '0%', '+15%'. When present, takes precedence over the pace field. Ignored by non-Azure TTS backends."
+        },
+        "azure_pitch": {
+          "type": "string",
+          "description": "Pitch shift, e.g. '-10%' (deeper), '+5%' (higher). Typical range: -20% to +20%. Ignored by non-Azure TTS backends."
+        },
+        "azure_break_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000,
+          "description": "Pause inserted after each sentence terminator (ms). 0 = no breaks. Typical: 300–800. Must be 0 when azure_style is 'whispering' (breaks sound robotic). Ignored by non-Azure TTS backends."
         }
       }
     }

@@ -1,0 +1,305 @@
+==============================
+SUMMARY BY LOCALE (styled voices)
+==============================
+
+de-DE: voices_with_styles=1, dragon_voices=0
+  top_styles: ['cheerful', 'sad']
+------------------------------------------------------------------------
+en-GB: voices_with_styles=2, dragon_voices=0
+  top_styles: ['cheerful', 'sad', 'chat', 'whispering']
+------------------------------------------------------------------------
+en-IN: voices_with_styles=1, dragon_voices=0
+  top_styles: ['newscast', 'cheerful', 'empathetic']
+------------------------------------------------------------------------
+en-US: voices_with_styles=18, dragon_voices=0
+  top_styles: ['sad', 'excited', 'friendly', 'angry', 'cheerful', 'terrified', 'shouting', 'unfriendly', 'whispering', 'hopeful']
+------------------------------------------------------------------------
+es-ES: voices_with_styles=1, dragon_voices=0
+  top_styles: ['cheerful', 'sad']
+------------------------------------------------------------------------
+es-MX: voices_with_styles=2, dragon_voices=0
+  top_styles: ['cheerful', 'sad', 'whispering', 'chat', 'excited']
+------------------------------------------------------------------------
+fr-FR: voices_with_styles=2, dragon_voices=0
+  top_styles: ['cheerful', 'sad', 'whispering', 'excited']
+------------------------------------------------------------------------
+hi-IN: voices_with_styles=1, dragon_voices=0
+  top_styles: ['newscast', 'cheerful', 'empathetic']
+------------------------------------------------------------------------
+it-IT: voices_with_styles=2, dragon_voices=0
+  top_styles: ['cheerful', 'sad', 'excited', 'chat', 'whispering']
+------------------------------------------------------------------------
+ja-JP: voices_with_styles=1, dragon_voices=0
+  top_styles: ['chat', 'customerservice', 'cheerful']
+------------------------------------------------------------------------
+ko-KR: voices_with_styles=1, dragon_voices=0
+  top_styles: ['sad']
+------------------------------------------------------------------------
+pt-BR: voices_with_styles=1, dragon_voices=0
+  top_styles: ['calm']
+------------------------------------------------------------------------
+pt-PT: voices_with_styles=1, dragon_voices=0
+  top_styles: ['sad', 'whispering']
+------------------------------------------------------------------------
+zh-CN: voices_with_styles=28, dragon_voices=8
+  top_styles: ['angry', 'cheerful', 'sad', 'fearful', 'disgruntled', 'serious', 'chat', 'affectionate', 'calm', 'excited']
+------------------------------------------------------------------------
+
+==============================
+DETAILED VOICE LIST
+==============================
+
+de-DE-ConradNeural  [STANDARD]
+  locale=de-DE  gender=Male  local_name=Conrad
+  styles(2): ['cheerful', 'sad']
+------------------------------------------------------------------------
+en-GB-RyanNeural  [STANDARD]
+  locale=en-GB  gender=Male  local_name=Ryan
+  styles(4): ['cheerful', 'chat', 'whispering', 'sad']
+------------------------------------------------------------------------
+en-GB-SoniaNeural  [STANDARD]
+  locale=en-GB  gender=Female  local_name=Sonia
+  styles(2): ['cheerful', 'sad']
+------------------------------------------------------------------------
+en-IN-NeerjaNeural  [STANDARD]
+  locale=en-IN  gender=Female  local_name=Neerja
+  styles(3): ['newscast', 'cheerful', 'empathetic']
+------------------------------------------------------------------------
+en-US-AndrewMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Andrew Multilingual
+  styles(2): ['empathetic', 'relieved']
+------------------------------------------------------------------------
+en-US-AriaNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Aria
+  styles(16): ['chat', 'customerservice', 'narration-professional', 'newscast-casual', 'newscast-formal', 'cheerful', 'empathetic', 'angry', 'sad', 'excited', 'friendly', 'terrified', 'shouting', 'unfriendly', 'whispering', 'hopeful']
+------------------------------------------------------------------------
+en-US-AvaNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Ava
+  styles(3): ['angry', 'fearful', 'sad']
+------------------------------------------------------------------------
+en-US-DavisMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Davis Multilingual
+  styles(3): ['empathetic', 'funny', 'relieved']
+------------------------------------------------------------------------
+en-US-DavisNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Davis
+  styles(11): ['chat', 'angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+------------------------------------------------------------------------
+en-US-DerekMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Derek Multilingual
+  styles(4): ['empathetic', 'excited', 'relieved', 'shy']
+------------------------------------------------------------------------
+en-US-GuyNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Guy
+  styles(11): ['newscast', 'angry', 'cheerful', 'sad', 'excited', 'friendly', 'terrified', 'shouting', 'unfriendly', 'whispering', 'hopeful']
+------------------------------------------------------------------------
+en-US-JaneNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Jane
+  styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+------------------------------------------------------------------------
+en-US-JasonNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Jason
+  styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+------------------------------------------------------------------------
+en-US-JennyNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Jenny
+  styles(14): ['assistant', 'chat', 'customerservice', 'newscast', 'angry', 'cheerful', 'sad', 'excited', 'friendly', 'terrified', 'shouting', 'unfriendly', 'whispering', 'hopeful']
+------------------------------------------------------------------------
+en-US-KaiNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Kai
+  styles(1): ['conversation']
+------------------------------------------------------------------------
+en-US-LunaNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Luna
+  styles(1): ['conversation']
+------------------------------------------------------------------------
+en-US-NancyMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Nancy Multilingual
+  styles(5): ['excited', 'friendly', 'funny', 'relieved', 'shy']
+------------------------------------------------------------------------
+en-US-NancyNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Nancy
+  styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+------------------------------------------------------------------------
+en-US-PhoebeMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Phoebe Multilingual
+  styles(3): ['empathetic', 'sad', 'serious']
+------------------------------------------------------------------------
+en-US-SaraNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Sara
+  styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+------------------------------------------------------------------------
+en-US-SerenaMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Serena Multilingual
+  styles(7): ['empathetic', 'excited', 'friendly', 'shy', 'serious', 'relieved', 'sad']
+------------------------------------------------------------------------
+en-US-TonyNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Tony
+  styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+------------------------------------------------------------------------
+es-ES-AlvaroNeural  [STANDARD]
+  locale=es-ES  gender=Male  local_name=Álvaro
+  styles(2): ['cheerful', 'sad']
+------------------------------------------------------------------------
+es-MX-DaliaNeural  [STANDARD]
+  locale=es-MX  gender=Female  local_name=Dalia
+  styles(3): ['cheerful', 'sad', 'whispering']
+------------------------------------------------------------------------
+es-MX-JorgeNeural  [STANDARD]
+  locale=es-MX  gender=Male  local_name=Jorge
+  styles(5): ['cheerful', 'chat', 'whispering', 'sad', 'excited']
+------------------------------------------------------------------------
+fr-FR-DeniseNeural  [STANDARD]
+  locale=fr-FR  gender=Female  local_name=Denise
+  styles(4): ['cheerful', 'sad', 'whispering', 'excited']
+------------------------------------------------------------------------
+fr-FR-HenriNeural  [STANDARD]
+  locale=fr-FR  gender=Male  local_name=Henri
+  styles(4): ['cheerful', 'sad', 'whispering', 'excited']
+------------------------------------------------------------------------
+hi-IN-SwaraNeural  [STANDARD]
+  locale=hi-IN  gender=Female  local_name=स्वरा
+  styles(3): ['newscast', 'cheerful', 'empathetic']
+------------------------------------------------------------------------
+it-IT-DiegoNeural  [STANDARD]
+  locale=it-IT  gender=Male  local_name=Diego
+  styles(3): ['cheerful', 'sad', 'excited']
+------------------------------------------------------------------------
+it-IT-IsabellaNeural  [STANDARD]
+  locale=it-IT  gender=Female  local_name=Isabella
+  styles(5): ['cheerful', 'chat', 'whispering', 'sad', 'excited']
+------------------------------------------------------------------------
+ja-JP-NanamiNeural  [STANDARD]
+  locale=ja-JP  gender=Female  local_name=七海
+  styles(3): ['chat', 'customerservice', 'cheerful']
+------------------------------------------------------------------------
+ko-KR-InJoonNeural  [STANDARD]
+  locale=ko-KR  gender=Male  local_name=인준
+  styles(1): ['sad']
+------------------------------------------------------------------------
+pt-BR-FranciscaNeural  [STANDARD]
+  locale=pt-BR  gender=Female  local_name=Francisca
+  styles(1): ['calm']
+------------------------------------------------------------------------
+pt-PT-RaquelNeural  [STANDARD]
+  locale=pt-PT  gender=Female  local_name=Raquel
+  styles(2): ['sad', 'whispering']
+------------------------------------------------------------------------
+zh-CN-Xiaoshuang:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Female  local_name=Xiaoshuang Dragon HD Flash Latest
+  styles(1): ['chat']
+------------------------------------------------------------------------
+zh-CN-Xiaoxiao2:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Female  local_name=Xiaoxiao2 Dragon HD Flash Latest
+  styles(20): ['affectionate', 'angry', 'anxious', 'cheerful', 'curious', 'disappointed', 'empathetic', 'encouragement', 'excited', 'fearful', 'guilty', 'lonely', 'poetry-reading', 'sad', 'surprised', 'sentiment', 'sorry', 'story', 'whisper', 'tired']
+------------------------------------------------------------------------
+zh-CN-Xiaoxiao:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Female  local_name=Xiaoxiao Dragon HD Flash Latest
+  styles(8): ['angry', 'chat', 'cheerful', 'excited', 'fearful', 'sad', 'voiceassistant', 'customerservice']
+------------------------------------------------------------------------
+zh-CN-Xiaoyi:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Female  local_name=Xiaoyi Dragon HD Flash Latest
+  styles(9): ['angry', 'cheerful', 'complaining', 'cutesy', 'gentle', 'nervous', 'sad', 'shy', 'strict']
+------------------------------------------------------------------------
+zh-CN-Xiaoyou:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Female  local_name=Xiaoyou Dragon HD Flash Latest
+  styles(7): ['chat', 'angry', 'cheerful', 'poetry-reading', 'sad', 'story', 'cute']
+------------------------------------------------------------------------
+zh-CN-Xiaoyu:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Female  local_name=Xiaoyu Dragon HD Flash Latest
+  styles(6): ['argue', 'angry', 'cheerful', 'comfort', 'sad', 'sorry']
+------------------------------------------------------------------------
+zh-CN-Yunxia:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Male  local_name=Yunxia Dragon HD Flash Latest
+  styles(9): ['affectionate', 'angry', 'comfort', 'cheerful', 'encourage', 'excited', 'fearful', 'sad', 'surprised']
+------------------------------------------------------------------------
+zh-CN-Yunyi:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Male  local_name=Yunyi Dragon HD Flash Latest
+  styles(7): ['assassin', 'captain', 'cavalier', 'drake', 'gamenarrator', 'geomancer', 'poet']
+------------------------------------------------------------------------
+zh-CN-XiaochenNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓辰
+  styles(1): ['livecommercial']
+------------------------------------------------------------------------
+zh-CN-XiaohanNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓涵
+  styles(10): ['calm', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad', 'gentle', 'affectionate', 'embarrassed']
+------------------------------------------------------------------------
+zh-CN-XiaomengNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓梦
+  styles(1): ['chat']
+------------------------------------------------------------------------
+zh-CN-XiaomoNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓墨
+  styles(12): ['embarrassed', 'calm', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad', 'depressed', 'affectionate', 'gentle', 'envious']
+  roles(8): ['YoungAdultFemale', 'YoungAdultMale', 'OlderAdultFemale', 'OlderAdultMale', 'SeniorFemale', 'SeniorMale', 'Girl', 'Boy']
+------------------------------------------------------------------------
+zh-CN-XiaoruiNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓睿
+  styles(4): ['calm', 'fearful', 'angry', 'sad']
+------------------------------------------------------------------------
+zh-CN-XiaoshuangMultilingualNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓双 多语言
+  styles(1): ['chat']
+------------------------------------------------------------------------
+zh-CN-XiaoshuangNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓双
+  styles(1): ['chat']
+------------------------------------------------------------------------
+zh-CN-XiaoxiaoMultilingualNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓晓 多语言
+  styles(7): ['affectionate', 'cheerful', 'empathetic', 'excited', 'poetry-reading', 'sorry', 'story']
+------------------------------------------------------------------------
+zh-CN-XiaoxiaoNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓晓
+  styles(20): ['assistant', 'chat', 'customerservice', 'newscast', 'affectionate', 'angry', 'calm', 'cheerful', 'disgruntled', 'fearful', 'gentle', 'lyrical', 'sad', 'serious', 'poetry-reading', 'friendly', 'chat-casual', 'whispering', 'sorry', 'excited']
+------------------------------------------------------------------------
+zh-CN-XiaoyiNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓伊
+  styles(9): ['angry', 'disgruntled', 'affectionate', 'cheerful', 'fearful', 'sad', 'embarrassed', 'serious', 'gentle']
+------------------------------------------------------------------------
+zh-CN-XiaoyouMultilingualNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓悠 多语言
+  styles(7): ['chat', 'angry', 'cheerful', 'poetry-reading', 'sad', 'story', 'cute']
+------------------------------------------------------------------------
+zh-CN-XiaozhenNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓甄
+  styles(6): ['angry', 'disgruntled', 'cheerful', 'fearful', 'sad', 'serious']
+------------------------------------------------------------------------
+zh-CN-YunfengNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云枫
+  styles(7): ['angry', 'disgruntled', 'cheerful', 'fearful', 'sad', 'serious', 'depressed']
+------------------------------------------------------------------------
+zh-CN-YunhaoNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云皓
+  styles(1): ['advertisement-upbeat']
+------------------------------------------------------------------------
+zh-CN-YunjianNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云健
+  styles(10): ['narration-relaxed', 'sports-commentary', 'sports-commentary-excited', 'angry', 'disgruntled', 'cheerful', 'sad', 'serious', 'depressed', 'documentary-narration']
+------------------------------------------------------------------------
+zh-CN-YunxiNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云希
+  styles(12): ['narration-relaxed', 'embarrassed', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad', 'depressed', 'chat', 'assistant', 'newscast']
+  roles(3): ['Narrator', 'YoungAdultMale', 'Boy']
+------------------------------------------------------------------------
+zh-CN-YunxiaNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云夏
+  styles(5): ['calm', 'fearful', 'cheerful', 'angry', 'sad']
+------------------------------------------------------------------------
+zh-CN-YunyangNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云扬
+  styles(3): ['customerservice', 'narration-professional', 'newscast-casual']
+------------------------------------------------------------------------
+zh-CN-YunyeNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云野
+  styles(8): ['embarrassed', 'calm', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad']
+  roles(8): ['YoungAdultFemale', 'YoungAdultMale', 'OlderAdultFemale', 'OlderAdultMale', 'SeniorFemale', 'SeniorMale', 'Girl', 'Boy']
+------------------------------------------------------------------------
+zh-CN-YunzeNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云泽
+  styles(9): ['calm', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad', 'depressed', 'documentary-narration']
+  roles(2): ['OlderAdultMale', 'SeniorMale']
+------------------------------------------------------------------------
+
+

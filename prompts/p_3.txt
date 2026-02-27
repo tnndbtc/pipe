@@ -10,6 +10,7 @@
 #
 # 📥 FILES READ (written by earlier stages):
 #     episode_direction.txt                                      (Stage 0)
+#     projects/{{PROJECT_SLUG}}/VoiceCast.json                   (Stage 0)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json  (Stage 2)
 #     contracts/schemas/Script.v1.json
 #
@@ -36,8 +37,9 @@ Schema         : contracts/schemas/Script.v1.json
 
 Read these files before writing anything:
   1. episode_direction.txt          — full episode direction
-  2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
-  3. contracts/schemas/Script.v1.json   — inspect all required fields
+  2. projects/{{PROJECT_SLUG}}/VoiceCast.json   — voice casting from Stage 0
+  3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
+  4. contracts/schemas/Script.v1.json   — inspect all required fields
 
 ---
 
@@ -57,13 +59,19 @@ Write this BEFORE scenes.  Fields per entry:
                  Use "neutral" only for non-human or intentionally ambiguous voices.
   role         : short description (e.g. "lead scientist", "military commander")
 
+**Character ID binding** — REQUIRED:
+  Use the character_id values from VoiceCast.json as the cast[].character_id
+  values here.  Do NOT invent new IDs for characters already in VoiceCast.json.
+  If VoiceCast.json has "pharaoh", this cast must have character_id "pharaoh".
+  New minor characters not in VoiceCast.json may get new IDs — they will fall
+  back to gender-based default voice assignment.
+
 Example:
 ```json
 "cast": [
-  { "character_id": "Lina",            "gender": "female", "role": "tech specialist, Ethan's partner" },
-  { "character_id": "Ethan",           "gender": "male",   "role": "enhanced guardian of Earth" },
-  { "character_id": "Dr. Hale",        "gender": "male",   "role": "lead scientist" },
-  { "character_id": "Commander Reyes", "gender": "female", "role": "military commander" }
+  { "character_id": "narrator",  "gender": "neutral", "role": "off-screen narrator" },
+  { "character_id": "pharaoh",   "gender": "male",    "role": "protagonist, defying death" },
+  { "character_id": "anubis",    "gender": "male",    "role": "god of death, antagonist" }
 ]
 ```
 
@@ -83,6 +91,19 @@ Rules:
   • All speaker_ids in dialogue MUST match a character_id in cast[].
   • All characters must be consistent with StoryPrompt.json characters[].
   • All story events must be consistent with episode_direction.txt.
+
+**Style-constrained dialogue** — REQUIRED:
+  Each character in VoiceCast.json has an en.available_styles list.
+  Write dialogue whose emotional register is expressible by a style
+  in that character's available_styles.  Do NOT write dialogue requiring
+  an emotion outside the available list.  Redirect strong emotion:
+    - available_styles has 'shouting' but not 'angry'
+        → write forceful, clipped lines — not screamed fury
+    - available_styles has 'whispering' but not 'shouting'
+        → use tense, low-voice urgency for intense moments
+    - available_styles has 'serious' but not 'angry'
+        → write cold authority, not hot rage
+  This constraint applies to the en locale script only.
 
 Validate the artifact against contracts/schemas/Script.v1.json using
 Python + jsonschema.  If validation fails, fix and retry.

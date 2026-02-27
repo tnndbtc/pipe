@@ -36,6 +36,8 @@
 #   azure_style        → <mstts:express-as style='...'>    (explicit; overrides emotion mapping)
 #   azure_style_degree → styledegree='...'                 (explicit; overrides default 1.5)
 #   azure_rate         → <prosody rate='...'>              (explicit; overrides pace mapping)
+#   azure_pitch        → <prosody pitch='...'>             (explicit; e.g. '-10%', '+5%')
+#   azure_break_ms     → <break time='Nms'/> after each sentence terminator (0 = disabled)
 #   voice_style        → secondary gender hint + vocal quality description
 #   emotion            → auto-mapped to Azure style via keyword rules
 #   pace               → auto-mapped to prosody rate (slow=-25%, normal=0%, fast=+25%)
@@ -300,16 +302,22 @@ def build_ssml(
     style: str | None,
     style_degree: float,
     duration_sec: float | None = None,
+    pitch: str | None = None,
+    break_ms: int = 0,
 ) -> str:
     """Build Azure SSML for a single utterance.
 
     Layer order (outermost → innermost):
-      <voice> → <mstts:express-as> → <prosody> → text
+      <voice> → <mstts:express-as> → <prosody> → text [<break/>text ...]
 
     Rules:
     - duration_sec overrides rate when both are set (used for timed-shot fitting)
     - express-as element is omitted entirely when style is None
-    - prosody element is omitted when rate is "0%" and duration_sec is None
+    - prosody element is always emitted when pitch is set, even if rate is "0%"
+      and duration_sec is None (pitch is a prosody attribute)
+    - break_ms > 0: inserts <break time='Nms'/> after each sentence terminator
+      (period, exclamation mark, question mark) in the text.  Set to 0 for
+      whispering style — breaks inside whispers sound robotic.
     """
     escaped = (text
                .replace("&", "&amp;")
@@ -318,15 +326,27 @@ def build_ssml(
                .replace('"', "&quot;")
                .replace("'", "&apos;"))
 
-    # Prosody
-    if duration_sec is not None:
-        prosody_attr = f'duration="{duration_sec:.3f}s"'
-    elif rate and rate != "0%":
-        prosody_attr = f'rate="{rate}"'
-    else:
-        prosody_attr = ""
+    # Optionally inject sentence-end breaks
+    if break_ms > 0:
+        escaped = re.sub(
+            r'([.!?](?:\s|$))',
+            lambda m: m.group(1).rstrip() + f'<break time="{break_ms}ms"/>' + (m.group(1)[len(m.group(1).rstrip()):] or ' '),
+            escaped,
+        )
 
-    spoken = f"<prosody {prosody_attr}>{escaped}</prosody>" if prosody_attr else escaped
+    # Prosody — emit whenever rate, pitch, or duration_sec is meaningful
+    prosody_parts: list[str] = []
+    if duration_sec is not None:
+        prosody_parts.append(f'duration="{duration_sec:.3f}s"')
+    elif rate and rate != "0%":
+        prosody_parts.append(f'rate="{rate}"')
+    if pitch:
+        prosody_parts.append(f'pitch="{pitch}"')
+
+    spoken = (
+        f"<prosody {' '.join(prosody_parts)}>{escaped}</prosody>"
+        if prosody_parts else escaped
+    )
 
     # Style
     if style:
@@ -460,6 +480,12 @@ def load_items_from_manifest(manifest: dict, path: str, asset_id_filter: str | N
         # ── Rate resolution (explicit > pace mapping) ──
         rate = tts.get("azure_rate") or AZURE_PACE_RATE.get(pace, "0%")
 
+        # ── Pitch (explicit only; no auto-derivation) ──
+        pitch = tts.get("azure_pitch") or None
+
+        # ── Sentence-end break (explicit only; default 0 = disabled) ──
+        break_ms = int(tts.get("azure_break_ms") or 0)
+
         items.append({
             "item_id":      vo["item_id"],
             "speaker":      vo["speaker_id"],
@@ -472,6 +498,8 @@ def load_items_from_manifest(manifest: dict, path: str, asset_id_filter: str | N
             "style":        style,
             "style_degree": style_degree,
             "rate":         rate,
+            "pitch":        pitch,
+            "break_ms":     break_ms,
         })
 
     return items
@@ -554,7 +582,9 @@ def run(items: list[dict], out_dir: Path) -> list[dict]:
         print(f"  Voice        : {vo['voice']}  (lang={vo['azure_lang']})")
         print(f"  Voice style  : {vo['voice_style'] or '(not set)'}")
         print(f"  Emotion      : {vo['emotion'] or '(not set)'}  →  style={vo['style'] or 'none'}  degree={vo['style_degree']}")
-        print(f"  Rate         : {vo['rate']}")
+        print(f"  Rate         : {vo['rate']}"
+              + (f"  pitch={vo['pitch']}" if vo.get('pitch') else "")
+              + (f"  break={vo['break_ms']}ms" if vo.get('break_ms') else ""))
         print(f"  Text         : \"{vo['text'][:80]}{'...' if len(vo['text']) > 80 else ''}\"")
 
         ssml = build_ssml(
@@ -564,6 +594,8 @@ def run(items: list[dict], out_dir: Path) -> list[dict]:
             rate=vo["rate"],
             style=vo["style"],
             style_degree=vo["style_degree"],
+            pitch=vo.get("pitch"),
+            break_ms=vo.get("break_ms", 0),
         )
 
         try:
