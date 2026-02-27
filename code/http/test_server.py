@@ -1252,6 +1252,7 @@ Direction    : …"></textarea>
   let pipeStepEs    = null;
   let pipeStoryFile = null;   // auto-detected from pipeline_vars.*.sh
   let pipeRunning   = null;   // { from, to } while an llm range is running; null otherwise
+  let activeVideoLocale = null;  // currently selected video locale tab
   let _pipeTabInited = false;
 
   async function initPipelineTab() {
@@ -1563,14 +1564,17 @@ Direction    : …"></textarea>
     if (readyVideos.length > 0) {
       videoWrap.style.display = 'block';
       videoTabs.innerHTML = '';
+      // Keep the previously active locale if it's still in readyVideos; else fall back to first
+      const targetLocale = (activeVideoLocale && readyVideos.includes(activeVideoLocale))
+                           ? activeVideoLocale : readyVideos[0];
       readyVideos.forEach((l, i) => {
         const btn = document.createElement('button');
-        btn.className = 'btn-locale-tab' + (i === 0 ? ' active' : '');
+        btn.className = 'btn-locale-tab' + (l === targetLocale ? ' active' : '');
         btn.textContent = l;
         btn.onclick = () => playLocaleVideoBtn(l, btn);
         videoTabs.appendChild(btn);
       });
-      playLocaleVideo(readyVideos[0]);
+      playLocaleVideo(targetLocale);
     } else {
       videoWrap.style.display = 'none';
     }
@@ -1596,11 +1600,13 @@ Direction    : …"></textarea>
   }
 
   function playLocaleVideo(locale) {
-    const video    = document.getElementById('pipe-video');
-    const path     = 'projects/' + pipeEpSlug + '/episodes/' + pipeEpId +
-                     '/renders/' + locale + '/output.mp4';
+    activeVideoLocale = locale;
+    const video = document.getElementById('pipe-video');
+    const path  = 'projects/' + pipeEpSlug + '/episodes/' + pipeEpId +
+                  '/renders/' + locale + '/output.mp4';
     video.pause();
-    video.src = '/serve_media?path=' + encodeURIComponent(path);
+    // Append ?t= cache-buster so the browser always fetches the latest file after re-render
+    video.src = '/serve_media?path=' + encodeURIComponent(path) + '&t=' + Date.now();
     video.load();
   }
 
@@ -2018,6 +2024,24 @@ def _step_is_done(step: str, slug: str, ep_id: str, locale: str) -> bool:
     return False
 
 
+def _delete_step_output(step: str, slug: str, ep_id: str, locale: str) -> None:
+    """Remove a step's primary output(s) so it will always re-run fresh."""
+    ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+    targets: dict[str, list[str]] = {
+        "manifest_merge":  [os.path.join(ep_dir, f"AssetManifest_merged.{locale}.json")],
+        "resolve_assets":  [os.path.join(ep_dir, f"AssetManifest.media.{locale}.json")],
+        "gen_render_plan": [os.path.join(ep_dir, f"RenderPlan.{locale}.json")],
+        "render_video":    [os.path.join(ep_dir, "renders", locale, "output.mp4"),
+                            os.path.join(ep_dir, "renders", locale, "render_output.json")],
+        # gen_tts / post_tts: skip deletion — TTS files are expensive to redo
+    }
+    for path in targets.get(step, []):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
 def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
                     profile: str = "preview_local") -> list | None:
     """Build command list for a post-processing step."""
@@ -2398,13 +2422,19 @@ class Handler(BaseHTTPRequestHandler):
                             "resolve_assets", "gen_render_plan", "render_video"]
             # Honour optional from= param — start from a specific step
             from_idx = LOCALE_STEPS.index(from_step) if from_step in LOCALE_STEPS else 0
+            # When user explicitly picks a start step ("Run N→7"), force-run all
+            # steps in the range (delete stale outputs).  Without from= (full chain)
+            # keep the skip-if-done behaviour to avoid re-running expensive TTS.
+            force_run = bool(from_step)
             step_env = os.environ.copy()
             step_env.pop("CLAUDECODE", None)
             client = self.client_address
 
             try:
                 for step in LOCALE_STEPS[from_idx:]:
-                    if _step_is_done(step, slug, ep_id, locale):
+                    if force_run:
+                        _delete_step_output(step, slug, ep_id, locale)
+                    elif _step_is_done(step, slug, ep_id, locale):
                         self.wfile.write(sse("line",
                             f"  ✓ {step} — already done, skipping"))
                         self.wfile.flush()

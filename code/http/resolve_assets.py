@@ -24,11 +24,11 @@
 #   Music     : music/{item_id}.{wav|mp3|ogg}
 #   SFX       : sfx/{item_id}.{wav|mp3|ogg}
 #   Background: {asset_id}.{png|jpg|webp|gif}  (then backgrounds/ subdir)
-#   Character : {asset_id}.{png|jpg|webp|gif}  (then characters/ subdir)
+#   Character : projects/{project_id}/characters/ (project-level, FIRST)
+#               then assets/characters/{asset_id}.ext  (episode subdir)
+#               then assets/{asset_id}.ext             (episode root, last resort)
 #               Also tries short form: strip "char-" prefix + "-vN" suffix
 #               so amunhotep.png matches char-amunhotep-v1
-#               Finally falls back to projects/{project_id}/characters/
-#               so characters are shared across all episodes of the same project
 #
 # Output: AssetManifest.media.{locale}.json in episode directory (or --out)
 #
@@ -176,15 +176,15 @@ def resolve_all(merged: dict, assets_root: Path) -> list[dict]:
     n_missing = 0
 
     # ── 1. Characters ────────────────────────────────────────────────────────
-    # Search order:
-    #   1. assets/{asset_id}.ext                       (episode-level)
+    # Search order (project-level wins so all locales share the same portraits):
+    #   1. projects/{project_id}/characters/           (project-level, shared — FIRST)
     #   2. assets/characters/{asset_id}.ext            (episode-level subdir)
-    #   3. projects/{project_id}/characters/           (project-level, shared)
+    #   3. assets/{asset_id}.ext                       (episode-level root, last resort)
     # Also tries short form in each dir — strip "char-" prefix and "-vN" suffix
     # so amunhotep.png matches asset_id char-amunhotep-v1
     project_id    = merged.get("project_id", "")
     proj_char_dir = PIPE_DIR / "projects" / project_id / "characters"
-    char_search   = [assets_root, assets_root / "characters", proj_char_dir]
+    char_search   = [proj_char_dir, assets_root / "characters", assets_root]
     for pack in merged.get("character_packs", []):
         aid = pack["asset_id"]
         lt  = pack.get("license_type", "proprietary_cleared")
