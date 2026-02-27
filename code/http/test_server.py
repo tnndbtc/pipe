@@ -407,6 +407,11 @@ HTML = r"""<!DOCTYPE html>
   .toggle-wrap.prod .toggle-thumb { transform: translateX(18px); background: var(--gold); }
   .toggle-wrap.prod .toggle-left  { color: var(--dim);  }
   .toggle-wrap.prod .toggle-right { color: var(--gold); }
+  /* HD render state — thumb slides right, colours in blue */
+  .toggle-wrap.render-hd .toggle-track { background: #5b9bff18; border-color: #5b9bff44; }
+  .toggle-wrap.render-hd .toggle-thumb { transform: translateX(18px); background: #5b9bff; }
+  .toggle-wrap.render-hd .toggle-left  { color: var(--dim);  }
+  .toggle-wrap.render-hd .toggle-right { color: #5b9bff; }
 
   /* ── Browse panel ── */
   #panel-browse {
@@ -562,6 +567,21 @@ HTML = r"""<!DOCTYPE html>
     color: #6a7a9a; white-space: pre; line-height: 1.7;
   }
   .pipe-detail.open { display: block; }
+  .pipe-substep-row {
+    display: flex; align-items: center; gap: 5px;
+    flex-wrap: wrap; padding: 3px 0; white-space: normal;
+  }
+  .pipe-substep-locale {
+    font-size: 0.78em; color: var(--dim); min-width: 64px;
+    font-family: var(--mono); flex-shrink: 0;
+  }
+  .btn-substep {
+    background: #ffffff08; color: #6a7a9a;
+    border: 1px solid var(--border); border-radius: 4px;
+    font-size: 0.76em; padding: 2px 9px; cursor: pointer;
+    font-family: var(--mono); transition: background .15s, color .15s;
+  }
+  .btn-substep:hover { background: #ffffff18; color: var(--text); }
 </style>
 </head>
 <body>
@@ -579,6 +599,13 @@ HTML = r"""<!DOCTYPE html>
     <span class="toggle-label toggle-left">🧪 Test</span>
     <div class="toggle-track"><div class="toggle-thumb"></div></div>
     <span class="toggle-label toggle-right">🎬 Prod</span>
+  </div>
+  <div class="toggle-wrap" id="toggle-render"
+       onclick="toggleRenderMode()" tabindex="0"
+       title="Preview — fast encode (CRF 28) for review">
+    <span class="toggle-label toggle-left">🖼 Preview</span>
+    <div class="toggle-track"><div class="toggle-thumb"></div></div>
+    <span class="toggle-label toggle-right">📺 HD</span>
   </div>
   <span id="status-badge">IDLE</span>
   <span id="cost-badge"></span>
@@ -704,7 +731,8 @@ Direction    : …"></textarea>
   let lineCount = 0;
   let currentSlug = null;
   let currentEpId = null;
-  let testMode = true;       // default ON — use cheapest model
+  let testMode   = true;     // default ON — use cheapest model
+  let renderProd = false;    // false = preview_local (CRF 28), true = high (CRF 18)
   const stageStartMs = {};   // stage number → Date.now() at start
   let _runFromStage = 0;
   let _runToStage   = 10;
@@ -967,7 +995,7 @@ Direction    : …"></textarea>
     cmdPreview.style.display = 'block';
 
     // ── 3. Open SSE stream ──────────────────────────────────────────────────
-    const url = `/stream?story_file=${encodeURIComponent(filename)}&from=${from}&to=${to}&test=${testMode ? '1' : '0'}`;
+    const url = `/stream?story_file=${encodeURIComponent(filename)}&from=${from}&to=${to}&test=${testMode ? '1' : '0'}&profile=${renderProd ? 'high' : 'preview_local'}`;
     es = new EventSource(url);
 
     es.addEventListener('line', e => {
@@ -1042,11 +1070,24 @@ Direction    : …"></textarea>
       ? 'Test mode ON — cheapest model (haiku) for all stages'
       : 'Production mode — quality models per stage (sonnet for creative, haiku for mechanical)';
   }
+  function toggleRenderMode() {
+    renderProd = !renderProd;
+    const wrap = document.getElementById('toggle-render');
+    wrap.classList.toggle('render-hd', renderProd);
+    wrap.title = renderProd
+      ? 'HD mode — high quality encode (CRF 18) for final upload'
+      : 'Preview mode — fast encode (CRF 28) for review';
+  }
+
   // Allow keyboard activation (Space / Enter)
   document.addEventListener('keydown', e => {
     if (e.target === document.getElementById('toggle-test') &&
         (e.key === ' ' || e.key === 'Enter')) {
       e.preventDefault(); toggleTestMode();
+    }
+    if (e.target === document.getElementById('toggle-render') &&
+        (e.key === ' ' || e.key === 'Enter')) {
+      e.preventDefault(); toggleRenderMode();
     }
   });
 
@@ -1407,14 +1448,102 @@ Direction    : …"></textarea>
         statusIcon(info.done) +
         '<span class="step-name">' + escHtml(label) + '</span>' +
         artHtml +
-        '<button class="btn-pipe-run" onclick="runLlmRange(' + n + ',' + n + ')">Run ' + n + '</button>' +
-        (n < 10 ? '<button class="btn-pipe-run" onclick="runLlmRange(' + n + ',10)">Run ' + n + '→10</button>' : '');
+        '<span style="margin-left:auto;display:flex;gap:4px;flex-shrink:0">' +
+          '<button class="btn-pipe-run" onclick="runLlmRange(' + n + ',' + n + ')">Run ' + n + '</button>' +
+          (n < 10 ? '<button class="btn-pipe-run" onclick="runLlmRange(' + n + ',10)">Run ' + n + '→10</button>' : '') +
+        '</span>';
       row.prepend(expandBtn);
 
       // Detail panel
       const detailEl = document.createElement('div');
       detailEl.className = 'pipe-detail';
-      detailEl.textContent = detail;
+
+      if (n === 10) {
+        // Stage 10: numbered Run / Run→7 buttons matching the main stage button style
+        const LOCALE_STEPS = [
+          { num: 2, step: 'manifest_merge',  label: '2 — merge'    },
+          { num: 3, step: 'gen_tts',         label: '3 — tts'      },
+          { num: 4, step: 'post_tts',        label: '4 — post_tts' },
+          { num: 5, step: 'resolve_assets',  label: '5 — resolve'  },
+          { num: 6, step: 'gen_render_plan', label: '6 — plan'     },
+          { num: 7, step: 'render_video',    label: '7 — render'   },
+        ];
+        const localeStepsMap = status.locale_steps || {};
+        const locales        = status.locales || [];
+
+        function makeRunBtn(label, onclick) {
+          const b = document.createElement('button');
+          b.className = 'btn-pipe-run';
+          b.style.cssText = 'font-size:0.72em;padding:2px 8px';
+          b.textContent = label;
+          b.onclick = onclick;
+          return b;
+        }
+
+        // ── Step 1: gen_music_clip (shared, no locale) ──────────────────────
+        const sharedRow = document.createElement('div');
+        sharedRow.className = 'pipe-substep-row';
+        const sharedNameSpan = document.createElement('span');
+        sharedNameSpan.className = 'pipe-substep-locale';
+        sharedNameSpan.style.cssText = 'min-width:0;flex:1';
+        sharedNameSpan.textContent = '1 — gen_music_clip';
+        sharedRow.appendChild(sharedNameSpan);
+        const sharedBtnWrap = document.createElement('span');
+        sharedBtnWrap.style.cssText = 'margin-left:auto;display:flex;gap:4px;flex-shrink:0';
+        sharedBtnWrap.appendChild(makeRunBtn('Run 1', () =>
+          startPipeStep({ type: 'post', step: 'gen_music_clip',
+                          slug: pipeEpSlug, ep_id: pipeEpId, locale: '' })));
+        sharedRow.appendChild(sharedBtnWrap);
+        detailEl.appendChild(sharedRow);
+
+        // ── Steps 2–7: per-locale ───────────────────────────────────────────
+        if (locales.length === 0) {
+          const hint = document.createElement('div');
+          hint.style.cssText = 'color:var(--dim);font-size:0.78em;padding:4px 0';
+          hint.textContent = 'No locales yet — run Stage 9 first.';
+          detailEl.appendChild(hint);
+        } else {
+          locales.forEach(locale => {
+            // Locale header
+            const hdr = document.createElement('div');
+            hdr.style.cssText = 'color:var(--dim);font-size:0.74em;padding:5px 0 2px;font-family:var(--mono)';
+            hdr.textContent = locale + ':';
+            detailEl.appendChild(hdr);
+
+            const lsteps = localeStepsMap[locale] || {};
+            LOCALE_STEPS.forEach(({ num, step, label }) => {
+              const done = (lsteps[step] || {}).done || false;
+              const row  = document.createElement('div');
+              row.className = 'pipe-substep-row';
+              // status icon
+              row.appendChild(Object.assign(document.createElement('span'), {
+                innerHTML: statusIcon(done), style: 'flex-shrink:0'
+              }));
+              // step label (flex:1 to push buttons right)
+              row.appendChild(Object.assign(document.createElement('span'), {
+                className: 'pipe-substep-locale',
+                style: 'min-width:0;flex:1',
+                textContent: label
+              }));
+              // Run N  [Run N→7]  — right-aligned
+              const btnWrap = document.createElement('span');
+              btnWrap.style.cssText = 'margin-left:auto;display:flex;gap:4px;flex-shrink:0';
+              btnWrap.appendChild(makeRunBtn('Run ' + num, () =>
+                startPipeStep({ type: 'post', step,
+                                slug: pipeEpSlug, ep_id: pipeEpId, locale })));
+              if (num < 7) {
+                btnWrap.appendChild(makeRunBtn('Run ' + num + '→7', () =>
+                  startPipeStep({ type: 'locale', from_step: step,
+                                  slug: pipeEpSlug, ep_id: pipeEpId, locale })));
+              }
+              row.appendChild(btnWrap);
+              detailEl.appendChild(row);
+            });
+          });
+        }
+      } else {
+        detailEl.textContent = detail;
+      }
 
       expandBtn.addEventListener('click', () => {
         const open = detailEl.classList.toggle('open');
@@ -1531,20 +1660,25 @@ Direction    : …"></textarea>
     clearOutput();
     setStatus('running');
 
+    const profile = renderProd ? 'high' : 'preview_local';
     let url;
     if (params.type === 'llm') {
       url = '/stream?story_file=' + encodeURIComponent(params.story_file) +
             '&from=' + params.from + '&to=' + params.to +
-            '&test=' + (testMode ? '1' : '0');
+            '&test=' + (testMode ? '1' : '0') +
+            '&profile=' + profile;
     } else if (params.type === 'locale') {
       url = '/run_locale?slug='   + encodeURIComponent(params.slug) +
             '&ep_id='  + encodeURIComponent(params.ep_id) +
-            '&locale=' + encodeURIComponent(params.locale);
+            '&locale=' + encodeURIComponent(params.locale) +
+            '&profile=' + profile +
+            (params.from_step ? '&from=' + encodeURIComponent(params.from_step) : '');
     } else {
       url = '/run_step?step='   + encodeURIComponent(params.step) +
             '&slug='   + encodeURIComponent(params.slug) +
             '&ep_id='  + encodeURIComponent(params.ep_id) +
-            '&locale=' + encodeURIComponent(params.locale);
+            '&locale=' + encodeURIComponent(params.locale) +
+            '&profile=' + profile;
     }
 
     pipeStepEs = new EventSource(url);
@@ -1892,7 +2026,12 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
 
     def ep(f): return os.path.join(ep_dir, f)
 
-    if step == "manifest_merge":
+    if step == "gen_music_clip":
+        return [
+            "python3", os.path.join(code_dir, "gen_music_clip.py"),
+            "--manifest", ep("AssetManifest_draft.shared.json"),
+        ]
+    elif step == "manifest_merge":
         return [
             "python3", os.path.join(code_dir, "manifest_merge.py"),
             "--shared", ep(f"AssetManifest_draft.shared.json"),
@@ -1984,11 +2123,14 @@ class Handler(BaseHTTPRequestHandler):
 
         # SSE stream  —  runs: bash run.sh <story_file> <from> <to>
         elif parsed.path == "/stream":
-            params     = parse_qs(parsed.query)
-            story_file = unquote_plus(params.get("story_file", [""])[0]).strip()
-            from_stage = params.get("from",  ["0"])[0].strip()
-            to_stage   = params.get("to",    ["9"])[0].strip()
-            test_mode  = params.get("test",  ["1"])[0].strip() == "1"
+            params        = parse_qs(parsed.query)
+            story_file    = unquote_plus(params.get("story_file", [""])[0]).strip()
+            from_stage    = params.get("from",    ["0"])[0].strip()
+            to_stage      = params.get("to",      ["9"])[0].strip()
+            test_mode     = params.get("test",    ["1"])[0].strip() == "1"
+            render_profile = params.get("profile", ["preview_local"])[0].strip()
+            if render_profile not in ("preview_local", "draft_720p", "high"):
+                render_profile = "preview_local"
 
             # Sanitise: digits only, 0–9
             from_stage = str(max(0, min(10, int(from_stage)))) if from_stage.isdigit() else "0"
@@ -2012,6 +2154,7 @@ class Handler(BaseHTTPRequestHandler):
             run_env.pop("CLAUDECODE", None)   # prevent nested-session guard from firing
             if test_mode:
                 run_env["MODEL"] = "haiku"   # cheapest model for all stages
+            run_env["RENDER_PROFILE"] = render_profile   # preview_local or high
 
             client = self.client_address
             proc   = None
@@ -2231,11 +2374,12 @@ class Handler(BaseHTTPRequestHandler):
 
         # SSE stream: all post-processing steps for one locale, skip-if-done
         elif parsed.path == "/run_locale":
-            params  = parse_qs(parsed.query)
-            slug    = unquote_plus(params.get("slug",    [""])[0]).strip()
-            ep_id   = unquote_plus(params.get("ep_id",   [""])[0]).strip()
-            locale  = unquote_plus(params.get("locale",  [""])[0]).strip()
-            profile = unquote_plus(params.get("profile", ["preview_local"])[0]).strip()
+            params     = parse_qs(parsed.query)
+            slug       = unquote_plus(params.get("slug",    [""])[0]).strip()
+            ep_id      = unquote_plus(params.get("ep_id",   [""])[0]).strip()
+            locale     = unquote_plus(params.get("locale",  [""])[0]).strip()
+            profile    = unquote_plus(params.get("profile", ["preview_local"])[0]).strip()
+            from_step  = unquote_plus(params.get("from",    [""])[0]).strip()
 
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -2252,12 +2396,14 @@ class Handler(BaseHTTPRequestHandler):
 
             LOCALE_STEPS = ["manifest_merge", "gen_tts", "post_tts",
                             "resolve_assets", "gen_render_plan", "render_video"]
+            # Honour optional from= param — start from a specific step
+            from_idx = LOCALE_STEPS.index(from_step) if from_step in LOCALE_STEPS else 0
             step_env = os.environ.copy()
             step_env.pop("CLAUDECODE", None)
             client = self.client_address
 
             try:
-                for step in LOCALE_STEPS:
+                for step in LOCALE_STEPS[from_idx:]:
                     if _step_is_done(step, slug, ep_id, locale):
                         self.wfile.write(sse("line",
                             f"  ✓ {step} — already done, skipping"))

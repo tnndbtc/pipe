@@ -25,6 +25,10 @@
 #   SFX       : sfx/{item_id}.{wav|mp3|ogg}
 #   Background: {asset_id}.{png|jpg|webp|gif}  (then backgrounds/ subdir)
 #   Character : {asset_id}.{png|jpg|webp|gif}  (then characters/ subdir)
+#               Also tries short form: strip "char-" prefix + "-vN" suffix
+#               so amunhotep.png matches char-amunhotep-v1
+#               Finally falls back to projects/{project_id}/characters/
+#               so characters are shared across all episodes of the same project
 #
 # Output: AssetManifest.media.{locale}.json in episode directory (or --out)
 #
@@ -33,8 +37,12 @@
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
+
+# Repo root — two levels up from code/http/
+PIPE_DIR = Path(__file__).resolve().parent.parent.parent
 
 PRODUCER = "resolve_assets.py"
 DETERMINISTIC_TS = "1970-01-01T00:00:00Z"
@@ -168,12 +176,23 @@ def resolve_all(merged: dict, assets_root: Path) -> list[dict]:
     n_missing = 0
 
     # ── 1. Characters ────────────────────────────────────────────────────────
-    # Search: assets/{asset_id}.ext  then  assets/characters/{asset_id}.ext
-    char_search = [assets_root, assets_root / "characters"]
+    # Search order:
+    #   1. assets/{asset_id}.ext                       (episode-level)
+    #   2. assets/characters/{asset_id}.ext            (episode-level subdir)
+    #   3. projects/{project_id}/characters/           (project-level, shared)
+    # Also tries short form in each dir — strip "char-" prefix and "-vN" suffix
+    # so amunhotep.png matches asset_id char-amunhotep-v1
+    project_id    = merged.get("project_id", "")
+    proj_char_dir = PIPE_DIR / "projects" / project_id / "characters"
+    char_search   = [assets_root, assets_root / "characters", proj_char_dir]
     for pack in merged.get("character_packs", []):
         aid = pack["asset_id"]
         lt  = pack.get("license_type", "proprietary_cleared")
         f   = search_dirs(char_search, aid, IMAGE_EXTS + AUDIO_EXTS)
+        if not f:
+            short = re.sub(r"^char-", "", re.sub(r"-v\d+$", "", aid))
+            if short != aid:
+                f = search_dirs(char_search, short, IMAGE_EXTS + AUDIO_EXTS)
         if f:
             items.append(_resolved(aid, "character", f, lt))
             n_found += 1
