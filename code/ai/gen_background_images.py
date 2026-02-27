@@ -175,6 +175,8 @@ def parse_args():
         "--asset-id", type=str, default=None, dest="asset_id",
         help="Process only this asset_id (requires --manifest).",
     )
+    parser.add_argument("--force", action="store_true",
+                        help="Overwrite existing output files instead of skipping them.")
     return parser.parse_args()
 
 
@@ -354,7 +356,7 @@ def run_model(model_key: str, backgrounds: list, out_dir: Path, args,
         out_path = out_dir / fname
         print(f"\n  [{idx}/{total}] {bg['asset_id']} (mood: {bg['color_mood']}) → {fname}")
 
-        if out_path.exists():
+        if out_path.exists() and not args.force:
             print(f"    [SKIP] already exists")
             results.append({
                 "asset_id": bg["asset_id"],
