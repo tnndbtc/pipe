@@ -16,27 +16,35 @@
 # ---------------------------------------------------------------------------
 # Hardware Target: NVIDIA RTX 4060 8 GB VRAM
 # ---------------------------------------------------------------------------
+# Supported models (--model flag):
+#
+#   flux-schnell  black-forest-labs/FLUX.1-schnell
+#                 4-bit BnB quant, ~6 GB VRAM. 4 steps. Fast.
+#                 Needs HF login: huggingface-cli login
+#
+#   flux-dev      black-forest-labs/FLUX.1-dev
+#                 4-bit BnB quant, ~6 GB VRAM. 28 steps. Best FLUX quality.
+#                 Needs HF login (gated model).
+#
+#   sdxl          stabilityai/stable-diffusion-xl-base-1.0
+#                 FP16 + CPU offload, ~5 GB VRAM. 25 steps.
+#
+#   sdxl-turbo    stabilityai/sdxl-turbo
+#                 FP16 + CPU offload, ~5 GB VRAM. 4 steps. Fast.
+#
+#   auto          Tries flux-schnell first, falls back to sdxl on failure.
+#
+#   all           Runs every model above in sequence. Outputs are saved with
+#                 model suffix: char-amunhotep-v1_flux-schnell.png etc.
+#                 Use this to compare quality across models.
+#
 # Memory-saving techniques:
-#   PRIMARY — FLUX.1-schnell with 4-bit bitsandbytes quantisation:
-#     The FLUX transformer is ~24 GB in FP32; load_in_4bit collapses it to
-#     ~6 GB on-GPU.  Text encoders + VAE are CPU-offloaded via
-#     enable_model_cpu_offload(), so they only occupy VRAM during their
-#     individual forward passes.  vae_slicing() further splits the VAE
-#     decode into row-by-row chunks to keep peak activation VRAM low.
-#
-#   FALLBACK — SDXL 1.0 in FP16 + enable_model_cpu_offload():
-#     The full SDXL UNet is ~5 GB in FP16.  CPU offload streams each
-#     sub-module to GPU only when needed, keeping peak VRAM ~4-5 GB.
-#
-#   Between images: torch.cuda.empty_cache() + gc.collect() are called
-#   after every generation to release fragmented allocations.
-#
-#   Resolution 512×768 (below SDXL native 1024 px) further reduces
-#   activation memory during the UNet forward pass.
-#
-# NOTE: FLUX.1-schnell requires accepting the licence at:
-#   https://huggingface.co/black-forest-labs/FLUX.1-schnell
-#   Run `huggingface-cli login` before the first run.
+#   FLUX: 4-bit bitsandbytes quantisation collapses transformer from ~24 GB
+#   to ~6 GB. enable_model_cpu_offload() streams text encoder + VAE to CPU.
+#   vae_slicing() splits the VAE decode into row-by-row chunks.
+#   SDXL: FP16 UNet ~5 GB. CPU offload keeps peak VRAM ~4-5 GB.
+#   Between images: torch.cuda.empty_cache() + gc.collect() after every gen.
+#   Resolution 512×768 (below SDXL native 1024 px) reduces activation VRAM.
 # ---------------------------------------------------------------------------
 
 import argparse
@@ -50,7 +58,7 @@ import torch
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
+OUTPUT_DIR  = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_character_images"
 
 CHARACTERS = [
@@ -109,33 +117,79 @@ CHARACTERS = [
 ]
 
 # Image dimensions (portrait orientation)
-WIDTH = 512
+WIDTH  = 512
 HEIGHT = 768
-NUM_STEPS_FLUX = 4    # Schnell is distilled — 4 steps is optimal
-NUM_STEPS_SDXL = 25   # SDXL needs more steps
-GUIDANCE_FLUX = 0.0   # Schnell is guidance-distilled; CFG scale unused
-GUIDANCE_SDXL = 7.5
 
-FLUX_MODEL_ID = "black-forest-labs/FLUX.1-schnell"
-SDXL_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
+# ---------------------------------------------------------------------------
+# Model registry
+# Each entry: model_id, steps, guidance, loader_family ("flux" | "sdxl")
+# ---------------------------------------------------------------------------
+MODELS = {
+    "flux-schnell": {
+        "model_id": "black-forest-labs/FLUX.1-schnell",
+        "steps":    4,
+        "guidance": 0.0,   # guidance-distilled — CFG unused
+        "family":   "flux",
+        "notes":    "Fast distilled FLUX, 4-bit quant, ~6 GB VRAM",
+    },
+    "flux-dev": {
+        "model_id": "black-forest-labs/FLUX.1-dev",
+        "steps":    28,
+        "guidance": 3.5,
+        "family":   "flux",
+        "notes":    "Higher quality FLUX, 4-bit quant, ~6 GB VRAM. Needs HF auth (gated).",
+    },
+    "sdxl": {
+        "model_id": "stabilityai/stable-diffusion-xl-base-1.0",
+        "steps":    25,
+        "guidance": 7.5,
+        "family":   "sdxl",
+        "notes":    "SDXL 1.0 FP16 + CPU offload, ~5 GB VRAM",
+    },
+    "sdxl-turbo": {
+        "model_id": "stabilityai/sdxl-turbo",
+        "steps":    4,
+        "guidance": 0.0,   # guidance-distilled
+        "family":   "sdxl",
+        "notes":    "Distilled SDXL, 4 steps, FP16 + CPU offload, ~5 GB VRAM",
+    },
+}
+
+ALL_MODEL_KEYS = list(MODELS.keys())   # ["flux-schnell", "flux-dev", "sdxl", "sdxl-turbo"]
 
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 def parse_args():
+    model_help = "\n".join(
+        f"  {key:<14} {cfg['model_id']}  [{cfg['steps']} steps, guidance={cfg['guidance']}]\n"
+        f"               {cfg['notes']}"
+        for key, cfg in MODELS.items()
+    )
     parser = argparse.ArgumentParser(
-        description="Generate character portrait images for s01e01."
+        description="Generate character portrait images.",
+        epilog=(
+            "Available --model values:\n\n"
+            + model_help +
+            "\n\n  auto           Tries flux-schnell, falls back to sdxl on failure."
+            "\n  all            Runs every model above in sequence for comparison."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--width", type=int, default=WIDTH)
+    parser.add_argument("--width",  type=int, default=WIDTH)
     parser.add_argument("--height", type=int, default=HEIGHT)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed",   type=int, default=42)
     parser.add_argument(
         "--model",
-        choices=["flux", "sdxl", "auto"],
+        choices=ALL_MODEL_KEYS + ["auto", "all"],
         default="auto",
-        help="Model to use. 'auto' tries FLUX first, falls back to SDXL.",
+        help=(
+            "Model to use. "
+            "'auto' tries flux-schnell, falls back to sdxl. "
+            "'all' runs every model in sequence for side-by-side comparison."
+        ),
     )
     parser.add_argument(
         "--manifest", type=str, default=None,
@@ -151,76 +205,93 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Model loaders
 # ---------------------------------------------------------------------------
-def load_flux_pipeline():
-    """Load FLUX.1-schnell with 4-bit bitsandbytes quantisation."""
-    from diffusers import FluxPipeline
+def load_flux_pipeline(model_key: str):
+    """Load a FLUX model with 4-bit bitsandbytes quantisation.
+
+    diffusers >=0.32 no longer accepts quantization_config on the pipeline
+    directly.  The transformer must be quantized separately, then injected.
+    """
+    from diffusers import FluxPipeline, FluxTransformer2DModel
     from transformers import BitsAndBytesConfig
 
-    print("[MODEL] Loading FLUX.1-schnell (4-bit quantised)...")
+    cfg     = MODELS[model_key]
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — 4-bit quant (transformer)...")
     bnb_cfg = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
-    pipe = FluxPipeline.from_pretrained(
-        FLUX_MODEL_ID,
+    transformer = FluxTransformer2DModel.from_pretrained(
+        cfg["model_id"],
+        subfolder="transformer",
         quantization_config=bnb_cfg,
         torch_dtype=torch.bfloat16,
     )
-    # CPU offload: each sub-model moves to GPU only during its forward pass
+    print(f"[MODEL] Loading full pipeline with quantized transformer...")
+    pipe = FluxPipeline.from_pretrained(
+        cfg["model_id"],
+        transformer=transformer,
+        torch_dtype=torch.bfloat16,
+    )
     pipe.enable_model_cpu_offload()
-    # VAE slicing decodes the latent in row chunks — lowers peak VRAM
     pipe.enable_vae_slicing()
-    return pipe, "flux"
+    return pipe
 
 
-def load_sdxl_pipeline():
-    """Load SDXL 1.0 in FP16 with CPU offload — peak ~4-5 GB VRAM."""
+def load_sdxl_pipeline(model_key: str):
+    """Load an SDXL-family model in FP16 with CPU offload."""
     from diffusers import StableDiffusionXLPipeline
 
-    print("[MODEL] Loading SDXL 1.0 (FP16 + CPU offload)...")
+    cfg = MODELS[model_key]
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — FP16 + CPU offload...")
     pipe = StableDiffusionXLPipeline.from_pretrained(
-        SDXL_MODEL_ID,
+        cfg["model_id"],
         torch_dtype=torch.float16,
         use_safetensors=True,
     )
     pipe.enable_model_cpu_offload()
     pipe.enable_vae_slicing()
-    return pipe, "sdxl"
+    return pipe
 
 
-def load_pipeline(preference: str):
-    """Load the requested model; fall back to SDXL if FLUX fails."""
-    if preference == "sdxl":
-        return load_sdxl_pipeline()
-    try:
-        return load_flux_pipeline()
-    except Exception as exc:
-        print(f"[WARN] FLUX load failed ({exc}). Falling back to SDXL.")
-        return load_sdxl_pipeline()
+def load_pipeline(model_key: str):
+    """Load the pipeline for model_key. Returns (pipe, model_key)."""
+    family = MODELS[model_key]["family"]
+    if family == "flux":
+        return load_flux_pipeline(model_key), model_key
+    else:
+        return load_sdxl_pipeline(model_key), model_key
+
+
+def unload_pipeline(pipe):
+    """Aggressively free VRAM after a model run."""
+    del pipe
+    torch.cuda.empty_cache()
+    gc.collect()
 
 
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
-def generate_image(pipe, model_type: str, char: dict, args, generator):
+def generate_image(pipe, model_key: str, char: dict, args, generator):
     """Run one inference call and return a PIL Image."""
-    if model_type == "flux":
+    cfg = MODELS[model_key]
+    if cfg["family"] == "flux":
         result = pipe(
             prompt=char["prompt"],
             width=args.width,
             height=args.height,
-            num_inference_steps=NUM_STEPS_FLUX,
-            guidance_scale=GUIDANCE_FLUX,
+            num_inference_steps=cfg["steps"],
+            guidance_scale=cfg["guidance"],
             generator=generator,
         )
-    else:  # sdxl
+    else:  # sdxl family
         result = pipe(
             prompt=char["prompt"],
-            negative_prompt=char["negative_prompt"],
+            negative_prompt=char.get("negative_prompt", ""),
             width=args.width,
             height=args.height,
-            num_inference_steps=NUM_STEPS_SDXL,
-            guidance_scale=GUIDANCE_SDXL,
+            num_inference_steps=cfg["steps"],
+            guidance_scale=cfg["guidance"],
             generator=generator,
         )
     return result.images[0]
@@ -250,15 +321,100 @@ def load_from_manifest(manifest_path: str, asset_id_filter):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 def locale_from_manifest_path(path: str) -> str:
-    """Extract locale from manifest filename.
-    'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
-    'AssetManifest_draft.json'          -> 'en'
+    stem  = Path(path).stem
+    parts = stem.split(".")
+    return parts[-1] if len(parts) > 1 else "en"
+
+
+def output_filename(char: dict, model_key: str, multi_model: bool) -> str:
     """
-    stem = Path(path).stem
-    parts = stem.split('.')
-    return parts[-1] if len(parts) > 1 else 'en'
+    Single model  → original filename unchanged  (char-amunhotep-v1.png)
+    All models    → model suffix inserted         (char-amunhotep-v1_flux-schnell.png)
+    """
+    if not multi_model:
+        return char["output"]
+    stem = Path(char["output"]).stem
+    return f"{stem}_{model_key}.png"
+
+
+# ---------------------------------------------------------------------------
+# Per-model generation run
+# ---------------------------------------------------------------------------
+def run_model(model_key: str, characters: list, out_dir: Path, args,
+              multi_model: bool) -> list[dict]:
+    """Load, generate all characters, unload. Returns result dicts."""
+    cfg = MODELS[model_key]
+    print(f"\n{'='*60}")
+    print(f"MODEL : {model_key}")
+    print(f"ID    : {cfg['model_id']}")
+    print(f"Notes : {cfg['notes']}")
+    print(f"{'='*60}")
+
+    try:
+        pipe, _ = load_pipeline(model_key)
+    except Exception as exc:
+        print(f"[ERROR] Failed to load {model_key}: {exc}")
+        return [
+            {
+                "asset_id": c["asset_id"],
+                "model": model_key,
+                "output": str(out_dir / output_filename(c, model_key, multi_model)),
+                "size_bytes": 0,
+                "status": "failed",
+                "error": str(exc),
+            }
+            for c in characters
+        ]
+
+    results = []
+    total   = len(characters)
+
+    for idx, char in enumerate(characters, start=1):
+        fname    = output_filename(char, model_key, multi_model)
+        out_path = out_dir / fname
+        print(f"\n  [{idx}/{total}] {char['asset_id']} → {fname}")
+
+        if out_path.exists():
+            print(f"    [SKIP] already exists")
+            results.append({
+                "asset_id": char["asset_id"],
+                "model": model_key,
+                "output": str(out_path),
+                "size_bytes": out_path.stat().st_size,
+                "status": "skipped",
+            })
+            continue
+
+        try:
+            generator = torch.Generator(device="cpu").manual_seed(args.seed)
+            image     = generate_image(pipe, model_key, char, args, generator)
+            image.save(str(out_path), format="PNG")
+            size      = out_path.stat().st_size
+            print(f"    [OK] {size:,} bytes")
+            results.append({
+                "asset_id": char["asset_id"],
+                "model": model_key,
+                "output": str(out_path),
+                "size_bytes": size,
+                "status": "success",
+            })
+        except Exception as exc:
+            print(f"    [ERROR] {exc}")
+            results.append({
+                "asset_id": char["asset_id"],
+                "model": model_key,
+                "output": str(out_path),
+                "size_bytes": 0,
+                "status": "failed",
+                "error": str(exc),
+            })
+        finally:
+            torch.cuda.empty_cache()
+            gc.collect()
+
+    unload_pipeline(pipe)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +422,7 @@ def locale_from_manifest_path(path: str) -> str:
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
+    locale  = locale_from_manifest_path(args.manifest) if args.manifest else "en"
     out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -277,70 +433,49 @@ def main():
             print("[WARN] No matching character_packs in manifest. Nothing to do.")
             return
 
-    pipe, model_type = load_pipeline(args.model)
-    print(f"[MODEL] Active pipeline: {model_type.upper()}")
+    # Resolve which model keys to run
+    if args.model == "all":
+        model_keys  = ALL_MODEL_KEYS
+        multi_model = True
+    elif args.model == "auto":
+        model_keys  = ["flux-schnell"]   # run_model handles fallback on load failure
+        multi_model = False
+    else:
+        model_keys  = [args.model]
+        multi_model = False
 
-    results = []
-    total = len(characters)
+    if args.model == "all":
+        print(f"[MODE] Comparing all {len(model_keys)} models: {', '.join(model_keys)}")
+        print(f"[INFO] Outputs will be saved as <name>_<model>.png for side-by-side comparison")
 
-    for idx, char in enumerate(characters, start=1):
-        out_path = out_dir / char["output"]
-        print(f"\n[{idx}/{total}] Generating {char['asset_id']}...")
+    all_results = []
+    for model_key in model_keys:
+        results = run_model(model_key, characters, out_dir, args, multi_model)
+        all_results.extend(results)
 
-        # Skip if the output already exists
-        if out_path.exists():
-            print(f"  [SKIP] {char['output']} already exists")
-            results.append({
-                "asset_id": char["asset_id"],
-                "output": str(out_path),
-                "size_bytes": out_path.stat().st_size,
-                "status": "skipped",
-            })
-            continue
+    # Auto fallback for 'auto' mode: if flux-schnell failed entirely, try sdxl
+    if args.model == "auto" and all(r["status"] == "failed" for r in all_results):
+        print("\n[WARN] flux-schnell failed for all characters. Falling back to sdxl.")
+        all_results = run_model("sdxl", characters, out_dir, args, multi_model=False)
 
-        try:
-            # Seed per-image so each character is reproducible independently
-            generator = torch.Generator(device="cpu").manual_seed(args.seed)
-            image = generate_image(pipe, model_type, char, args, generator)
-            image.save(str(out_path), format="PNG")
-            size = out_path.stat().st_size
-            print(f"  [OK] {out_path}  ({size:,} bytes)")
-            results.append({
-                "asset_id": char["asset_id"],
-                "output": str(out_path),
-                "size_bytes": size,
-                "status": "success",
-            })
-        except Exception as exc:
-            print(f"  [ERROR] {char['asset_id']}: {exc}")
-            results.append({
-                "asset_id": char["asset_id"],
-                "output": str(out_path),
-                "size_bytes": 0,
-                "status": "failed",
-                "error": str(exc),
-            })
-        finally:
-            # Release GPU allocations before the next image
-            torch.cuda.empty_cache()
-            gc.collect()
+    # Write JSON results
+    results_path = out_dir / f"{SCRIPT_NAME}_results.json"
+    with open(results_path, "w") as fh:
+        json.dump(all_results, fh, indent=2)
 
-    # Write JSON manifest
-    manifest_path = out_dir / f"{SCRIPT_NAME}_results.json"
-    with open(manifest_path, "w") as fh:
-        json.dump(results, fh, indent=2)
-
-    # Print summary
+    # Summary
+    total       = len(all_results)
+    ok_count    = sum(1 for r in all_results if r["status"] in ("success", "skipped"))
+    total_bytes = sum(r["size_bytes"] for r in all_results)
     print("\n" + "=" * 60)
-    print("SUMMARY — gen_character_images")
+    print(f"SUMMARY — gen_character_images ({args.model})")
     print("=" * 60)
-    for r in results:
-        tag = "OK" if r["status"] == "success" else r["status"].upper()
-        print(f"  [{tag}]  {r['output']}  ({r['size_bytes']:,} bytes)")
-    ok_count = sum(1 for r in results if r["status"] in ("success", "skipped"))
-    total_bytes = sum(r["size_bytes"] for r in results)
+    for r in all_results:
+        label = "OK" if r["status"] == "success" else r["status"].upper()
+        model = r.get("model", "")
+        print(f"  [{label}]  [{model}]  {r['output']}  ({r['size_bytes']:,} bytes)")
     print(f"\n{ok_count}/{total} completed | {total_bytes:,} bytes total")
-    print(f"Manifest: {manifest_path}")
+    print(f"Results: {results_path}")
 
 
 if __name__ == "__main__":

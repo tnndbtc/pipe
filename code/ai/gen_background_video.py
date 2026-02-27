@@ -2,16 +2,11 @@
 # gen_background_video.py
 # Generate short cinematic background video clips for shots that require
 # camera motion (pan, crane, zoom) in s01e01.
-#
-# 8 GB VRAM FALLBACK: CogVideoX-2b (~6 GB)
-# Original target model (LTX-Video 0.9.8-13B) requires ~24 GB VRAM and
-# cannot run on an RTX 4060 8 GB. See placeholder_for_background_video.py
-# for the full GPU requirements of the original model.
 # =============================================================================
 #
 # requirements.txt (pip install before running):
 #   torch>=2.4.1
-#   diffusers>=0.30.0        # CogVideoXPipeline added in 0.30
+#   diffusers>=0.32.0        # LTXPipeline added in 0.32; CogVideoXPipeline in 0.30
 #   transformers>=4.40.0
 #   accelerate>=0.30.0
 #   imageio[ffmpeg]>=2.34.0
@@ -19,29 +14,36 @@
 #   safetensors>=0.4.0
 #
 # ---------------------------------------------------------------------------
-# Hardware Target: NVIDIA RTX 4060 8 GB VRAM
+# Hardware targets:
+#
+#   cogvideox-2b  THUDM/CogVideoX-2b
+#                 FP16 + CPU offload + VAE slicing/tiling, ~6 GB VRAM.
+#                 Native resolution 720×480 (3:2).  RTX 4060 8 GB. ✓
+#
+#   cogvideox-5b  THUDM/CogVideoX-5b
+#                 FP16 + CPU offload + VAE slicing/tiling, ~12 GB VRAM.
+#                 Better quality than 2b.  Needs RTX 4070 Ti / 4080 (>=12 GB).
+#                 May OOM on RTX 4060 8 GB.
+#
+#   ltx-video     Lightricks/LTX-Video
+#                 bfloat16 + CPU offload, ~6-8 GB VRAM.
+#                 Fast distilled model, 768×512 native.  RTX 4060 8 GB. ✓
+#
+#   auto          Tries cogvideox-2b first, falls back to ltx-video on failure.
+#
+#   all           Runs every model in sequence. Outputs saved with model
+#                 suffix: bg-desert-excavation-site-v1_cogvideox-2b.mp4
+#                 Use this to compare quality across models.
+#
 # ---------------------------------------------------------------------------
-# Memory-saving techniques:
-#   CogVideoX-2b (2B params) in FP16 fits within 8 GB with:
+# Memory-saving techniques (all models):
+#   enable_model_cpu_offload(): streams each sub-module to GPU only during
+#   its forward pass.  enable_vae_slicing() + enable_vae_tiling() decompose
+#   the VAE decode into frame-sliced and spatially-tiled chunks.
+#   torch.cuda.empty_cache() + gc.collect() between videos.
 #
-#   1. torch.float16: halves weight memory vs FP32.
-#   2. enable_model_cpu_offload(): transformer and VAE stream through GPU
-#      only during their individual forward passes — persistent VRAM is just
-#      the active module (~4-5 GB peak).
-#   3. enable_vae_slicing(): VAE decode processes the video in frame-sliced
-#      chunks, keeping decode peak VRAM flat regardless of frame count.
-#   4. enable_vae_tiling(): spatial tiling further reduces activation memory
-#      for each frame during the VAE decode pass.
-#   5. num_inference_steps=25 (vs default 50) for faster prototype runs;
-#      increase to 50 for better quality if time allows.
-#   6. torch.cuda.empty_cache() + gc.collect() between videos.
-#
-# OUTPUT NOTE: CogVideoX-2b default resolution is 720×480 (3:2 ratio).
-#   True 16:9 (e.g. 768×432) is not guaranteed to be supported by this
-#   model version without fine-tuning. Use 720×480 for prototyping.
-#
-# UPGRADE PATH: For full LTX-Video 0.9.8-13B quality, see:
-#   placeholder_for_background_video.py  (requires RTX 3090/4090 24 GB)
+# UPGRADE PATH: For LTX-Video 0.9.8-13B or CogVideoX higher-res quality,
+#   a GPU with >=24 GB VRAM is required (RTX 3090 / 4090).
 # ---------------------------------------------------------------------------
 
 import argparse
@@ -54,7 +56,7 @@ import torch
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
+OUTPUT_DIR  = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_background_video"
 
 VIDEO_BACKGROUNDS = [
@@ -72,8 +74,8 @@ VIDEO_BACKGROUNDS = [
             "and the workers descending"
         ),
         "duration_sec": 6.0,
-        "num_frames": 49,   # 6s × 8fps + 1
-        "output": "bg-desert-excavation-site-v1.mp4",
+        "num_frames":   49,   # 6s × 8fps + 1
+        "output":       "bg-desert-excavation-site-v1.mp4",
     },
     {
         "asset_id": "bg-underground-chamber-v1",
@@ -90,34 +92,85 @@ VIDEO_BACKGROUNDS = [
             "the full scale of the chamber and the glowing slab at its center"
         ),
         "duration_sec": 5.0,
-        "num_frames": 41,   # 5s × 8fps + 1
-        "output": "bg-underground-chamber-v1.mp4",
+        "num_frames":   41,   # 5s × 8fps + 1
+        "output":       "bg-underground-chamber-v1.mp4",
     },
 ]
 
-COGVIDEOX_MODEL_ID = "THUDM/CogVideoX-2b"
-
-# CogVideoX-2b native resolution (3:2 landscape); best to use as-is
-WIDTH = 720
-HEIGHT = 480
 FPS = 8
-NUM_STEPS = 25      # 50 for quality; 25 for faster prototype
-GUIDANCE_SCALE = 6.0
+
+# ---------------------------------------------------------------------------
+# Model registry
+# family: "cogvideox" | "ltx"
+# width/height: native resolution each model works best at
+# ---------------------------------------------------------------------------
+MODELS = {
+    "cogvideox-2b": {
+        "model_id": "THUDM/CogVideoX-2b",
+        "steps":    25,
+        "guidance": 6.0,
+        "family":   "cogvideox",
+        "width":    720,
+        "height":   480,
+        "notes":    "CogVideoX 2B, FP16 + CPU offload, ~6 GB VRAM. Native 720×480.",
+    },
+    "cogvideox-5b": {
+        "model_id": "THUDM/CogVideoX-5b",
+        "steps":    25,
+        "guidance": 6.0,
+        "family":   "cogvideox",
+        "width":    720,
+        "height":   480,
+        "notes":    "CogVideoX 5B, FP16 + CPU offload, ~12 GB VRAM. RTX 4070 Ti / 4080+ recommended. May OOM on 8 GB.",
+    },
+    "ltx-video": {
+        "model_id": "Lightricks/LTX-Video",
+        "steps":    25,
+        "guidance": 3.0,
+        "family":   "ltx",
+        "width":    768,
+        "height":   512,
+        "notes":    "LTX-Video, bfloat16 + CPU offload, ~6-8 GB VRAM. Native 768×512.",
+    },
+}
+
+ALL_MODEL_KEYS = list(MODELS.keys())
 
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 def parse_args():
+    model_help = "\n".join(
+        f"  {key:<14} {cfg['model_id']}  [{cfg['steps']} steps, guidance={cfg['guidance']}]\n"
+        f"               {cfg['notes']}"
+        for key, cfg in MODELS.items()
+    )
     parser = argparse.ArgumentParser(
-        description="Generate background video clips using CogVideoX-2b (RTX 4060 8 GB)."
+        description="Generate background video clips using text-to-video models.",
+        epilog=(
+            "Available --model values:\n\n"
+            + model_help +
+            "\n\n  auto           Tries cogvideox-2b, falls back to ltx-video on failure."
+            "\n  all            Runs every model above in sequence for comparison."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--width", type=int, default=WIDTH)
-    parser.add_argument("--height", type=int, default=HEIGHT)
-    parser.add_argument("--fps", type=int, default=FPS)
-    parser.add_argument("--steps", type=int, default=NUM_STEPS)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--fps",   type=int, default=FPS)
+    parser.add_argument("--steps", type=int, default=None,
+                        help="Override inference steps (default: per-model value).")
+    parser.add_argument("--seed",  type=int, default=42)
+    parser.add_argument(
+        "--model",
+        choices=ALL_MODEL_KEYS + ["auto", "all"],
+        default="auto",
+        help=(
+            "Model to use. "
+            "'auto' tries cogvideox-2b, falls back to ltx-video on failure. "
+            "'all' runs every model in sequence for side-by-side comparison."
+        ),
+    )
     parser.add_argument(
         "--manifest", type=str, default=None,
         help="Path to AssetManifest JSON. When given, overrides the hardcoded VIDEO_BACKGROUNDS list.",
@@ -143,82 +196,197 @@ def load_from_manifest(manifest_path: str, asset_id_filter):
             continue
         if asset_id_filter and bg["asset_id"] != asset_id_filter:
             continue
-        aid = bg["asset_id"]
-        duration = float(motion.get("duration_sec", 5.0))
+        aid        = bg["asset_id"]
+        duration   = float(motion.get("duration_sec", 5.0))
         num_frames = int(duration * 8) + 1
-        motion_desc = motion.get("description", "slow camera motion")
         videos.append({
-            "asset_id":         aid,
-            "prompt":           bg["ai_prompt"] + ", slow camera motion",
-            "negative_prompt":  "blurry, low quality, modern, fast motion, shaky",
-            "motion_description": motion_desc,
-            "duration_sec":     duration,
-            "num_frames":       num_frames,
-            "output":           f"{aid}.mp4",
+            "asset_id":           aid,
+            "prompt":             bg["ai_prompt"] + ", slow camera motion",
+            "negative_prompt":    "blurry, low quality, modern, fast motion, shaky",
+            "motion_description": motion.get("description", "slow camera motion"),
+            "duration_sec":       duration,
+            "num_frames":         num_frames,
+            "output":             f"{aid}.mp4",
         })
     return videos
 
 
 # ---------------------------------------------------------------------------
-# Model loader
+# Model loaders
 # ---------------------------------------------------------------------------
-def load_cogvideox_pipeline():
-    """
-    Load CogVideoX-2b in FP16 with full CPU offload + VAE slicing/tiling.
-    Requires diffusers >= 0.30.0.
-    """
-    from diffusers import CogVideoXPipeline
+def load_cogvideox_pipeline(model_key: str):
+    """Load a CogVideoX model in FP16 with CPU offload + VAE slicing/tiling."""
+    from diffusers import CogVideoXPipeline  # noqa: PLC0415
 
-    print(f"[MODEL] Loading {COGVIDEOX_MODEL_ID} (FP16 + CPU offload)...")
-    pipe = CogVideoXPipeline.from_pretrained(
-        COGVIDEOX_MODEL_ID,
-        torch_dtype=torch.float16,
-    )
-    # Each sub-module moves to GPU only for its forward pass
+    cfg = MODELS[model_key]
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — FP16 + CPU offload...")
+    pipe = CogVideoXPipeline.from_pretrained(cfg["model_id"], torch_dtype=torch.float16)
     pipe.enable_model_cpu_offload()
-    # Process VAE in frame slices to cap decode VRAM
-    pipe.enable_vae_slicing()
-    # Process each frame in spatial tiles to reduce activation memory
-    pipe.enable_vae_tiling()
-    print("[MODEL] CogVideoX-2b pipeline ready.")
+    pipe.enable_vae_slicing()   # frame-sliced VAE decode
+    pipe.enable_vae_tiling()    # spatial tiling per frame
+    print(f"[MODEL] {model_key} ready.")
     return pipe
+
+
+def load_ltx_pipeline(model_key: str):
+    """Load LTX-Video in bfloat16 with CPU offload."""
+    from diffusers import LTXPipeline  # noqa: PLC0415
+
+    cfg = MODELS[model_key]
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — bfloat16 + CPU offload...")
+    pipe = LTXPipeline.from_pretrained(cfg["model_id"], torch_dtype=torch.bfloat16)
+    pipe.enable_model_cpu_offload()
+    pipe.enable_vae_slicing()
+    pipe.enable_vae_tiling()
+    print(f"[MODEL] {model_key} ready.")
+    return pipe
+
+
+def load_pipeline(model_key: str):
+    """Load the pipeline for model_key. Returns (pipe, model_key)."""
+    family = MODELS[model_key]["family"]
+    if family == "cogvideox":
+        return load_cogvideox_pipeline(model_key), model_key
+    elif family == "ltx":
+        return load_ltx_pipeline(model_key), model_key
+    else:
+        raise ValueError(f"Unknown model family: {family!r}")
+
+
+def unload_pipeline(pipe):
+    """Aggressively free VRAM after a model run."""
+    del pipe
+    torch.cuda.empty_cache()
+    gc.collect()
 
 
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
-def generate_video(pipe, job: dict, args) -> list:
-    """Run CogVideoX inference and return a list of PIL Image frames."""
-    generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu")
-    generator.manual_seed(args.seed)
+def generate_video(pipe, model_key: str, job: dict, args) -> list:
+    """Run inference and return a list of PIL Image frames."""
+    cfg       = MODELS[model_key]
+    steps     = args.steps if args.steps is not None else cfg["steps"]
+    device    = "cuda" if torch.cuda.is_available() else "cpu"
+    generator = torch.Generator(device=device).manual_seed(args.seed)
 
     result = pipe(
         prompt=job["prompt"],
         negative_prompt=job["negative_prompt"],
-        height=args.height,
-        width=args.width,
+        height=cfg["height"],
+        width=cfg["width"],
         num_frames=job["num_frames"],
-        num_inference_steps=args.steps,
-        guidance_scale=GUIDANCE_SCALE,
+        num_inference_steps=steps,
+        guidance_scale=cfg["guidance"],
         generator=generator,
     )
-    # CogVideoX returns result.frames as list-of-lists:
-    # result.frames[0] = PIL Image list for the first batch item
+    # Both CogVideoX and LTX return result.frames[0] as a list of PIL Images
     return result.frames[0]
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 def locale_from_manifest_path(path: str) -> str:
-    """Extract locale from manifest filename.
-    'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
-    'AssetManifest_draft.json'          -> 'en'
+    stem  = Path(path).stem
+    parts = stem.split(".")
+    return parts[-1] if len(parts) > 1 else "en"
+
+
+def output_filename(job: dict, model_key: str, multi_model: bool) -> str:
     """
-    stem = Path(path).stem
-    parts = stem.split('.')
-    return parts[-1] if len(parts) > 1 else 'en'
+    Single model  → original filename unchanged  (bg-desert-excavation-site-v1.mp4)
+    All models    → model suffix inserted         (bg-desert-excavation-site-v1_cogvideox-2b.mp4)
+    """
+    if not multi_model:
+        return job["output"]
+    stem = Path(job["output"]).stem
+    return f"{stem}_{model_key}.mp4"
+
+
+# ---------------------------------------------------------------------------
+# Per-model generation run
+# ---------------------------------------------------------------------------
+def run_model(model_key: str, video_backgrounds: list, out_dir: Path, args,
+              multi_model: bool) -> list[dict]:
+    """Load, generate all video clips, unload. Returns result dicts."""
+    from diffusers.utils import export_to_video  # noqa: PLC0415
+
+    cfg = MODELS[model_key]
+    print(f"\n{'='*60}")
+    print(f"MODEL : {model_key}")
+    print(f"ID    : {cfg['model_id']}")
+    print(f"Notes : {cfg['notes']}")
+    print(f"{'='*60}")
+
+    try:
+        pipe, _ = load_pipeline(model_key)
+    except Exception as exc:
+        print(f"[ERROR] Failed to load {model_key}: {exc}")
+        return [
+            {
+                "asset_id": job["asset_id"],
+                "model": model_key,
+                "output": str(out_dir / output_filename(job, model_key, multi_model)),
+                "size_bytes": 0,
+                "status": "failed",
+                "error": str(exc),
+            }
+            for job in video_backgrounds
+        ]
+
+    results = []
+    total   = len(video_backgrounds)
+
+    for idx, job in enumerate(video_backgrounds, start=1):
+        fname    = output_filename(job, model_key, multi_model)
+        out_path = out_dir / fname
+        steps    = args.steps if args.steps is not None else cfg["steps"]
+        print(f"\n  [{idx}/{total}] {job['asset_id']} → {fname}")
+        print(f"    Motion  : {job['motion_description']}")
+        print(f"    Duration: {job['duration_sec']}s  Frames: {job['num_frames']}  @ {args.fps} fps  Steps: {steps}")
+        print(f"    Res     : {cfg['width']}×{cfg['height']}")
+
+        if out_path.exists():
+            print(f"    [SKIP] already exists")
+            results.append({
+                "asset_id":  job["asset_id"],
+                "model":     model_key,
+                "output":    str(out_path),
+                "size_bytes": out_path.stat().st_size,
+                "status":    "skipped",
+            })
+            continue
+
+        try:
+            frames = generate_video(pipe, model_key, job, args)
+            export_to_video(frames, str(out_path), fps=args.fps)
+            size = out_path.stat().st_size
+            print(f"    [OK] {len(frames)} frames, {size:,} bytes")
+            results.append({
+                "asset_id":   job["asset_id"],
+                "model":      model_key,
+                "output":     str(out_path),
+                "size_bytes": size,
+                "num_frames": len(frames),
+                "status":     "success",
+            })
+        except Exception as exc:
+            print(f"    [ERROR] {exc}")
+            results.append({
+                "asset_id":   job["asset_id"],
+                "model":      model_key,
+                "output":     str(out_path),
+                "size_bytes": 0,
+                "status":     "failed",
+                "error":      str(exc),
+            })
+        finally:
+            torch.cuda.empty_cache()
+            gc.collect()
+
+    unload_pipeline(pipe)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +394,7 @@ def locale_from_manifest_path(path: str) -> str:
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
+    locale  = locale_from_manifest_path(args.manifest) if args.manifest else "en"
     out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -237,73 +405,49 @@ def main():
             print("[WARN] No matching animated backgrounds (motion.type=camera) in manifest. Nothing to do.")
             return
 
-    pipe = load_cogvideox_pipeline()
+    # Resolve which model keys to run
+    if args.model == "all":
+        model_keys  = ALL_MODEL_KEYS
+        multi_model = True
+    elif args.model == "auto":
+        model_keys  = ["cogvideox-2b"]
+        multi_model = False
+    else:
+        model_keys  = [args.model]
+        multi_model = False
 
-    results = []
-    total = len(video_backgrounds)
+    if args.model == "all":
+        print(f"[MODE] Comparing all {len(model_keys)} models: {', '.join(model_keys)}")
+        print(f"[INFO] Outputs will be saved as <name>_<model>.mp4 for side-by-side comparison")
 
-    for idx, job in enumerate(video_backgrounds, start=1):
-        out_path = out_dir / job["output"]
-        print(f"\n[{idx}/{total}] Generating {job['asset_id']}...")
-        print(f"  Motion:   {job['motion_description']}")
-        print(f"  Duration: {job['duration_sec']}s  Frames: {job['num_frames']}  @ {args.fps} fps")
+    all_results = []
+    for model_key in model_keys:
+        results = run_model(model_key, video_backgrounds, out_dir, args, multi_model)
+        all_results.extend(results)
 
-        if out_path.exists():
-            print(f"  [SKIP] {job['output']} already exists")
-            results.append({
-                "asset_id": job["asset_id"],
-                "output": str(out_path),
-                "size_bytes": out_path.stat().st_size,
-                "status": "skipped",
-            })
-            continue
+    # Auto fallback: if cogvideox-2b failed entirely, try ltx-video
+    if args.model == "auto" and all(r["status"] == "failed" for r in all_results):
+        print("\n[WARN] cogvideox-2b failed for all clips. Falling back to ltx-video.")
+        all_results = run_model("ltx-video", video_backgrounds, out_dir, args, multi_model=False)
 
-        try:
-            from diffusers.utils import export_to_video
-
-            frames = generate_video(pipe, job, args)
-            export_to_video(frames, str(out_path), fps=args.fps)
-            size = out_path.stat().st_size
-            print(f"  [OK] {out_path}  ({len(frames)} frames, {size:,} bytes)")
-            results.append({
-                "asset_id": job["asset_id"],
-                "output": str(out_path),
-                "size_bytes": size,
-                "num_frames": len(frames),
-                "model": COGVIDEOX_MODEL_ID,
-                "status": "success",
-            })
-        except Exception as exc:
-            print(f"  [ERROR] {job['asset_id']}: {exc}")
-            results.append({
-                "asset_id": job["asset_id"],
-                "output": str(out_path),
-                "size_bytes": 0,
-                "status": "failed",
-                "error": str(exc),
-            })
-        finally:
-            torch.cuda.empty_cache()
-            gc.collect()
-
-    # Write manifest
-    manifest_path = out_dir / f"{SCRIPT_NAME}_results.json"
-    with open(manifest_path, "w") as fh:
-        json.dump(results, fh, indent=2)
+    # Write JSON results
+    results_path = out_dir / f"{SCRIPT_NAME}_results.json"
+    with open(results_path, "w") as fh:
+        json.dump(all_results, fh, indent=2)
 
     # Summary
+    total       = len(all_results)
+    ok_count    = sum(1 for r in all_results if r["status"] in ("success", "skipped"))
+    total_bytes = sum(r["size_bytes"] for r in all_results)
     print("\n" + "=" * 60)
-    print("SUMMARY — gen_background_video  [CogVideoX-2b fallback]")
+    print(f"SUMMARY — gen_background_video ({args.model})")
     print("=" * 60)
-    for r in results:
-        tag = "OK" if r["status"] == "success" else r["status"].upper()
-        print(f"  [{tag}]  {r['output']}  ({r['size_bytes']:,} bytes)")
-    ok_count = sum(1 for r in results if r["status"] in ("success", "skipped"))
-    total_bytes = sum(r["size_bytes"] for r in results)
+    for r in all_results:
+        label = "OK" if r["status"] == "success" else r["status"].upper()
+        model = r.get("model", "")
+        print(f"  [{label}]  [{model}]  {r['output']}  ({r['size_bytes']:,} bytes)")
     print(f"\n{ok_count}/{total} completed | {total_bytes:,} bytes total")
-    print(f"Manifest: {manifest_path}")
-    print(f"\nNote: Using CogVideoX-2b (8 GB fallback). For LTX-Video 13B quality,")
-    print(f"run placeholder_for_background_video.py to see GPU requirements.")
+    print(f"Results: {results_path}")
 
 
 if __name__ == "__main__":

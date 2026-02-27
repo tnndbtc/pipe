@@ -110,7 +110,23 @@ WAV2LIP_CHECKPOINT = "checkpoints/wav2lip_gan.pth"   # relative to wav2lip_dir
 # ---------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Apply lip-sync to character videos using Wav2Lip."
+        description="Apply lip-sync to character videos using Wav2Lip.",
+        epilog=(
+            "Model used:\n\n"
+            "  Wav2Lip-GAN   Rudrabha/Wav2Lip  (local repo clone required)\n"
+            "                GAN-based lip-sync, ~500 MB checkpoint.\n"
+            "                Processes face crops frame-by-frame — minimal VRAM.\n"
+            "                Falls back to ffmpeg audio-merge if repo is not present.\n\n"
+            "  SETUP:\n"
+            "    git clone https://github.com/Rudrabha/Wav2Lip\n"
+            "    # Place checkpoint at: Wav2Lip/checkpoints/wav2lip_gan.pth\n"
+            "    # (download link in the Wav2Lip repo README)\n"
+            "    pip install -r Wav2Lip/requirements.txt\n"
+            "    python gen_lipsync.py --wav2lip_dir Wav2Lip\n\n"
+            "  UPGRADE: LatentSync 1.5 requires RTX 4080 16 GB+.\n"
+            "  This script has no --model flag; Wav2Lip is the only supported model."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--output_dir", type=str, default=str(OUTPUT_DIR),
                         help="Directory containing input videos/audio and output destination.")

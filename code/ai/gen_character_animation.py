@@ -137,7 +137,18 @@ FRAME_SIZE = 512  # SD1.5 native
 # ---------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Animate character portraits using AnimateDiff for s01e01."
+        description="Animate character portraits using AnimateDiff for s01e01.",
+        epilog=(
+            "Model used:\n\n"
+            "  AnimateDiff   guoyww/animatediff-motion-adapter-v1-5-3\n"
+            "                + runwayml/stable-diffusion-v1-5\n"
+            "                FP16 + CPU offload, ~3-4 GB VRAM. 512×512 native resolution.\n"
+            "                Pipeline: img2vid (AnimateDiffVideoToVideoPipeline) if available\n"
+            "                in the installed diffusers; falls back to text-to-video\n"
+            "                (AnimateDiffPipeline) automatically.\n\n"
+            "  This script has no --model flag; AnimateDiff v1-5-3 is the only supported model."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--input_dir", type=str, default=None,

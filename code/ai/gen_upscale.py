@@ -120,7 +120,18 @@ REALESRGAN_FILENAME = "RealESRGAN_x4plus.pth"
 # ---------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Upscale character RGBA PNGs 2× using Real-ESRGAN x4plus."
+        description="Upscale character RGBA PNGs 2× using Real-ESRGAN x4plus.",
+        epilog=(
+            "Model used:\n\n"
+            "  Real-ESRGAN x4plus    xinntao/Real-ESRGAN  (RealESRGAN_x4plus.pth)\n"
+            "                        RRDB network, ~67 MB weights, ~2 GB VRAM.\n"
+            "                        tile=512 (default) caps VRAM at ~2 GB for any image size.\n"
+            "                        outscale=2: runs 4× model then downsamples to 2× for\n"
+            "                        better antialiasing vs a native 2× model.\n"
+            "                        Alpha channel preserved (split → upscale RGB → resize alpha).\n\n"
+            "  This script has no --model flag; Real-ESRGAN x4plus is the only supported model."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)

@@ -58,7 +58,7 @@
 # HuggingFace stack
 # ---------------------------------------------------------------------------
 diffusers>=0.32.0          # CogVideoXPipeline, AnimateDiffPipeline, FluxPipeline
-transformers>=4.40.0       # RMBG-1.4, Kokoro, text encoders
+transformers>=4.41.0       # RMBG-1.4, Kokoro, text encoders; SiglipImageProcessor (diffusers IP-Adapter) requires >=4.39
 accelerate>=0.30.0         # enable_model_cpu_offload()
 huggingface_hub>=0.21.0    # hf_hub_download(), snapshot_download()
 safetensors>=0.4.0         # fast weight loading

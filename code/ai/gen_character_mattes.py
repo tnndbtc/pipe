@@ -95,7 +95,15 @@ IMAGENET_STD  = [0.229, 0.224, 0.225]
 # ---------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Remove backgrounds from character portraits using RMBG-1.4."
+        description="Remove backgrounds from character portraits using RMBG-1.4.",
+        epilog=(
+            "Model used:\n\n"
+            "  RMBG-1.4    briaai/RMBG-1.4\n"
+            "              BiRefNet segmentation, ~175 MB weights, ~1-2 GB VRAM.\n"
+            "              trust_remote_code=True required. No HF login needed.\n\n"
+            "  This script has no --model flag; RMBG-1.4 is the only supported model."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
