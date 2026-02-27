@@ -115,8 +115,43 @@ def _parse_story_vars(story_file: str) -> dict:
 
 
 # ── Azure TTS helpers ──────────────────────────────────────────────────────────
-_PRESETS_FILE = (Path(PIPE_DIR) / "projects" / "resources" / "azure_tts"
-                 / "presets.json")
+_PRESETS_FILE    = (Path(PIPE_DIR) / "projects" / "resources" / "azure_tts"
+                    / "presets.json")
+_INDEX_FILE      = (Path(PIPE_DIR) / "projects" / "resources" / "azure_tts"
+                    / "index.json")
+_index_cache: dict | None = None   # loaded once; maps voice → clip dict
+
+def _load_index_cache() -> dict:
+    """Return the voices section of index.json (in-process cache)."""
+    global _index_cache
+    if _index_cache is not None:
+        return _index_cache
+    if _INDEX_FILE.exists():
+        try:
+            _index_cache = json.loads(
+                _INDEX_FILE.read_text(encoding="utf-8")
+            ).get("voices", {})
+            return _index_cache
+        except (json.JSONDecodeError, OSError):
+            pass
+    _index_cache = {}
+    return _index_cache
+
+def _is_default_clip(voice: str, style: str | None, h: str) -> bool:
+    """Return True when hash h matches the pre-cached index entry for voice+style.
+
+    Same hash means the user's params are identical to the index defaults,
+    so no custom preset should be created.
+    """
+    if not style:
+        return False
+    idx = _load_index_cache()
+    clip = idx.get(voice, {}).get("clips", {}).get(style)
+    if not clip:
+        return False
+    # index stores full 64-char SHA256; h is the first 16 chars
+    return clip.get("hash", "")[:16] == h
+
 
 def load_presets() -> dict:
     """Load global voice presets from disk; return empty structure on any error."""
@@ -803,6 +838,8 @@ HTML = r"""<!DOCTYPE html>
   }
   /* Interpretation text + zone badges */
   .vc-param-interp { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; flex: 1; }
+  .vc-param-range  { font-size: 0.65em; color: var(--dim); font-family: var(--mono);
+                     opacity: 0.6; white-space: nowrap; flex-shrink: 0; }
   .vc-interp-text  { font-size: 0.70em; color: var(--dim); font-style: italic; line-height: 1.3; }
   .vc-zone-badge   { font-size: 0.68em; padding: 1px 5px; border-radius: 3px; font-weight: 700;
                      font-family: var(--mono); white-space: nowrap; letter-spacing: 0.03em; flex-shrink: 0; }
@@ -1004,6 +1041,7 @@ Direction    : …"></textarea>
   let _vcActiveLocale  = null;   // MIN-R7: init from voiceCast.locales, not hardcoded
   let _vcData          = null;   // in-memory VoiceCast.json content
   let _vcPresets       = {};     // voice → preset[]; loaded once on editor open
+  let _voiceIndex      = null;   // index.json voices object; loaded once on editor open
   let _vcPlayingAudio  = null;   // Audio object currently playing (for pause support)
   let _lastRunFilename = null;   // set in runPrompt(); fallback for vcContinue()
 
@@ -1532,6 +1570,17 @@ Direction    : …"></textarea>
     }
   }
 
+  // ── loadVoiceIndex() ─────────────────────────────────────────────────────────
+  async function loadVoiceIndex() {
+    if (_voiceIndex) return;
+    try {
+      const r = await fetch('/api/voice_index');
+      _voiceIndex = (await r.json()).voices ?? {};
+    } catch (_) {
+      _voiceIndex = {};
+    }
+  }
+
   // ── rebuildPresetSelect(card, voice) ─────────────────────────────────────────
   // Rebuilds .vc-preset-select options from _vcPresets[voice].
   // Preserves the current selection if the hash still exists after rebuild.
@@ -1565,6 +1614,7 @@ Direction    : …"></textarea>
       }
       await loadVoiceCatalog();
       await loadVoicePresets();
+      await loadVoiceIndex();
       _vcData = status.voice_cast;
       renderVcEditor(status.voice_cast, _voiceCatalog, status.locales || []);
     } catch(e) {
@@ -1726,7 +1776,7 @@ Direction    : …"></textarea>
       const body = document.createElement('div');
       body.className = 'vc-char-card-body';
 
-      // Voice row: select + Sample button
+      // Voice row: select
       const voiceRow = document.createElement('div');
       voiceRow.className = 'vc-voice-row';
 
@@ -1740,13 +1790,7 @@ Direction    : …"></textarea>
         voiceSel.appendChild(opt);
       });
 
-      const sampleBtn = document.createElement('button');
-      sampleBtn.className = 'btn-vc-preview';
-      sampleBtn.setAttribute('data-role', 'sample');
-      sampleBtn.textContent = '\u25B6 Sample';
-
       voiceRow.appendChild(voiceSel);
-      voiceRow.appendChild(sampleBtn);
       body.appendChild(voiceRow);
 
       // Preset row (between voice row and params row)
@@ -1754,7 +1798,7 @@ Direction    : …"></textarea>
       presetRow.className = 'vc-preset-row';
       const presetLbl = document.createElement('span');
       presetLbl.className = 'vc-preset-label';
-      presetLbl.textContent = 'Preset:';
+      presetLbl.textContent = 'Custom:';
       const presetSel = document.createElement('select');
       presetSel.className = 'vc-preset-select';
       presetSel.add(new Option('\u2014 no preset \u2014', ''));
@@ -1796,13 +1840,13 @@ Direction    : …"></textarea>
       // Numeric params — any value accepted; live interpretation shown inline
       const paramDefs = [
         { label: 'Emotion',  field: 'degree', interp: vcInterpDegree,
-          value: String(charLoc.azure_style_degree ?? 1.0) },
+          value: String(charLoc.azure_style_degree ?? 1.0), range: '0.6 – 2.8' },
         { label: 'Speak Speed (%)',    field: 'rate',   interp: vcInterpRate,
-          value: String(charLoc.azure_rate  ?? '0').replace('%', '') },
+          value: String(charLoc.azure_rate  ?? '0').replace('%', ''), range: '-40 – +35' },
         { label: 'Voice Depth (%)',   field: 'pitch',  interp: vcInterpPitch,
-          value: String(charLoc.azure_pitch ?? '' ).replace('%', '') },
+          value: String(charLoc.azure_pitch ?? '' ).replace('%', ''), range: '-8 – +8' },
         { label: 'Pause Duration (ms)', field: 'break',  interp: vcInterpBreak,
-          value: String(charLoc.azure_break_ms ?? 0) },
+          value: String(charLoc.azure_break_ms ?? 0), range: '200 – 1200' },
       ];
       paramDefs.forEach(pd => {
         const grp = document.createElement('div');
@@ -1815,6 +1859,9 @@ Direction    : …"></textarea>
         inp.type = 'text';
         inp.setAttribute('data-field', pd.field);
         inp.value = pd.value;
+        const rangeHint = document.createElement('span');
+        rangeHint.className = 'vc-param-range';
+        rangeHint.textContent = pd.range;
         const interpDiv = document.createElement('div');
         interpDiv.className = 'vc-param-interp';
         const updateInterp = () => {
@@ -1827,6 +1874,7 @@ Direction    : …"></textarea>
         updateInterp();   // render immediately on card creation
         grp.appendChild(lbl);
         grp.appendChild(inp);
+        grp.appendChild(rangeHint);
         grp.appendChild(interpDiv);
         paramsRow.appendChild(grp);
       });
@@ -1856,6 +1904,36 @@ Direction    : …"></textarea>
         card.querySelector('.vc-preset-select').selectedIndex = 0;
       });
 
+      // ── Style select onChange → auto-apply preset or index params; refresh interp ──
+      styleSel.addEventListener('change', () => {
+        const voice   = voiceSel.value;
+        const style   = styleSel.value;
+        const presets = _vcPresets[voice] ?? [];
+        // 1st priority: most-recent saved preset for this voice+style
+        const match = style ? [...presets].reverse().find(p => p.style === style) : null;
+        if (match) {
+          card.querySelector('[data-field=degree]').value = match.style_degree;
+          card.querySelector('[data-field=rate]').value   = String(match.rate  ?? '').replace('%', '');
+          card.querySelector('[data-field=pitch]').value  = String(match.pitch ?? '').replace('%', '');
+          card.querySelector('[data-field=break]').value  = match.break_ms;
+          presetSel.value = match.hash;
+        } else {
+          // 2nd priority: params from the pre-cached index.json clip for this voice+style
+          const clip = style ? (_voiceIndex?.[voice]?.clips?.[style]) : null;
+          if (clip?.params) {
+            const p = clip.params;
+            card.querySelector('[data-field=degree]').value = p.style_degree ?? 1.0;
+            card.querySelector('[data-field=rate]').value   = String(p.rate  ?? '0').replace('%', '');
+            card.querySelector('[data-field=pitch]').value  = String(p.pitch ?? '' ).replace('%', '');
+            card.querySelector('[data-field=break]').value  = p.break_ms ?? 0;
+          }
+          presetSel.selectedIndex = 0;
+        }
+        // Always fire input events so interpretation text reflects current values
+        ['degree','rate','pitch','break'].forEach(f =>
+          card.querySelector(`[data-field=${f}]`).dispatchEvent(new Event('input')));
+      });
+
       // ── Preset select onChange → populate all param fields ──
       presetSel.addEventListener('change', () => {
         const presets = _vcPresets[voiceSel.value] ?? [];
@@ -1872,16 +1950,9 @@ Direction    : …"></textarea>
         });
       });
 
-      // ── Sample button: bare voice, bedtime sentence (BUG-B: pitch='', not '0%') ──
-      sampleBtn.addEventListener('click', () => {
-        previewVoice(card, locale, {
-          azure_voice: voiceSel.value, style: null,
-          style_degree: null, rate: '0%', pitch: '', break_ms: 0,
-        }, sampleBtn);
-      });
-
       // ── Preview button: full params ──
       prevBtn.addEventListener('click', () => {
+        if (prevBtn.textContent === '\u23F8 Pause') return;
         previewVoice(card, locale, {
           azure_voice:  voiceSel.value,
           style:        styleSel.value || null,
@@ -2291,6 +2362,8 @@ Direction    : …"></textarea>
     // Pre-load VoiceCast so the Voice Cast tab is immediately usable
     if (voiceCast && !_vcData) {
       await loadVoiceCatalog();
+      await loadVoicePresets();
+      await loadVoiceIndex();
       _vcData = voiceCast;
       // If the Voice Cast editor is already open, render it now
       if (document.getElementById('vc-editor').style.display !== 'none') {
@@ -3571,6 +3644,24 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass   # client cancelled the video request
 
+        # Voice clip index — params for every pre-cached style clip  (GET /api/voice_index)
+        elif parsed.path == "/api/voice_index":
+            idx_path = (Path(PIPE_DIR) / "projects" / "resources"
+                        / "azure_tts" / "index.json")
+            if idx_path.exists():
+                try:
+                    idx = json.loads(idx_path.read_text(encoding="utf-8"))
+                    body = json.dumps({"voices": idx.get("voices", {})}).encode()
+                except (json.JSONDecodeError, OSError):
+                    body = json.dumps({"voices": {}}).encode()
+            else:
+                body = json.dumps({"voices": {}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # Voice presets (GET /api/voice_presets)
         elif parsed.path == "/api/voice_presets":
             pdata = load_presets()
@@ -3730,9 +3821,11 @@ class Handler(BaseHTTPRequestHandler):
                 # BUG-I1: relative URL so serve_media can resolve it
                 url = "/serve_media?path=" + str(cache_path.relative_to(_pipe_path))
 
-                # Auto-save preset (silent side-effect of every Preview with a style)
+                # Auto-save preset only when params differ from index defaults.
+                # Same hash as the pre-cached clip = user hasn't customised anything
+                # → skip, so the preset list stays clean.
                 new_preset = None
-                if style:
+                if style and not _is_default_clip(azure_voice, style, h):
                     pdata = load_presets()
                     vp    = pdata["presets"].setdefault(azure_voice, [])
                     if not any(p["hash"] == h for p in vp):
@@ -3816,7 +3909,7 @@ class Handler(BaseHTTPRequestHandler):
         silent = {"/", "/stop", "/next_story_num", "/check_episode", "/read_story",
                   "/list_projects", "/view_artifact", "/list_stories",
                   "/pipeline_status", "/serve_media", "/run_locale",
-                  "/api/azure_voices", "/api/voice_presets",
+                  "/api/azure_voices", "/api/voice_presets", "/api/voice_index",
                   "/api/preview_voice", "/api/save_voice_cast"}
         if not any(path == s or path.startswith(s + "?") for s in silent):
             print(f"  {self.address_string()}  {fmt % args}")
