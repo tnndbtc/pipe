@@ -482,7 +482,7 @@ HTML = r"""<!DOCTYPE html>
     padding: 5px 10px; cursor: pointer; flex: 1; max-width: 360px;
   }
   .pipe-body {
-    flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+    flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
     padding-right: 2px;
   }
   .pipe-section {
@@ -525,18 +525,28 @@ HTML = r"""<!DOCTYPE html>
 
   /* ── Pipe terminal ── */
 
-  /* ── Video player ── */
-  #pipe-video-wrap {
+  /* ── Review block (Video / Soundtrack / Voice Cast tabs) ── */
+  #pipe-review-wrap {
     flex-shrink: 0; background: var(--surface);
     border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
   }
-  .video-hdr {
+  .review-hdr {
     padding: 8px 14px; border-bottom: 1px solid var(--border);
     font-size: 0.68em; font-weight: 700; letter-spacing: .1em;
     text-transform: uppercase; color: var(--dim);
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   }
-  .video-locale-tabs { display: flex; gap: 4px; margin-left: 4px; }
+  .review-content-tabs { display: flex; gap: 4px; }
+  .btn-review-tab {
+    background: #ffffff10; color: var(--dim); border: 1px solid var(--border);
+    border-radius: 4px; font-size: 1.1em; padding: 2px 10px; cursor: pointer;
+    font-weight: 600; letter-spacing: 0; text-transform: none;
+    transition: background .15s, color .15s;
+  }
+  .btn-review-tab.active {
+    background: #5b9cf620; color: var(--blue); border-color: #5b9cf650;
+  }
+  .review-locale-tabs { display: flex; gap: 4px; margin-left: auto; }
   .btn-locale-tab {
     background: #ffffff10; color: var(--dim); border: 1px solid var(--border);
     border-radius: 4px; font-size: 1.1em; padding: 2px 10px; cursor: pointer;
@@ -546,7 +556,11 @@ HTML = r"""<!DOCTYPE html>
   .btn-locale-tab.active {
     background: #5b9cf620; color: var(--blue); border-color: #5b9cf650;
   }
+  .review-pane { display: none; }
+  .review-pane.active { display: block; }
   #pipe-video { width: 100%; max-height: 240px; background: #000; display: block; }
+  #pipe-audio { width: 100%; display: block; padding: 8px; box-sizing: border-box; }
+  #review-pane-vc { max-height: 260px; overflow-y: auto; }
   .pipe-body::-webkit-scrollbar { width: 6px; }
   .pipe-body::-webkit-scrollbar-track { background: transparent; }
   .pipe-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -583,10 +597,6 @@ HTML = r"""<!DOCTYPE html>
   }
   .btn-substep:hover { background: #ffffff18; color: var(--text); }
   /* ── Voice Cast viewer ────────────────────────────────────────────── */
-  #pipe-voicecast-wrap {
-    flex-shrink: 0; border: 1px solid var(--border);
-    border-radius: 8px; overflow: hidden; background: var(--surface);
-  }
   .vc-char-row {
     padding: 8px 14px; border-bottom: 1px solid #1a1a26;
   }
@@ -712,32 +722,21 @@ Direction    : …"></textarea>
     <div style="color:var(--dim);font-style:italic;font-size:0.83em;padding:4px 0">Select an episode above to see pipeline status.</div>
   </div>
 
-  <!-- Video player -->
-  <div id="pipe-video-wrap" style="display:none">
-    <div class="video-hdr">
-      Video Preview
-      <div class="video-locale-tabs" id="video-locale-tabs"></div>
+  <!-- VIDEO REVIEW block: Video / Soundtrack / Voice Cast -->
+  <div id="pipe-review-wrap" style="display:none">
+    <div class="review-hdr">
+      <div class="review-content-tabs" id="review-content-tabs"></div>
+      <div class="review-locale-tabs" id="review-locale-tabs"></div>
     </div>
-    <video id="pipe-video" controls></video>
-  </div>
-
-  <!-- Dubbed audio player -->
-  <div id="pipe-audio-wrap" style="display:none">
-    <div class="video-hdr">
-      Soundtrack
-      <span style="color:var(--dim);font-size:0.8em;font-weight:400">YouTube Dubbed Audio</span>
-      <div class="video-locale-tabs" id="audio-locale-tabs"></div>
+    <div id="review-pane-video" class="review-pane">
+      <video id="pipe-video" controls></video>
     </div>
-    <audio id="pipe-audio" controls style="width:100%;margin-top:6px;border-radius:6px"></audio>
-  </div>
-
-  <!-- Voice cast viewer -->
-  <div id="pipe-voicecast-wrap" style="display:none">
-    <div class="pipe-section-hdr">
-      🎙 Voice Cast
-      <div style="margin-left:auto" id="voicecast-locale-tabs"></div>
+    <div id="review-pane-audio" class="review-pane">
+      <audio id="pipe-audio" controls></audio>
     </div>
-    <div id="voicecast-body"></div>
+    <div id="review-pane-vc" class="review-pane">
+      <div id="voicecast-body"></div>
+    </div>
   </div>
 </div>
 
@@ -1242,7 +1241,7 @@ Direction    : …"></textarea>
       2: [ep('StoryPrompt.json')],
       3: [ep('Script.json')],
       4: [ep('ShotList.json')],
-      5: [ep('AssetManifest_draft.json')],
+      5: [ep('AssetManifest_draft.shared.json'), ep('AssetManifest_draft.en.json')],
       6: [ep('canon_diff.json')],
       7: [ep('canon.json')],
       9: [ep('AssetManifest_final.json'), ep('RenderPlan.json')],
@@ -1319,7 +1318,7 @@ Direction    : …"></textarea>
       pipeEpSlug = pipeEpId = null;
       document.getElementById('pipe-body').innerHTML =
         '<div style="color:var(--dim);font-style:italic;font-size:0.83em;padding:4px 0">Select an episode above.</div>';
-      document.getElementById('pipe-video-wrap').style.display = 'none';
+      document.getElementById('pipe-review-wrap').style.display = 'none';
       return;
     }
     const parts = val.split('|');
@@ -1374,7 +1373,7 @@ Direction    : …"></textarea>
     2:  'claude -p --model sonnet prompts/p_2.txt\n→ writes StoryPrompt.json',
     3:  'claude -p --model sonnet prompts/p_3.txt\n→ writes Script.json',
     4:  'claude -p --model sonnet prompts/p_4.txt\n→ writes ShotList.json',
-    5:  'claude -p --model sonnet prompts/p_5.txt\n→ writes AssetManifest_draft.json',
+    5:  'claude -p --model sonnet prompts/p_5.txt\n→ writes AssetManifest_draft.shared.json + AssetManifest_draft.en.json',
     6:  'claude -p --model haiku  prompts/p_6.txt\n→ writes canon_diff.json',
     7:  'claude -p --model haiku  prompts/p_7.txt\n→ updates canon.json',
     8:  'claude -p --model sonnet prompts/p_8.txt\n→ writes StoryPrompt.{locale}.json per non-en locale',
@@ -1587,102 +1586,60 @@ Direction    : …"></textarea>
       section.appendChild(wrap);
     });
 
-    // ── Video player ──────────────────────────────────────────────────────────
-    const videoWrap   = document.getElementById('pipe-video-wrap');
-    const videoTabs   = document.getElementById('video-locale-tabs');
+    // ── VIDEO REVIEW block (Video / Soundtrack / Voice Cast tabs) ────────────
+    const reviewWrap        = document.getElementById('pipe-review-wrap');
+    const reviewContentTabs = document.getElementById('review-content-tabs');
+    const reviewLocaleTabs  = document.getElementById('review-locale-tabs');
+    const vcBody            = document.getElementById('voicecast-body');
+
     const readyVideos = status.ready_videos || [];
-    if (readyVideos.length > 0) {
-      videoWrap.style.display = 'block';
-      videoTabs.innerHTML = '';
-      // Keep the previously active locale if it's still in readyVideos; else fall back to first
-      const targetLocale = (activeVideoLocale && readyVideos.includes(activeVideoLocale))
-                           ? activeVideoLocale : readyVideos[0];
-      readyVideos.forEach((l, i) => {
-        const btn = document.createElement('button');
-        btn.className = 'btn-locale-tab' + (l === targetLocale ? ' active' : '');
-        btn.textContent = l;
-        btn.onclick = () => playLocaleVideoBtn(l, btn);
-        videoTabs.appendChild(btn);
-      });
-      playLocaleVideo(targetLocale);
-    } else {
-      videoWrap.style.display = 'none';
-    }
-
-    // ── Dubbed audio player (YouTube Soundtrack) ──────────────────────────────
-    const audioWrap   = document.getElementById('pipe-audio-wrap');
-    const audioTabs   = document.getElementById('audio-locale-tabs');
     const readyDubbed = status.ready_dubbed || [];
-    if (readyDubbed.length > 0) {
-      audioWrap.style.display = 'block';
-      audioTabs.innerHTML = '';
-      readyDubbed.forEach((l, i) => {
-        const btn = document.createElement('button');
-        btn.className = 'btn-locale-tab' + (i === 0 ? ' active' : '');
-        btn.textContent = l;
-        btn.onclick = () => playLocaleDubbedAudioBtn(l, btn);
-        audioTabs.appendChild(btn);
-      });
-      playLocaleDubbedAudio(readyDubbed[0]);
+    const vc          = status.voice_cast;
+    const vcChars     = (vc && vc.characters && vc.characters.length) ? vc.characters : null;
+    const vcLocales   = vcChars
+      ? Object.keys(vcChars[0]).filter(k => !['character_id','role','gender','personality'].includes(k))
+      : [];
+
+    const hasVideo = readyVideos.length > 0;
+    const hasAudio = readyDubbed.length > 0;
+    const hasVc    = !!vcChars;
+
+    if (!hasVideo && !hasAudio && !hasVc) {
+      reviewWrap.style.display = 'none';
     } else {
-      audioWrap.style.display = 'none';
-    }
+      reviewWrap.style.display = '';
+      reviewContentTabs.innerHTML = '';
+      reviewLocaleTabs.innerHTML  = '';
 
-    // ── Voice Cast viewer ─────────────────────────────────────────────────────
-    const vcWrap  = document.getElementById('pipe-voicecast-wrap');
-    const vcBody  = document.getElementById('voicecast-body');
-    const vcTabs  = document.getElementById('voicecast-locale-tabs');
-    const vc      = status.voice_cast;
-    const vcChars = vc && vc.characters && vc.characters.length ? vc.characters : null;
-
-    if (vcChars) {
-      vcWrap.style.display = '';
-      vcTabs.innerHTML = '';
-      vcBody.innerHTML  = '';
-
-      // Collect locales present in the first character entry
-      const vcLocales = Object.keys(vcChars[0]).filter(
-        k => !['character_id', 'role', 'gender', 'personality'].includes(k)
-      );
-      let activeVcLocale = vcLocales[0] || 'en';
-
+      // ── Voice cast renderer ─────────────────────────────────────────────────
       function renderVcLocale(locale) {
         vcBody.innerHTML = '';
         vcChars.forEach(char => {
           const loc = char[locale];
           if (!loc) return;
-
           const row = document.createElement('div');
           row.className = 'vc-char-row';
-
-          // Name + role
-          const hdr = document.createElement('div');
-          hdr.innerHTML =
+          const charHdr = document.createElement('div');
+          charHdr.innerHTML =
             `<span class="vc-char-name">👤 ${char.character_id}</span>` +
             `<span class="vc-char-role">${char.role || ''}</span>`;
-          row.appendChild(hdr);
-
-          // Voice name
+          row.appendChild(charHdr);
           if (loc.azure_voice) {
             const v = document.createElement('div');
             v.className = 'vc-char-voice';
             v.textContent = loc.azure_voice;
             row.appendChild(v);
           }
-
-          // Params: pitch · break · degree
           const paramParts = [];
-          if (loc.azure_pitch)        paramParts.push('pitch: ' + loc.azure_pitch);
+          if (loc.azure_pitch)            paramParts.push('pitch: ' + loc.azure_pitch);
           if (loc.azure_break_ms != null) paramParts.push('break: ' + loc.azure_break_ms + 'ms');
-          if (loc.azure_style_degree) paramParts.push('degree: ' + loc.azure_style_degree);
+          if (loc.azure_style_degree)     paramParts.push('degree: ' + loc.azure_style_degree);
           if (paramParts.length) {
             const p = document.createElement('div');
             p.className = 'vc-char-params';
             p.textContent = paramParts.join('  ·  ');
             row.appendChild(p);
           }
-
-          // Style chips
           const styles = loc.available_styles || [];
           if (styles.length) {
             const chips = document.createElement('div');
@@ -1695,28 +1652,67 @@ Direction    : …"></textarea>
             });
             row.appendChild(chips);
           }
-
           vcBody.appendChild(row);
         });
       }
 
-      // Locale tab buttons
-      vcLocales.forEach((l, i) => {
+      // ── Locale tab builder ──────────────────────────────────────────────────
+      function buildLocaleTabs(locales, onSelect, activeLocale) {
+        reviewLocaleTabs.innerHTML = '';
+        locales.forEach(l => {
+          const btn = document.createElement('button');
+          btn.className = 'btn-locale-tab' + (l === activeLocale ? ' active' : '');
+          btn.textContent = l;
+          btn.onclick = () => {
+            reviewLocaleTabs.querySelectorAll('.btn-locale-tab')
+              .forEach(b => b.classList.toggle('active', b === btn));
+            onSelect(l);
+          };
+          reviewLocaleTabs.appendChild(btn);
+        });
+      }
+
+      // ── Content pane switcher ───────────────────────────────────────────────
+      function switchPane(pane) {
+        document.querySelectorAll('.review-pane')
+          .forEach(p => p.classList.remove('active'));
+        document.getElementById('review-pane-' + pane).classList.add('active');
+        if (pane === 'video') {
+          const tgt = (activeVideoLocale && readyVideos.includes(activeVideoLocale))
+                      ? activeVideoLocale : readyVideos[0];
+          buildLocaleTabs(readyVideos, playLocaleVideo, tgt);
+          playLocaleVideo(tgt);
+        } else if (pane === 'audio') {
+          buildLocaleTabs(readyDubbed, playLocaleDubbedAudio, readyDubbed[0]);
+          playLocaleDubbedAudio(readyDubbed[0]);
+        } else if (pane === 'vc') {
+          const firstVcLocale = vcLocales[0] || '';
+          buildLocaleTabs(vcLocales, renderVcLocale, firstVcLocale);
+          if (firstVcLocale) renderVcLocale(firstVcLocale);
+        }
+      }
+
+      // ── Content tab buttons ─────────────────────────────────────────────────
+      const tabDefs = [];
+      if (hasVideo) tabDefs.push({ pane: 'video', label: 'Video' });
+      if (hasAudio) tabDefs.push({ pane: 'audio', label: 'Soundtrack' });
+      if (hasVc)    tabDefs.push({ pane: 'vc',    label: 'Voice Cast' });
+
+      tabDefs.forEach(({ pane, label }, i) => {
         const btn = document.createElement('button');
-        btn.className = 'btn-locale-tab' + (i === 0 ? ' active' : '');
-        btn.textContent = l;
+        btn.className = 'btn-review-tab' + (i === 0 ? ' active' : '');
+        btn.textContent = label;
         btn.onclick = () => {
-          activeVcLocale = l;
-          document.querySelectorAll('#voicecast-locale-tabs .btn-locale-tab')
-            .forEach(b => b.classList.toggle('active', b === btn));
-          renderVcLocale(l);
+          reviewContentTabs.querySelectorAll('.btn-review-tab')
+            .forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          switchPane(pane);
         };
-        vcTabs.appendChild(btn);
+        reviewContentTabs.appendChild(btn);
       });
 
-      renderVcLocale(activeVcLocale);
-    } else {
-      vcWrap.style.display = 'none';
+      // Show first available pane on initial render
+      switchPane(tabDefs[0].pane);
     }
   }
 
@@ -1732,7 +1728,7 @@ Direction    : …"></textarea>
   }
 
   function playLocaleVideoBtn(locale, clickedBtn) {
-    document.querySelectorAll('#video-locale-tabs .btn-locale-tab').forEach(b =>
+    document.querySelectorAll('#review-locale-tabs .btn-locale-tab').forEach(b =>
       b.classList.toggle('active', b === clickedBtn));
     playLocaleVideo(locale);
   }
@@ -1747,7 +1743,7 @@ Direction    : …"></textarea>
   }
 
   function playLocaleDubbedAudioBtn(locale, clickedBtn) {
-    document.querySelectorAll('#audio-locale-tabs .btn-locale-tab').forEach(b =>
+    document.querySelectorAll('#review-locale-tabs .btn-locale-tab').forEach(b =>
       b.classList.toggle('active', b === clickedBtn));
     playLocaleDubbedAudio(locale);
   }
@@ -2027,8 +2023,8 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             "artifacts": [ep_rel("ShotList.json")],
         },
         "stage_5": {
-            "done": check(ep("AssetManifest_draft.json")),
-            "artifacts": [ep_rel("AssetManifest_draft.json")],
+            "done": check(ep("AssetManifest_draft.shared.json")) and check(ep("AssetManifest_draft.en.json")),
+            "artifacts": [ep_rel("AssetManifest_draft.shared.json"), ep_rel("AssetManifest_draft.en.json")],
         },
         "stage_6": {
             "done": check(ep("canon_diff.json")),
