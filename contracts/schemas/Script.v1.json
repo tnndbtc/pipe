@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Script",
   "type": "object",
-  "required": ["schema_id", "schema_version", "script_id", "project_id", "title", "scenes"],
+  "required": ["schema_id", "schema_version", "script_id", "project_id", "title", "cast", "scenes"],
   "additionalProperties": true,
   "properties": {
     "schema_version": {
@@ -13,6 +13,30 @@
     "project_id": {"type": "string"},
     "title": {"type": "string"},
     "genre": {"type": "string"},
+    "cast": {
+      "type": "array",
+      "description": "One entry per named character who speaks or appears in this episode. Defines character attributes used by all downstream stages.",
+      "items": {
+        "type": "object",
+        "required": ["character_id", "gender"],
+        "additionalProperties": true,
+        "properties": {
+          "character_id": {
+            "type": "string",
+            "description": "Matches speaker_id used in dialogue lines and ShotList vo_speaker_id"
+          },
+          "gender": {
+            "type": "string",
+            "enum": ["male", "female", "neutral"],
+            "description": "Voice gender: 'male', 'female', or 'neutral' for non-human/disembodied voices. Set explicitly from the story — never infer."
+          },
+          "role": {
+            "type": "string",
+            "description": "Short character role description (e.g. 'lead scientist', 'military commander')"
+          }
+        }
+      }
+    },
     "scenes": {
       "type": "array",
       "items": {

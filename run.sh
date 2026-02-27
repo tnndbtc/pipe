@@ -21,7 +21,7 @@ set -euo pipefail
 
 STORY_FILE="${1:-story_2.txt}"
 FROM_STAGE="${2:-0}"
-TO_STAGE="${3:-9}"
+TO_STAGE="${3:-10}"
 
 # Per-story vars file — keyed by story filename so concurrent runs don't clobber each other.
 # e.g. story_2.txt → pipeline_vars.story_2.sh
@@ -49,6 +49,92 @@ get_stage_model() {
     2|3|4|5|8) echo "sonnet" ;;   # creative writing / complex JSON derivation
     *)       echo "haiku"  ;;   # variable extraction, diffs, assembly
   esac
+}
+
+# ── Stage human-readable labels ────────────────────────────────────────────────
+stage_label() {
+  case "$1" in
+    0) echo "Extract story variables & set up project" ;;
+    1) echo "Check story & world consistency" ;;
+    2) echo "Write episode direction (StoryPrompt)" ;;
+    3) echo "Write script & character dialogue" ;;
+    4) echo "Break script into visual shots (ShotList)" ;;
+    5) echo "List required assets — images, voice, music" ;;
+    6) echo "Identify new story facts to record" ;;
+    7) echo "Update story memory (world canon)" ;;
+    8) echo "Translate & adapt for each language" ;;
+    9) echo "Finalize assets & build render plan" ;;
+   10) echo "Merge assets & generate video (output.mp4)" ;;
+    *) echo "Stage $1" ;;
+  esac
+}
+
+# ── Stage 10: asset merge + render (no LLM) ────────────────────────────────
+run_stage_10() {
+  local label
+  label=$(stage_label "10")
+  echo ""
+  echo "══════════════════════════════════════════════════════════════"
+  echo "  STAGE 10/10  —  ${label}"
+  echo "  locales: ${LOCALES:-en}"
+  echo "══════════════════════════════════════════════════════════════"
+
+  local code_dir ep_dir
+  code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
+  ep_dir="projects/${PROJECT_SLUG}/episodes/${EPISODE_ID}"
+
+  # ── [1/7] Music clips — locale-free, runs once, skips if no resources ─
+  echo "  [1/7] Generating music clips (skips gracefully if no resources)…"
+  python3 "${code_dir}/gen_music_clip.py" \
+    --manifest "${ep_dir}/AssetManifest_draft.shared.json"
+
+  # ── Per-locale steps ──────────────────────────────────────────────────
+  # Parse comma-separated locales (e.g. "en, zh-Hans")
+  IFS=',' read -ra _locale_arr <<< "${LOCALES:-en}"
+  for _raw in "${_locale_arr[@]}"; do
+    local locale
+    locale="$(echo "$_raw" | tr -d ' ')"
+    [[ -z "$locale" ]] && continue
+
+    echo ""
+    echo "  ── Locale: ${locale} ───────────────────────────────────────────"
+
+    echo "  [2/7] Merging shared + locale manifests…"
+    python3 "${code_dir}/manifest_merge.py" \
+      --shared "${ep_dir}/AssetManifest_draft.shared.json" \
+      --locale "${ep_dir}/AssetManifest_draft.${locale}.json" \
+      --out    "${ep_dir}/AssetManifest_merged.${locale}.json"
+
+    echo "  [3/7] Generating voice-over audio…"
+    python3 "${code_dir}/gen_tts_cloud.py" \
+      --manifest "${ep_dir}/AssetManifest_merged.${locale}.json"
+
+    echo "  [4/7] Analysing voice timing…"
+    python3 "${code_dir}/post_tts_analysis.py" \
+      --manifest "${ep_dir}/AssetManifest_merged.${locale}.json"
+
+    echo "  [5/7] Resolving asset file paths…"
+    python3 "${code_dir}/resolve_assets.py" \
+      --manifest "${ep_dir}/AssetManifest_merged.${locale}.json" \
+      --out      "${ep_dir}/AssetManifest.media.${locale}.json"
+
+    echo "  [6/7] Building per-shot render plan…"
+    python3 "${code_dir}/gen_render_plan.py" \
+      --manifest "${ep_dir}/AssetManifest_merged.${locale}.json" \
+      --media    "${ep_dir}/AssetManifest.media.${locale}.json"
+
+    echo "  [7/7] Rendering video…"
+    python3 "${code_dir}/render_video.py" \
+      --plan    "${ep_dir}/RenderPlan.${locale}.json" \
+      --locale  "${locale}" \
+      --out     "${ep_dir}/renders/${locale}" \
+      --profile "${RENDER_PROFILE:-preview_local}"
+
+    echo "  ✓ ${locale}  →  ${ep_dir}/renders/${locale}/output.mp4"
+  done
+
+  echo ""
+  echo "✓ Stage 10 complete"
 }
 
 # ── File inlining ──────────────────────────────────────────────────────
@@ -123,9 +209,12 @@ fill_and_run() {
   tmp=$(mktemp  /tmp/pipe_stage_${N}_XXXXXX.txt)
   tmp2=$(mktemp /tmp/pipe_stage_${N}_inlined_XXXXXX.txt)
 
+  local label
+  label=$(stage_label "$N")
   echo ""
   echo "══════════════════════════════════════════════════════════════"
-  echo "  STAGE ${N}  →  ${prompt_src}  [model: ${model}]"
+  echo "  STAGE ${N}/10  —  ${label}"
+  echo "  model: ${model}"
   echo "══════════════════════════════════════════════════════════════"
 
   # 1. Substitute all {{PLACEHOLDER}} tokens
@@ -172,16 +261,17 @@ fill_and_run() {
 echo "══════════════════════════════════════════════════════════════"
 echo "  PIPELINE PLAN  —  10 stages  (step 9 is conditional)"
 echo "══════════════════════════════════════════════════════════════"
-echo "  [0]  Read story file & populate variables"
-echo "  [1]  Canon check"
-echo "  [2]  Produce StoryPrompt.json"
-echo "  [3]  Produce Script.json"
-echo "  [4]  Produce ShotList.json"
-echo "  [5]  Produce AssetManifest_draft.json"
-echo "  [6]  Write canon_diff.json"
-echo "  [7]  Update canon.json"
-echo "  [8]  Produce locale variants  (one pass per non-en locale)"
-echo "  [9]  AssetManifest_final.json + RenderPlan.json  ← conditional"
+echo "  [0]  Extract story variables & set up project"
+echo "  [1]  Check story & world consistency"
+echo "  [2]  Write episode direction (StoryPrompt)"
+echo "  [3]  Write script & character dialogue"
+echo "  [4]  Break script into visual shots (ShotList)"
+echo "  [5]  List required assets — images, voice, music"
+echo "  [6]  Identify new story facts to record"
+echo "  [7]  Update story memory (world canon)"
+echo "  [8]  Translate & adapt for each language"
+echo "  [9]  Finalize assets & build render plan  ← conditional"
+echo "  [10] Merge assets & generate video (output.mp4)"
 echo "══════════════════════════════════════════════════════════════"
 echo "  Input story  : $STORY_FILE"
 echo "  Running stages $FROM_STAGE → $TO_STAGE"
@@ -217,12 +307,17 @@ if [[ "$FROM_STAGE" -gt 0 ]]; then
   echo "  PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
 fi
 
-# ── Stages 1–9 ────────────────────────────────────────────────────────
+# ── Stages 1–9 (LLM) ─────────────────────────────────────────────────
 for N in 1 2 3 4 5 6 7 8 9; do
   if [[ "$N" -ge "$FROM_STAGE" && "$N" -le "$TO_STAGE" ]]; then
     fill_and_run "$N"
   fi
 done
+
+# ── Stage 10: merge assets & render video ─────────────────────────────
+if [[ "$FROM_STAGE" -le 10 && "$TO_STAGE" -ge 10 ]]; then
+  run_stage_10
+fi
 
 # ── Final summary ──────────────────────────────────────────────────────
 echo ""

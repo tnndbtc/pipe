@@ -40,7 +40,8 @@
         "type": "object",
         "required": [
           "asset_id",
-          "license_type"
+          "license_type",
+          "gender"
         ],
         "additionalProperties": true,
         "properties": {
@@ -49,6 +50,11 @@
           },
           "license_type": {
             "type": "string"
+          },
+          "gender": {
+            "type": "string",
+            "enum": ["male", "female", "neutral"],
+            "description": "Voice gender for TTS assignment. Always derive explicitly from the story — 'male', 'female', or 'neutral' for non-human/ambiguous voices."
           },
           "search_prompt": {
             "type": "string",

@@ -25,12 +25,18 @@
 #   projects/{project_id}/episodes/{episode_id}/assets/{locale}/audio/vo/licenses/{item_id}.license.json
 #   projects/{project_id}/episodes/{episode_id}/assets/meta/gen_tts_cloud_results.json
 #
-# tts_prompt fields used (in priority order):
-#   azure_voice        → <voice name='...'>                (explicit; overrides speaker lookup)
+# Voice selection priority:
+#   1. tts_prompt.azure_voice          explicit voice name — highest priority
+#   2. character_packs[].gender        set by Stage 5 from Script.json cast[].gender
+#   3. tts_prompt.voice_style keywords fallback for manifests without gender field
+#   4. AZURE_DEFAULT_VOICE[lang][male] hard default
+#
+# tts_prompt fields used:
+#   azure_voice        → <voice name='...'>                (explicit; overrides all)
 #   azure_style        → <mstts:express-as style='...'>    (explicit; overrides emotion mapping)
 #   azure_style_degree → styledegree='...'                 (explicit; overrides default 1.5)
 #   azure_rate         → <prosody rate='...'>              (explicit; overrides pace mapping)
-#   voice_style        → gender fallback for speaker lookup
+#   voice_style        → secondary gender hint + vocal quality description
 #   emotion            → auto-mapped to Azure style via keyword rules
 #   pace               → auto-mapped to prosody rate (slow=-25%, normal=0%, fast=+25%)
 #   locale             → Azure xml:lang derivation
@@ -41,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -79,37 +86,9 @@ LOCALE_TO_AZURE_LANG: dict[str, str] = {
     "ar":       "ar-EG",
 }
 
-# =============================================================================
-# Speaker → Azure voice name, keyed by language prefix
-#
-# Populated with voices known to work well for this project's characters.
-# Override at runtime via tts_prompt.azure_voice in the manifest.
-# =============================================================================
-AZURE_SPEAKER_VOICE: dict[str, dict[str, str]] = {
-    "en": {
-        "amunhotep":     "en-US-DavisNeural",    # deep older male, haunted
-        "ramesses_ka":   "en-US-TonyNeural",     # commanding, imperious
-        "neferet":       "en-US-AriaNeural",     # young intelligent female
-        "khamun":        "en-US-GuyNeural",      # military, stern
-        "voice_of_gate": "en-US-DavisNeural",   # deep, supernatural cadence
-    },
-    "zh": {
-        "amunhotep":     "zh-CN-YunxiNeural",
-        "ramesses_ka":   "zh-CN-Yunyi:DragonHDFlashLatestNeural",
-        "neferet":       "zh-CN-Xiaoxiao:DragonHDFlashLatestNeural",
-        "khamun":        "zh-CN-Yunxia:DragonHDFlashLatestNeural",
-        "voice_of_gate": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
-    },
-    "ja": {
-        "amunhotep":     "ja-JP-KeitaNeural",
-        "ramesses_ka":   "ja-JP-DaichiNeural",
-        "neferet":       "ja-JP-NanamiNeural",
-        "khamun":        "ja-JP-KeitaNeural",
-        "voice_of_gate": "ja-JP-KeitaNeural",
-    },
-}
-
-# Default voice per gender when the speaker is not in AZURE_SPEAKER_VOICE
+# Default voice per gender — resolved from character_packs[].gender (set by Stage 5
+# from Script.json cast[].gender).  Use tts_prompt.azure_voice in the manifest to
+# pin a specific voice for a character.
 AZURE_DEFAULT_VOICE: dict[str, dict[str, str]] = {
     "en": {"male": "en-US-DavisNeural",      "female": "en-US-AriaNeural"},
     "zh": {"male": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
@@ -198,31 +177,102 @@ _GENDER_RULES: list[tuple[str, str]] = [
     ("male",   "male"),   ("man",   "male"),   ("boy",  "male"),
 ]
 
+# =============================================================================
+# Gender detection from character_pack descriptions (ai_prompt / search_prompt)
+# Word-boundary patterns — avoids false matches in words like "commanding".
+# =============================================================================
+_GENDER_DETECT_RE: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'\b(?:woman|female|girl)\b', re.IGNORECASE), "female"),
+    (re.compile(r'\b(?:male|man|boy)\b',      re.IGNORECASE), "male"),
+]
+
+
+def _norm_speaker(name: str) -> str:
+    """Normalise a speaker name to a lowercase alphanumeric key.
+
+    Strips spaces, underscores, dots and hyphens so that 'Dr. Hale', 'Dr_Hale'
+    and 'drhale' all map to the same canonical key 'drhale'.
+    """
+    return re.sub(r'[\s._\-]', '', name).lower()
+
+
+def build_gender_map_from_character_packs(character_packs: list) -> dict[str, str]:
+    """Return a normalised speaker_id → 'male'|'female' map.
+
+    Keys are produced by _norm_speaker() so they match regardless of whether
+    the manifest uses underscores (asset_id: 'Dr_Hale') or spaces/dots
+    (speaker_id: 'Dr. Hale').
+
+    Priority per character_pack:
+      1. Explicit 'gender' field  ("male"|"female"|"neutral") — set by Stage 5 LLM
+      2. Text scan of search_prompt + ai_prompt for gender keywords (legacy fallback)
+
+    'neutral' is intentionally omitted from the map so the voice_style keyword
+    check in resolve_azure_voice() can still apply (e.g. a narrator voice).
+    """
+    gender_map: dict[str, str] = {}
+    for cp in character_packs:
+        asset_id = cp.get("asset_id", "")
+        if not asset_id:
+            continue
+
+        key = _norm_speaker(asset_id)
+
+        # 1. Explicit gender field (reliable — always use this when present)
+        explicit = cp.get("gender", "")
+        if explicit in ("male", "female"):
+            gender_map[key] = explicit
+            continue
+        # "neutral" → skip (leave out of map; voice_style keywords can still match)
+
+        # 2. Legacy fallback: scan description text for gender keywords
+        text = " ".join(filter(None, [
+            cp.get("search_prompt", ""),
+            cp.get("ai_prompt", ""),
+        ]))
+        for pattern, gender in _GENDER_DETECT_RE:
+            if pattern.search(text):
+                gender_map[key] = gender
+                break   # first match wins (female checked before male)
+
+    return gender_map
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def resolve_azure_voice(speaker: str, voice_style: str, azure_lang: str) -> str:
+def resolve_azure_voice(
+    speaker: str,
+    voice_style: str,
+    azure_lang: str,
+    speaker_gender_map: dict[str, str] | None = None,
+) -> str:
     """Return an Azure voice name for speaker + locale.
 
     Priority:
-      1. AZURE_SPEAKER_VOICE[lang_prefix][speaker]
-      2. AZURE_DEFAULT_VOICE[lang_prefix][gender]  (gender from voice_style keywords)
-      3. First entry in AZURE_DEFAULT_VOICE[lang_prefix]
-      4. en-US-DavisNeural  (absolute fallback)
+      1. speaker_gender_map[speaker]   gender from character_packs[].gender
+                                       (set by Stage 5 from Script.json cast[].gender)
+      2. voice_style keywords          fallback for manifests missing the gender field
+      3. "male" hard default
     """
     lang_prefix = azure_lang.split("-")[0].lower()
 
-    speaker_map = AZURE_SPEAKER_VOICE.get(lang_prefix, {})
-    if speaker in speaker_map:
-        return speaker_map[speaker]
+    # 1. Gender from character_packs[].gender (the authoritative pipeline source)
+    gender: str | None = None
+    if speaker_gender_map:
+        gender = speaker_gender_map.get(_norm_speaker(speaker))
 
-    gender = "male"
-    for kw, g in _GENDER_RULES:
-        if kw in voice_style.lower():
-            gender = g
-            break
+    # 2. Gender from voice_style keywords (fallback for old manifests)
+    if gender is None:
+        for kw, g in _GENDER_RULES:
+            if kw in voice_style.lower():
+                gender = g
+                break
+
+    # 3. Hard default
+    if gender is None:
+        gender = "male"
 
     defaults = AZURE_DEFAULT_VOICE.get(lang_prefix, {})
     return defaults.get(gender) or next(iter(defaults.values()), "en-US-DavisNeural")
@@ -374,6 +424,14 @@ def load_items_from_manifest(manifest: dict, path: str, asset_id_filter: str | N
     locale     = locale_from_manifest(manifest, path)
     azure_lang = LOCALE_TO_AZURE_LANG.get(locale.lower(), "en-US")
 
+    # Build a speaker → gender map from character_packs[].gender
+    # (written by Stage 5 from Script.json cast[].gender).
+    speaker_gender_map = build_gender_map_from_character_packs(
+        manifest.get("character_packs", [])
+    )
+    if speaker_gender_map:
+        print(f"  [TTS] Character gender map: {speaker_gender_map}")
+
     items = []
     for vo in manifest.get("vo_items", []):
         if asset_id_filter and vo["item_id"] != asset_id_filter:
@@ -387,7 +445,7 @@ def load_items_from_manifest(manifest: dict, path: str, asset_id_filter: str | N
         # ── Voice resolution (explicit > speaker lookup > gender default) ──
         voice = (
             tts.get("azure_voice")
-            or resolve_azure_voice(vo["speaker_id"], voice_style, azure_lang)
+            or resolve_azure_voice(vo["speaker_id"], voice_style, azure_lang, speaker_gender_map)
         )
 
         # ── Style resolution (explicit > emotion mapping) ──

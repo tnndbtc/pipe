@@ -292,7 +292,10 @@ def parse_args():
                         "shared manifest, not in locale or merged variants.")
     p.add_argument("--resources", default=None, metavar="DIR",
                    help="Directory containing tagged source music files. "
-                        "Default: <repo_root>/projects/resources/music/")
+                        "Auto-detected from manifest if omitted: checks "
+                        "projects/{project_id}/resources/music/ then "
+                        "projects/resources/music/. Skips music generation "
+                        "gracefully if neither location exists or is empty.")
     p.add_argument("--item-id", default=None, metavar="ID",
                    help="Process only this music item_id (e.g. music-s01-sh02).")
     p.add_argument("--hop", type=float, default=2.0, metavar="SEC",
@@ -301,6 +304,9 @@ def parse_args():
     p.add_argument("--ckpt-dir", default=None, metavar="DIR",
                    help="Directory for CLAP checkpoint. "
                         "Default: ~/.cache/laion_clap/")
+    p.add_argument("--force", action="store_true", default=False,
+                   help="Overwrite existing clips (default: skip items whose "
+                        ".wav and .license.json already exist).")
     return p.parse_args()
 
 
@@ -310,19 +316,19 @@ def main():
     args = parse_args()
 
     manifest_path = Path(args.manifest).resolve()
-    resources_dir = (Path(args.resources).resolve() if args.resources
-                     else PIPE_DIR / "projects" / "resources" / "music")
     ckpt_dir      = (Path(args.ckpt_dir) if args.ckpt_dir
                      else Path.home() / ".cache" / "laion_clap")
 
-    # ── Validate inputs ───────────────────────────────────────────────────────
+    # ── Validate manifest ─────────────────────────────────────────────────────
     if not manifest_path.exists():
         print(f"[ERROR] Manifest not found: {manifest_path}", file=sys.stderr)
         sys.exit(1)
-    if not resources_dir.exists():
-        print(f"[ERROR] Resources directory not found: {resources_dir}",
-              file=sys.stderr)
-        sys.exit(1)
+
+    # ── Resolve resources dir (explicit > project-level > global fallback) ────
+    # NOTE: we intentionally do this AFTER loading the manifest so that
+    # auto-detection can use project_id from the manifest itself.
+    # resources_dir is set to None here and resolved below after manifest load.
+    _resources_arg = args.resources
 
     # ── Load manifest ─────────────────────────────────────────────────────────
     manifest    = load_manifest(manifest_path)
@@ -364,6 +370,33 @@ def main():
         print("[INFO] No music_items in manifest — nothing to do.")
         return
 
+    # ── Auto-detect resources dir (now that we have project_id) ──────────────
+    if _resources_arg:
+        resources_dir = Path(_resources_arg).resolve()
+        if not resources_dir.exists():
+            print(f"[ERROR] Resources directory not found: {resources_dir}",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Search order: project-level first, then global shared pool
+        candidates_dirs = [
+            PIPE_DIR / "projects" / project_id / "resources" / "music",
+            PIPE_DIR / "projects" / "resources" / "music",
+        ]
+        resources_dir = next(
+            (d for d in candidates_dirs if d.is_dir() and
+             any(f.suffix.lower() in SUPPORTED_EXTS for f in d.iterdir() if f.is_file())),
+            None,
+        )
+        if resources_dir is None:
+            searched = "\n  ".join(str(d) for d in candidates_dirs)
+            print(
+                f"[SKIP] No music resources found — skipping music clip generation.\n"
+                f"  Searched: {', '.join(str(d) for d in candidates_dirs)}\n"
+                f"  To enable: add tagged MP3/WAV files to one of those dirs."
+            )
+            return   # clean exit — not an error
+
     if args.item_id:
         music_items = [m for m in music_items if m["item_id"] == args.item_id]
         if not music_items:
@@ -387,11 +420,12 @@ def main():
     print("\n── Resource files ──────────────────────────────────────")
     candidates = scan_resources(resources_dir)
     if not candidates:
-        print(f"[ERROR] No audio files found in {resources_dir}", file=sys.stderr)
-        sys.exit(1)
+        print(f"[SKIP] No audio files found in {resources_dir} — skipping music generation.",
+              file=sys.stderr)
+        return   # clean exit — not an error
 
-    # ── Load CLAP once ────────────────────────────────────────────────────────
-    model = load_clap(ckpt_dir)
+    # ── CLAP is loaded lazily — only when the first item actually needs it ─────
+    model = None
 
     # Audio cache: avoid reloading the same source track multiple times
     # (multiple shots often map to the same file)
@@ -409,13 +443,31 @@ def main():
         license_path = licenses_dir / f"{item_id}.license.json"
 
         print(f"\n[{idx}/{total}] {item_id}  ({duration}s)")
+
+        # ── Skip if already done (unless --force) ────────────────────────────
+        if not args.force and out_path.exists() and license_path.exists():
+            print(f"  [SKIP] already exists — use --force to regenerate")
+            results.append({
+                "item_id":      item_id,
+                "shot_id":      shot_id,
+                "output":       str(out_path),
+                "license":      str(license_path),
+                "size_bytes":   out_path.stat().st_size,
+                "status":       "skipped",
+            })
+            continue
+
         print(f"  Mood : \"{music_mood}\"")
 
-        # Always overwrite — delete existing clip and sidecar before writing
+        # Delete stale clip and sidecar before writing
         if out_path.exists():
             out_path.unlink()
         if license_path.exists():
             license_path.unlink()
+
+        # Load CLAP on first item that actually needs processing
+        if model is None:
+            model = load_clap(ckpt_dir)
 
         try:
             # ── Step 1: pick best matching source file ────────────────────────
@@ -491,7 +543,7 @@ def main():
                   f"  ← {r['source_file']} @ {r['start_sec']}s")
             print(f"            music/licenses/{Path(r['license']).name}")
         elif r["status"] == "skipped":
-            print(f"  [SKIPPED] audio/{stem}")
+            print(f"  [SKIPPED] music/{stem}")
         else:
             print(f"  [FAILED]  {r.get('item_id')}  — {r.get('error')}")
 

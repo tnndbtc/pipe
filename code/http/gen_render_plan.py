@@ -203,6 +203,7 @@ def build_shot(
     audio_intent = shot.get("audio_intent", {})
     vo_lines: list[dict] = []
     cursor_ms = 0
+    _seen_vo: set[tuple] = set()   # deduplicate by (speaker_id, text) within shot
 
     for vid in audio_intent.get("vo_item_ids", []):
         media_item = media_map.get(vid)
@@ -219,14 +220,26 @@ def build_shot(
         if wav_dur_ms <= 0:
             continue
 
+        # Skip duplicate VO lines (same speaker + same text) within the same shot.
+        # The LLM sometimes assigns two IDs for the same line (e.g. -001 and -002
+        # with identical text), causing the sentence to play twice in the render.
+        speaker = vo_item.get("speaker_id", "")
+        text    = vo_item.get("text", "").strip()
+        dedup_key = (speaker, text)
+        if dedup_key in _seen_vo:
+            print(f"  [DEDUP] Skipping duplicate VO '{vid}' "
+                  f"(speaker={speaker!r}, text={text[:50]!r}…)")
+            continue
+        _seen_vo.add(dedup_key)
+
         timeline_in_ms  = cursor_ms
         timeline_out_ms = cursor_ms + wav_dur_ms
         cursor_ms = timeline_out_ms + INTER_LINE_PAUSE_MS
 
         vo_lines.append({
             "line_id":         vid,
-            "speaker_id":      vo_item.get("speaker_id", ""),
-            "text":            vo_item.get("text", ""),
+            "speaker_id":      speaker,
+            "text":            text,
             "timeline_in_ms":  timeline_in_ms,
             "timeline_out_ms": timeline_out_ms,
         })

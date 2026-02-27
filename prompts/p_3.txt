@@ -46,16 +46,41 @@ Read these files before writing anything:
 Print: `▶ [3/9] Stage 3 — Produce Script.json  …`
 
 Produce Script.json.  Required top-level fields (confirm from schema):
-  schema_id, schema_version, script_id, title, episode, scenes[]
+  schema_id, schema_version, script_id, title, cast[], scenes[]
+
+### cast[] — one entry per named character in this episode
+
+Write this BEFORE scenes.  Fields per entry:
+  character_id : matches speaker_id used in all dialogue lines (e.g. "Dr. Hale")
+  gender       : "male" | "female" | "neutral"
+                 Read directly from the story — never guess.
+                 Use "neutral" only for non-human or intentionally ambiguous voices.
+  role         : short description (e.g. "lead scientist", "military commander")
+
+Example:
+```json
+"cast": [
+  { "character_id": "Lina",            "gender": "female", "role": "tech specialist, Ethan's partner" },
+  { "character_id": "Ethan",           "gender": "male",   "role": "enhanced guardian of Earth" },
+  { "character_id": "Dr. Hale",        "gender": "male",   "role": "lead scientist" },
+  { "character_id": "Commander Reyes", "gender": "female", "role": "military commander" }
+]
+```
+
+### scenes[]
 
 Each scene must have:
-  scene_id, location, time_of_day, characters[], dialogue[], action_beats[]
+  scene_id, location, time_of_day, actions[]
 
-Dialogue items: { "speaker_id": "<id>", "line": "<text>" }
+Action items are one of:
+  { "type": "description", "text": "..." }
+  { "type": "action",      "text": "..." }
+  { "type": "dialogue",    "speaker_id": "<character_id from cast>", "line": "..." }
 
 Rules:
   • Maximum 5 scenes.
   • No camera instructions — script only.
+  • All speaker_ids in dialogue MUST match a character_id in cast[].
   • All characters must be consistent with StoryPrompt.json characters[].
   • All story events must be consistent with episode_direction.txt.
 

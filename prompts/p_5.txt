@@ -8,6 +8,7 @@
 #
 # 📥 FILES READ (written by earlier stages):
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json  (Stage 4)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json    (Stage 3 — cast[].gender)
 #     contracts/schemas/AssetManifest.v1.json
 #
 # 📤 OUTPUT:
@@ -33,8 +34,9 @@ Schema      : contracts/schemas/AssetManifest.v1.json
 
 Read these files before writing anything:
   1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
-  2. episode_direction.txt   (for ai_prompt context)
-  3. contracts/schemas/AssetManifest.v1.json   — inspect all required fields
+  2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json   — read cast[] for character gender
+  3. episode_direction.txt   (for ai_prompt context)
+  4. contracts/schemas/AssetManifest.v1.json   — inspect all required fields
 
 ---
 
@@ -67,6 +69,13 @@ Derive directly from ShotList.json:
 license_type for all entries: "proprietary_cleared"
 
 #### Per character_pack and background entry — extra fields required
+
+**gender** (character_packs ONLY — required, not used on backgrounds):
+  Read directly from Script.json cast[].gender — do NOT guess or infer.
+  Every character_id in the shared manifest MUST have a matching entry in cast[].
+  "male"    — character is male
+  "female"  — character is female
+  "neutral" — non-human, disembodied voice, or deliberately ambiguous
 
 **search_prompt** (5–10 keywords for free library image search):
   Derive from character role / scene location and period.
@@ -185,12 +194,14 @@ Required fields per entry:
 **tts_prompt** per entry:
 ```json
 {
-  "voice_style" : "<derive from character role>",
+  "voice_style" : "<gender + role quality — MUST start with gender, e.g. 'young female, fierce', 'deep male, commanding', 'elderly male, weary'>",
   "emotion"     : "<derive from scene context>",
   "pace"        : "<slow|normal|fast>",
   "locale"      : "en"
 }
 ```
+voice_style MUST lead with the character's gender word ("female", "male", or "neutral")
+followed by their vocal qualities. This is the primary signal for TTS voice selection.
 
 DO NOT add start_sec, end_sec, or duration_sec to vo_items —
 those are written by post_tts_analysis.py after WAV generation.
