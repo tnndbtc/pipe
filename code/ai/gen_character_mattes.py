@@ -6,12 +6,9 @@
 # =============================================================================
 #
 # requirements.txt (pip install before running):
-#   torch>=2.4.1
-#   transformers>=4.40.0
-#   torchvision>=0.19.0
+#   rembg>=2.0.50
 #   Pillow>=10.0.0
-#   numpy>=1.24.0,<2.0.0
-#   huggingface_hub>=0.21.0
+#   torch>=2.1.0       (optional — used only for GPU cache management)
 #
 # ---------------------------------------------------------------------------
 # Hardware Target: NVIDIA RTX 4060 8 GB VRAM
@@ -44,10 +41,8 @@ import gc
 import json
 from pathlib import Path
 
-import numpy as np
 import torch
 from PIL import Image
-import torchvision.transforms as T
 
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
@@ -83,11 +78,7 @@ CHARACTERS = [
     },
 ]
 
-RMBG_MODEL_ID = "briaai/RMBG-1.4"
-# RMBG-1.4 expects images normalised to ImageNet stats at 1024×1024
-INFERENCE_SIZE = (1024, 1024)
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+RMBG_MODEL = "u2net_human_seg"   # rembg model — optimised for human subject isolation
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +89,10 @@ def parse_args():
         description="Remove backgrounds from character portraits using RMBG-1.4.",
         epilog=(
             "Model used:\n\n"
-            "  RMBG-1.4    briaai/RMBG-1.4\n"
-            "              BiRefNet segmentation, ~175 MB weights, ~1-2 GB VRAM.\n"
-            "              trust_remote_code=True required. No HF login needed.\n\n"
-            "  This script has no --model flag; RMBG-1.4 is the only supported model."
+            "  u2net_human_seg    rembg built-in model, optimised for human subjects.\n"
+            "                     Downloaded automatically on first run (~176 MB).\n"
+            "                     No GPU or HF login required.\n\n"
+            "  This script has no --model flag; u2net_human_seg is the only supported model."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -146,51 +137,13 @@ def load_from_manifest(manifest_path: str, asset_id_filter):
 # Model loader
 # ---------------------------------------------------------------------------
 def load_rmbg(device: str):
-    """Load RMBG-1.4 from HuggingFace with trust_remote_code=True."""
-    from transformers import AutoModelForImageSegmentation
+    """Load rembg session (u2net_human_seg — optimised for human portraits)."""
+    from rembg import new_session
 
-    print(f"[MODEL] Loading {RMBG_MODEL_ID}...")
-    model = AutoModelForImageSegmentation.from_pretrained(
-        RMBG_MODEL_ID,
-        trust_remote_code=True,
-    )
-    model.to(device)
-    model.eval()
-    print(f"[MODEL] RMBG-1.4 ready on {device}.")
-    return model
-
-
-# ---------------------------------------------------------------------------
-# Preprocessing / postprocessing helpers
-# ---------------------------------------------------------------------------
-def preprocess(img: Image.Image) -> torch.Tensor:
-    """Resize to 1024×1024, normalise, return [1, 3, H, W] tensor."""
-    transform = T.Compose([
-        T.Resize(INFERENCE_SIZE),
-        T.ToTensor(),
-        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    ])
-    return transform(img.convert("RGB")).unsqueeze(0)
-
-
-def extract_mask(model_output, orig_w: int, orig_h: int, threshold: float) -> Image.Image:
-    """
-    Pull the final prediction from the model output, sigmoid it, resize to
-    the original image dimensions, and binarise at `threshold`.
-    Returns a single-channel PIL Image (mode "L") for use as alpha.
-    """
-    # RMBG-1.4 returns a list of predictions; use the last (most refined) one
-    pred = model_output[-1].sigmoid().squeeze()   # shape: [H, W]
-    pred_np = pred.cpu().float().numpy()
-    # Scale to [0, 255]
-    pred_np = (pred_np * 255).clip(0, 255).astype(np.uint8)
-    mask = Image.fromarray(pred_np, mode="L")
-    # Resize back to original resolution
-    mask = mask.resize((orig_w, orig_h), Image.LANCZOS)
-    # Binarise: pixels above threshold → fully opaque, else transparent
-    threshold_uint8 = int(threshold * 255)
-    mask = mask.point(lambda p: 255 if p >= threshold_uint8 else 0)
-    return mask
+    print(f"[MODEL] Loading rembg ({RMBG_MODEL})...")
+    session = new_session(RMBG_MODEL)
+    print(f"[MODEL] rembg ({RMBG_MODEL}) ready.")
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -204,24 +157,14 @@ def remove_background(
     threshold: float,
 ) -> int:
     """
-    Run RMBG-1.4 on one image, apply the mask as alpha, save RGBA PNG.
+    Remove background using rembg (u2net_human_seg), save RGBA PNG.
     Returns the output file size in bytes.
     """
-    img = Image.open(str(input_path)).convert("RGB")
-    orig_w, orig_h = img.size
+    from rembg import remove
 
-    # Preprocess → inference
-    input_tensor = preprocess(img).to(device)
-    with torch.no_grad():
-        output = model(input_tensor)
-
-    # Build alpha mask at original resolution
-    alpha_mask = extract_mask(output, orig_w, orig_h, threshold)
-
-    # Composite: paste alpha channel onto original RGB
-    img_rgba = img.convert("RGBA")
-    img_rgba.putalpha(alpha_mask)
-    img_rgba.save(str(output_path), format="PNG")
+    img    = Image.open(str(input_path)).convert("RGB")
+    result = remove(img, session=model)   # returns RGBA PIL Image
+    result.save(str(output_path), format="PNG")
 
     return output_path.stat().st_size
 

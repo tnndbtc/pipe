@@ -1,10 +1,17 @@
 {
   "api_key": "change-me",
   "job_dir": null,
+  "offline": false,
   "models": {
     "characters":  "flux-schnell",
     "backgrounds": "flux-schnell",
     "sfx":         "audiogen",
     "bg_video":    "cogvideox-2b"
+  },
+  "bg_hints": {
+    "characters":  "plain white studio background, solid backdrop, no scenery, isolated figure",
+    "backgrounds": null,
+    "bg_video":    null,
+    "sfx":         null
   }
 }

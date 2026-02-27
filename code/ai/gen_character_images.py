@@ -133,11 +133,13 @@ MODELS = {
         "notes":    "Fast distilled FLUX, 4-bit quant, ~6 GB VRAM",
     },
     "flux-dev": {
-        "model_id": "black-forest-labs/FLUX.1-dev",
-        "steps":    28,
-        "guidance": 3.5,
-        "family":   "flux",
-        "notes":    "Higher quality FLUX, 4-bit quant, ~6 GB VRAM. Needs HF auth (gated).",
+        "model_id":  "black-forest-labs/FLUX.1-dev",
+        "steps":     28,
+        "guidance":  3.5,
+        "family":    "flux",
+        "outdated":  True,
+        "successor": "flux-schnell",
+        "notes":     "[OUTDATED] Non-commercial licence only. Use flux-schnell (Apache 2.0) for commercial projects.",
     },
     "sdxl": {
         "model_id":  "stabilityai/stable-diffusion-xl-base-1.0",
@@ -185,6 +187,8 @@ def parse_args():
     parser.add_argument("--width",  type=int, default=WIDTH)
     parser.add_argument("--height", type=int, default=HEIGHT)
     parser.add_argument("--seed",   type=int, default=42)
+    parser.add_argument("--force", action="store_true",
+                        help="Overwrite existing output files instead of skipping them.")
     parser.add_argument(
         "--model",
         choices=ALL_MODEL_KEYS + ["auto", "all"],
@@ -202,6 +206,20 @@ def parse_args():
     parser.add_argument(
         "--asset-id", type=str, default=None, dest="asset_id",
         help="Process only this asset_id (requires --manifest).",
+    )
+    parser.add_argument(
+        "--no-matte", action="store_true", dest="no_matte",
+        help="Skip automatic background removal after generation. "
+             "By default, rembg runs after generation to produce {asset_id}-rgba.png.",
+    )
+    parser.add_argument(
+        "--bg-hint", type=str, default=None, dest="bg_hint",
+        help=(
+            "Optional prompt suffix appended to every character prompt to guide "
+            "background style — makes rembg removal more reliable. "
+            "The original pipeline prompt is preserved; this is appended. "
+            "Example: --bg-hint \"plain white studio background, solid backdrop, no scenery\""
+        ),
     )
     return parser.parse_args()
 
@@ -379,7 +397,7 @@ def run_model(model_key: str, characters: list, out_dir: Path, args,
         out_path = out_dir / fname
         print(f"\n  [{idx}/{total}] {char['asset_id']} → {fname}")
 
-        if out_path.exists():
+        if out_path.exists() and not args.force:
             print(f"    [SKIP] already exists")
             results.append({
                 "asset_id": char["asset_id"],
@@ -447,6 +465,12 @@ def main():
             print("[WARN] No matching character_packs in manifest. Nothing to do.")
             return
 
+    # Append background hint to each prompt if provided
+    if args.bg_hint:
+        for char in characters:
+            char["prompt"] = char["prompt"] + ", " + args.bg_hint
+        print(f"[BG-HINT] Appended to all prompts: \"{args.bg_hint}\"")
+
     # Resolve which model keys to run
     if args.model == "all":
         model_keys  = ALL_MODEL_KEYS
@@ -490,6 +514,51 @@ def main():
         print(f"  [{label}]  [{model}]  {r['output']}  ({r['size_bytes']:,} bytes)")
     print(f"\n{ok_count}/{total} completed | {total_bytes:,} bytes total")
     print(f"Results: {results_path}")
+
+    # ---------------------------------------------------------------------------
+    # Auto-matte post-processing  (RMBG-1.4 background removal)
+    # Produces {asset_id}-rgba.png alongside each generated image.
+    # Skip with --no-matte.
+    # ---------------------------------------------------------------------------
+    if not args.no_matte:
+        to_matte = [
+            r for r in all_results
+            if r["status"] in ("success", "skipped") and Path(r["output"]).is_file()
+        ]
+        if not to_matte:
+            print("\n[MATTE] No images available to process.")
+        else:
+            from gen_character_mattes import load_rmbg, remove_background  # noqa: PLC0415
+
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"\n[MATTE] Running RMBG-1.4 background removal on "
+                  f"{len(to_matte)} image(s)...")
+            matte_model = load_rmbg(device)
+
+            for idx, r in enumerate(to_matte, start=1):
+                input_path  = Path(r["output"])
+                output_path = input_path.with_name(input_path.stem + "-rgba.png")
+                print(f"\n  [{idx}/{len(to_matte)}] {input_path.name} → {output_path.name}")
+
+                if output_path.exists() and not args.force:
+                    print(f"    [SKIP] already exists")
+                    continue
+
+                try:
+                    size = remove_background(
+                        matte_model, input_path, output_path, device, threshold=0.5
+                    )
+                    print(f"    [OK] {size:,} bytes  (RGBA, transparent background)")
+                except Exception as exc:
+                    print(f"    [ERROR] {exc}")
+                finally:
+                    torch.cuda.empty_cache()
+                    gc.collect()
+
+            del matte_model
+            torch.cuda.empty_cache()
+            gc.collect()
+            print(f"\n[MATTE] Done. RGBA images saved alongside originals in {out_dir}")
 
 
 if __name__ == "__main__":

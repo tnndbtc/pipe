@@ -143,11 +143,13 @@ librosa>=0.10.0
 
 
 # ---------------------------------------------------------------------------
-# Background removal — RMBG-1.4  (gen_character_mattes.py)
+# Background removal — rembg  (gen_character_mattes.py)
 #
-# Uses transformers + torchvision (already pulled in above).
-# No additional packages required.
+# Uses u2net_human_seg model (~176 MB, downloaded automatically on first run).
+# No GPU required; ONNX runtime handles inference.
 # ---------------------------------------------------------------------------
+rembg>=2.0.50
+onnxruntime>=1.18.0        # rembg runtime (CPU); swap for onnxruntime-gpu for GPU inference
 
 
 # ---------------------------------------------------------------------------

@@ -15,11 +15,15 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+import logging
+
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from job_store import JobStore
+
+logger = logging.getLogger("ai_server")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -65,6 +69,10 @@ app = FastAPI(title="AI Asset Generation Server", version="1.0.0")
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    if config.get("offline"):
+        logger.warning("[OFFLINE] Server started in offline mode — all job submissions will be rejected.")
+    else:
+        logger.info("[ONLINE] Server ready — accepting job submissions.")
     store.startup_scan()
     asyncio.create_task(queue_worker())
 
@@ -95,6 +103,10 @@ class JobRequest(BaseModel):
 @app.post("/jobs")
 async def create_job(body: JobRequest, x_api_key: str = Header(...)):
     raise_if_bad_key(x_api_key)
+
+    if config.get("offline"):
+        logger.warning("[OFFLINE] POST /jobs rejected — asset_types=%s", body.asset_types)
+        return {"status": "unavailable", "job_id": None, "total": 0}
 
     # Validate asset types
     unknown = [t for t in body.asset_types if t not in DISPATCH]
@@ -170,6 +182,14 @@ async def download_file(job_id: str, filename: str, x_api_key: str = Header(...)
 
 @app.get("/health")
 async def health():
+    if config.get("offline"):
+        logger.info("[OFFLINE] GET /health — server is in offline mode")
+        return {
+            "status":       "offline",
+            "gpu":          "N/A",
+            "vram_free_gb": 0.0,
+            "queue_len":    0,
+        }
     gpu_info = _gpu_info()
     return {
         "status":       "ok",
@@ -216,6 +236,10 @@ async def run_job(job_id: str, body: JobRequest) -> None:
                 "--output_dir", str(out_dir),
                 model_flag,     model,
             ]
+
+            bg_hint = config.get("bg_hints", {}).get(asset_type)
+            if bg_hint:
+                cmd += ["--bg-hint", bg_hint]
 
             if body.asset_ids:
                 for aid in body.asset_ids:
@@ -309,5 +333,19 @@ def _gpu_info() -> dict:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
-    uvicorn.run("server:app", host="192.168.86.27", port=8000, reload=False)
+
+    parser = argparse.ArgumentParser(description="AI Asset Generation Server")
+    parser.add_argument("--host",    default="192.168.86.27")
+    parser.add_argument("--port",    type=int, default=8000)
+    parser.add_argument("--offline", action="store_true",
+                        help="Start in offline mode: server accepts connections "
+                             "but rejects all job submissions with status=unavailable.")
+    cli = parser.parse_args()
+
+    if cli.offline:
+        config["offline"] = True
+        print("[SERVER] Starting in OFFLINE mode — job submissions will be rejected.")
+
+    uvicorn.run(app, host=cli.host, port=cli.port, reload=False)
