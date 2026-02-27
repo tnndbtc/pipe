@@ -201,8 +201,12 @@ def resolve_all(merged: dict, assets_root: Path) -> list[dict]:
             n_missing += 1
 
     # ── 2. Backgrounds ───────────────────────────────────────────────────────
-    # Search: assets/{asset_id}.ext  then  assets/backgrounds/{asset_id}.ext
-    bg_search = [assets_root, assets_root / "backgrounds"]
+    # Search order (project-level wins so all episodes share the same backgrounds):
+    #   1. projects/{project_id}/backgrounds/  (project-level, shared — FIRST)
+    #   2. assets/{asset_id}.ext              (episode-level root)
+    #   3. assets/backgrounds/{asset_id}.ext  (episode-level backgrounds subdir)
+    proj_bg_dir = PIPE_DIR / "projects" / project_id / "backgrounds"
+    bg_search = [proj_bg_dir, assets_root, assets_root / "backgrounds"]
     for bg in merged.get("backgrounds", []):
         aid = bg["asset_id"]
         lt  = bg.get("license_type", "proprietary_cleared")
@@ -284,8 +288,10 @@ File path conventions (relative to --assets-root):
   VO        : {locale}/audio/vo/{item_id}.wav
   Music     : music/{item_id}.wav
   SFX       : sfx/{item_id}.wav
-  Background: {asset_id}.png  (also searched in backgrounds/ subdir)
-  Character : {asset_id}.png  (also searched in characters/ subdir)
+  Background: projects/{project_id}/backgrounds/ (project-level, shared — FIRST)
+              then assets/{asset_id}.png, assets/backgrounds/{asset_id}.png
+  Character : projects/{project_id}/characters/ (project-level, shared — FIRST)
+              then assets/characters/{asset_id}.png, assets/{asset_id}.png
 """,
     )
     p.add_argument(
