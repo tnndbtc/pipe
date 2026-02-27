@@ -64,7 +64,7 @@ stage_label() {
     7) echo "Update story memory (world canon)" ;;
     8) echo "Translate & adapt for each language" ;;
     9) echo "Finalize assets & build render plan" ;;
-   10) echo "Merge assets & generate video (output.mp4)" ;;
+   10) echo "Merge assets, render video & export dubbed audio" ;;
     *) echo "Stage $1" ;;
   esac
 }
@@ -83,8 +83,8 @@ run_stage_10() {
   code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
   ep_dir="projects/${PROJECT_SLUG}/episodes/${EPISODE_ID}"
 
-  # ── [1/7] Music clips — locale-free, runs once, skips if no resources ─
-  echo "  [1/7] Generating music clips (skips gracefully if no resources)…"
+  # ── [1/8] Music clips — locale-free, runs once, skips if no resources ─
+  echo "  [1/8] Generating music clips (skips gracefully if no resources)…"
   python3 "${code_dir}/gen_music_clip.py" \
     --manifest "${ep_dir}/AssetManifest_draft.shared.json"
 
@@ -99,31 +99,31 @@ run_stage_10() {
     echo ""
     echo "  ── Locale: ${locale} ───────────────────────────────────────────"
 
-    echo "  [2/7] Merging shared + locale manifests…"
+    echo "  [2/8] Merging shared + locale manifests…"
     python3 "${code_dir}/manifest_merge.py" \
       --shared "${ep_dir}/AssetManifest_draft.shared.json" \
       --locale "${ep_dir}/AssetManifest_draft.${locale}.json" \
       --out    "${ep_dir}/AssetManifest_merged.${locale}.json"
 
-    echo "  [3/7] Generating voice-over audio…"
+    echo "  [3/8] Generating voice-over audio…"
     python3 "${code_dir}/gen_tts_cloud.py" \
       --manifest "${ep_dir}/AssetManifest_merged.${locale}.json"
 
-    echo "  [4/7] Analysing voice timing…"
+    echo "  [4/8] Analysing voice timing…"
     python3 "${code_dir}/post_tts_analysis.py" \
       --manifest "${ep_dir}/AssetManifest_merged.${locale}.json"
 
-    echo "  [5/7] Resolving asset file paths…"
+    echo "  [5/8] Resolving asset file paths…"
     python3 "${code_dir}/resolve_assets.py" \
       --manifest "${ep_dir}/AssetManifest_merged.${locale}.json" \
       --out      "${ep_dir}/AssetManifest.media.${locale}.json"
 
-    echo "  [6/7] Building per-shot render plan…"
+    echo "  [6/8] Building per-shot render plan…"
     python3 "${code_dir}/gen_render_plan.py" \
       --manifest "${ep_dir}/AssetManifest_merged.${locale}.json" \
       --media    "${ep_dir}/AssetManifest.media.${locale}.json"
 
-    echo "  [7/7] Rendering video…"
+    echo "  [7/8] Rendering video…"
     python3 "${code_dir}/render_video.py" \
       --plan    "${ep_dir}/RenderPlan.${locale}.json" \
       --locale  "${locale}" \
@@ -131,6 +131,16 @@ run_stage_10() {
       --profile "${RENDER_PROFILE:-preview_local}"
 
     echo "  ✓ ${locale}  →  ${ep_dir}/renders/${locale}/output.mp4"
+
+    echo "  [8/8] Exporting YouTube dubbed audio…"
+    if [[ "$locale" != "en" ]]; then
+      python3 "${code_dir}/export_youtube_dubbed.py" \
+        "${ep_dir}" \
+        "${locale}"
+      echo "  ✓ ${locale}  →  ${ep_dir}/renders/${locale}/youtube_dubbed.aac"
+    else
+      echo "  ↷ ${locale}  English is the primary upload — dubbed audio export skipped"
+    fi
   done
 
   echo ""
@@ -271,7 +281,7 @@ echo "  [6]  Identify new story facts to record"
 echo "  [7]  Update story memory (world canon)"
 echo "  [8]  Translate & adapt for each language"
 echo "  [9]  Finalize assets & build render plan  ← conditional"
-echo "  [10] Merge assets & generate video (output.mp4)"
+echo "  [10] Merge assets, render video & export dubbed audio"
 echo "══════════════════════════════════════════════════════════════"
 echo "  Input story  : $STORY_FILE"
 echo "  Running stages $FROM_STAGE → $TO_STAGE"

@@ -114,6 +114,39 @@ For each locale OTHER than "en":
       tts_prompt.voice_style, tts_prompt.emotion, tts_prompt.pace)
     - DO NOT add start_sec, end_sec — those are written by post_tts_analysis.py
 
+  Duration Matching Rule — applies to every vo_item.text translation:
+
+    English and the target locale speak at different natural rates.  To keep
+    the dubbed audio aligned with the video, write translated text that — at
+    the SAME tts_prompt.pace — takes approximately the same time to speak as
+    the English source line.
+
+    Step 1 — Estimate the English speaking duration from word count:
+        estimated_sec = word_count(english_text) / 2.5
+    (English narration at normal pace ≈ 2.5 words / second)
+
+    Step 2 — Write target-locale text that fills estimated_sec at natural pace.
+    Adjust character / word count as needed:
+
+    If the literal translation would be TOO SHORT (locale speaks faster):
+      • Add contextual description of the scene or emotion already implied
+      • Use the character's title or honorific in full rather than abbreviated
+      • Elaborate on a sensory detail (sound, light, atmosphere) present in
+        the English
+      • Adopt a slightly more classical or formal narrative register
+
+    If the literal translation would be TOO LONG (locale speaks slower):
+      • Use concise idioms or set phrases that compress meaning
+      • Drop connective filler ("and then", "at that moment") where the
+        meaning is clear without it
+      • Prefer a direct subject-verb-object structure
+
+    Rules:
+      • NEVER change tts_prompt.pace — voice quality is critical
+      • Tolerance: ±20 % of estimated_sec is acceptable
+      • Natural, high-quality target-locale prose takes priority over
+        exact timing; do NOT pad with meaningless syllables or filler
+
   ⚠️  DO NOT include: music_items, sfx_items — those live in the shared manifest.
   ⚠️  DO NOT translate: search_prompt, ai_prompt, motion.description.
 

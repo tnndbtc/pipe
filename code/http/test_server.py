@@ -672,6 +672,16 @@ Direction    : …"></textarea>
     </div>
     <video id="pipe-video" controls></video>
   </div>
+
+  <!-- Dubbed audio player -->
+  <div id="pipe-audio-wrap" style="display:none">
+    <div class="video-hdr">
+      Soundtrack
+      <span style="color:var(--dim);font-size:0.8em;font-weight:400">YouTube Dubbed Audio</span>
+      <div class="video-locale-tabs" id="audio-locale-tabs"></div>
+    </div>
+    <audio id="pipe-audio" controls style="width:100%;margin-top:6px;border-radius:6px"></audio>
+  </div>
 </div>
 
 <!-- ── Confirm modal ── -->
@@ -1435,6 +1445,25 @@ Direction    : …"></textarea>
     } else {
       videoWrap.style.display = 'none';
     }
+
+    // ── Dubbed audio player (YouTube Soundtrack) ──────────────────────────────
+    const audioWrap   = document.getElementById('pipe-audio-wrap');
+    const audioTabs   = document.getElementById('audio-locale-tabs');
+    const readyDubbed = status.ready_dubbed || [];
+    if (readyDubbed.length > 0) {
+      audioWrap.style.display = 'block';
+      audioTabs.innerHTML = '';
+      readyDubbed.forEach((l, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'btn-locale-tab' + (i === 0 ? ' active' : '');
+        btn.textContent = l;
+        btn.onclick = () => playLocaleDubbedAudioBtn(l, btn);
+        audioTabs.appendChild(btn);
+      });
+      playLocaleDubbedAudio(readyDubbed[0]);
+    } else {
+      audioWrap.style.display = 'none';
+    }
   }
 
   function playLocaleVideo(locale) {
@@ -1447,9 +1476,24 @@ Direction    : …"></textarea>
   }
 
   function playLocaleVideoBtn(locale, clickedBtn) {
-    document.querySelectorAll('.btn-locale-tab').forEach(b =>
+    document.querySelectorAll('#video-locale-tabs .btn-locale-tab').forEach(b =>
       b.classList.toggle('active', b === clickedBtn));
     playLocaleVideo(locale);
+  }
+
+  function playLocaleDubbedAudio(locale) {
+    const audio = document.getElementById('pipe-audio');
+    const path  = 'projects/' + pipeEpSlug + '/episodes/' + pipeEpId +
+                  '/renders/' + locale + '/youtube_dubbed.aac';
+    audio.pause();
+    audio.src = '/serve_media?path=' + encodeURIComponent(path);
+    audio.load();
+  }
+
+  function playLocaleDubbedAudioBtn(locale, clickedBtn) {
+    document.querySelectorAll('#audio-locale-tabs .btn-locale-tab').forEach(b =>
+      b.classList.toggle('active', b === clickedBtn));
+    playLocaleDubbedAudio(locale);
   }
 
   function openArtifact(path) {
@@ -1785,6 +1829,12 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             for loc in ready_videos
         ]
 
+    # Dubbed audio tracks ready for YouTube Studio upload (non-en locales only)
+    ready_dubbed: list[str] = [
+        loc for loc in locales
+        if loc != "en" and check(os.path.join(ep_dir, "renders", loc, "youtube_dubbed.aac"))
+    ]
+
     # Detect which story_N.txt produced this episode by scanning pipeline_vars.*.sh
     story_file_detected = ""
     for _vp in sorted(_glob.glob(os.path.join(PIPE_DIR, "pipeline_vars.*.sh")), reverse=True):
@@ -1808,6 +1858,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "locales": locales,
         "locale_steps": locale_steps,   # kept for /run_step recovery endpoint
         "ready_videos": ready_videos,
+        "ready_dubbed": ready_dubbed,
         "story_file": story_file_detected,
     }
 
@@ -2289,7 +2340,8 @@ class Handler(BaseHTTPRequestHandler):
 
             ext  = os.path.splitext(full_path)[1].lower().lstrip(".")
             mime = {"mp4": "video/mp4", "webm": "video/webm", "ogg": "video/ogg",
-                    "mp3": "audio/mpeg", "wav": "audio/wav"}.get(ext, "application/octet-stream")
+                    "mp3": "audio/mpeg", "wav": "audio/wav",
+                    "aac": "audio/aac"}.get(ext, "application/octet-stream")
 
             file_size = os.path.getsize(full_path)
             range_hdr = self.headers.get("Range", "")
