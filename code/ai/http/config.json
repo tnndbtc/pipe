@@ -1,0 +1,10 @@
+{
+  "api_key": "change-me",
+  "job_dir": null,
+  "models": {
+    "characters":  "flux-schnell",
+    "backgrounds": "flux-schnell",
+    "sfx":         "audiogen",
+    "bg_video":    "cogvideox-2b"
+  }
+}
