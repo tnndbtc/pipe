@@ -118,6 +118,8 @@ For each locale OTHER than "en":
     - tts_prompt.azure_voice  → character[<locale>].azure_voice from VoiceCast.json
     - tts_prompt.azure_pitch  → character[<locale>].azure_pitch from VoiceCast.json
     - tts_prompt.azure_break_ms → character[<locale>].azure_break_ms from VoiceCast.json
+    - tts_prompt.azure_style_degree → character[<locale>].azure_style_degree from VoiceCast.json
+    - tts_prompt.azure_rate   → character[<locale>].azure_rate from VoiceCast.json
     - tts_prompt.azure_style  → apply Emotion Policy (see below)
 
   **Keep unchanged:**
@@ -125,8 +127,6 @@ For each locale OTHER than "en":
     - tts_prompt.voice_style  (gender hint — still valid across locales)
     - tts_prompt.emotion      (English label kept for debugging)
     - tts_prompt.pace         (same pace intent)
-    - tts_prompt.azure_style_degree  (same dramatic intensity)
-    - tts_prompt.azure_rate   (same pace intent)
 
   **Whisper special case:**
     When azure_style resolves to "whispering":
@@ -152,12 +152,20 @@ For each locale OTHER than "en":
          sad       → disgruntled → (omit)
          excited   → cheerful → friendly → (omit)
          serious   → calm → (omit)
-    4. If no fallback matches → omit azure_style entirely (no express-as element).
+    4. If no fallback matches → use character[<locale>].azure_style from VoiceCast.json
+       if that field is set (this handles voices like Dragon HD whose style vocabulary
+       is entirely different from English emotion labels).
+       Only omit azure_style if VoiceCast.json also has no azure_style for this locale.
 
-  Example:
+  Example A (standard voice with emotion styles):
     English vo_item: azure_style = "terrified"
-    zh-Hans character available_styles: ["angry", "fearful", "sad", "excited", ...]
+    zh-Hans available_styles: ["angry", "fearful", "sad", "excited", ...]
     Fallback chain: terrified → fearful (found) → use "fearful"
+
+  Example B (Dragon HD voice with archetype styles):
+    English vo_item: azure_style = "whispering"
+    zh-Hans available_styles: ["assassin", "captain", "cavalier", "drake", "gamenarrator", "geomancer", "poet"]
+    Fallback chain: no match found → use VoiceCast.json character[zh-Hans].azure_style = "gamenarrator"
 
   Duration Matching Rule — applies to every vo_item.text translation:
 
@@ -209,8 +217,7 @@ For each locale OTHER than "en":
   series.title, series.genre, knows[],
   AssetManifest: search_prompt, ai_prompt, motion.description,
                  search_filters (all subfields), tts_prompt.voice_style,
-                 tts_prompt.emotion, tts_prompt.pace,
-                 tts_prompt.azure_style_degree, tts_prompt.azure_rate
+                 tts_prompt.emotion, tts_prompt.pace
 
   ### Validation and writing
 

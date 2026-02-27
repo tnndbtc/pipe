@@ -939,11 +939,22 @@ Direction    : …"></textarea>
 
   <!-- hidden: stage range always 0–10; split into 0+1–N handled in runPrompt() -->
   <input type="hidden" id="prompt" value="0  10">
-  <!-- ── Run buttons ── -->
-  <div class="btn-group">
-    <button id="btn-run"   onclick="runPrompt()">▶ Run</button>
-    <button id="btn-stop"  onclick="stopRun()">■ Stop</button>
-    <button id="btn-clear" onclick="clearOutput()">✕ Clear</button>
+  <!-- ── Run options + buttons ── -->
+  <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+    <label id="label-no-music"
+           style="display:flex; align-items:center; gap:6px; cursor:pointer;
+                  font-size:0.82em; font-family:var(--mono); color:var(--dim);
+                  user-select:none;"
+           title="Skip background music — render VO + SFX only">
+      <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()"
+             style="width:14px; height:14px; cursor:pointer; accent-color:var(--gold);">
+      🔇 No Music
+    </label>
+    <div class="btn-group" style="margin:0;">
+      <button id="btn-run"   onclick="runPrompt()">▶ Run</button>
+      <button id="btn-stop"  onclick="stopRun()">■ Stop</button>
+      <button id="btn-clear" onclick="clearOutput()">✕ Clear</button>
+    </div>
   </div>
 
   <div id="cmd-preview">$ <span id="cmd-text"></span></div>
@@ -1031,6 +1042,7 @@ Direction    : …"></textarea>
   let currentEpId = null;
   let testMode   = true;     // default ON — use cheapest model
   let renderProd = false;    // false = preview_local (CRF 28), true = high (CRF 18)
+  let noMusic    = false;    // false = include music, true = skip music in render
   const stageStartMs = {};   // stage number → Date.now() at start
   let _runFromStage = 0;
   let _runToStage   = 10;
@@ -1307,7 +1319,7 @@ Direction    : …"></textarea>
     cmdPreview.style.display = 'block';
 
     // ── 3. Open SSE stream ──────────────────────────────────────────────────
-    const url = `/stream?story_file=${encodeURIComponent(filename)}&from=${from}&to=${to}&test=${testMode ? '1' : '0'}&profile=${renderProd ? 'high' : 'preview_local'}`;
+    const url = `/stream?story_file=${encodeURIComponent(filename)}&from=${from}&to=${to}&test=${testMode ? '1' : '0'}&profile=${renderProd ? 'high' : 'preview_local'}&no_music=${noMusic ? '1' : '0'}`;
     es = new EventSource(url);
 
     es.addEventListener('line', e => {
@@ -1400,6 +1412,10 @@ Direction    : …"></textarea>
     wrap.title = renderProd
       ? 'HD mode — high quality encode (CRF 18) for final upload'
       : 'Preview mode — fast encode (CRF 28) for review';
+  }
+  function toggleMusicMode() {
+    const chk = document.getElementById('chk-no-music');
+    noMusic = chk ? chk.checked : !noMusic;
   }
 
   // Allow keyboard activation (Space / Enter)
@@ -1885,6 +1901,16 @@ Direction    : …"></textarea>
       cardsEl.appendChild(card);
       // card is now in the DOM — safe to querySelector inside it
       rebuildPresetSelect(card, charLoc.azure_voice);
+      // Auto-select the preset whose params match the loaded VoiceCast values
+      const _loadedPresets = _vcPresets[charLoc.azure_voice] ?? [];
+      const _matchedPreset = _loadedPresets.find(p =>
+        (p.style        || '') === (charLoc.azure_style        || '') &&
+        parseFloat(p.style_degree) === parseFloat(charLoc.azure_style_degree) &&
+        (p.rate         || '') === (charLoc.azure_rate         || '') &&
+        (p.pitch        || '') === (charLoc.azure_pitch        || '') &&
+        parseInt(p.break_ms)   === parseInt(charLoc.azure_break_ms)
+      );
+      if (_matchedPreset) presetSel.value = _matchedPreset.hash;
 
       // ── Voice select onChange → rebuild style + preset dropdowns ──
       voiceSel.addEventListener('change', () => {
@@ -2478,12 +2504,12 @@ Direction    : …"></textarea>
       if (n === 10) {
         // Stage 10: numbered Run / Run→7 buttons matching the main stage button style
         const LOCALE_STEPS = [
-          { num: 2, step: 'manifest_merge',  label: '2 — merge'    },
-          { num: 3, step: 'gen_tts',         label: '3 — tts'      },
-          { num: 4, step: 'post_tts',        label: '4 — post_tts' },
-          { num: 5, step: 'resolve_assets',  label: '5 — resolve'  },
-          { num: 6, step: 'gen_render_plan', label: '6 — plan'     },
-          { num: 7, step: 'render_video',    label: '7 — render'   },
+          { num: 5, step: 'manifest_merge',  label: '5 — merge'    },
+          { num: 6, step: 'gen_tts',         label: '6 — tts'      },
+          { num: 7, step: 'post_tts',        label: '7 — post_tts' },
+          { num: 8, step: 'resolve_assets',  label: '8 — resolve'  },
+          { num: 9, step: 'gen_render_plan', label: '9 — plan'     },
+          { num: 10, step: 'render_video',   label: '10 — render'  },
         ];
         const localeStepsMap = status.locale_steps || {};
         const locales        = status.locales || [];
@@ -2497,23 +2523,30 @@ Direction    : …"></textarea>
           return b;
         }
 
-        // ── Step 1: gen_music_clip (shared, no locale) ──────────────────────
-        const sharedRow = document.createElement('div');
-        sharedRow.className = 'pipe-substep-row';
-        const sharedNameSpan = document.createElement('span');
-        sharedNameSpan.className = 'pipe-substep-locale';
-        sharedNameSpan.style.cssText = 'min-width:0;flex:1';
-        sharedNameSpan.textContent = '1 — gen_music_clip';
-        sharedRow.appendChild(sharedNameSpan);
-        const sharedBtnWrap = document.createElement('span');
-        sharedBtnWrap.style.cssText = 'margin-left:auto;display:flex;gap:4px;flex-shrink:0';
-        sharedBtnWrap.appendChild(makeRunBtn('Run 1', () =>
-          startPipeStep({ type: 'post', step: 'gen_music_clip',
-                          slug: pipeEpSlug, ep_id: pipeEpId, locale: '' })));
-        sharedRow.appendChild(sharedBtnWrap);
-        detailEl.appendChild(sharedRow);
+        // ── Steps 1–4: shared (no locale) ───────────────────────────────────
+        [
+          { num: 1, step: 'gen_music_clip',  label: '1 — gen_music_clip'  },
+          { num: 2, step: 'gen_characters',  label: '2 — gen_characters'  },
+          { num: 3, step: 'gen_backgrounds', label: '3 — gen_backgrounds' },
+          { num: 4, step: 'gen_sfx',         label: '4 — gen_sfx'         },
+        ].forEach(({ num, step, label }) => {
+          const row = document.createElement('div');
+          row.className = 'pipe-substep-row';
+          const nameSpan = document.createElement('span');
+          nameSpan.className = 'pipe-substep-locale';
+          nameSpan.style.cssText = 'min-width:0;flex:1';
+          nameSpan.textContent = label;
+          row.appendChild(nameSpan);
+          const btnWrap = document.createElement('span');
+          btnWrap.style.cssText = 'margin-left:auto;display:flex;gap:4px;flex-shrink:0';
+          btnWrap.appendChild(makeRunBtn('Run ' + num, () =>
+            startPipeStep({ type: 'post', step,
+                            slug: pipeEpSlug, ep_id: pipeEpId, locale: '' })));
+          row.appendChild(btnWrap);
+          detailEl.appendChild(row);
+        });
 
-        // ── Steps 2–7: per-locale ───────────────────────────────────────────
+        // ── Steps 5–10: per-locale ──────────────────────────────────────────
         if (locales.length === 0) {
           const hint = document.createElement('div');
           hint.style.cssText = 'color:var(--dim);font-size:0.78em;padding:4px 0';
@@ -2548,8 +2581,8 @@ Direction    : …"></textarea>
               btnWrap.appendChild(makeRunBtn('Run ' + num, () =>
                 startPipeStep({ type: 'post', step,
                                 slug: pipeEpSlug, ep_id: pipeEpId, locale })));
-              if (num < 7) {
-                btnWrap.appendChild(makeRunBtn('Run ' + num + '→7', () =>
+              if (num < 10) {
+                btnWrap.appendChild(makeRunBtn('Run ' + num + '→10', () =>
                   startPipeStep({ type: 'locale', from_step: step,
                                   slug: pipeEpSlug, ep_id: pipeEpId, locale })));
               }
@@ -2730,13 +2763,15 @@ Direction    : …"></textarea>
             '&ep_id='  + encodeURIComponent(params.ep_id) +
             '&locale=' + encodeURIComponent(params.locale) +
             '&profile=' + profile +
+            '&no_music=' + (noMusic ? '1' : '0') +
             (params.from_step ? '&from=' + encodeURIComponent(params.from_step) : '');
     } else {
       url = '/run_step?step='   + encodeURIComponent(params.step) +
             '&slug='   + encodeURIComponent(params.slug) +
             '&ep_id='  + encodeURIComponent(params.ep_id) +
             '&locale=' + encodeURIComponent(params.locale) +
-            '&profile=' + profile;
+            '&profile=' + profile +
+            '&no_music=' + (noMusic ? '1' : '0');
     }
 
     pipeStepEs = new EventSource(url);
@@ -3106,7 +3141,8 @@ def _delete_step_output(step: str, slug: str, ep_id: str, locale: str) -> None:
 
 
 def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
-                    profile: str = "preview_local") -> list | None:
+                    profile: str = "preview_local",
+                    no_music: bool = False) -> list | None:
     """Build command list for a post-processing step."""
     ep_dir   = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
     code_dir = os.path.join(PIPE_DIR, "code", "http")
@@ -3117,6 +3153,25 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
         return [
             "python3", os.path.join(code_dir, "gen_music_clip.py"),
             "--manifest", ep("AssetManifest_draft.shared.json"),
+        ]
+    elif step == "gen_characters":
+        # AI asset steps inherit AI_SERVER_URL / AI_SERVER_KEY from the shell env.
+        return [
+            "python3", os.path.join(code_dir, "fetch_ai_assets.py"),
+            "--manifest",    ep("AssetManifest_draft.shared.json"),
+            "--asset_type",  "characters",
+        ]
+    elif step == "gen_backgrounds":
+        return [
+            "python3", os.path.join(code_dir, "fetch_ai_assets.py"),
+            "--manifest",    ep("AssetManifest_draft.shared.json"),
+            "--asset_type",  "backgrounds",
+        ]
+    elif step == "gen_sfx":
+        return [
+            "python3", os.path.join(code_dir, "fetch_ai_assets.py"),
+            "--manifest",    ep("AssetManifest_draft.shared.json"),
+            "--asset_type",  "sfx",
         ]
     elif step == "manifest_merge":
         return [
@@ -3150,13 +3205,16 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
         ]
     elif step == "render_video":
         out_dir = os.path.join(ep_dir, "renders", locale)
-        return [
+        cmd = [
             "python3", os.path.join(code_dir, "render_video.py"),
             "--plan",    ep(f"RenderPlan.{locale}.json"),
             "--locale",  locale,
             "--out",     out_dir,
             "--profile", profile,
         ]
+        if no_music:
+            cmd.append("--no-music")
+        return cmd
     return None
 
 
@@ -3240,6 +3298,7 @@ class Handler(BaseHTTPRequestHandler):
             render_profile = params.get("profile", ["preview_local"])[0].strip()
             if render_profile not in ("preview_local", "draft_720p", "high"):
                 render_profile = "preview_local"
+            no_music = params.get("no_music", ["0"])[0].strip() == "1"
 
             # Sanitise: digits only, 0–9
             from_stage = str(max(0, min(10, int(from_stage)))) if from_stage.isdigit() else "0"
@@ -3264,6 +3323,8 @@ class Handler(BaseHTTPRequestHandler):
             if test_mode:
                 run_env["MODEL"] = "haiku"   # cheapest model for all stages
             run_env["RENDER_PROFILE"] = render_profile   # preview_local or high
+            if no_music:
+                run_env["NO_MUSIC"] = "1"
 
             client = self.client_address
             proc   = None
@@ -3419,12 +3480,13 @@ class Handler(BaseHTTPRequestHandler):
 
         # SSE stream for a single post-processing step
         elif parsed.path == "/run_step":
-            params  = parse_qs(parsed.query)
-            step    = unquote_plus(params.get("step",    [""])[0]).strip()
-            slug    = unquote_plus(params.get("slug",    [""])[0]).strip()
-            ep_id   = unquote_plus(params.get("ep_id",   [""])[0]).strip()
-            locale  = unquote_plus(params.get("locale",  [""])[0]).strip()
-            profile = unquote_plus(params.get("profile", ["preview_local"])[0]).strip()
+            params   = parse_qs(parsed.query)
+            step     = unquote_plus(params.get("step",     [""])[0]).strip()
+            slug     = unquote_plus(params.get("slug",     [""])[0]).strip()
+            ep_id    = unquote_plus(params.get("ep_id",    [""])[0]).strip()
+            locale   = unquote_plus(params.get("locale",   [""])[0]).strip()
+            profile  = unquote_plus(params.get("profile",  ["preview_local"])[0]).strip()
+            no_music = params.get("no_music", ["0"])[0].strip() == "1"
 
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -3433,7 +3495,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
-            cmd = _build_step_cmd(step, slug, ep_id, locale, profile)
+            cmd = _build_step_cmd(step, slug, ep_id, locale, profile, no_music)
             if not cmd:
                 self.wfile.write(sse("error_line", f"Unknown step: {step!r}"))
                 self.wfile.write(sse("done", "1"))
@@ -3489,6 +3551,7 @@ class Handler(BaseHTTPRequestHandler):
             locale     = unquote_plus(params.get("locale",  [""])[0]).strip()
             profile    = unquote_plus(params.get("profile", ["preview_local"])[0]).strip()
             from_step  = unquote_plus(params.get("from",    [""])[0]).strip()
+            no_music   = params.get("no_music", ["0"])[0].strip() == "1"
 
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -3529,7 +3592,7 @@ class Handler(BaseHTTPRequestHandler):
                         f"\n── {step} ──────────────────────────────────────────"))
                     self.wfile.flush()
 
-                    cmd = _build_step_cmd(step, slug, ep_id, locale, profile)
+                    cmd = _build_step_cmd(step, slug, ep_id, locale, profile, no_music)
                     if not cmd:
                         self.wfile.write(sse("error_line", f"Unknown step: {step!r}"))
                         self.wfile.write(sse("done", "1"))

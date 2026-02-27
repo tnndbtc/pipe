@@ -128,7 +128,8 @@ run_stage_10() {
       --plan    "${ep_dir}/RenderPlan.${locale}.json" \
       --locale  "${locale}" \
       --out     "${ep_dir}/renders/${locale}" \
-      --profile "${RENDER_PROFILE:-preview_local}"
+      --profile "${RENDER_PROFILE:-preview_local}" \
+      ${NO_MUSIC:+--no-music}
 
     echo "  ✓ ${locale}  →  ${ep_dir}/renders/${locale}/output.mp4"
 

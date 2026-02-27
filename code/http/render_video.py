@@ -248,6 +248,7 @@ def render_shot(
     music_start_sec:    float = 0.0,
     music_apply_fadeout: bool = False,
     music_fadeout_sec:  float = MUSIC_FADEOUT_SEC,
+    no_music:           bool  = False,
     verbose:            bool  = False,
 ) -> Path:
     """
@@ -445,7 +446,7 @@ def render_shot(
     music_uri  = music_info.get("uri", "")
     music_path = uri_to_path(music_uri)
 
-    if music_path and music_path.exists() and not music_info.get("is_placeholder", True):
+    if not no_music and music_path and music_path.exists() and not music_info.get("is_placeholder", True):
         duck_intervals = shot.get("duck_intervals", [])
         duck_db        = shot.get("duck_db", -12.0)
         fade_sec       = shot.get("music_fade_sec", 0.15)
@@ -649,6 +650,10 @@ def parse_args() -> argparse.Namespace:
         help="Keep per-shot MKV intermediates after rendering (default: delete).",
     )
     p.add_argument(
+        "--no-music", action="store_true",
+        help="Skip music entirely — renders VO + SFX only.",
+    )
+    p.add_argument(
         "--verbose", action="store_true",
         help="Print FFmpeg commands as they run.",
     )
@@ -745,6 +750,7 @@ def main() -> None:
             music_start_sec=m_start,
             music_apply_fadeout=m_fadeout,
             music_fadeout_sec=args.music_fadeout_sec,
+            no_music=args.no_music,
             verbose=args.verbose,
         )
         shot_mkv_pairs.append((shot, mkv))
