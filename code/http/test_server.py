@@ -15,6 +15,7 @@ Open:
 """
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -22,7 +23,9 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote_plus
 
 PORT     = 8000
@@ -31,6 +34,26 @@ PIPE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 # ── Running-process registry (so Stop button can kill it) ──────────────────────
 _lock  = threading.Lock()
 _procs = {}   # client_addr → subprocess.Popen
+
+# ── Azure TTS preview — throttle state + lazy imports ─────────────────────────
+_tts_lock             = threading.Lock()
+_tts_last_call: float = 0.0               # monotonic timestamp
+TTS_MIN_INTERVAL      = 3.5               # seconds (F0: 20 req/60 s → safe rate)
+TTS_RETRY_BACKOFF     = [5, 10, 20]       # seconds; sleep before each 429 retry
+_voice_catalog_cache  = None              # set once by parse_azure_tts_styles()
+_tts_synth            = None              # lazy singleton; created on first preview request
+
+# Lazy-import Azure SDK so server starts even when SDK is not installed
+try:
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from gen_tts_cloud import build_ssml as _build_ssml
+    import azure.cognitiveservices.speech as _speechsdk
+    _TTS_AVAILABLE = True
+except ImportError:
+    _build_ssml    = None  # type: ignore
+    _speechsdk     = None  # type: ignore
+    _TTS_AVAILABLE = False
 
 
 # ── Story-file helpers ─────────────────────────────────────────────────────────
@@ -89,6 +112,154 @@ def _parse_story_vars(story_file: str) -> dict:
         ep_id = f"ep{ep_num}"
 
     return {"project_slug": slug, "episode_id": ep_id}
+
+
+# ── Azure TTS helpers ──────────────────────────────────────────────────────────
+_PRESETS_FILE = (Path(PIPE_DIR) / "projects" / "resources" / "azure_tts"
+                 / "presets.json")
+
+def load_presets() -> dict:
+    """Load global voice presets from disk; return empty structure on any error."""
+    if _PRESETS_FILE.exists():
+        try:
+            return json.loads(_PRESETS_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"schema_version": "1.0", "presets": {}}
+
+def save_presets(data: dict) -> None:
+    """Atomic write of presets.json (same pattern as other cache files)."""
+    _PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _PRESETS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                   encoding="utf-8")
+    tmp.replace(_PRESETS_FILE)
+
+
+def parse_azure_tts_styles() -> dict:
+    """Parse prompts/azure_tts_styles.txt; return voice catalog grouped by story locale.
+
+    Returns: { "en": [VoiceEntry, ...], "zh-Hans": [...], ... }
+    VoiceEntry: { voice, azure_locale, gender, local_name, styles }
+    Result is cached at module level (parsed once on first request).
+    """
+    global _voice_catalog_cache
+    if _voice_catalog_cache is not None:
+        return _voice_catalog_cache
+
+    styles_path = os.path.join(PIPE_DIR, "prompts", "azure_tts_styles.txt")
+    # BUG-1 fix: r'^(\S+Neural)' captures Dragon HD names with colon
+    #   e.g. "zh-CN-Xiaoxiao2:DragonHDFlashLatestNeural" — broken if \w+ is used
+    VOICE_RE  = re.compile(r'^(\S+Neural)')
+    LOCALE_RE = re.compile(r'locale=(\S+)\s+gender=(\S+)\s+local_name=(.+)')
+    STYLES_RE = re.compile(r"styles\(\d+\):\s*\[(.+)\]")
+
+    entries: list[dict] = []
+    cur: dict | None    = None
+
+    if os.path.isfile(styles_path):
+        with open(styles_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                vm = VOICE_RE.match(line)
+                if vm:
+                    if cur and "azure_locale" in cur:
+                        entries.append(cur)
+                    cur = {"voice": vm.group(1), "styles": []}
+                    continue
+                lm = LOCALE_RE.search(line)
+                if lm and cur:
+                    cur["azure_locale"] = lm.group(1)
+                    cur["gender"]       = lm.group(2)
+                    cur["local_name"]   = lm.group(3).strip()
+                    continue
+                sm = STYLES_RE.search(line)
+                if sm and cur:
+                    cur["styles"] = re.findall(r"'([^']+)'", sm.group(1))
+        if cur and "azure_locale" in cur:
+            entries.append(cur)
+
+    # Group by story locale: "en" → azure_locale.startswith("en-")
+    catalog: dict[str, list] = {}
+    for entry in entries:
+        al = entry.get("azure_locale", "")
+        if al.startswith("en-"):
+            group = "en"
+        elif al.startswith("zh-"):
+            group = "zh-Hans"
+        else:
+            group = al.split("-")[0] if "-" in al else al
+        catalog.setdefault(group, []).append(entry)
+
+    _voice_catalog_cache = catalog
+    return catalog
+
+
+def _tts_throttled_call(synth, ssml: str):
+    """Call Azure TTS with F0-safe throttling (3.5 s min gap) and 429 retry."""
+    global _tts_last_call
+    with _tts_lock:                                   # serialise all preview threads
+        elapsed = time.monotonic() - _tts_last_call
+        if elapsed < TTS_MIN_INTERVAL:
+            time.sleep(TTS_MIN_INTERVAL - elapsed)
+
+        for attempt, backoff in enumerate([0] + TTS_RETRY_BACKOFF):
+            if backoff:
+                time.sleep(backoff)
+            result = synth.speak_ssml_async(ssml).get()
+            _tts_last_call = time.monotonic()
+
+            if result.reason == _speechsdk.ResultReason.SynthesizingAudioCompleted:
+                return result
+
+            details = result.cancellation_details
+            err_str = getattr(details, "error_details", "") or ""
+            if "429" in err_str and attempt < len(TTS_RETRY_BACKOFF):
+                continue   # retry with next backoff
+            raise RuntimeError(err_str or str(getattr(details, "reason", "Unknown")))
+
+
+def _get_synth():
+    """Create or return the module-level SpeechSynthesizer singleton (CON-R5).
+
+    Using a module-level singleton avoids ~100 ms overhead per preview request
+    and prevents connection leaks from repeatedly creating new synthesisers.
+    """
+    global _tts_synth
+    if _tts_synth is None:
+        if not _TTS_AVAILABLE:
+            raise RuntimeError("azure-cognitiveservices-speech SDK not installed")
+        key    = os.environ.get("AZURE_SPEECH_KEY", "")
+        region = os.environ.get("AZURE_SPEECH_REGION", "")
+        if not key:
+            raise RuntimeError("AZURE_SPEECH_KEY not set")
+        config = _speechsdk.SpeechConfig(subscription=key, region=region)
+        config.set_speech_synthesis_output_format(
+            _speechsdk.SpeechSynthesisOutputFormat.Audio24Khz96KBitRateMonoMp3)
+        _tts_synth = _speechsdk.SpeechSynthesizer(speech_config=config, audio_config=None)
+    return _tts_synth
+
+
+def _preview_build_ssml(text: str, azure_voice: str, azure_locale: str,
+                         style: str | None, *, style_degree: float = 1.0,
+                         rate: str = "0%", pitch: str = "", break_ms: int = 0) -> str:
+    """Build SSML for a preview request (identical format to pre_cache_voices.py)."""
+    escaped = (text.replace("&", "&amp;").replace("<", "&lt;")
+                   .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
+    spoken = escaped
+    if break_ms:
+        spoken = f'{spoken}<break time="{break_ms}ms"/>'
+    rate_attr  = f' rate="{rate}"'   if rate  and rate  != "0%" else ""
+    pitch_attr = f' pitch="{pitch}"' if pitch and pitch != "0%" else ""
+    if rate_attr or pitch_attr:
+        spoken = f'<prosody{rate_attr}{pitch_attr}>{spoken}</prosody>'
+    if style:
+        spoken = (f'<mstts:express-as style="{style}" styledegree="{style_degree}">'
+                  f"{spoken}</mstts:express-as>")
+    return (f"<speak version='1.0' xml:lang='{azure_locale}' "
+            f"xmlns='http://www.w3.org/2001/10/synthesis' "
+            f"xmlns:mstts='http://www.w3.org/2001/mstts'>"
+            f"<voice name='{azure_voice}'>{spoken}</voice></speak>")
 
 
 # ── SSE helper ─────────────────────────────────────────────────────────────────
@@ -178,7 +349,7 @@ HTML = r"""<!DOCTYPE html>
   }
 
   /* ── Story textarea ── */
-  .story-block { flex-shrink: 0; }
+  .story-block { flex-shrink: 0; display: flex; flex-direction: column; }
   #story {
     width: 100%;
     background: var(--surface);
@@ -199,28 +370,7 @@ HTML = r"""<!DOCTYPE html>
   #story:focus { border-color: var(--gold); }
   #story::placeholder { color: #4a4a5a; }
 
-  /* ── Prompt area ── */
-  .prompt-block { flex-shrink: 0; }
-  .input-row { display: flex; gap: 10px; align-items: flex-end; }
-  #prompt {
-    flex: 1;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 0.88em;
-    padding: 12px 14px;
-    resize: none;
-    min-height: 54px;
-    max-height: 140px;
-    line-height: 1.5;
-    outline: none;
-    transition: border-color .15s;
-  }
-  #prompt:focus { border-color: var(--gold); }
-
-  .btn-group { display: flex; flex-direction: column; gap: 6px; }
+  .btn-group { display: flex; flex-direction: row; gap: 8px; flex-shrink: 0; }
   button {
     border: none; border-radius: 7px;
     font-size: 0.82em; font-weight: 700;
@@ -560,7 +710,6 @@ HTML = r"""<!DOCTYPE html>
   .review-pane.active { display: block; }
   #pipe-video { width: 100%; max-height: 240px; background: #000; display: block; }
   #pipe-audio { width: 100%; display: block; padding: 8px; box-sizing: border-box; }
-  #review-pane-vc { max-height: 260px; overflow-y: auto; }
   .pipe-body::-webkit-scrollbar { width: 6px; }
   .pipe-body::-webkit-scrollbar-track { background: transparent; }
   .pipe-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -596,23 +745,101 @@ HTML = r"""<!DOCTYPE html>
     font-family: var(--mono); transition: background .15s, color .15s;
   }
   .btn-substep:hover { background: #ffffff18; color: var(--text); }
-  /* ── Voice Cast viewer ────────────────────────────────────────────── */
-  .vc-char-row {
-    padding: 8px 14px; border-bottom: 1px solid #1a1a26;
-  }
-  .vc-char-row:last-child { border-bottom: none; }
-  .vc-char-name { font-weight: 700; font-size: 0.83em; color: var(--text); }
-  .vc-char-role { font-size: 0.75em; color: var(--dim); margin-left: 8px; }
-  .vc-char-voice {
-    font-family: var(--mono); font-size: 0.78em; color: var(--blue); margin-top: 3px;
-  }
-  .vc-char-params { font-size: 0.74em; color: var(--dim); margin-top: 2px; }
-  .vc-style-chip {
+  .vc-style-chip-UNUSED {   /* kept as placeholder; vc viewer removed from Pipeline tab */
     display: inline-block; background: #ffffff08;
     border: 1px solid var(--border); border-radius: 3px;
     padding: 1px 5px; font-size: 0.70em; color: #8a9ab8;
     margin: 2px 2px 0 0;
   }
+
+  /* ── Story Input tab bar ── */
+  .story-tab-bar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding-bottom: 8px; flex-shrink: 0;
+  }
+  .btn-story-tab {
+    background: #ffffff08; color: var(--dim); border: 1px solid var(--border);
+    border-radius: 5px; padding: 3px 12px; font-size: 0.78em; cursor: pointer;
+    font-weight: 600; transition: background .15s, color .15s;
+  }
+  .btn-story-tab.active {
+    background: #5b9cf620; color: var(--blue); border-color: #5b9cf650;
+  }
+  #vc-saved-badge {
+    font-size: 0.74em; color: var(--green); font-family: var(--mono); margin-left: 4px;
+  }
+  #vc-editor {
+    overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+    min-height: 200px; max-height: 420px;
+  }
+  #vc-locale-tabs { display: flex; gap: 4px; flex-shrink: 0; }
+
+  /* ── Voice Cast editor character cards ── */
+  .vc-char-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; flex-shrink: 0;
+  }
+  .vc-char-card-hdr {
+    background: #ffffff08; padding: 7px 14px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.82em; font-weight: 700; color: var(--text);
+  }
+  .vc-char-card-body { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .vc-voice-row      { display: flex; align-items: center; gap: 8px; }
+  .vc-voice-select {
+    flex: 1; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 5px; color: var(--text); font-family: var(--mono);
+    font-size: 0.78em; padding: 4px 8px; cursor: pointer;
+  }
+  .vc-params-row  { display: flex; flex-direction: column; gap: 5px; }
+  .vc-param-group { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+  .vc-param-label { font-size: 0.68em; color: var(--dim); font-family: var(--mono);
+                    min-width: 115px; text-align: right; flex-shrink: 0; }
+  .vc-param-input {
+    width: 64px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; color: var(--text); font-size: 0.78em;
+    font-family: var(--mono); padding: 3px 6px; flex-shrink: 0;
+  }
+  /* Interpretation text + zone badges */
+  .vc-param-interp { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; flex: 1; }
+  .vc-interp-text  { font-size: 0.70em; color: var(--dim); font-style: italic; line-height: 1.3; }
+  .vc-zone-badge   { font-size: 0.68em; padding: 1px 5px; border-radius: 3px; font-weight: 700;
+                     font-family: var(--mono); white-space: nowrap; letter-spacing: 0.03em; flex-shrink: 0; }
+  .vc-zone-extended     { background: rgba(201,168,76,.12); color: var(--gold);
+                          border: 1px solid rgba(201,168,76,.35); }
+  .vc-zone-experimental { background: rgba(220,60,60,.10); color: #d05050;
+                          border: 1px solid rgba(208,80,80,.30); }
+  .vc-preset-row   { display: flex; align-items: center; gap: 8px; }
+  .vc-preset-label { font-size: 0.68em; color: var(--dim); font-family: var(--mono);
+                     white-space: nowrap; min-width: 115px; text-align: right; flex-shrink: 0; }
+  .vc-preset-select { flex: 1; background: var(--surface); border: 1px solid var(--border);
+                      border-radius: 4px; color: var(--text); font-size: 0.78em;
+                      font-family: var(--mono); padding: 3px 6px; cursor: pointer; }
+  .vc-preset-select:disabled { opacity: 0.4; cursor: default; }
+  .vc-style-select {
+    width: 150px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; color: var(--text); font-size: 0.78em;
+    font-family: var(--mono); padding: 3px 6px; cursor: pointer;
+  }
+  .btn-vc-preview {
+    background: #5b9cf614; color: var(--blue); border: 1px solid #5b9cf650;
+    border-radius: 4px; font-size: 0.72em; padding: 3px 10px; cursor: pointer;
+    font-family: var(--mono); font-weight: 700; white-space: nowrap;
+    transition: background .15s;
+  }
+  .btn-vc-preview:hover    { background: #5b9cf628; }
+  .btn-vc-preview:disabled { opacity: 0.45; cursor: not-allowed; }
+  .vc-footer {
+    display: flex; gap: 8px; justify-content: flex-end; padding: 4px 0 2px; flex-shrink: 0;
+  }
+  #btn-vc-save, #btn-vc-continue {
+    background: #c9a84c14; color: var(--gold); border: 1px solid #c9a84c50;
+    border-radius: 5px; font-size: 0.78em; font-weight: 700;
+    font-family: var(--mono); padding: 5px 14px; cursor: pointer;
+    transition: background .15s;
+  }
+  #btn-vc-continue { background: #5b9cf614; color: var(--blue); border-color: #5b9cf650; }
 </style>
 </head>
 <body>
@@ -646,9 +873,12 @@ HTML = r"""<!DOCTYPE html>
 
   <!-- ── Story input ── -->
   <div class="story-block">
-    <div class="section-label">
-      Story Input
-      <span class="file-badge" id="file-badge">story_1.txt</span>
+    <div class="story-tab-bar">
+      <div class="section-label" style="margin:0">Story Input</div>
+      <button class="btn-story-tab active" data-tab="story" onclick="switchStoryTab('story')">Story</button>
+      <button class="btn-story-tab"        data-tab="vc"    onclick="switchStoryTab('vc')">Voice Cast</button>
+      <span id="vc-saved-badge" style="display:none">✓ Saved</span>
+      <span class="file-badge" id="file-badge" style="margin-left:auto">story_1.txt</span>
     </div>
     <textarea id="story" spellcheck="false"
 placeholder="Story title  : The Pharaoh Who Defied Death
@@ -658,20 +888,25 @@ Episode id   : s01e01
 Locales      : en, zh-Hans
 Genre        : Ancient Egyptian Epic / Mystery / Supernatural / Political Drama
 Direction    : …"></textarea>
-  </div>
-
-  <!-- ── Stages + buttons ── -->
-  <div class="prompt-block">
-    <div class="section-label">Stages <span style="font-weight:400;letter-spacing:0;text-transform:none;color:#555">(from – to, e.g. "0 10" for full run, "2 4" to re-run steps 2–4)</span></div>
-    <div class="input-row">
-      <textarea id="prompt" rows="2" spellcheck="false"
-        placeholder="0  10"></textarea>
-      <div class="btn-group">
-        <button id="btn-run"   onclick="runPrompt()">▶ Run</button>
-        <button id="btn-stop"  onclick="stopRun()">■ Stop</button>
-        <button id="btn-clear" onclick="clearOutput()">✕ Clear</button>
+    <div id="vc-editor" style="display:none">
+      <div id="vc-locale-tabs"></div>
+      <div id="vc-cards"></div>
+      <div class="vc-footer">
+        <button id="btn-vc-save"     onclick="saveVoiceCast()">💾 Save Voice Cast</button>
+        <button id="btn-vc-continue" onclick="vcContinue()" style="display:none">
+          ▶ Continue (Run 1–10)
+        </button>
       </div>
     </div>
+  </div>
+
+  <!-- hidden: stage range always 0–10; split into 0+1–N handled in runPrompt() -->
+  <input type="hidden" id="prompt" value="0  10">
+  <!-- ── Run buttons ── -->
+  <div class="btn-group">
+    <button id="btn-run"   onclick="runPrompt()">▶ Run</button>
+    <button id="btn-stop"  onclick="stopRun()">■ Stop</button>
+    <button id="btn-clear" onclick="clearOutput()">✕ Clear</button>
   </div>
 
   <div id="cmd-preview">$ <span id="cmd-text"></span></div>
@@ -734,9 +969,6 @@ Direction    : …"></textarea>
     <div id="review-pane-audio" class="review-pane">
       <audio id="pipe-audio" controls></audio>
     </div>
-    <div id="review-pane-vc" class="review-pane">
-      <div id="voicecast-body"></div>
-    </div>
   </div>
 </div>
 
@@ -765,6 +997,15 @@ Direction    : …"></textarea>
   const stageStartMs = {};   // stage number → Date.now() at start
   let _runFromStage = 0;
   let _runToStage   = 10;
+
+  // ── Voice Cast editor globals ────────────────────────────────────────────────
+  let _voiceCatalog    = null;   // loaded once from /api/azure_voices
+  let _vcPendingTo     = null;   // if set, Continue runs stages 1 → _vcPendingTo
+  let _vcActiveLocale  = null;   // MIN-R7: init from voiceCast.locales, not hardcoded
+  let _vcData          = null;   // in-memory VoiceCast.json content
+  let _vcPresets       = {};     // voice → preset[]; loaded once on editor open
+  let _vcPlayingAudio  = null;   // Audio object currently playing (for pause support)
+  let _lastRunFilename = null;   // set in runPrompt(); fallback for vcContinue()
 
   const storyEl     = document.getElementById('story');
   const promptEl    = document.getElementById('prompt');
@@ -927,7 +1168,6 @@ Direction    : …"></textarea>
 
   // ── Init ────────────────────────────────────────────────────────────────────
   window.addEventListener('DOMContentLoaded', async () => {
-    promptEl.value = '0  10';         // default: full pipeline run
     await refreshNextNum();
   });
 
@@ -935,7 +1175,7 @@ Direction    : …"></textarea>
   async function runPrompt() {
     const story        = storyEl.value.trim();
     const stagesRaw    = promptEl.value.trim() || '0 9';
-    const { from, to } = parseStages(stagesRaw);
+    let { from, to } = parseStages(stagesRaw);
 
     if (!story) {
       storyEl.focus();
@@ -943,13 +1183,16 @@ Direction    : …"></textarea>
       setTimeout(() => (storyEl.style.borderColor = ''), 1200);
       return;
     }
-    if (from > to) {
-      promptEl.focus();
-      promptEl.style.borderColor = 'var(--red)';
-      setTimeout(() => (promptEl.style.borderColor = ''), 1200);
-      return;
-    }
     if (es) { es.close(); es = null; }
+
+    // ── Voice Cast auto-split: when running 0→N, run Stage 0 alone first ──
+    // vcContinue() will kick off stages 1–N after the user reviews the cast.
+    if (from === 0 && to > 0) {
+      _vcPendingTo = to;   // save full target; Continue button picks this up
+      to = 0;              // only submit Stage 0 now
+    } else {
+      _vcPendingTo = null; // clear any stale value from a prior run
+    }
 
     // Track stage range for progress dots
     _runFromStage = from;
@@ -976,6 +1219,7 @@ Direction    : …"></textarea>
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       filename = data.filename;
+      _lastRunFilename = filename;   // GAP-I4: fallback for vcContinue() story_file
       appendLine(`Saved as ${filename}`, 'sys');
       // Pre-update badge so the user sees the next slot immediately
       fileBadgeEl.textContent = `story_${data.num + 1}.txt`;
@@ -1020,7 +1264,8 @@ Direction    : …"></textarea>
 
     // ── 2. Show command preview ─────────────────────────────────────────────
     const modeTag = testMode ? '  [MODEL=haiku 🧪]' : '  [per-stage models 🎬]';
-    cmdText.textContent      = `./run.sh ${filename} ${from} ${to}${modeTag}`;
+    const vcSplitNote = (_vcPendingTo != null) ? `  →  then 1–${_vcPendingTo} after Voice Cast` : '';
+    cmdText.textContent      = `./run.sh ${filename} ${from} ${to}${vcSplitNote}${modeTag}`;
     cmdPreview.style.display = 'block';
 
     // ── 3. Open SSE stream ──────────────────────────────────────────────────
@@ -1068,11 +1313,22 @@ Direction    : …"></textarea>
       } catch (_) {}
     });
 
-    es.addEventListener('done', e => {
+    es.addEventListener('done', async e => {
       es.close(); es = null;
       const code = parseInt(e.data);
       hideStageProgress();
       if (code === 0) {
+        // ── Voice Cast pause: Stage 0 just ran alone; _vcPendingTo holds the
+        //    original toStage set by the auto-split in runPrompt() above. ──
+        if (_vcPendingTo != null) {
+          appendLine('  ✋ Stage 0 done — review Voice Cast then click Continue', 'sys');
+          setStatus('idle');
+          switchStoryTab('vc');
+          document.getElementById('btn-vc-continue').style.display = '';
+          await loadVoiceCastForEditing();
+          refreshNextNum();
+          return;
+        }
         appendLine('[ ✓ Done — output.mp4 ready ]', 'done');
         setStatus('idle');
         switchTab('pipeline');   // jump to video player
@@ -1129,6 +1385,628 @@ Direction    : …"></textarea>
     document.getElementById('panel-pipeline').style.display = name === 'pipeline' ? 'flex' : 'none';
     if (name === 'browse')   loadProjects();
     if (name === 'pipeline') initPipelineTab();
+  }
+
+  // ── Voice Cast editor ────────────────────────────────────────────────────────
+
+  // ── F0-3 / BUG-C: full 16-category sentence bank ─────────────────────────────
+  // Sentences are IDENTICAL to pre_cache_voices.py STYLE_SENTENCES.
+  // The cache hash includes the text — any deviation = guaranteed cache miss.
+  const VC_SAMPLE = {
+    baseline: {
+      en:        'The ancient pharaoh stood before the gods, refusing to yield.',
+      'zh-Hans': '古老的法老站在众神面前，拒绝屈服。',
+    },
+    bedtime: {
+      en:        'Breathe in\u2026 and let your shoulders soften. The night is quiet, and you are safe.',
+      'zh-Hans': '慢慢吸一口气，把肩膀放松。夜很安静，你很安全。',
+    },
+    narrator: {
+      en:        'It was a quiet evening \u2014 the kind that makes you forget how loud the world can be.',
+      'zh-Hans': '那是个安静的傍晚——那种让人忘记世界有多嘈杂的夜晚。',
+    },
+    documentary: {
+      en:        'For millions of years, these mountains have stood as silent witnesses to all that lives below.',
+      'zh-Hans': '数百万年来，这些山脉默默伫立，见证着脚下一切生命的来去。',
+    },
+    epic: {
+      en:        'Under a cold moon, the ancient stones remember every name they have ever known.',
+      'zh-Hans': '冷月之下，古老的石墙记得每一个曾经存在过的名字。',
+    },
+    poet: {
+      en:        'The river does not remember the rain that made it, yet carries all things to the sea.',
+      'zh-Hans': '河流不记得造就它的雨水，却将万物带向大海。',
+    },
+    angry: {
+      en:        'This will not stand. I have given everything, and still it is never enough.',
+      'zh-Hans': '这不能接受。我已经付出了一切，却永远都不够。',
+    },
+    fear: {
+      en:        'Something is wrong. I can feel it \u2014 the silence where there should be sound.',
+      'zh-Hans': '有什么不对劲。我能感觉到——本该有声音的地方，却一片寂静。',
+    },
+    sad: {
+      en:        'Some things, once broken, can never truly be made whole again.',
+      'zh-Hans': '有些事情，一旦破碎，就再也无法复原了。',
+    },
+    warm: {
+      en:        'Even in the darkest hour, a single light is enough to find the way home.',
+      'zh-Hans': '即使在最黑暗的时刻，一点点光芒也足以找到回家的路。',
+    },
+    curious: {
+      en:        'Wait \u2014 what is that? I have never seen anything like it.',
+      'zh-Hans': '等等——这是什么？我从来没见过这样的东西。',
+    },
+    social: {
+      en:        "I honestly don't know what to say. I should have handled that better.",
+      'zh-Hans': '我真的不知道该说什么。我本应该处理得更好的。',
+    },
+    professional: {
+      en:        "Reporting from the capital \u2014 tonight's session concluded with a unanimous vote.",
+      'zh-Hans': '来自首都的报道——今晚的会议以全票通过结束。',
+    },
+    sports: {
+      en:        'And he drives forward \u2014 the crowd is on their feet \u2014 can he make it across the line?',
+      'zh-Hans': '他向前冲去——观众全站了起来——他能做到吗？',
+    },
+    'sports-excited': {
+      en:        'UNBELIEVABLE! What a finish! Nobody saw that coming!',
+      'zh-Hans': '难以置信！什么样的结局！没有任何人预料到这一幕！',
+    },
+    commercial: {
+      en:        'Limited time only \u2014 get the best price of the year, today.',
+      'zh-Hans': '限时特惠！现在购买，享受全年最低价！',
+    },
+  };
+
+  // ── F0-4 / BUG-C: complete style → category mapping ──────────────────────────
+  const VC_STYLE_CATEGORY = {
+    calm: 'bedtime', gentle: 'bedtime', whispering: 'bedtime', whisper: 'bedtime',
+    'narration-relaxed': 'narrator', 'narration-professional': 'narrator',
+    'documentary-narration': 'documentary', 'newscast-formal': 'documentary',
+    drake: 'epic', geomancer: 'epic', cavalier: 'epic', captain: 'epic',
+    assassin: 'epic', gamenarrator: 'epic',
+    poet: 'poet', lyrical: 'poet', 'poetry-reading': 'poet', story: 'poet', sentiment: 'poet',
+    angry: 'angry', shouting: 'angry', disgruntled: 'angry', complaining: 'angry',
+    argue: 'angry', strict: 'angry', unfriendly: 'angry',
+    terrified: 'fear', fearful: 'fear', anxious: 'fear', nervous: 'fear',
+    sad: 'sad', depressed: 'sad', disappointed: 'sad', tired: 'sad',
+    lonely: 'sad', sorry: 'sad', guilty: 'sad',
+    cheerful: 'warm', excited: 'warm', friendly: 'warm', hopeful: 'warm',
+    affectionate: 'warm', encouragement: 'warm', encourage: 'warm',
+    comfort: 'warm', cute: 'warm', cutesy: 'warm',
+    curious: 'curious', surprised: 'curious',
+    shy: 'social', embarrassed: 'social', envious: 'social', empathetic: 'social',
+    relieved: 'social', funny: 'social',
+    newscast: 'professional', 'newscast-casual': 'professional', chat: 'professional',
+    'chat-casual': 'professional', conversation: 'professional', assistant: 'professional',
+    customerservice: 'professional', serious: 'professional', voiceassistant: 'professional',
+    'sports-commentary': 'sports', 'sports-commentary-excited': 'sports-excited',
+    'advertisement-upbeat': 'commercial', livecommercial: 'commercial',
+  };
+
+  // Auto-select sample text by style (null style → bedtime, safe default).
+  // NOTE: VC_SAMPLE['baseline'] is dead code — the editor never requests it and
+  // pre_cache_voices.py no longer generates baseline clips (Option A, Rev 5).
+  function vcSampleText(locale, style) {
+    const cat  = (style && VC_STYLE_CATEGORY[style]) ?? 'bedtime';
+    const bank = VC_SAMPLE[cat] ?? VC_SAMPLE.bedtime;
+    return bank[locale] ?? bank['en'];
+  }
+
+  // ── switchStoryTab(tab) ──────────────────────────────────────────────────────
+  function switchStoryTab(tab) {
+    document.querySelectorAll('.btn-story-tab').forEach(b =>
+      b.classList.toggle('active', b.dataset.tab === tab));
+    document.getElementById('story').style.display     = tab === 'story' ? '' : 'none';
+    document.getElementById('vc-editor').style.display = tab === 'vc'    ? 'flex' : 'none';
+    if (tab === 'vc') {
+      const cardsEl = document.getElementById('vc-cards');
+      if (!_vcData || !_voiceCatalog) {
+        // Nothing in memory yet — full async fetch + render
+        loadVoiceCastForEditing();
+      } else if (!cardsEl.firstChild) {
+        // Data already in memory (e.g. pre-loaded from Pipeline tab) but cards
+        // not yet rendered — render now without hitting the network
+        renderVcEditor(_vcData, _voiceCatalog, []);
+      }
+      // else: cards are already rendered — preserve any in-progress edits
+    }
+  }
+
+  // ── loadVoiceCatalog() ───────────────────────────────────────────────────────
+  async function loadVoiceCatalog() {
+    if (_voiceCatalog) return _voiceCatalog;
+    const r = await fetch('/api/azure_voices');
+    _voiceCatalog = await r.json();
+    return _voiceCatalog;
+  }
+
+  // ── loadVoicePresets() ───────────────────────────────────────────────────────
+  async function loadVoicePresets() {
+    try {
+      const r = await fetch('/api/voice_presets');
+      _vcPresets = (await r.json()).presets ?? {};
+    } catch (_) {
+      _vcPresets = {};
+    }
+  }
+
+  // ── rebuildPresetSelect(card, voice) ─────────────────────────────────────────
+  // Rebuilds .vc-preset-select options from _vcPresets[voice].
+  // Preserves the current selection if the hash still exists after rebuild.
+  // Module-level so both renderVcCards() and previewVoice() can call it.
+  function rebuildPresetSelect(card, voice) {
+    const sel     = card.querySelector('.vc-preset-select');
+    if (!sel) return;
+    const prevVal = sel.value;
+    while (sel.options.length > 1) sel.remove(1);
+    const presets = _vcPresets[voice] ?? [];
+    presets.forEach(p => sel.add(new Option(p.name, p.hash)));
+    sel.disabled = presets.length === 0;
+    sel.value    = prevVal;
+    if (!sel.value) sel.selectedIndex = 0;
+  }
+
+  // ── loadVoiceCastForEditing() ────────────────────────────────────────────────
+  async function loadVoiceCastForEditing() {
+    const vcCards = document.getElementById('vc-cards');
+    if (!currentSlug || !currentEpId) {
+      vcCards.innerHTML = '<div style="color:var(--dim);font-style:italic;font-size:0.83em;padding:8px 0">Run Stage 0 first to generate the Voice Cast.</div>';
+      return;
+    }
+    try {
+      const res    = await fetch('/pipeline_status?slug=' + encodeURIComponent(currentSlug) +
+                                 '&ep_id=' + encodeURIComponent(currentEpId));
+      const status = await res.json();
+      if (!status.voice_cast) {
+        vcCards.innerHTML = '<div style="color:var(--dim);font-style:italic;font-size:0.83em;padding:8px 0">No VoiceCast.json yet \u2014 run Stage 0 first.</div>';
+        return;
+      }
+      await loadVoiceCatalog();
+      await loadVoicePresets();
+      _vcData = status.voice_cast;
+      renderVcEditor(status.voice_cast, _voiceCatalog, status.locales || []);
+    } catch(e) {
+      vcCards.innerHTML = '<div style="color:var(--red);font-family:var(--mono);font-size:0.82em">Error loading voice cast: ' + escHtml(String(e)) + '</div>';
+    }
+  }
+
+  // ── renderVcEditor(voiceCast, catalog, locales) ──────────────────────────────
+  function renderVcEditor(voiceCast, catalog, locales) {
+    const tabsEl = document.getElementById('vc-locale-tabs');
+    tabsEl.innerHTML = '';
+
+    // Derive locale list from VoiceCast.json characters directly.
+    // status.locales is empty until Stage 8 writes AssetManifest files, so we
+    // can't rely on it here — read the locale keys off the first character instead.
+    const SKIP = new Set(['character_id', 'role', 'gender', 'personality']);
+    const vcLocaleKeys = (voiceCast.characters?.[0])
+      ? Object.keys(voiceCast.characters[0]).filter(k => !SKIP.has(k))
+      : [];
+    const effectiveLocales = (locales && locales.length > 0) ? locales : vcLocaleKeys;
+
+    // MIN-R7: init to first available locale, never hardcoded 'en'
+    _vcActiveLocale = effectiveLocales[0] ?? Object.keys(catalog)[0] ?? 'en';
+
+    if (effectiveLocales.length > 1) {
+      effectiveLocales.forEach(l => {
+        const btn = document.createElement('button');
+        btn.className = 'btn-story-tab' + (l === _vcActiveLocale ? ' active' : '');
+        btn.textContent = l;
+        btn.dataset.locale = l;
+        btn.onclick = () => {
+          // BUG-R1: flush active locale DOM → _vcData BEFORE rebuilding cards
+          flushActiveLocale();
+          _vcActiveLocale = l;
+          tabsEl.querySelectorAll('.btn-story-tab').forEach(b =>
+            b.classList.toggle('active', b.dataset.locale === l));
+          renderVcCards(l);
+        };
+        tabsEl.appendChild(btn);
+      });
+    }
+    renderVcCards(_vcActiveLocale);
+  }
+
+  // ── flushActiveLocale() ──────────────────────────────────────────────────────
+  // Write the currently rendered card DOM back into _vcData so no edits are lost
+  // when switching locale tabs or saving. Called by locale tab onclick AND at the
+  // top of saveVoiceCast() (BUG-R1 fix).
+  function flushActiveLocale() {
+    if (!_vcData || !_vcActiveLocale || !_voiceCatalog) return;
+    document.getElementById('vc-cards').querySelectorAll('.vc-char-card').forEach(card => {
+      const charId    = card.dataset.charId;
+      const voiceVal  = card.querySelector('.vc-voice-select').value;
+      const styleVal  = card.querySelector('.vc-style-select').value || null;
+      const degreeVal = parseFloat(card.querySelector('[data-field=degree]').value) || 1.0;
+      const rateVal   = addPct(card.querySelector('[data-field=rate]').value);
+      const pitchVal  = addPct(card.querySelector('[data-field=pitch]').value);
+      const breakVal  = parseInt(card.querySelector('[data-field=break]').value) || 0;
+      // BUG 2: derive newVoice locally from catalog (not a stale outer variable)
+      const lg = Object.keys(_voiceCatalog)
+        .find(g => _vcActiveLocale.startsWith(g.split('-')[0]))
+        ?? Object.keys(_voiceCatalog)[0];
+      const newVoice  = (_voiceCatalog[lg] || []).find(v => v.voice === voiceVal);
+      const charEntry = (_vcData.characters || []).find(c => c.character_id === charId);
+      if (charEntry && charEntry[_vcActiveLocale]) {
+        charEntry[_vcActiveLocale].azure_voice        = voiceVal;
+        charEntry[_vcActiveLocale].azure_style        = styleVal;
+        charEntry[_vcActiveLocale].azure_style_degree = degreeVal;
+        charEntry[_vcActiveLocale].azure_rate         = rateVal;
+        charEntry[_vcActiveLocale].azure_pitch        = pitchVal;
+        charEntry[_vcActiveLocale].azure_break_ms     = breakVal;
+        if (newVoice) charEntry[_vcActiveLocale].available_styles = newVoice.styles;
+      }
+    });
+  }
+
+  // ── addPct(raw) — normalise rate/pitch: user types plain integer, storage needs "%" ──
+  // "−25" → "−25%"  |  "" → ""  |  "−5%" → "−5%" (idempotent)
+  function addPct(raw) {
+    const s = String(raw ?? '').trim().replace('%', '');
+    return s === '' ? '' : s + '%';
+  }
+
+  // ── Voice Cast parameter interpretation (live meaning bands) ─────────────────
+  // Input = any value the user typed; never clamped.  Returns { text, zone }.
+  // zone: 'normal' | 'extended' | 'experimental'
+  function vcInterpDegree(raw) {
+    const v = parseFloat(raw);
+    if (isNaN(v)) return { text: '\u2014', zone: 'normal' };
+    if (v < 0.6)  return { text: 'Minimal \u2014 nearly emotionless, experimental flat delivery', zone: 'experimental' };
+    if (v < 0.8)  return { text: 'Restrained \u2014 calm, controlled narration', zone: 'normal' };
+    if (v < 1.0)  return { text: 'Natural \u2014 realistic everyday speaking emotion', zone: 'normal' };
+    if (v < 1.3)  return { text: 'Expressive \u2014 engaging storytelling tone', zone: 'normal' };
+    if (v < 1.7)  return { text: 'Cinematic \u2014 dramatic movie narration', zone: 'extended' };
+    if (v < 2.2)  return { text: 'Epic \u2014 theatrical performance energy', zone: 'extended' };
+    if (v < 2.8)  return { text: 'Intense \u2014 emotionally overwhelming delivery', zone: 'extended' };
+                  return { text: 'Extreme \u2014 exaggerated emotion (experimental)', zone: 'experimental' };
+  }
+  function vcInterpRate(raw) {
+    const v = parseFloat(String(raw).replace('%', ''));
+    if (isNaN(v)) return { text: '\u2014', zone: 'normal' };
+    if (v < -40)  return { text: 'Frozen \u2014 extremely slow, surreal pacing', zone: 'experimental' };
+    if (v < -30)  return { text: 'Dreamlike \u2014 very slow, sleep/meditation tone', zone: 'extended' };
+    if (v < -15)  return { text: 'Slow \u2014 calm narration', zone: 'normal' };
+    if (v <= 10)  return { text: 'Natural \u2014 conversational pacing', zone: 'normal' };
+    if (v <= 25)  return { text: 'Energetic \u2014 lively delivery', zone: 'normal' };
+    if (v <= 35)  return { text: 'Urgent \u2014 tense rapid speech', zone: 'extended' };
+                  return { text: 'Hyperfast \u2014 experimental speed, clarity may degrade', zone: 'experimental' };
+  }
+  function vcInterpPitch(raw) {
+    const v = parseFloat(String(raw).replace('%', ''));
+    if (isNaN(v)) return { text: '\u2014', zone: 'normal' };
+    if (v < -8)   return { text: 'Abyssal \u2014 extremely deep, unnatural resonance', zone: 'experimental' };
+    if (v < -6)   return { text: 'Ancient \u2014 mythic elder narrator tone', zone: 'extended' };
+    if (v < -2)   return { text: 'Deep \u2014 mature cinematic voice', zone: 'normal' };
+    if (v <= 2)   return { text: 'Neutral \u2014 original voice', zone: 'normal' };
+    if (v <= 6)   return { text: 'Bright \u2014 youthful tone', zone: 'normal' };
+    if (v <= 8)   return { text: 'Airy \u2014 light energetic voice', zone: 'extended' };
+                  return { text: 'Helium \u2014 exaggerated high pitch (experimental)', zone: 'experimental' };
+  }
+  function vcInterpBreak(raw) {
+    const v = parseInt(raw, 10);
+    if (isNaN(v)) return { text: '\u2014', zone: 'normal' };
+    if (v < 200)  return { text: 'Rapid \u2014 almost no pauses', zone: 'experimental' };
+    if (v < 300)  return { text: 'Continuous \u2014 flowing speech', zone: 'normal' };
+    if (v < 450)  return { text: 'Conversational \u2014 natural dialogue', zone: 'normal' };
+    if (v < 700)  return { text: 'Reflective \u2014 thoughtful narration', zone: 'normal' };
+    if (v < 900)  return { text: 'Storytelling \u2014 dramatic pacing', zone: 'extended' };
+    if (v <= 1200) return { text: 'Meditative \u2014 slow immersive timing', zone: 'extended' };
+                  return { text: 'Suspended \u2014 extremely long pauses (experimental)', zone: 'experimental' };
+  }
+
+  // ── renderVcCards(locale) ────────────────────────────────────────────────────
+  function renderVcCards(locale) {
+    const cardsEl = document.getElementById('vc-cards');
+    cardsEl.innerHTML = '';
+    if (!_vcData || !_voiceCatalog) return;
+    // MIN 3: locale group derived dynamically from catalog keys
+    const localeGroup = Object.keys(_voiceCatalog)
+      .find(g => locale.startsWith(g.split('-')[0]))
+      ?? Object.keys(_voiceCatalog)[0];
+    const voiceList = _voiceCatalog[localeGroup] || [];
+
+    (_vcData.characters || []).forEach(char => {
+      const charLoc = char[locale];
+      if (!charLoc) return;
+
+      const card = document.createElement('div');
+      card.className = 'vc-char-card';
+      card.dataset.charId = char.character_id;
+
+      // ── Card header ──
+      const hdr = document.createElement('div');
+      hdr.className = 'vc-char-card-hdr';
+      hdr.innerHTML = `\u{1F464} ${escHtml(char.character_id)}<span style="font-weight:400;color:var(--dim);margin-left:6px">${escHtml(char.role || '')}</span>`;
+      card.appendChild(hdr);
+
+      // ── Card body ──
+      const body = document.createElement('div');
+      body.className = 'vc-char-card-body';
+
+      // Voice row: select + Sample button
+      const voiceRow = document.createElement('div');
+      voiceRow.className = 'vc-voice-row';
+
+      const voiceSel = document.createElement('select');
+      voiceSel.className = 'vc-voice-select';
+      voiceList.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v.voice;
+        opt.textContent = v.voice + ' (' + v.gender + ')';
+        if (v.voice === charLoc.azure_voice) opt.selected = true;
+        voiceSel.appendChild(opt);
+      });
+
+      const sampleBtn = document.createElement('button');
+      sampleBtn.className = 'btn-vc-preview';
+      sampleBtn.setAttribute('data-role', 'sample');
+      sampleBtn.textContent = '\u25B6 Sample';
+
+      voiceRow.appendChild(voiceSel);
+      voiceRow.appendChild(sampleBtn);
+      body.appendChild(voiceRow);
+
+      // Preset row (between voice row and params row)
+      const presetRow = document.createElement('div');
+      presetRow.className = 'vc-preset-row';
+      const presetLbl = document.createElement('span');
+      presetLbl.className = 'vc-preset-label';
+      presetLbl.textContent = 'Preset:';
+      const presetSel = document.createElement('select');
+      presetSel.className = 'vc-preset-select';
+      presetSel.add(new Option('\u2014 no preset \u2014', ''));
+      presetRow.appendChild(presetLbl);
+      presetRow.appendChild(presetSel);
+      body.appendChild(presetRow);
+
+      // Params column: style row + 4 numeric param rows (no value clamping)
+      const paramsRow = document.createElement('div');
+      paramsRow.className = 'vc-params-row';
+
+      // Style row: [label] [select] [▶ Preview]
+      const styleGrp = document.createElement('div');
+      styleGrp.className = 'vc-param-group';
+      const styleLbl = document.createElement('label');
+      styleLbl.className = 'vc-param-label';
+      styleLbl.textContent = 'Style';
+      const styleSel = document.createElement('select');
+      styleSel.className = 'vc-style-select';
+      const blankOpt = document.createElement('option');
+      blankOpt.value = ''; blankOpt.textContent = '\u2014 no style \u2014';
+      styleSel.appendChild(blankOpt);
+      const selectedVoice = voiceList.find(v => v.voice === (charLoc.azure_voice || voiceSel.value));
+      (selectedVoice?.styles || []).forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s; opt.textContent = s;
+        if (s === charLoc.azure_style) opt.selected = true;
+        styleSel.appendChild(opt);
+      });
+      const prevBtn = document.createElement('button');
+      prevBtn.className = 'btn-vc-preview';
+      prevBtn.setAttribute('data-role', 'preview');
+      prevBtn.textContent = '\u25B6 Preview';
+      styleGrp.appendChild(styleLbl);
+      styleGrp.appendChild(styleSel);
+      styleGrp.appendChild(prevBtn);
+      paramsRow.appendChild(styleGrp);
+
+      // Numeric params — any value accepted; live interpretation shown inline
+      const paramDefs = [
+        { label: 'Emotion',  field: 'degree', interp: vcInterpDegree,
+          value: String(charLoc.azure_style_degree ?? 1.0) },
+        { label: 'Speak Speed (%)',    field: 'rate',   interp: vcInterpRate,
+          value: String(charLoc.azure_rate  ?? '0').replace('%', '') },
+        { label: 'Voice Depth (%)',   field: 'pitch',  interp: vcInterpPitch,
+          value: String(charLoc.azure_pitch ?? '' ).replace('%', '') },
+        { label: 'Pause Duration (ms)', field: 'break',  interp: vcInterpBreak,
+          value: String(charLoc.azure_break_ms ?? 0) },
+      ];
+      paramDefs.forEach(pd => {
+        const grp = document.createElement('div');
+        grp.className = 'vc-param-group';
+        const lbl = document.createElement('label');
+        lbl.className = 'vc-param-label';
+        lbl.textContent = pd.label;
+        const inp = document.createElement('input');
+        inp.className = 'vc-param-input';
+        inp.type = 'text';
+        inp.setAttribute('data-field', pd.field);
+        inp.value = pd.value;
+        const interpDiv = document.createElement('div');
+        interpDiv.className = 'vc-param-interp';
+        const updateInterp = () => {
+          const { text, zone } = pd.interp(inp.value);
+          const badge = zone === 'normal' ? '' :
+            `<span class="vc-zone-badge vc-zone-${zone}">${zone === 'extended' ? 'Extended' : 'Experimental'}</span>`;
+          interpDiv.innerHTML = `<span class="vc-interp-text">${escHtml(text)}</span>${badge}`;
+        };
+        inp.addEventListener('input', updateInterp);
+        updateInterp();   // render immediately on card creation
+        grp.appendChild(lbl);
+        grp.appendChild(inp);
+        grp.appendChild(interpDiv);
+        paramsRow.appendChild(grp);
+      });
+
+      body.appendChild(paramsRow);
+
+      card.appendChild(body);
+      cardsEl.appendChild(card);
+      // card is now in the DOM — safe to querySelector inside it
+      rebuildPresetSelect(card, charLoc.azure_voice);
+
+      // ── Voice select onChange → rebuild style + preset dropdowns ──
+      voiceSel.addEventListener('change', () => {
+        const newV     = voiceList.find(v => v.voice === voiceSel.value);
+        const curStyle = styleSel.value;
+        styleSel.innerHTML = '';
+        const blank2 = document.createElement('option');
+        blank2.value = ''; blank2.textContent = '\u2014 no style \u2014';
+        styleSel.appendChild(blank2);
+        (newV?.styles || []).forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s; opt.textContent = s;
+          if (s === curStyle) opt.selected = true;
+          styleSel.appendChild(opt);
+        });
+        rebuildPresetSelect(card, voiceSel.value);
+        card.querySelector('.vc-preset-select').selectedIndex = 0;
+      });
+
+      // ── Preset select onChange → populate all param fields ──
+      presetSel.addEventListener('change', () => {
+        const presets = _vcPresets[voiceSel.value] ?? [];
+        const preset  = presets.find(p => p.hash === presetSel.value);
+        if (!preset) return;
+        styleSel.value = preset.style || '';
+        card.querySelector('[data-field=degree]').value = preset.style_degree;
+        card.querySelector('[data-field=rate]').value   = String(preset.rate  ?? '').replace('%', '');
+        card.querySelector('[data-field=pitch]').value  = String(preset.pitch ?? '').replace('%', '');
+        card.querySelector('[data-field=break]').value  = preset.break_ms;
+        // Trigger interpretation text updates
+        ['degree','rate','pitch','break'].forEach(f => {
+          card.querySelector(`[data-field=${f}]`).dispatchEvent(new Event('input'));
+        });
+      });
+
+      // ── Sample button: bare voice, bedtime sentence (BUG-B: pitch='', not '0%') ──
+      sampleBtn.addEventListener('click', () => {
+        previewVoice(card, locale, {
+          azure_voice: voiceSel.value, style: null,
+          style_degree: null, rate: '0%', pitch: '', break_ms: 0,
+        }, sampleBtn);
+      });
+
+      // ── Preview button: full params ──
+      prevBtn.addEventListener('click', () => {
+        previewVoice(card, locale, {
+          azure_voice:  voiceSel.value,
+          style:        styleSel.value || null,
+          style_degree: parseFloat(card.querySelector('[data-field=degree]').value),
+          rate:         addPct(card.querySelector('[data-field=rate]').value),
+          pitch:        addPct(card.querySelector('[data-field=pitch]').value),
+          break_ms:     parseInt(card.querySelector('[data-field=break]').value),
+        }, prevBtn);
+      });
+    });
+  }
+
+  // ── previewVoice(card, locale, params, clickedBtn) ───────────────────────────
+  async function previewVoice(card, locale, params, clickedBtn) {
+    // Stop any audio already playing (from this or another card)
+    if (_vcPlayingAudio) {
+      _vcPlayingAudio.pause();
+      _vcPlayingAudio = null;
+    }
+
+    const btns = card.querySelectorAll('.btn-vc-preview');
+    btns.forEach(b => { b.disabled = true; b._orig = b.textContent; b.textContent = '\u2026'; });
+    let playing = false;
+    try {
+      const r = await fetch('/api/preview_voice', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          azure_voice:  params.azure_voice,
+          style:        params.style,
+          style_degree: params.style_degree,
+          rate:         params.rate,
+          pitch:        params.pitch,
+          break_ms:     params.break_ms,
+          text:         vcSampleText(locale, params.style),
+        }),
+      });
+      const data = await r.json();
+      if (data.url) {
+        const audio = new Audio(data.url + '&t=' + Date.now());
+        _vcPlayingAudio = audio;
+        playing = true;
+
+        // All buttons except the clicked one re-enable normally
+        btns.forEach(b => { if (b !== clickedBtn) { b.disabled = false; b.textContent = b._orig; } });
+        // Clicked button becomes ⏸ Pause
+        clickedBtn.textContent = '\u23F8 Pause';
+        clickedBtn.disabled = false;
+
+        // Revert button and re-enable all when playback ends or is paused
+        let reverted = false;
+        const revert = () => {
+          if (reverted) return;
+          reverted = true;
+          if (_vcPlayingAudio === audio) _vcPlayingAudio = null;
+          clickedBtn.textContent = clickedBtn._orig;
+          btns.forEach(b => { b.disabled = false; });
+        };
+        audio.addEventListener('ended', revert);
+        audio.addEventListener('pause', revert);
+
+        // One-shot: clicking the ⏸ Pause button pauses audio (revert fires via 'pause' event)
+        clickedBtn.addEventListener('click', () => audio.pause(), { once: true });
+
+        audio.play();
+
+        if (data.preset) {
+          (_vcPresets[params.azure_voice] ??= []).push(data.preset);
+          rebuildPresetSelect(card, params.azure_voice);
+          card.querySelector('.vc-preset-select').value = data.preset.hash;
+        }
+      } else {
+        appendLine('\u26A0 TTS preview failed: ' + (data.error || 'unknown error'), 'err');
+      }
+    } finally {
+      // Only revert buttons if audio never started (synthesis error / network failure)
+      if (!playing) {
+        btns.forEach(b => { b.disabled = false; b.textContent = b._orig; });
+      }
+    }
+  }
+
+  // ── saveVoiceCast() → boolean ─────────────────────────────────────────────────
+  async function saveVoiceCast() {
+    // MIN-I8: guard — user may click Save before Stage 0 has run
+    if (!_vcData) return false;
+    // BUG-R1: flush active locale DOM → _vcData first so all locales are captured
+    flushActiveLocale();
+    try {
+      const r = await fetch('/api/save_voice_cast', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: currentSlug, voice_cast: _vcData }),
+      });
+      const data = await r.json();
+      if (data.ok) {
+        const badge = document.getElementById('vc-saved-badge');
+        badge.style.display = '';
+        setTimeout(() => { badge.style.display = 'none'; }, 2000);
+        return true;
+      } else {
+        appendLine('\u26A0 Save failed: ' + (data.error || 'unknown error'), 'err');
+        return false;
+      }
+    } catch(e) {
+      appendLine('\u26A0 Save failed: ' + e, 'err');
+      return false;
+    }
+  }
+
+  // ── vcContinue() ─────────────────────────────────────────────────────────────
+  async function vcContinue() {
+    if (_vcPendingTo == null) return;
+    // CON-R6: guard on save failure — don't run pipeline with stale VoiceCast.json
+    const saveOk = await saveVoiceCast();
+    if (!saveOk) {
+      appendLine('\u26A0 Save failed \u2014 fix the error above before continuing', 'err');
+      return;
+    }
+    switchStoryTab('story');
+    // C2: use _lastRunFilename as fallback when pipeStoryFile is null (paste-and-run flow)
+    startPipeStep({ type: 'llm', from: 1, to: _vcPendingTo,
+                    story_file: pipeStoryFile ?? _lastRunFilename });
+    _vcPendingTo = null;
+    document.getElementById('btn-vc-continue').style.display = 'none';
   }
 
   // ── Browse panel ─────────────────────────────────────────────────────────────
@@ -1388,9 +2266,45 @@ Direction    : …"></textarea>
         '[7/7] render_video.py       --plan RenderPlan.{locale}.json  →  renders/{locale}/output.mp4',
   };
 
+  // ── syncRunTabFromPipeline(slug, epId, storyFile, voiceCast) ─────────────────
+  // Called whenever a pipeline episode is selected or refreshed.
+  // Restores Run-tab state (story textarea, currentSlug/epId, VoiceCast) so the
+  // user can resume work after a page reload or server restart.
+  async function syncRunTabFromPipeline(slug, epId, storyFile, voiceCast) {
+    // Always sync slug/ep_id so the Run tab references the right episode
+    currentSlug = slug;
+    currentEpId = epId;
+
+    // Restore story textarea — only if this episode's file isn't already loaded
+    if (storyFile && storyFile !== _lastRunFilename) {
+      try {
+        const r = await fetch('/read_story?story_file=' + encodeURIComponent(storyFile));
+        const d = await r.json();
+        if (d.ok && d.content) {
+          storyEl.value      = d.content;
+          _lastRunFilename   = storyFile;
+          fileBadgeEl.textContent = storyFile;
+        }
+      } catch (_) { /* non-fatal: server may not have the file */ }
+    }
+
+    // Pre-load VoiceCast so the Voice Cast tab is immediately usable
+    if (voiceCast && !_vcData) {
+      await loadVoiceCatalog();
+      _vcData = voiceCast;
+      // If the Voice Cast editor is already open, render it now
+      if (document.getElementById('vc-editor').style.display !== 'none') {
+        renderVcEditor(voiceCast, _voiceCatalog, []);
+      }
+    }
+  }
+
   function renderPipelineStatus(status) {
     // Store the auto-detected story file for use by runLlmRange
     pipeStoryFile = status.story_file || null;
+
+    // Sync Run tab: restore story textarea + VoiceCast on episode load/reload
+    syncRunTabFromPipeline(pipeEpSlug, pipeEpId, pipeStoryFile, status.voice_cast);
 
     const body = document.getElementById('pipe-body');
     body.innerHTML = '';
@@ -1590,71 +2504,18 @@ Direction    : …"></textarea>
     const reviewWrap        = document.getElementById('pipe-review-wrap');
     const reviewContentTabs = document.getElementById('review-content-tabs');
     const reviewLocaleTabs  = document.getElementById('review-locale-tabs');
-    const vcBody            = document.getElementById('voicecast-body');
-
     const readyVideos = status.ready_videos || [];
     const readyDubbed = status.ready_dubbed || [];
-    const vc          = status.voice_cast;
-    const vcChars     = (vc && vc.characters && vc.characters.length) ? vc.characters : null;
-    const vcLocales   = vcChars
-      ? Object.keys(vcChars[0]).filter(k => !['character_id','role','gender','personality'].includes(k))
-      : [];
 
     const hasVideo = readyVideos.length > 0;
     const hasAudio = readyDubbed.length > 0;
-    const hasVc    = !!vcChars;
 
-    if (!hasVideo && !hasAudio && !hasVc) {
+    if (!hasVideo && !hasAudio) {
       reviewWrap.style.display = 'none';
     } else {
       reviewWrap.style.display = '';
       reviewContentTabs.innerHTML = '';
       reviewLocaleTabs.innerHTML  = '';
-
-      // ── Voice cast renderer ─────────────────────────────────────────────────
-      function renderVcLocale(locale) {
-        vcBody.innerHTML = '';
-        vcChars.forEach(char => {
-          const loc = char[locale];
-          if (!loc) return;
-          const row = document.createElement('div');
-          row.className = 'vc-char-row';
-          const charHdr = document.createElement('div');
-          charHdr.innerHTML =
-            `<span class="vc-char-name">👤 ${char.character_id}</span>` +
-            `<span class="vc-char-role">${char.role || ''}</span>`;
-          row.appendChild(charHdr);
-          if (loc.azure_voice) {
-            const v = document.createElement('div');
-            v.className = 'vc-char-voice';
-            v.textContent = loc.azure_voice;
-            row.appendChild(v);
-          }
-          const paramParts = [];
-          if (loc.azure_pitch)            paramParts.push('pitch: ' + loc.azure_pitch);
-          if (loc.azure_break_ms != null) paramParts.push('break: ' + loc.azure_break_ms + 'ms');
-          if (loc.azure_style_degree)     paramParts.push('degree: ' + loc.azure_style_degree);
-          if (paramParts.length) {
-            const p = document.createElement('div');
-            p.className = 'vc-char-params';
-            p.textContent = paramParts.join('  ·  ');
-            row.appendChild(p);
-          }
-          const styles = loc.available_styles || [];
-          if (styles.length) {
-            const chips = document.createElement('div');
-            chips.style.marginTop = '4px';
-            styles.forEach(s => {
-              const chip = document.createElement('span');
-              chip.className = 'vc-style-chip';
-              chip.textContent = s;
-              chips.appendChild(chip);
-            });
-            row.appendChild(chips);
-          }
-          vcBody.appendChild(row);
-        });
-      }
 
       // ── Locale tab builder ──────────────────────────────────────────────────
       function buildLocaleTabs(locales, onSelect, activeLocale) {
@@ -1685,10 +2546,6 @@ Direction    : …"></textarea>
         } else if (pane === 'audio') {
           buildLocaleTabs(readyDubbed, playLocaleDubbedAudio, readyDubbed[0]);
           playLocaleDubbedAudio(readyDubbed[0]);
-        } else if (pane === 'vc') {
-          const firstVcLocale = vcLocales[0] || '';
-          buildLocaleTabs(vcLocales, renderVcLocale, firstVcLocale);
-          if (firstVcLocale) renderVcLocale(firstVcLocale);
         }
       }
 
@@ -1696,7 +2553,6 @@ Direction    : …"></textarea>
       const tabDefs = [];
       if (hasVideo) tabDefs.push({ pane: 'video', label: 'Video' });
       if (hasAudio) tabDefs.push({ pane: 'audio', label: 'Soundtrack' });
-      if (hasVc)    tabDefs.push({ pane: 'vc',    label: 'Voice Cast' });
 
       tabDefs.forEach(({ pane, label }, i) => {
         const btn = document.createElement('button');
@@ -1776,6 +2632,12 @@ Direction    : …"></textarea>
 
     // Track which stage range is running so Pipeline tab doesn't show stale ✓
     pipeRunning = (params.type === 'llm') ? { from: params.from, to: params.to } : null;
+    if (params.type === 'llm') {
+      // Keep progress-dot globals accurate for startPipeStep-driven runs
+      // (vcContinue, runLlmRange from Pipeline tab, etc.)
+      _runFromStage = params.from;
+      _runToStage   = params.to;
+    }
     refreshPipeline();   // immediately clear stale ✓ in Pipeline tab
 
     // Route output to the Run tab — switch there and clear the output box
@@ -2241,6 +3103,28 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        # Read a story_N.txt file back to the client (Run-tab restore)
+        elif parsed.path == "/read_story":
+            params     = parse_qs(parsed.query)
+            story_file = unquote_plus(params.get("story_file", [""])[0]).strip()
+            # Restrict to story_N.txt in the pipe root — no directory traversal
+            if story_file and re.match(r"^story_\d+\.txt$", story_file):
+                full_path = os.path.join(PIPE_DIR, story_file)
+                if os.path.isfile(full_path):
+                    with open(full_path, encoding="utf-8") as _fh:
+                        content = _fh.read()
+                    payload = {"ok": True, "content": content, "filename": story_file}
+                else:
+                    payload = {"ok": False, "error": "file not found"}
+            else:
+                payload = {"ok": False, "error": "invalid filename"}
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # Pre-flight: check if the episode output folder exists
         elif parsed.path == "/check_episode":
             params     = parse_qs(parsed.query)
@@ -2687,6 +3571,26 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass   # client cancelled the video request
 
+        # Voice presets (GET /api/voice_presets)
+        elif parsed.path == "/api/voice_presets":
+            pdata = load_presets()
+            body  = json.dumps({"presets": pdata.get("presets", {})}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # Voice catalog grouped by story locale  (GET /api/azure_voices)
+        elif parsed.path == "/api/azure_voices":
+            catalog = parse_azure_tts_styles()
+            body    = json.dumps(catalog).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -2768,6 +3672,140 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(resp)
 
+        # TTS preview — F0-throttled, disk-cached  (POST /api/preview_voice)
+        elif self.path == "/api/preview_voice":
+            tmp_path = None
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                req      = json.loads(raw_body)
+
+                azure_voice  = req.get("azure_voice", "").strip()
+                style        = req.get("style") or None
+                style_degree = float(req.get("style_degree") or 0)
+                rate         = req.get("rate") or "0%"
+                pitch        = req.get("pitch") or ""
+                break_ms     = int(req.get("break_ms") or 0)
+                text         = req.get("text", "").strip()
+
+                if not azure_voice or not text:
+                    raise ValueError("azure_voice and text are required")
+
+                # Derive azure_locale server-side (MIN 1)
+                azure_locale = '-'.join(azure_voice.split('-')[:2])
+
+                # Cache key (MIN 2 / BUG-B: pitch normalised to "" not "0%")
+                key_dict = {
+                    "v": azure_voice, "s": style or "",
+                    "d": style_degree, "r": rate,
+                    "p": pitch or "", "b": break_ms, "t": text,
+                }
+                h = hashlib.sha256(
+                    json.dumps(key_dict, sort_keys=True).encode()
+                ).hexdigest()[:16]
+
+                # BUG-A: colon → underscore (colon illegal on Windows/FAT)
+                voice_dir  = azure_voice.replace(":", "_")
+                # BUG-R4: PIPE_DIR-anchored absolute path (not CWD-relative)
+                _pipe_path = Path(PIPE_DIR)
+                cache_path = (_pipe_path / "projects" / "resources" / "azure_tts"
+                              / voice_dir / f"{h}.mp3")
+
+                if not cache_path.exists():
+                    if not _TTS_AVAILABLE:
+                        raise RuntimeError("azure-cognitiveservices-speech SDK not installed")
+
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    ssml   = _preview_build_ssml(text, azure_voice, azure_locale, style,
+                                                 style_degree=style_degree, rate=rate,
+                                                 pitch=pitch, break_ms=break_ms)
+                    result = _tts_throttled_call(_get_synth(), ssml)
+
+                    # BUG 3: atomic write — no partial files land at cache_path
+                    tmp_path = cache_path.with_suffix(".tmp")
+                    tmp_path.write_bytes(result.audio_data)
+                    tmp_path.rename(cache_path)
+                    tmp_path = None
+
+                # BUG-I1: relative URL so serve_media can resolve it
+                url = "/serve_media?path=" + str(cache_path.relative_to(_pipe_path))
+
+                # Auto-save preset (silent side-effect of every Preview with a style)
+                new_preset = None
+                if style:
+                    pdata = load_presets()
+                    vp    = pdata["presets"].setdefault(azure_voice, [])
+                    if not any(p["hash"] == h for p in vp):
+                        new_preset = {
+                            "name":         f"custom{len(vp) + 1}",
+                            "style":        style,
+                            "style_degree": style_degree,
+                            "rate":         rate,
+                            "pitch":        pitch or "",
+                            "break_ms":     break_ms,
+                            "hash":         h,
+                        }
+                        vp.append(new_preset)
+                        save_presets(pdata)
+
+                resp = json.dumps({"url": url, "preset": new_preset}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
+            except Exception as exc:
+                if tmp_path:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                resp = json.dumps({"error": str(exc)}).encode()
+                self.send_response(200)          # 200 so JS always gets JSON body
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
+        # Save VoiceCast.json  (POST /api/save_voice_cast)
+        elif self.path == "/api/save_voice_cast":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                req      = json.loads(raw_body)
+
+                slug       = req.get("slug", "").strip()
+                voice_cast = req.get("voice_cast")
+
+                if not slug:
+                    raise ValueError("slug is required")
+                if voice_cast is None:
+                    raise ValueError("voice_cast is required")
+
+                # Write to projects/{slug}/VoiceCast.json (project-level, full overwrite)
+                proj_dir = os.path.join(PIPE_DIR, "projects", slug)
+                os.makedirs(proj_dir, exist_ok=True)
+                vc_path  = os.path.join(proj_dir, "VoiceCast.json")
+                with open(vc_path, "w", encoding="utf-8") as fh:
+                    json.dump(voice_cast, fh, indent=2, ensure_ascii=False)
+
+                resp = json.dumps({"ok": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+                print(f"  Saved VoiceCast.json → projects/{slug}/")
+
+            except Exception as exc:
+                resp = json.dumps({"error": str(exc)}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -2775,9 +3813,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         path = args[0].split()[1] if args else ""
         # Silence noisy but uninteresting routes
-        silent = {"/", "/stop", "/next_story_num", "/check_episode",
+        silent = {"/", "/stop", "/next_story_num", "/check_episode", "/read_story",
                   "/list_projects", "/view_artifact", "/list_stories",
-                  "/pipeline_status", "/serve_media", "/run_locale"}
+                  "/pipeline_status", "/serve_media", "/run_locale",
+                  "/api/azure_voices", "/api/voice_presets",
+                  "/api/preview_voice", "/api/save_voice_cast"}
         if not any(path == s or path.startswith(s + "?") for s in silent):
             print(f"  {self.address_string()}  {fmt % args}")
 
