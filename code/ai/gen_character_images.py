@@ -140,18 +140,22 @@ MODELS = {
         "notes":    "Higher quality FLUX, 4-bit quant, ~6 GB VRAM. Needs HF auth (gated).",
     },
     "sdxl": {
-        "model_id": "stabilityai/stable-diffusion-xl-base-1.0",
-        "steps":    25,
-        "guidance": 7.5,
-        "family":   "sdxl",
-        "notes":    "SDXL 1.0 FP16 + CPU offload, ~5 GB VRAM",
+        "model_id":  "stabilityai/stable-diffusion-xl-base-1.0",
+        "steps":     25,
+        "guidance":  7.5,
+        "family":    "sdxl",
+        "outdated":  True,
+        "successor": "flux-schnell or flux-dev",
+        "notes":     "[OUTDATED] SDXL 1.0 FP16 + CPU offload, ~5 GB VRAM. Superseded by FLUX for character portraits.",
     },
     "sdxl-turbo": {
-        "model_id": "stabilityai/sdxl-turbo",
-        "steps":    4,
-        "guidance": 0.0,   # guidance-distilled
-        "family":   "sdxl",
-        "notes":    "Distilled SDXL, 4 steps, FP16 + CPU offload, ~5 GB VRAM",
+        "model_id":  "stabilityai/sdxl-turbo",
+        "steps":     4,
+        "guidance":  0.0,   # guidance-distilled
+        "family":    "sdxl",
+        "outdated":  True,
+        "successor": "flux-schnell",
+        "notes":     "[OUTDATED] Distilled SDXL, 4 steps, FP16 + CPU offload, ~5 GB VRAM. Superseded by flux-schnell.",
     },
 }
 
@@ -422,6 +426,16 @@ def run_model(model_key: str, characters: list, out_dir: Path, args,
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
+
+    # Reject outdated models early with a clear message.
+    if args.model not in ("auto", "all"):
+        cfg = MODELS[args.model]
+        if cfg.get("outdated"):
+            print(f"[ERROR] '{args.model}' is outdated and no longer supported for character generation.")
+            print(f"        Reason : {cfg['notes']}")
+            print(f"        Use    : --model {cfg['successor']}")
+            sys.exit(1)
+
     locale  = locale_from_manifest_path(args.manifest) if args.manifest else "en"
     out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
