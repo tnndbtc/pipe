@@ -239,6 +239,7 @@ fill_and_run() {
     -e "s|{{GENERATION_SEED}}|${GENERATION_SEED:-}|g" \
     -e "s|{{RENDER_PROFILE}}|${RENDER_PROFILE:-preview_local}|g" \
     -e "s|{{LOCALES}}|${LOCALES:-en}|g" \
+    -e "s|{{STORY_FORMAT}}|${STORY_FORMAT:-episodic}|g" \
     "$prompt_src" > "$tmp"
 
   # 2. Pre-embed referenced input files → eliminate Read tool calls

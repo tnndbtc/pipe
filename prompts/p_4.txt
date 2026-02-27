@@ -5,6 +5,7 @@
 # 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
 #     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
 #     {{EPISODE_ID}}     →  e.g. "s01e02"
+#     {{STORY_FORMAT}}   →  e.g. "episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"
 #
 # 📥 FILES READ (written by earlier stages):
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json   (Stage 3)
@@ -25,9 +26,10 @@ Your ONLY job: produce a valid ShotList.json derived from Script.json.
 
 ## Context
 
-Episode ID  : {{EPISODE_ID}}
-Episode dir : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
-Schema      : contracts/schemas/ShotList.v1.json
+Episode ID    : {{EPISODE_ID}}
+Episode dir   : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Schema        : contracts/schemas/ShotList.v1.json
+Story format  : {{STORY_FORMAT}}
 
 Read these files before writing anything:
   1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
@@ -38,6 +40,22 @@ Read these files before writing anything:
 ## Task
 
 Print: `▶ [4/9] Stage 4 — Produce ShotList.json  …`
+
+### Story format rules — read before writing anything
+
+Story format: **{{STORY_FORMAT}}**
+
+**episodic**: Normal shot structure. Include character positions. Use `background_id` per scene. Hard cuts between scenes.
+
+**continuous_narration**: Every shot must have `"characters": []` (empty array). Shots represent atmospheric segments (~30-60s each). Background changes with each mood/setting shift. No character positions needed.
+
+**illustrated_narration**: Shots include characters in `characters[]` but narrator drives all VO — characters appear visually but have no VO lines assigned to them. Backgrounds support the story visually.
+
+**documentary**: Every shot must have `"characters": []` (empty array). Shots represent topic segments. Backgrounds are informational b-roll visuals.
+
+**monologue**: One or very few shots. The single protagonist is always centred (`position: "center"`). Background is minimal — a single consistent setting. No scene changes.
+
+---
 
 Produce ShotList.json.  Required top-level fields (confirm from schema):
   schema_id, schema_version, shotlist_id, script_ref, timing_lock_hash, shots[]

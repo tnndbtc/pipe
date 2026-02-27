@@ -7,6 +7,7 @@
 #     {{EPISODE_ID}}     →  e.g. "s01e02"
 #     {{STORY_TITLE}}    →  e.g. "The Pharaoh Who Defied Death"
 #     {{EPISODE_NUMBER}} →  e.g. "02"
+#     {{STORY_FORMAT}}   →  e.g. "episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"
 #
 # 📥 FILES READ (written by earlier stages):
 #     episode_direction.txt                                      (Stage 0)
@@ -34,6 +35,7 @@ Episode number : {{EPISODE_NUMBER}}
 Episode ID     : {{EPISODE_ID}}
 Episode dir    : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
 Schema         : contracts/schemas/Script.v1.json
+Story format   : {{STORY_FORMAT}}
 
 Read these files before writing anything:
   1. episode_direction.txt          — full episode direction
@@ -49,6 +51,24 @@ Print: `▶ [3/9] Stage 3 — Produce Script.json  …`
 
 Produce Script.json.  Required top-level fields (confirm from schema):
   schema_id, schema_version, script_id, title, cast[], scenes[]
+
+### Story format rules — read before writing anything
+
+Story format for this episode: **{{STORY_FORMAT}}**
+
+Apply these rules based on the format:
+
+**episodic** (default): Write multi-character dialogue scenes. Characters speak to each other. Include narrator lines only where needed for scene transitions. Normal scene structure.
+
+**continuous_narration**: ALL lines must use `speaker_id: "narrator"`. No character dialogue interchange. No scene divisions — structure as atmospheric sections separated by mood/setting shift. The entire script is one continuous narrator monologue. Do NOT include any other speaker_ids in the script.
+
+**illustrated_narration**: ALL lines must use `speaker_id: "narrator"`. Characters appear in scenes visually but do NOT speak. The narrator describes and reads for all characters. Structure as narrator-paced sections.
+
+**documentary**: ALL lines must use `speaker_id: "narrator"`. Structure as topic-driven sections (each scene = one topic/point). No character dialogue. The narrator explains, describes, educates.
+
+**monologue**: ALL lines must use `speaker_id` set to the SINGLE protagonist character_id (NOT "narrator"). This character speaks directly to the audience. No other characters speak. Single continuous take with no scene changes. Do NOT create a narrator entry — the protagonist IS the narrator.
+
+---
 
 ### cast[] — one entry per named character in this episode
 

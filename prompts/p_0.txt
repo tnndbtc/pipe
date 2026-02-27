@@ -53,6 +53,7 @@ use judgement to map content to each field):
 | SERIES_GENRE      | "Genre"; infer from tone/setting if not explicit                           |
 | GENERATION_SEED   | "Seed" if present; else compute int(sha256(STORY_TITLE+EPISODE_ID)[:8])   |
 | RENDER_PROFILE    | "Render profile"; default "preview_local" if absent                        |
+| STORY_FORMAT      | "Story format" / "Format" if present; otherwise detect from content: sleep/meditation/mindfulness → continuous_narration, children's story/fable/fairy tale → illustrated_narration, documentary/explainer/educational → documentary, diary/confession/speech/first-person → monologue; default "episodic" |
 
 After extraction, print this exact confirmation block to stdout:
 
@@ -67,6 +68,7 @@ PROJECT_SLUG     : <value>
 SERIES_GENRE     : <value>
 GENERATION_SEED  : <value>
 RENDER_PROFILE   : <value>
+STORY_FORMAT     : <value>
 ────────────────────────────────────────────────────────────────────────
 ```
 
@@ -92,12 +94,22 @@ Using the story file and projects/azure_tts_styles.txt you already read:
 
 #### Step 1 — Identify main characters
 
-List the main characters (protagonist, antagonist, narrator, supporting —
-typically 2–5 roles).
+**Format-aware cast scope — apply BEFORE listing characters:**
 
-MANDATORY: Always include a "narrator" entry.  Every episode has narrator VO
-(off-screen narration lines).  Narrator is not a story character but must
-appear in VoiceCast.json with its own voice.
+| STORY_FORMAT            | Characters to cast                                                  |
+|-------------------------|---------------------------------------------------------------------|
+| `episodic`              | narrator + protagonist + antagonist + supporting (typically 2–5)   |
+| `continuous_narration`  | **narrator ONLY** — no protagonist, no other characters            |
+| `illustrated_narration` | **narrator ONLY** — characters appear visually but never speak     |
+| `documentary`           | **narrator ONLY** — no characters, narrator explains everything    |
+| `monologue`             | **protagonist ONLY** — protagonist IS the narrator; do NOT create a separate narrator entry |
+
+For `episodic`: narrator is mandatory. Every episode has off-screen narration lines.
+Narrator is not a story character but must appear in VoiceCast.json with its own voice.
+
+For `monologue`: the protagonist speaks directly to the audience and fills the narrator
+role. Do NOT add a "narrator" entry — Stage 3 will use the protagonist's character_id
+for all lines.
 
 #### Step 2 — For each character × each locale in {{LOCALES}}
 
@@ -190,6 +202,7 @@ export PROJECT_SLUG="<value>"
 export SERIES_GENRE="<value>"
 export GENERATION_SEED="<value>"
 export RENDER_PROFILE="<value>"
+export STORY_FORMAT="<value>"
 export PROJECT_DIR="projects/<PROJECT_SLUG>"
 export EPISODE_DIR="projects/<PROJECT_SLUG>/episodes/<EPISODE_ID>"
 export VOICE_CAST_FILE="projects/<PROJECT_SLUG>/VoiceCast.json"

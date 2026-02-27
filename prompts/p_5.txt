@@ -5,6 +5,7 @@
 # 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
 #     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
 #     {{EPISODE_ID}}     →  e.g. "s01e02"
+#     {{STORY_FORMAT}}   →  e.g. "episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"
 #
 # 📥 FILES READ (written by earlier stages):
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json  (Stage 4)
@@ -29,9 +30,10 @@ one shared (locale-free assets) and one locale (English VO items).
 
 ## Context
 
-Episode ID  : {{EPISODE_ID}}
-Episode dir : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
-Schema      : contracts/schemas/AssetManifest.v1.json
+Episode ID    : {{EPISODE_ID}}
+Episode dir   : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Schema        : contracts/schemas/AssetManifest.v1.json
+Story format  : {{STORY_FORMAT}}
 
 Read these files before writing anything:
   1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
@@ -45,6 +47,22 @@ Read these files before writing anything:
 ## Task
 
 Print: `▶ [5/9] Stage 5 — Produce AssetManifest drafts  …`
+
+### Story format rules for asset generation
+
+Story format: **{{STORY_FORMAT}}**
+
+**character_packs**:
+- `episodic`, `illustrated_narration`, `monologue`: Generate character_packs as normal.
+- `continuous_narration`, `documentary`: Do NOT generate character_packs (empty array `[]`). No character images are needed.
+
+**backgrounds**:
+- All formats: Generate backgrounds as normal — one per distinct setting/segment.
+- `continuous_narration`: Backgrounds should emphasise atmosphere and mood (soft, ambient, dreamlike).
+- `documentary`: Backgrounds should be informational b-roll (relevant locations, objects, environments).
+- `monologue`: Only one or two backgrounds needed (the single location where the character speaks).
+
+---
 
 Produce TWO files:
 

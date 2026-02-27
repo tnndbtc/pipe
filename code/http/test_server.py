@@ -877,6 +877,27 @@ HTML = r"""<!DOCTYPE html>
     transition: background .15s;
   }
   #btn-vc-continue { background: #5b9cf614; color: var(--blue); border-color: #5b9cf650; }
+
+  /* ── Prepare / info bar ───────────────────────────────────────────────── */
+  #run-ep-selector { display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
+  #run-ep-selector select { background:var(--surface); color:var(--fg); border:1px solid var(--border); border-radius:4px; padding:3px 6px; font-size:0.82em; }
+  #btn-prepare { background:var(--surface); color:var(--fg); border:1px solid var(--border); border-radius:4px; padding:4px 12px; font-size:0.82em; cursor:pointer; }
+  #btn-prepare:hover { border-color:var(--accent); color:var(--accent); }
+  #btn-prepare:disabled { opacity:0.4; cursor:default; }
+  #info-bar { display:none; border:1px solid var(--border); border-radius:6px; padding:10px 12px; margin:8px 0; font-size:0.82em; background:var(--surface); }
+  #info-bar.visible { display:block; }
+  .info-row { display:flex; align-items:center; gap:8px; margin:4px 0; }
+  .info-label { color:var(--dim); min-width:56px; }
+  .info-value { flex:1; }
+  .info-value input { background:var(--bg); border:1px solid var(--border); border-radius:3px; color:var(--fg); padding:2px 6px; font-size:0.82em; width:100%; box-sizing:border-box; }
+  .info-badge { font-size:0.72em; color:var(--dim); border:1px solid var(--border); border-radius:10px; padding:1px 6px; white-space:nowrap; }
+  .info-badge.from-story { color:#7ec87e; border-color:#7ec87e44; }
+  .info-badge.unique { color:#7ec87e; border-color:#7ec87e44; }
+  .info-badge.exists  { color:#e08030; border-color:#e0803044; }
+  #info-format select { background:var(--surface); color:var(--fg); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:0.82em; }
+  #info-format .format-hint { color:var(--dim); font-size:0.76em; margin-top:3px; font-style:italic; }
+  .locale-row { display:flex; align-items:center; gap:12px; margin-top:6px; }
+  .locale-row label { display:flex; align-items:center; gap:4px; cursor:pointer; color:var(--fg); font-size:0.82em; }
 </style>
 </head>
 <body>
@@ -917,6 +938,17 @@ HTML = r"""<!DOCTYPE html>
       <span id="vc-saved-badge" style="display:none">✓ Saved</span>
       <span class="file-badge" id="file-badge" style="margin-left:auto">story_1.txt</span>
     </div>
+  <!-- Project / episode selector for Run tab -->
+  <div id="run-ep-selector">
+    <span style="color:var(--dim);font-size:0.8em">Project</span>
+    <select id="run-project-sel" onchange="onRunProjectChange()">
+      <option value="">— New Project —</option>
+    </select>
+    <span style="color:var(--dim);font-size:0.8em">Episode</span>
+    <select id="run-episode-sel" onchange="onRunEpisodeChange()" disabled>
+      <option value="">s01e01</option>
+    </select>
+  </div>
     <textarea id="story" spellcheck="false"
 placeholder="Story title  : The Pharaoh Who Defied Death
 Project slug : the-pharaoh-who-defied-death
@@ -950,11 +982,69 @@ Direction    : …"></textarea>
              style="width:14px; height:14px; cursor:pointer; accent-color:var(--gold);">
       🔇 No Music
     </label>
+    <button id="btn-prepare" onclick="runPrepare()" title="Analyse story and detect project name, format and genre">⚙ Prepare</button>
     <div class="btn-group" style="margin:0;">
       <button id="btn-run"   onclick="runPrompt()">▶ Run</button>
       <button id="btn-stop"  onclick="stopRun()">■ Stop</button>
       <button id="btn-clear" onclick="clearOutput()">✕ Clear</button>
     </div>
+  </div>
+
+  <!-- Info bar — shown after Prepare -->
+  <div id="info-bar">
+    <div class="info-row">
+      <span class="info-label">📖 Title</span>
+      <span class="info-value"><input id="info-title" type="text" placeholder="Story title"></span>
+      <span id="badge-title" class="info-badge" style="display:none"></span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">🏷 Genre</span>
+      <span class="info-value"><input id="info-genre" type="text" placeholder="Genre"></span>
+      <span id="badge-genre" class="info-badge" style="display:none"></span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">📁 Slug</span>
+      <span class="info-value"><input id="info-slug" type="text" placeholder="project-slug" oninput="onSlugInput()"></span>
+      <span id="badge-slug" class="info-badge"></span>
+    </div>
+    <div id="info-format" class="info-row" style="flex-direction:column;align-items:flex-start;gap:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="info-label">🎬 Format</span>
+        <select id="info-format-sel" onchange="onFormatChange()">
+          <option value="episodic">Episodic (default)</option>
+          <option value="continuous_narration">Continuous Narration</option>
+          <option value="illustrated_narration">Illustrated Narration</option>
+          <option value="documentary">Documentary / Explainer</option>
+          <option value="monologue">Monologue / First-Person</option>
+        </select>
+        <span id="badge-format" class="info-badge" style="display:none"></span>
+      </div>
+      <div id="format-hint" class="format-hint"></div>
+    </div>
+    <div class="locale-row">
+      <span class="info-label" style="color:var(--dim)">Locales</span>
+      <label><input type="checkbox" id="locale-en"      checked onchange="onLocaleChange()"> en</label>
+      <label><input type="checkbox" id="locale-zh-Hans" checked onchange="onLocaleChange()"> zh-Hans</label>
+    </div>
+  </div>
+  <!-- Minimal format+locale bar for existing projects (always visible) -->
+  <div id="existing-ep-bar" style="display:none;border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin:8px 0;font-size:0.82em;background:var(--surface)">
+    <div id="info-format-existing" style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <span class="info-label">🎬 Format</span>
+      <select id="info-format-sel-existing" onchange="onFormatChangeExisting()">
+        <option value="episodic">Episodic (default)</option>
+        <option value="continuous_narration">Continuous Narration</option>
+        <option value="illustrated_narration">Illustrated Narration</option>
+        <option value="documentary">Documentary / Explainer</option>
+        <option value="monologue">Monologue / First-Person</option>
+      </select>
+    </div>
+    <div class="locale-row">
+      <span class="info-label" style="color:var(--dim)">Locales</span>
+      <label><input type="checkbox" id="locale-en-ex"      checked onchange="onLocaleChange()"> en</label>
+      <label><input type="checkbox" id="locale-zh-Hans-ex" checked onchange="onLocaleChange()"> zh-Hans</label>
+    </div>
+    <div id="format-hint-existing" style="color:var(--dim);font-size:0.76em;margin-top:4px;font-style:italic"></div>
   </div>
 
   <div id="cmd-preview">$ <span id="cmd-text"></span></div>
@@ -1043,6 +1133,11 @@ Direction    : …"></textarea>
   let testMode   = true;     // default ON — use cheapest model
   let renderProd = false;    // false = preview_local (CRF 28), true = high (CRF 18)
   let noMusic    = false;    // false = include music, true = skip music in render
+
+  let _preparedMeta  = null;   // result from last /api/infer_story_meta call
+  let _runProjectList = [];    // cached project list for run-tab dropdowns
+  let _selectedFormat  = 'episodic';
+  let _usingExistingEp = false;  // true when an existing project/episode is selected
   const stageStartMs = {};   // stage number → Date.now() at start
   let _runFromStage = 0;
   let _runToStage   = 10;
@@ -1219,6 +1314,7 @@ Direction    : …"></textarea>
   // ── Init ────────────────────────────────────────────────────────────────────
   window.addEventListener('DOMContentLoaded', async () => {
     await refreshNextNum();
+    loadRunProjects();
   });
 
   // ── Run ─────────────────────────────────────────────────────────────────────
@@ -1319,7 +1415,9 @@ Direction    : …"></textarea>
     cmdPreview.style.display = 'block';
 
     // ── 3. Open SSE stream ──────────────────────────────────────────────────
-    const url = `/stream?story_file=${encodeURIComponent(filename)}&from=${from}&to=${to}&test=${testMode ? '1' : '0'}&profile=${renderProd ? 'high' : 'preview_local'}&no_music=${noMusic ? '1' : '0'}`;
+    const _locales = getSelectedLocales().join(',');
+    const _fmt     = _selectedFormat || 'episodic';
+    const url = `/stream?story_file=${encodeURIComponent(filename)}&from=${from}&to=${to}&test=${testMode ? '1' : '0'}&profile=${renderProd ? 'high' : 'preview_local'}&no_music=${noMusic ? '1' : '0'}&locales=${encodeURIComponent(_locales)}&story_format=${encodeURIComponent(_fmt)}`;
     es = new EventSource(url);
 
     es.addEventListener('line', e => {
@@ -1964,7 +2062,18 @@ Direction    : …"></textarea>
       presetSel.addEventListener('change', () => {
         const presets = _vcPresets[voiceSel.value] ?? [];
         const preset  = presets.find(p => p.hash === presetSel.value);
-        if (!preset) return;
+        if (!preset) {
+          // "— no preset —" selected: restore index defaults for the current style
+          const defaults = _voiceIndex?.[voiceSel.value]?.clips?.[styleSel.value]?.params;
+          card.querySelector('[data-field=degree]').value = defaults?.style_degree ?? 1.0;
+          card.querySelector('[data-field=rate]').value   = String(defaults?.rate   ?? '0%').replace('%', '');
+          card.querySelector('[data-field=pitch]').value  = String(defaults?.pitch  ?? '').replace('%', '');
+          card.querySelector('[data-field=break]').value  = defaults?.break_ms ?? 0;
+          ['degree','rate','pitch','break'].forEach(f => {
+            card.querySelector(`[data-field=${f}]`).dispatchEvent(new Event('input'));
+          });
+          return;
+        }
         styleSel.value = preset.style || '';
         card.querySelector('[data-field=degree]').value = preset.style_degree;
         card.querySelector('[data-field=rate]').value   = String(preset.rate  ?? '').replace('%', '');
@@ -2282,6 +2391,7 @@ Direction    : …"></textarea>
         sel.value = prev;
       }
       if (sel.value) onPipeEpChange();
+      loadRunProjects();  // keep Run tab project dropdown in sync
     } catch (e) {
       console.error('Pipeline tab init error:', e);
     }
@@ -2730,6 +2840,172 @@ Direction    : …"></textarea>
   function runLocaleInPipeTerm(locale) {
     // Runs all 6 post-processing steps for this locale via /run_locale (skip-if-done)
     startPipeStep({ type: 'locale', locale, slug: pipeEpSlug, ep_id: pipeEpId });
+  }
+
+  // ── Run tab: Project / Episode dropdowns ────────────────────────────────────
+  async function loadRunProjects() {
+    try {
+      const r = await fetch('/list_projects');
+      const d = await r.json();
+      _runProjectList = d.projects || [];
+      const sel = document.getElementById('run-project-sel');
+      // preserve selection
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">— New Project —</option>';
+      _runProjectList.forEach(p => {
+        const o = document.createElement('option');
+        o.value = p.slug; o.textContent = p.slug;
+        sel.appendChild(o);
+      });
+      if (prev) sel.value = prev;
+    } catch(_) {}
+  }
+
+  function onRunProjectChange() {
+    const slug = document.getElementById('run-project-sel').value;
+    const epSel = document.getElementById('run-episode-sel');
+    epSel.innerHTML = '';
+    if (!slug) {
+      // New project
+      epSel.disabled = true;
+      const o = document.createElement('option'); o.value = ''; o.textContent = 's01e01'; epSel.appendChild(o);
+      _usingExistingEp = false;
+      document.getElementById('info-bar').classList.remove('visible');
+      document.getElementById('existing-ep-bar').style.display = 'none';
+      document.getElementById('btn-prepare').style.display = '';
+      setRunBtnEnabled(false);
+    } else {
+      // Existing project — populate episodes
+      epSel.disabled = false;
+      const proj = _runProjectList.find(p => p.slug === slug);
+      if (proj) {
+        (proj.episodes || []).forEach(ep => {
+          const o = document.createElement('option'); o.value = ep.id; o.textContent = ep.id; epSel.appendChild(o);
+        });
+      }
+      // Add "New Episode" option
+      fetch('/api/next_episode_id?slug=' + encodeURIComponent(slug))
+        .then(r => r.json()).then(d => {
+          const o = document.createElement('option'); o.value = 'new'; o.textContent = '＋ New Episode → ' + d.next_ep_id; epSel.appendChild(o);
+        }).catch(_=>{});
+      _usingExistingEp = true;
+      document.getElementById('info-bar').classList.remove('visible');
+      document.getElementById('existing-ep-bar').style.display = 'block';
+      document.getElementById('btn-prepare').style.display = 'none';
+      currentSlug = slug;
+      setRunBtnEnabled(true);
+    }
+  }
+
+  function onRunEpisodeChange() {
+    const slug  = document.getElementById('run-project-sel').value;
+    const ep    = document.getElementById('run-episode-sel').value;
+    if (ep && ep !== 'new') {
+      currentSlug = slug; currentEpId = ep;
+    }
+  }
+
+  // ── Prepare button ───────────────────────────────────────────────────────────
+  async function runPrepare() {
+    const story = storyEl.value.trim();
+    if (!story) { storyEl.style.borderColor='var(--red)'; setTimeout(()=>(storyEl.style.borderColor=''),1200); return; }
+    const btn = document.getElementById('btn-prepare');
+    btn.disabled = true; btn.textContent = '⚙ Preparing…';
+    setRunBtnEnabled(false);
+    try {
+      const r = await fetch('/api/infer_story_meta', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({story})
+      });
+      const d = await r.json();
+      if (d.error && !d.title) throw new Error(d.error);
+      _preparedMeta = d;
+      _selectedFormat = d.story_format || 'episodic';
+      applyPreparedMeta(d);
+      document.getElementById('info-bar').classList.add('visible');
+      setRunBtnEnabled(true);
+    } catch(e) {
+      alert('Prepare failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = '⚙ Prepare';
+    }
+  }
+
+  function applyPreparedMeta(d) {
+    const found = d.metadata_found || [];
+    function setField(inputId, badgeId, value, field) {
+      document.getElementById(inputId).value = value || '';
+      const badge = document.getElementById(badgeId);
+      if (found.includes(field)) {
+        badge.textContent = '📌 from story'; badge.className = 'info-badge from-story'; badge.style.display = '';
+      } else { badge.style.display = 'none'; }
+    }
+    setField('info-title', 'badge-title', d.title, 'title');
+    setField('info-genre', 'badge-genre', d.genre, 'genre');
+    // Slug
+    const slugInput = document.getElementById('info-slug');
+    slugInput.value = d.slug_suggested || d.slug || '';
+    updateSlugBadge(d.slug_exists, d.slug_suggested || d.slug);
+    // Format
+    const fsel = document.getElementById('info-format-sel');
+    fsel.value = _selectedFormat;
+    updateFormatHint(_selectedFormat, 'format-hint');
+  }
+
+  function updateSlugBadge(exists, slug) {
+    const badge = document.getElementById('badge-slug');
+    if (exists) { badge.textContent = '⚠ exists → ' + slug; badge.className = 'info-badge exists'; }
+    else         { badge.textContent = '✓ unique';            badge.className = 'info-badge unique'; }
+    badge.style.display = '';
+  }
+
+  let _slugCheckTo = null;
+  function onSlugInput() {
+    const slug = document.getElementById('info-slug').value.trim();
+    if (_slugCheckTo) clearTimeout(_slugCheckTo);
+    _slugCheckTo = setTimeout(async () => {
+      if (!slug) return;
+      const r = await fetch('/api/check_slug?slug=' + encodeURIComponent(slug));
+      const d = await r.json();
+      updateSlugBadge(d.exists, d.suggested);
+    }, 400);
+  }
+
+  function onFormatChange() {
+    _selectedFormat = document.getElementById('info-format-sel').value;
+    updateFormatHint(_selectedFormat, 'format-hint');
+  }
+  function onFormatChangeExisting() {
+    _selectedFormat = document.getElementById('info-format-sel-existing').value;
+    updateFormatHint(_selectedFormat, 'format-hint-existing');
+  }
+  function updateFormatHint(fmt, hintId) {
+    const hints = {
+      episodic:              '',
+      continuous_narration:  'No characters on screen. Narrator voice only. Atmospheric visuals.',
+      illustrated_narration: 'Characters shown as silent visuals. Narrator reads the story.',
+      documentary:           'No characters. Narrator explains over b-roll backgrounds.',
+      monologue:             'Single character speaks to camera. No scene changes.',
+    };
+    document.getElementById(hintId).textContent = hints[fmt] || '';
+  }
+
+  function getSelectedLocales() {
+    const locales = [];
+    if (document.getElementById('locale-en')      ?.checked) locales.push('en');
+    if (document.getElementById('locale-en-ex')   ?.checked) locales.push('en');
+    if (document.getElementById('locale-zh-Hans') ?.checked && !locales.includes('zh-Hans') ) locales.push('zh-Hans'); // dedupe
+    if (document.getElementById('locale-zh-Hans-ex')?.checked && !locales.includes('zh-Hans')) locales.push('zh-Hans');
+    return locales.length ? locales : ['en'];
+  }
+  function onLocaleChange() { /* state is read live from checkboxes in getSelectedLocales() */ }
+
+  function setRunBtnEnabled(enabled) {
+    // Find the main Run button and enable/disable it
+    const btn = document.querySelector('button[onclick*="runPrompt"]') ||
+                document.getElementById('btn-run');
+    if (btn) btn.disabled = !enabled;
   }
 
   function startPipeStep(params) {
@@ -3298,7 +3574,9 @@ class Handler(BaseHTTPRequestHandler):
             render_profile = params.get("profile", ["preview_local"])[0].strip()
             if render_profile not in ("preview_local", "draft_720p", "high"):
                 render_profile = "preview_local"
-            no_music = params.get("no_music", ["0"])[0].strip() == "1"
+            no_music     = params.get("no_music", ["0"])[0].strip() == "1"
+            locales      = params.get("locales",       ["en"])[0].strip()
+            story_format = params.get("story_format",  ["episodic"])[0].strip()
 
             # Sanitise: digits only, 0–9
             from_stage = str(max(0, min(10, int(from_stage)))) if from_stage.isdigit() else "0"
@@ -3325,6 +3603,10 @@ class Handler(BaseHTTPRequestHandler):
             run_env["RENDER_PROFILE"] = render_profile   # preview_local or high
             if no_music:
                 run_env["NO_MUSIC"] = "1"
+            if locales:
+                run_env["LOCALES"] = locales
+            if story_format in ("episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"):
+                run_env["STORY_FORMAT"] = story_format
 
             client = self.client_address
             proc   = None
@@ -3407,6 +3689,42 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        elif parsed.path == "/api/check_slug":
+            params_qs = parse_qs(parsed.query)
+            slug      = unquote_plus(params_qs.get("slug", [""])[0]).strip()
+            exists    = os.path.isdir(os.path.join(PIPE_DIR, "projects", slug)) if slug else False
+            n = 2
+            suggested = slug
+            while exists and os.path.isdir(os.path.join(PIPE_DIR, "projects", suggested)):
+                suggested = f"{slug}-{n}"; n += 1
+            resp = json.dumps({"exists": exists, "suggested": suggested}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        elif parsed.path == "/api/next_episode_id":
+            import re as _re2
+            params_qs = parse_qs(parsed.query)
+            slug      = unquote_plus(params_qs.get("slug", [""])[0]).strip()
+            ep_dir    = os.path.join(PIPE_DIR, "projects", slug, "episodes")
+            next_ep   = "s01e01"
+            if os.path.isdir(ep_dir):
+                nums = []
+                for name in os.listdir(ep_dir):
+                    m = _re2.match(r"s01e(\d+)$", name)
+                    if m:
+                        nums.append(int(m.group(1)))
+                if nums:
+                    next_ep = f"s01e{max(nums)+1:02d}"
+            resp = json.dumps({"next_ep_id": next_ep}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
 
         # Serve artifact viewer page
         elif parsed.path == "/view_artifact":
@@ -3962,6 +4280,85 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(resp)
 
+        elif self.path == "/api/infer_story_meta":
+            length  = int(self.headers.get("Content-Length", 0))
+            body    = json.loads(self.rfile.read(length).decode())
+            story   = body.get("story", "").strip()
+            if not story:
+                resp = json.dumps({"error": "No story provided"}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+                return
+
+            import tempfile, re as _re
+
+            prompt_text = (
+                "Read the following story and reply with ONLY a valid JSON object — no explanation, no markdown, just the JSON.\n\n"
+                "JSON fields required:\n"
+                "  title        : the story title (string)\n"
+                "  slug         : URL-safe project slug — lowercase, hyphens only, no spaces (string)\n"
+                "  genre        : inferred genre e.g. dark-fantasy, sci-fi, romance, sleep-story (string)\n"
+                "  story_format : one of: episodic, continuous_narration, illustrated_narration, documentary, monologue\n"
+                "                 Rules: sleep/meditation/mindfulness → continuous_narration\n"
+                "                        children's story/fable/fairy tale → illustrated_narration\n"
+                "                        documentary/explainer/educational → documentary\n"
+                "                        diary/confession/first-person speech → monologue\n"
+                "                        all others → episodic\n"
+                "  metadata_found : array of field names explicitly present in the story text\n"
+                "                   (e.g. [\"title\", \"slug\"] if the story has 'Title:' and 'Project slug:' lines)\n\n"
+                "Story:\n\n" + story[:6000]
+            )
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tf:
+                tf.write(prompt_text)
+                tmp_path = tf.name
+
+            try:
+                result = subprocess.run(
+                    ["claude", "-p",
+                     "--model", "haiku",
+                     "--dangerously-skip-permissions",
+                     "--no-session-persistence",
+                     tmp_path],
+                    capture_output=True, text=True, cwd=PIPE_DIR, timeout=30
+                )
+                raw = result.stdout.strip()
+                # Strip markdown code fences if present
+                raw = _re.sub(r"^```[a-z]*\n?", "", raw, flags=_re.MULTILINE)
+                raw = _re.sub(r"\n?```$", "", raw, flags=_re.MULTILINE)
+                raw = raw.strip()
+                data = json.loads(raw)
+            except Exception as exc:
+                data = {"error": str(exc), "title": "", "slug": "", "genre": "", "story_format": "episodic", "metadata_found": []}
+            finally:
+                import os as _os
+                _os.unlink(tmp_path)
+
+            # Check slug uniqueness
+            slug = data.get("slug", "")
+            if slug:
+                projects_dir = os.path.join(PIPE_DIR, "projects")
+                if os.path.isdir(os.path.join(projects_dir, slug)):
+                    data["slug_exists"] = True
+                    # Suggest a unique slug
+                    n = 2
+                    while os.path.isdir(os.path.join(projects_dir, f"{slug}-{n}")):
+                        n += 1
+                    data["slug_suggested"] = f"{slug}-{n}"
+                else:
+                    data["slug_exists"] = False
+                    data["slug_suggested"] = slug
+
+            resp = json.dumps(data).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -3973,7 +4370,8 @@ class Handler(BaseHTTPRequestHandler):
                   "/list_projects", "/view_artifact", "/list_stories",
                   "/pipeline_status", "/serve_media", "/run_locale",
                   "/api/azure_voices", "/api/voice_presets", "/api/voice_index",
-                  "/api/preview_voice", "/api/save_voice_cast"}
+                  "/api/preview_voice", "/api/save_voice_cast",
+                  "/api/check_slug", "/api/next_episode_id"}
         if not any(path == s or path.startswith(s + "?") for s in silent):
             print(f"  {self.address_string()}  {fmt % args}")
 

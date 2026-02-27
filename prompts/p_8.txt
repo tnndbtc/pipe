@@ -6,6 +6,7 @@
 #     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
 #     {{EPISODE_ID}}     →  e.g. "s01e02"
 #     {{LOCALES}}        →  e.g. "en, zh-Hans"
+#     {{STORY_FORMAT}}   →  e.g. "episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"
 #
 # 📥 FILES READ (written by earlier stages):
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json    (Stage 2)
@@ -37,6 +38,7 @@ for every locale beyond "en".
 Locales      : {{LOCALES}}   ("en" is the source; translate all others)
 Episode dir  : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
 Project dir  : projects/{{PROJECT_SLUG}}/
+Story format : {{STORY_FORMAT}}
 
 Read these files before writing anything:
   1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
@@ -53,6 +55,19 @@ Read these files before writing anything:
 ## Task
 
 Print: `▶ [8/9] Stage 8 — Produce locale variants  …`
+
+### Story format guard
+
+Story format: **{{STORY_FORMAT}}**
+
+If `STORY_FORMAT` is `continuous_narration` or `documentary`:
+- There are NO `character_packs` in this manifest. Do not attempt to translate or look up character pack entries.
+- All VO lines belong to `narrator`. Translate narrator VO only.
+- Skip any section that references character voice casting or character_packs.
+
+For all other formats: proceed normally.
+
+---
 
 Parse {{LOCALES}}.  If the only locale is "en", skip all work and print:
   `ℹ️  Stage 8: only locale is "en" — no variants needed.`
