@@ -6,8 +6,9 @@
 #     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
 #     {{EPISODE_ID}}     →  e.g. "s01e02"
 #
-# 📤 OUTPUT (stdout printed to web UI):
-#     • Canon status report (no new files written in this stage)
+# 📤 OUTPUT (stdout printed to web UI + file written to disk):
+#     • Canon status report (stdout)
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/stage_1_check.txt
 #
 # ▶ Invoked by run.sh as:
 #     claude -p prompts/p_1_filled.txt
@@ -57,5 +58,8 @@ Print: `▶ [1/9] Stage 1 — Canon check  …`
       Resolved   : <list>
     ──────────────────────────────────────────────────────
     ```
+
+Write the full canon status report to:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/stage_1_check.txt
 
 Print: `✓ [1/9] Stage 1 — Canon check  done`

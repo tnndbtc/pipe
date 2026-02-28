@@ -363,7 +363,7 @@ HTML = r"""<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     flex: 1;
-    overflow: hidden;
+    overflow-y: auto;
     padding: 16px 24px 20px;
     gap: 10px;
   }
@@ -469,8 +469,9 @@ HTML = r"""<!DOCTYPE html>
     flex: 1; background: var(--surface);
     border: 1px solid var(--border); border-radius: 8px;
     overflow: hidden; display: flex; flex-direction: column;
-    min-height: 0;
+    min-height: 260px;
   }
+
   #output-label {
     font-size: 0.68em; font-weight: 700; letter-spacing: .1em;
     text-transform: uppercase; color: var(--dim);
@@ -938,7 +939,7 @@ HTML = r"""<!DOCTYPE html>
       <span id="vc-saved-badge" style="display:none">✓ Saved</span>
       <span class="file-badge" id="file-badge" style="margin-left:auto">story_1.txt</span>
     </div>
-  <!-- Project / episode selector for Run tab -->
+  <!-- Project / Episode selectors for Run tab -->
   <div id="run-ep-selector">
     <span style="color:var(--dim);font-size:0.8em">Project</span>
     <select id="run-project-sel" onchange="onRunProjectChange()">
@@ -946,7 +947,7 @@ HTML = r"""<!DOCTYPE html>
     </select>
     <span style="color:var(--dim);font-size:0.8em">Episode</span>
     <select id="run-episode-sel" onchange="onRunEpisodeChange()" disabled>
-      <option value="">s01e01</option>
+      <option value="">—</option>
     </select>
   </div>
     <textarea id="story" spellcheck="false"
@@ -978,7 +979,7 @@ Direction    : …"></textarea>
                   font-size:0.82em; font-family:var(--mono); color:var(--dim);
                   user-select:none;"
            title="Skip background music — render VO + SFX only">
-      <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()"
+      <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()" checked
              style="width:14px; height:14px; cursor:pointer; accent-color:var(--gold);">
       🔇 No Music
     </label>
@@ -1007,6 +1008,11 @@ Direction    : …"></textarea>
       <span class="info-value"><input id="info-slug" type="text" placeholder="project-slug" oninput="onSlugInput()"></span>
       <span id="badge-slug" class="info-badge"></span>
     </div>
+    <div class="info-row">
+      <span class="info-label">🆔 Episode</span>
+      <span class="info-value" id="info-ep-id" style="font-family:var(--mono);color:var(--blue);font-size:0.85em;padding:2px 0">—</span>
+      <span id="badge-ep-id" class="info-badge" style="display:none"></span>
+    </div>
     <div id="info-format" class="info-row" style="flex-direction:column;align-items:flex-start;gap:4px">
       <div style="display:flex;align-items:center;gap:8px">
         <span class="info-label">🎬 Format</span>
@@ -1026,10 +1032,25 @@ Direction    : …"></textarea>
       <label><input type="checkbox" id="locale-en"      checked onchange="onLocaleChange()"> en</label>
       <label><input type="checkbox" id="locale-zh-Hans" checked onchange="onLocaleChange()"> zh-Hans</label>
     </div>
+    <div id="save-new-ep-row" class="info-row" style="display:none;justify-content:flex-end;margin-top:6px;gap:8px">
+      <span id="save-new-ep-status" style="color:var(--dim);font-size:0.85em;font-style:italic"></span>
+      <button id="btn-save-new-ep" onclick="saveNewEpMeta()"
+        style="padding:3px 12px;font-size:0.85em;background:var(--accent,#4a9eff);color:#fff;border:none;border-radius:4px;cursor:pointer">💾 Save</button>
+    </div>
   </div>
-  <!-- Minimal format+locale bar for existing projects (always visible) -->
+  <!-- Info bar for existing projects -->
   <div id="existing-ep-bar" style="display:none;border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin:8px 0;font-size:0.82em;background:var(--surface)">
-    <div id="info-format-existing" style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+    <div class="info-row">
+      <span class="info-label">📖 Title</span>
+      <input id="ex-title" type="text" placeholder="—"
+        style="flex:1;background:var(--input-bg,#1e1e1e);border:1px solid var(--border);border-radius:4px;color:var(--text);font-weight:600;padding:2px 6px;font-size:1em">
+    </div>
+    <div class="info-row">
+      <span class="info-label">🏷 Genre</span>
+      <input id="ex-genre" type="text" placeholder="—"
+        style="flex:1;background:var(--input-bg,#1e1e1e);border:1px solid var(--border);border-radius:4px;color:var(--dim);padding:2px 6px;font-size:1em">
+    </div>
+    <div class="info-row">
       <span class="info-label">🎬 Format</span>
       <select id="info-format-sel-existing" onchange="onFormatChangeExisting()">
         <option value="episodic">Episodic (default)</option>
@@ -1042,9 +1063,14 @@ Direction    : …"></textarea>
     <div class="locale-row">
       <span class="info-label" style="color:var(--dim)">Locales</span>
       <label><input type="checkbox" id="locale-en-ex"      checked onchange="onLocaleChange()"> en</label>
-      <label><input type="checkbox" id="locale-zh-Hans-ex" checked onchange="onLocaleChange()"> zh-Hans</label>
+      <label><input type="checkbox" id="locale-zh-Hans-ex" onchange="onLocaleChange()"> zh-Hans</label>
     </div>
     <div id="format-hint-existing" style="color:var(--dim);font-size:0.76em;margin-top:4px;font-style:italic"></div>
+    <div class="info-row" style="justify-content:flex-end;margin-top:6px;gap:8px">
+      <span id="save-ep-status" style="color:var(--dim);font-size:0.85em;font-style:italic"></span>
+      <button id="btn-save-ep-meta" onclick="saveEpisodeMeta()"
+        style="padding:3px 12px;font-size:0.85em;background:var(--accent,#4a9eff);color:#fff;border:none;border-radius:4px;cursor:pointer">💾 Save</button>
+    </div>
   </div>
 
   <div id="cmd-preview">$ <span id="cmd-text"></span></div>
@@ -1132,9 +1158,11 @@ Direction    : …"></textarea>
   let currentEpId = null;
   let testMode   = true;     // default ON — use cheapest model
   let renderProd = false;    // false = preview_local (CRF 28), true = high (CRF 18)
-  let noMusic    = false;    // false = include music, true = skip music in render
+  let noMusic    = true;     // true = skip music by default (faster renders during development)
 
   let _preparedMeta  = null;   // result from last /api/infer_story_meta call
+  let _preparedEpId  = null;   // next episode ID fetched during Prepare (e.g. "s01e01")
+  let _episodeCreated = false; // true after Create Episode completes
   let _runProjectList = [];    // cached project list for run-tab dropdowns
   let _selectedFormat  = 'episodic';
   let _usingExistingEp = false;  // true when an existing project/episode is selected
@@ -1143,6 +1171,7 @@ Direction    : …"></textarea>
   let _runToStage   = 10;
 
   // ── Voice Cast editor globals ────────────────────────────────────────────────
+  let _vcLocales       = [];     // locale list for current episode (drives tab rendering)
   let _voiceCatalog    = null;   // loaded once from /api/azure_voices
   let _vcPendingTo     = null;   // if set, Continue runs stages 1 → _vcPendingTo
   let _vcActiveLocale  = null;   // MIN-R7: init from voiceCast.locales, not hardcoded
@@ -1263,7 +1292,8 @@ Direction    : …"></textarea>
   }
 
   function stopRun() {
-    if (es) { es.close(); es = null; }
+    if (es)         { es.close();         es = null;         }
+    if (pipeStepEs) { pipeStepEs.close(); pipeStepEs = null; }
     fetch('/stop', { method: 'POST' }).catch(() => {});
     appendLine('[ Stopped by user ]', 'sys');
     setStatus('idle');
@@ -1319,16 +1349,18 @@ Direction    : …"></textarea>
 
   // ── Run ─────────────────────────────────────────────────────────────────────
   async function runPrompt() {
-    const story        = storyEl.value.trim();
-    const stagesRaw    = promptEl.value.trim() || '0 9';
+    const stagesRaw    = promptEl.value.trim() || '0 10';
     let { from, to } = parseStages(stagesRaw);
 
-    if (!story) {
-      storyEl.focus();
-      storyEl.style.borderColor = 'var(--red)';
-      setTimeout(() => (storyEl.style.borderColor = ''), 1200);
-      return;
+    // For new projects: Run auto-creates the episode if Prepare has been run.
+    // For existing projects: currentSlug/currentEpId are set by the dropdown.
+    if (!currentSlug || !currentEpId) {
+      if (!_preparedEpId) {
+        appendLine('⚠  Paste a story and click Prepare first.', 'err');
+        return;
+      }
     }
+
     if (es) { es.close(); es = null; }
 
     // ── Voice Cast auto-split: when running 0→N, run Stage 0 alone first ──
@@ -1353,71 +1385,30 @@ Direction    : …"></textarea>
     hideStageProgress();
     setStatus('running');
 
-    // ── 1. Save story file ──────────────────────────────────────────────────
-    let filename;
-    try {
-      appendLine('Saving story…', 'sys');
-      const res = await fetch('/save_story', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ story }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      filename = data.filename;
-      _lastRunFilename = filename;   // GAP-I4: fallback for vcContinue() story_file
-      appendLine(`Saved as ${filename}`, 'sys');
-      // Pre-update badge so the user sees the next slot immediately
-      fileBadgeEl.textContent = `story_${data.num + 1}.txt`;
-    } catch (err) {
-      appendLine(`Failed to save story: ${err}`, 'err');
-      setStatus('error');
-      return;
-    }
-
-    // ── 1b. Check whether the episode output folder already exists ──────────
-    try {
-      const chk  = await fetch('/check_episode?story_file=' + encodeURIComponent(filename));
-      const info = await chk.json();
-      if (info.project_slug) currentSlug = info.project_slug;
-      if (info.episode_id)   currentEpId = info.episode_id;
-      if (info.exists) {
-        appendLine(`⚠  Episode folder exists: ${info.path}`, 'sys');
-        const doDelete = await showConfirmModal(info.path);
-        if (doDelete) {
-          appendLine(`Deleting ${info.path} …`, 'sys');
-          const del     = await fetch('/delete_episode_dir', {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ path: info.path }),
-          });
-          const delData = await del.json();
-          if (delData.deleted) {
-            appendLine(`Deleted. Starting fresh.`, 'sys');
-          } else {
-            appendLine(`Delete failed: ${delData.error || 'unknown error'}`, 'err');
-            setStatus('error');
-            return;
-          }
-        } else {
-          appendLine(`Keeping existing folder — continuing pipeline.`, 'sys');
-        }
+    // ── Auto-create episode dir for new projects (Prepare → Run flow) ────────
+    if (!currentSlug || !currentEpId) {
+      const _slug = document.getElementById('info-slug').value.trim();
+      appendLine(`Creating episode ${_slug}/${_preparedEpId}…`, 'sys');
+      try {
+        const ep_dir_created = await createEpisode();
+        appendLine(`✓ Created: ${ep_dir_created}`, 'sys');
+      } catch(e) {
+        appendLine(`✗ Create episode failed: ${e.message}`, 'err');
+        setStatus('error');
+        return;
       }
-    } catch (err) {
-      // Non-fatal: if check fails just proceed
-      appendLine(`(Episode-dir check skipped: ${err})`, 'sys');
     }
 
-    // ── 2. Show command preview ─────────────────────────────────────────────
+    const ep_dir = 'projects/' + currentSlug + '/episodes/' + currentEpId;
+
+    // ── Show command preview ─────────────────────────────────────────────────
     const modeTag = testMode ? '  [MODEL=haiku 🧪]' : '  [per-stage models 🎬]';
     const vcSplitNote = (_vcPendingTo != null) ? `  →  then 1–${_vcPendingTo} after Voice Cast` : '';
-    cmdText.textContent      = `./run.sh ${filename} ${from} ${to}${vcSplitNote}${modeTag}`;
+    cmdText.textContent      = `./run.sh ${ep_dir} ${from} ${to}${vcSplitNote}${modeTag}`;
     cmdPreview.style.display = 'block';
 
-    // ── 3. Open SSE stream ──────────────────────────────────────────────────
-    const _locales = getSelectedLocales().join(',');
-    const _fmt     = _selectedFormat || 'episodic';
-    const url = `/stream?story_file=${encodeURIComponent(filename)}&from=${from}&to=${to}&test=${testMode ? '1' : '0'}&profile=${renderProd ? 'high' : 'preview_local'}&no_music=${noMusic ? '1' : '0'}&locales=${encodeURIComponent(_locales)}&story_format=${encodeURIComponent(_fmt)}`;
+    // ── Open SSE stream ──────────────────────────────────────────────────────
+    const url = `/stream?ep_dir=${encodeURIComponent(ep_dir)}&from=${from}&to=${to}&test=${testMode ? '1' : '0'}&profile=${renderProd ? 'high' : 'preview_local'}&no_music=${noMusic ? '1' : '0'}`;
     es = new EventSource(url);
 
     es.addEventListener('line', e => {
@@ -1648,7 +1639,8 @@ Direction    : …"></textarea>
 
   // ── switchStoryTab(tab) ──────────────────────────────────────────────────────
   function switchStoryTab(tab) {
-    document.querySelectorAll('.btn-story-tab').forEach(b =>
+    // Scope to .story-tab-bar only — never touch locale tab buttons inside vc-editor
+    document.querySelectorAll('.story-tab-bar .btn-story-tab').forEach(b =>
       b.classList.toggle('active', b.dataset.tab === tab));
     document.getElementById('story').style.display     = tab === 'story' ? '' : 'none';
     document.getElementById('vc-editor').style.display = tab === 'vc'    ? 'flex' : 'none';
@@ -1658,11 +1650,10 @@ Direction    : …"></textarea>
         // Nothing in memory yet — full async fetch + render
         loadVoiceCastForEditing();
       } else if (!cardsEl.firstChild) {
-        // Data already in memory (e.g. pre-loaded from Pipeline tab) but cards
-        // not yet rendered — render now without hitting the network
-        renderVcEditor(_vcData, _voiceCatalog, []);
+        // Data in memory but cards cleared (e.g. after project switch) — re-render
+        renderVcEditor(_vcData, _voiceCatalog, _vcLocales);
       }
-      // else: cards are already rendered — preserve any in-progress edits
+      // else: cards already rendered — preserve any in-progress edits
     }
   }
 
@@ -1729,8 +1720,11 @@ Direction    : …"></textarea>
       await loadVoiceCatalog();
       await loadVoicePresets();
       await loadVoiceIndex();
-      _vcData = status.voice_cast;
-      renderVcEditor(status.voice_cast, _voiceCatalog, status.locales || []);
+      _vcData    = status.voice_cast;
+      _vcLocales = status.locales_str
+        ? status.locales_str.split(',').map(l => l.trim()).filter(Boolean)
+        : (status.locales || []);
+      renderVcEditor(status.voice_cast, _voiceCatalog, _vcLocales);
     } catch(e) {
       vcCards.innerHTML = '<div style="color:var(--red);font-family:var(--mono);font-size:0.82em">Error loading voice cast: ' + escHtml(String(e)) + '</div>';
     }
@@ -1793,7 +1787,9 @@ Direction    : …"></textarea>
         ?? Object.keys(_voiceCatalog)[0];
       const newVoice  = (_voiceCatalog[lg] || []).find(v => v.voice === voiceVal);
       const charEntry = (_vcData.characters || []).find(c => c.character_id === charId);
-      if (charEntry && charEntry[_vcActiveLocale]) {
+      if (charEntry) {
+        // Create the locale entry if it didn't exist yet (user manually assigned a new locale)
+        if (!charEntry[_vcActiveLocale]) charEntry[_vcActiveLocale] = {};
         charEntry[_vcActiveLocale].azure_voice        = voiceVal;
         charEntry[_vcActiveLocale].azure_style        = styleVal;
         charEntry[_vcActiveLocale].azure_style_degree = degreeVal;
@@ -1873,8 +1869,31 @@ Direction    : …"></textarea>
     const voiceList = _voiceCatalog[localeGroup] || [];
 
     (_vcData.characters || []).forEach(char => {
-      const charLoc = char[locale];
-      if (!charLoc) return;
+      let charLoc = char[locale];
+
+      // No data for this locale yet — synthesise defaults so user can assign manually
+      // Borrow pitch/break/rate from the 'en' locale if it exists, otherwise use role defaults
+      if (!charLoc) {
+        const enLoc = char['en'] || {};
+        const roleDefaults = {
+          narrator:    { pitch: '-5',  break_ms: 600, rate: '0'  },
+          protagonist: { pitch: '0',   break_ms: 400, rate: '0'  },
+          antagonist:  { pitch: '-5',  break_ms: 500, rate: '0'  },
+          default:     { pitch: '0',   break_ms: 500, rate: '0'  },
+        };
+        const rd = roleDefaults[char.role] || roleDefaults.default;
+        charLoc = {
+          azure_voice:        voiceList[0]?.voice || '',
+          azure_style:        null,
+          azure_style_degree: enLoc.azure_style_degree ?? 1.0,
+          azure_rate:         enLoc.azure_rate  ?? (rd.rate  + '%'),
+          azure_pitch:        enLoc.azure_pitch ?? (rd.pitch + '%'),
+          azure_break_ms:     enLoc.azure_break_ms ?? rd.break_ms,
+          available_styles:   voiceList[0]?.styles || [],
+          _isNew:             true,   // flag: not yet saved to VoiceCast.json
+        };
+      }
+      const isNew = !!charLoc._isNew;
 
       const card = document.createElement('div');
       card.className = 'vc-char-card';
@@ -1883,7 +1902,9 @@ Direction    : …"></textarea>
       // ── Card header ──
       const hdr = document.createElement('div');
       hdr.className = 'vc-char-card-hdr';
-      hdr.innerHTML = `\u{1F464} ${escHtml(char.character_id)}<span style="font-weight:400;color:var(--dim);margin-left:6px">${escHtml(char.role || '')}</span>`;
+      hdr.innerHTML = `\u{1F464} ${escHtml(char.character_id)}`+
+        `<span style="font-weight:400;color:var(--dim);margin-left:6px">${escHtml(char.role || '')}</span>`+
+        (isNew ? `<span style="margin-left:auto;font-size:0.75em;color:#f0a500;font-weight:500">⚠ new — save VC to keep</span>` : '');
       card.appendChild(hdr);
 
       // ── Card body ──
@@ -2208,9 +2229,10 @@ Direction    : …"></textarea>
       return;
     }
     switchStoryTab('story');
-    // C2: use _lastRunFilename as fallback when pipeStoryFile is null (paste-and-run flow)
+    // Build ep_dir from current episode globals (set by runPrompt / createEpisode)
+    const _ep_dir = 'projects/' + currentSlug + '/episodes/' + currentEpId;
     startPipeStep({ type: 'llm', from: 1, to: _vcPendingTo,
-                    story_file: pipeStoryFile ?? _lastRunFilename });
+                    ep_dir: _ep_dir });
     _vcPendingTo = null;
     document.getElementById('btn-vc-continue').style.display = 'none';
   }
@@ -2319,8 +2341,8 @@ Direction    : …"></textarea>
     });
     const map = {
       0: [
-        { label: 'pipeline_vars.sh',    path: 'pipeline_vars.sh' },
-        { label: 'episode_direction.txt', path: 'episode_direction.txt' },
+        ep('pipeline_vars.sh'),
+        { label: 'VoiceCast.json', path: `projects/${currentSlug}/VoiceCast.json` },
       ],
       2: [ep('StoryPrompt.json')],
       3: [ep('Script.json')],
@@ -2330,8 +2352,8 @@ Direction    : …"></textarea>
       7: [ep('canon.json')],
       9: [ep('AssetManifest_final.json'), ep('RenderPlan.json')],
     };
-    // Stages > 0 need slug/ep_id to build the episode path
-    if (n !== 0 && (!currentSlug || !currentEpId)) return [];
+    // All stages need slug/ep_id to build the episode path
+    if (!currentSlug || !currentEpId) return [];
     return map[n] || [];
   }
 
@@ -2453,7 +2475,7 @@ Direction    : …"></textarea>
 
   // ── Stage command detail strings ─────────────────────────────────────────────
   const stageDetail = {
-    0:  'claude -p --model haiku  prompts/p_0.txt\n→ writes pipeline_vars.sh, episode_direction.txt',
+    0:  'claude -p --model haiku  prompts/p_0.txt\n→ reads meta.json + story.txt, casts voices per locale\n→ writes VoiceCast.json, overwrites pipeline_vars.sh (adds VOICE_CAST_FILE)',
     1:  'claude -p --model haiku  prompts/p_1.txt\n→ checks world & character consistency (no output file)',
     2:  'claude -p --model sonnet prompts/p_2.txt\n→ writes StoryPrompt.json',
     3:  'claude -p --model sonnet prompts/p_3.txt\n→ writes Script.json',
@@ -2477,12 +2499,33 @@ Direction    : …"></textarea>
   // Called whenever a pipeline episode is selected or refreshed.
   // Restores Run-tab state (story textarea, currentSlug/epId, VoiceCast) so the
   // user can resume work after a page reload or server restart.
-  async function syncRunTabFromPipeline(slug, epId, storyFile, voiceCast) {
+  async function syncRunTabFromPipeline(slug, epId, storyFile, voiceCast, meta = {}) {
     // Always sync slug/ep_id so the Run tab references the right episode
     currentSlug = slug;
     currentEpId = epId;
 
-    // Restore story textarea — only if this episode's file isn't already loaded
+    // ── Apply metadata to existing-ep-bar ────────────────────────────────────
+    document.getElementById('ex-title').value = meta.title  || slug;
+    document.getElementById('ex-genre').value = meta.genre  || '';
+    document.getElementById('save-ep-status').textContent = '';
+    if (meta.story_format) {
+      _selectedFormat = meta.story_format;
+      document.getElementById('info-format-sel-existing').value = meta.story_format;
+      updateFormatHint(meta.story_format, 'format-hint-existing');
+    }
+    if (meta.locales_str) {
+      const locs = meta.locales_str.split(',').map(l => l.trim());
+      document.getElementById('locale-en-ex').checked       = locs.includes('en');
+      document.getElementById('locale-zh-Hans-ex').checked  = locs.includes('zh-Hans');
+    }
+    // Restore No Music state into the single top-bar checkbox
+    if (meta.no_music !== undefined) {
+      noMusic = !!meta.no_music;
+      const chk = document.getElementById('chk-no-music');
+      if (chk) chk.checked = noMusic;
+    }
+
+    // Always reload story when switching to a different episode
     if (storyFile && storyFile !== _lastRunFilename) {
       try {
         const r = await fetch('/read_story?story_file=' + encodeURIComponent(storyFile));
@@ -2495,25 +2538,34 @@ Direction    : …"></textarea>
       } catch (_) { /* non-fatal: server may not have the file */ }
     }
 
-    // Pre-load VoiceCast so the Voice Cast tab is immediately usable
-    if (voiceCast && !_vcData) {
-      await loadVoiceCatalog();
-      await loadVoicePresets();
-      await loadVoiceIndex();
-      _vcData = voiceCast;
-      // If the Voice Cast editor is already open, render it now
+    // Always reload VoiceCast when switching episodes — never use stale data
+    if (voiceCast) {
+      if (!_voiceCatalog)                  await loadVoiceCatalog();
+      if (!Object.keys(_vcPresets).length) await loadVoicePresets();
+      if (!_voiceIndex)                    await loadVoiceIndex();
+      _vcData    = voiceCast;
+      _vcLocales = meta.locales_str
+        ? meta.locales_str.split(',').map(l => l.trim()).filter(Boolean)
+        : [];
+      // Clear rendered cards so switchStoryTab always re-renders with fresh data
+      document.getElementById('vc-cards').innerHTML = '';
+      // Re-render immediately if the Voice Cast editor is already open
       if (document.getElementById('vc-editor').style.display !== 'none') {
-        renderVcEditor(voiceCast, _voiceCatalog, []);
+        renderVcEditor(voiceCast, _voiceCatalog, _vcLocales);
       }
+    } else {
+      _vcData    = null;
+      _vcLocales = [];
+      document.getElementById('vc-cards').innerHTML = '';  // clear stale cards
     }
   }
 
   function renderPipelineStatus(status) {
-    // Store the auto-detected story file for use by runLlmRange
+    // Store the auto-detected story file for loading story text into the textarea
     pipeStoryFile = status.story_file || null;
 
     // Sync Run tab: restore story textarea + VoiceCast on episode load/reload
-    syncRunTabFromPipeline(pipeEpSlug, pipeEpId, pipeStoryFile, status.voice_cast);
+    syncRunTabFromPipeline(pipeEpSlug, pipeEpId, pipeStoryFile, status.voice_cast, status);
 
     const body = document.getElementById('pipe-body');
     body.innerHTML = '';
@@ -2529,7 +2581,7 @@ Direction    : …"></textarea>
     body.appendChild(section);
 
     const llmDefs = [
-      { n:0,  label:'Stage 0  — Extract story variables & set up project',    key:'stage_0'  },
+      { n:0,  label:'Stage 0  — Cast voices & write pipeline_vars.sh',         key:'stage_0'  },
       { n:1,  label:'Stage 1  — Check story & world consistency',             key:'stage_1'  },
       { n:2,  label:'Stage 2  — Write episode direction (StoryPrompt)',       key:'stage_2'  },
       { n:3,  label:'Stage 3  — Write script & character dialogue',           key:'stage_3'  },
@@ -2825,12 +2877,13 @@ Direction    : …"></textarea>
   }
 
   function runLlmRange(from, to) {
-    if (!pipeStoryFile) {
+    if (!pipeEpSlug || !pipeEpId) {
       switchTab('run');
-      appendLine('⚠  No story file detected for this episode. Run Stage 0 first.', 'err');
+      appendLine('⚠  No episode selected. Select an episode in the Pipeline tab first.', 'err');
       return;
     }
-    startPipeStep({ type: 'llm', from, to, story_file: pipeStoryFile });
+    const ep_dir = 'projects/' + pipeEpSlug + '/episodes/' + pipeEpId;
+    startPipeStep({ type: 'llm', from, to, ep_dir });
   }
 
   function runPostStep(step, locale) {
@@ -2846,63 +2899,78 @@ Direction    : …"></textarea>
   async function loadRunProjects() {
     try {
       const r = await fetch('/list_projects');
-      const d = await r.json();
-      _runProjectList = d.projects || [];
+      const { projects } = await r.json();
+      _runProjectList = projects || [];
       const sel = document.getElementById('run-project-sel');
-      // preserve selection
       const prev = sel.value;
       sel.innerHTML = '<option value="">— New Project —</option>';
-      _runProjectList.forEach(p => {
+      projects.forEach(p => {
         const o = document.createElement('option');
         o.value = p.slug; o.textContent = p.slug;
         sel.appendChild(o);
       });
-      if (prev) sel.value = prev;
+      // Restore previous selection if still present
+      if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+    } catch(_) {}
+  }
+
+  // Load story file + VoiceCast + metadata for a given slug+ep
+  async function loadEpisodeDetails(slug, epId) {
+    currentSlug = slug; currentEpId = epId;
+    _lastRunFilename = null;   // force story reload — never show previous episode's story
+    try {
+      const res    = await fetch('/pipeline_status?slug=' + encodeURIComponent(slug) +
+                                 '&ep_id=' + encodeURIComponent(epId));
+      const status = await res.json();
+      await syncRunTabFromPipeline(slug, epId, status.story_file, status.voice_cast, status);
     } catch(_) {}
   }
 
   function onRunProjectChange() {
-    const slug = document.getElementById('run-project-sel').value;
+    const slug  = document.getElementById('run-project-sel').value;
     const epSel = document.getElementById('run-episode-sel');
     epSel.innerHTML = '';
+
     if (!slug) {
-      // New project
+      // ── New Project ──────────────────────────────────────────────────────────
       epSel.disabled = true;
-      const o = document.createElement('option'); o.value = ''; o.textContent = 's01e01'; epSel.appendChild(o);
+      epSel.innerHTML = '<option value="">—</option>';
       _usingExistingEp = false;
       document.getElementById('info-bar').classList.remove('visible');
       document.getElementById('existing-ep-bar').style.display = 'none';
       document.getElementById('btn-prepare').style.display = '';
       setRunBtnEnabled(false);
-    } else {
-      // Existing project — populate episodes
-      epSel.disabled = false;
-      const proj = _runProjectList.find(p => p.slug === slug);
-      if (proj) {
-        (proj.episodes || []).forEach(ep => {
-          const o = document.createElement('option'); o.value = ep.id; o.textContent = ep.id; epSel.appendChild(o);
-        });
-      }
-      // Add "New Episode" option
-      fetch('/api/next_episode_id?slug=' + encodeURIComponent(slug))
-        .then(r => r.json()).then(d => {
-          const o = document.createElement('option'); o.value = 'new'; o.textContent = '＋ New Episode → ' + d.next_ep_id; epSel.appendChild(o);
-        }).catch(_=>{});
-      _usingExistingEp = true;
-      document.getElementById('info-bar').classList.remove('visible');
-      document.getElementById('existing-ep-bar').style.display = 'block';
-      document.getElementById('btn-prepare').style.display = 'none';
-      currentSlug = slug;
-      setRunBtnEnabled(true);
+      return;
+    }
+
+    // ── Existing project — populate episodes and auto-load the first one ──────
+    epSel.disabled = false;
+    const proj = _runProjectList.find(p => p.slug === slug);
+    const episodes = (proj && proj.episodes) || [];
+    episodes.forEach(ep => {
+      const o = document.createElement('option');
+      o.value = ep.id; o.textContent = ep.id;
+      epSel.appendChild(o);
+    });
+
+    _usingExistingEp = true;
+    document.getElementById('info-bar').classList.remove('visible');
+    document.getElementById('existing-ep-bar').style.display = 'block';
+    document.getElementById('btn-prepare').style.display = 'none';
+    setRunBtnEnabled(true);
+
+    // Auto-select first episode and load its details
+    const firstEpId = episodes.length ? episodes[0].id : null;
+    if (firstEpId) {
+      epSel.value = firstEpId;
+      loadEpisodeDetails(slug, firstEpId);
     }
   }
 
   function onRunEpisodeChange() {
-    const slug  = document.getElementById('run-project-sel').value;
-    const ep    = document.getElementById('run-episode-sel').value;
-    if (ep && ep !== 'new') {
-      currentSlug = slug; currentEpId = ep;
-    }
+    const slug = document.getElementById('run-project-sel').value;
+    const epId = document.getElementById('run-episode-sel').value;
+    if (slug && epId) loadEpisodeDetails(slug, epId);
   }
 
   // ── Prepare button ───────────────────────────────────────────────────────────
@@ -2912,6 +2980,8 @@ Direction    : …"></textarea>
     const btn = document.getElementById('btn-prepare');
     btn.disabled = true; btn.textContent = '⚙ Preparing…';
     setRunBtnEnabled(false);
+    _episodeCreated = false;
+    document.getElementById('save-new-ep-row').style.display = 'none';
     try {
       const r = await fetch('/api/infer_story_meta', {
         method: 'POST',
@@ -2924,11 +2994,103 @@ Direction    : …"></textarea>
       _selectedFormat = d.story_format || 'episodic';
       applyPreparedMeta(d);
       document.getElementById('info-bar').classList.add('visible');
-      setRunBtnEnabled(true);
+      // For new projects: fetch next episode ID and show Create Episode button
+      const _slug = document.getElementById('info-slug').value.trim();
+      if (_slug && !d.slug_exists) {
+        try {
+          const nr = await fetch('/api/next_episode_id?slug=' + encodeURIComponent(_slug));
+          const nd = await nr.json();
+          _preparedEpId = nd.next_ep_id || 's01e01';
+        } catch(_) { _preparedEpId = 's01e01'; }
+        const epEl = document.getElementById('info-ep-id');
+        if (epEl) epEl.textContent = _preparedEpId;
+        setRunBtnEnabled(true);
+      } else {
+        // Existing project/slug — Run directly
+        _preparedEpId = null;
+        const epEl = document.getElementById('info-ep-id');
+        if (epEl) epEl.textContent = '—';
+        setRunBtnEnabled(true);
+      }
     } catch(e) {
       alert('Prepare failed: ' + e.message);
     } finally {
       btn.disabled = false; btn.textContent = '⚙ Prepare';
+    }
+  }
+
+  // ── Create Episode — called automatically by runPrompt() for new projects ──
+  // Throws on failure so the caller can handle the error.
+  async function createEpisode() {
+    const slug  = document.getElementById('info-slug').value.trim();
+    const title = document.getElementById('info-title').value.trim();
+    const genre = document.getElementById('info-genre').value.trim();
+    const story = storyEl.value.trim();
+    const locs  = getSelectedLocales();
+    const ep_id = _preparedEpId;
+    if (!slug || !title || !ep_id) throw new Error('Prepare must run first (missing slug or episode ID).');
+    const r = await fetch('/api/create_episode', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({
+        slug, ep_id, story, title, genre,
+        story_format: _selectedFormat,
+        locales:      locs.join(','),
+        no_music:     document.getElementById('chk-no-music')?.checked || false,
+      })
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'Unknown error');
+    currentSlug = d.slug;
+    currentEpId = d.ep_id;
+    _episodeCreated = true;
+    document.getElementById('save-new-ep-row').style.display = '';
+    // Refresh project dropdown so it reflects the new project
+    loadRunProjects().then(() => {
+      const sel = document.getElementById('run-project-sel');
+      if (Array.from(sel.options).some(o => o.value === currentSlug)) sel.value = currentSlug;
+      const epSel = document.getElementById('run-episode-sel');
+      epSel.disabled = false;
+      if (!Array.from(epSel.options).some(o => o.value === currentEpId)) {
+        const o = document.createElement('option');
+        o.value = currentEpId; o.textContent = currentEpId;
+        epSel.appendChild(o);
+      }
+      epSel.value = currentEpId;
+    });
+    return d.ep_dir;
+  }
+
+  // ── Save metadata for a newly created episode (reads from #info-bar fields) ─
+  async function saveNewEpMeta() {
+    if (!currentSlug || !currentEpId) return;
+    const statusEl = document.getElementById('save-new-ep-status');
+    const btnEl    = document.getElementById('btn-save-new-ep');
+    const title    = document.getElementById('info-title').value.trim();
+    const genre    = document.getElementById('info-genre').value.trim();
+    const format   = document.getElementById('info-format-sel').value;
+    const locs     = getSelectedLocales();
+    const no_music = document.getElementById('chk-no-music')?.checked || false;
+    btnEl.disabled = true;
+    statusEl.textContent = 'Saving…';
+    statusEl.style.color = 'var(--dim)';
+    try {
+      const resp = await fetch('/api/save_episode_meta', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: currentSlug, ep_id: currentEpId,
+                               title, genre, story_format: format,
+                               locales: locs.join(','), no_music })
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+      statusEl.textContent = '✓ Saved';
+      statusEl.style.color = 'var(--success,#4caf50)';
+    } catch (err) {
+      statusEl.textContent = '✗ ' + err.message;
+      statusEl.style.color = '#e74c3c';
+    } finally {
+      btnEl.disabled = false;
+      setTimeout(() => { statusEl.textContent = ''; }, 3000);
     }
   }
 
@@ -2944,13 +3106,23 @@ Direction    : …"></textarea>
     setField('info-title', 'badge-title', d.title, 'title');
     setField('info-genre', 'badge-genre', d.genre, 'genre');
     // Slug
-    const slugInput = document.getElementById('info-slug');
-    slugInput.value = d.slug_suggested || d.slug || '';
-    updateSlugBadge(d.slug_exists, d.slug_suggested || d.slug);
+    const slug = d.slug_suggested || d.slug || '';
+    document.getElementById('info-slug').value = slug;
+    updateSlugBadge(d.slug_exists, slug);
     // Format
     const fsel = document.getElementById('info-format-sel');
     fsel.value = _selectedFormat;
     updateFormatHint(_selectedFormat, 'format-hint');
+    // Auto-select project in dropdown if it already exists on disk
+    if (d.slug_exists && slug) {
+      loadRunProjects().then(() => {
+        const sel = document.getElementById('run-project-sel');
+        if (Array.from(sel.options).some(o => o.value === slug)) {
+          sel.value = slug;
+          onRunProjectChange();   // populates episodes, auto-loads first ep details
+        }
+      });
+    }
   }
 
   function updateSlugBadge(exists, slug) {
@@ -2993,13 +3165,59 @@ Direction    : …"></textarea>
 
   function getSelectedLocales() {
     const locales = [];
-    if (document.getElementById('locale-en')      ?.checked) locales.push('en');
-    if (document.getElementById('locale-en-ex')   ?.checked) locales.push('en');
-    if (document.getElementById('locale-zh-Hans') ?.checked && !locales.includes('zh-Hans') ) locales.push('zh-Hans'); // dedupe
+    if (document.getElementById('locale-en')      ?.checked && !locales.includes('en')) locales.push('en');
+    if (document.getElementById('locale-en-ex')   ?.checked && !locales.includes('en')) locales.push('en');
+    if (document.getElementById('locale-zh-Hans') ?.checked && !locales.includes('zh-Hans')) locales.push('zh-Hans');
     if (document.getElementById('locale-zh-Hans-ex')?.checked && !locales.includes('zh-Hans')) locales.push('zh-Hans');
     return locales.length ? locales : ['en'];
   }
-  function onLocaleChange() { /* state is read live from checkboxes in getSelectedLocales() */ }
+  function onLocaleChange() {
+    // Update _vcLocales so VC editor reflects the new selection
+    _vcLocales = getSelectedLocales();
+    // Re-render VC editor tabs/cards if it is currently open
+    if (_vcData && _voiceCatalog &&
+        document.getElementById('vc-editor').style.display !== 'none') {
+      document.getElementById('vc-cards').innerHTML = '';
+      renderVcEditor(_vcData, _voiceCatalog, _vcLocales);
+    }
+  }
+  // ── saveEpisodeMeta() ─────────────────────────────────────────────────────────
+  // Saves title, genre, story_format, locales for the current episode to
+  // projects/<slug>/episodes/<ep_id>/meta.json via POST /api/save_episode_meta.
+  async function saveEpisodeMeta() {
+    if (!currentSlug || !currentEpId) return;
+    const statusEl = document.getElementById('save-ep-status');
+    const btnEl    = document.getElementById('btn-save-ep-meta');
+    const title    = document.getElementById('ex-title').value.trim();
+    const genre    = document.getElementById('ex-genre').value.trim();
+    const format   = document.getElementById('info-format-sel-existing').value;
+    const locs     = getSelectedLocales();
+    const no_music = document.getElementById('chk-no-music')?.checked || false;
+    btnEl.disabled = true;
+    statusEl.textContent = 'Saving…';
+    statusEl.style.color = 'var(--dim)';
+    try {
+      const resp = await fetch('/api/save_episode_meta', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slug: currentSlug, ep_id: currentEpId,
+          title, genre, story_format: format, locales: locs.join(','), no_music
+        })
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+      statusEl.textContent = '✓ Saved';
+      statusEl.style.color = 'var(--success,#4caf50)';
+      // Sync _vcLocales in case locales changed
+      _vcLocales = locs;
+    } catch (err) {
+      statusEl.textContent = '✗ ' + err.message;
+      statusEl.style.color = '#e74c3c';
+    } finally {
+      btnEl.disabled = false;
+      setTimeout(() => { statusEl.textContent = ''; }, 3000);
+    }
+  }
 
   function setRunBtnEnabled(enabled) {
     // Find the main Run button and enable/disable it
@@ -3030,7 +3248,7 @@ Direction    : …"></textarea>
     const profile = renderProd ? 'high' : 'preview_local';
     let url;
     if (params.type === 'llm') {
-      url = '/stream?story_file=' + encodeURIComponent(params.story_file) +
+      url = '/stream?ep_dir=' + encodeURIComponent(params.ep_dir) +
             '&from=' + params.from + '&to=' + params.to +
             '&test=' + (testMode ? '1' : '0') +
             '&profile=' + profile;
@@ -3081,6 +3299,20 @@ Direction    : …"></textarea>
       if (code === 0) {
         appendLine('[ ✓ Done ]', 'done');
         setStatus('idle');
+        // Pre-select the completed episode in the Pipeline tab selector so that
+        // initPipelineTab()'s prev-restore mechanism lands on the right episode,
+        // even if the user had a different episode selected before this run.
+        if (currentSlug && currentEpId) {
+          pipeEpSlug = currentSlug; pipeEpId = currentEpId;
+          const pipeSel = document.getElementById('pipe-ep-select');
+          const tv = currentSlug + '|' + currentEpId;
+          if (!Array.from(pipeSel.options).some(o => o.value === tv)) {
+            const o = document.createElement('option');
+            o.value = tv; o.textContent = currentSlug + ' / ' + currentEpId;
+            pipeSel.appendChild(o);
+          }
+          pipeSel.value = tv;
+        }
         switchTab('pipeline');
       } else {
         appendLine(`[ Exited with code ${code} ]`, 'err');
@@ -3241,20 +3473,34 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             for f in os.listdir(ep_dir)
         )
 
-    # Stage 0 renames pipeline_vars.sh → pipeline_vars.{story}.sh, so check
-    # for any matching per-story vars file as the stage_0 done indicator.
+    # Stage 0 is done when pipeline_vars.sh in ep_dir contains VOICE_CAST_FILE
+    # (Stage 0 writes that; the Prepare-created stub does not have it)
     import glob as _glob
-    _vars_files = _glob.glob(os.path.join(PIPE_DIR, "pipeline_vars.*.sh"))
-    _stage0_done = bool(_vars_files) and check(root("episode_direction.txt"))
+    _pipeline_vars = os.path.join(ep_dir, "pipeline_vars.sh")
+    _stage0_done = False
+    if os.path.isfile(_pipeline_vars):
+        try:
+            _pv_content = open(_pipeline_vars, encoding="utf-8").read()
+            _stage0_done = "VOICE_CAST_FILE" in _pv_content
+        except Exception:
+            pass
+
+    # Stage 1 is done when its stage log has content.
+    # Claude often only prints the canon report to stdout without writing
+    # stage_1_check.txt, so we use the log file instead — run.sh always
+    # writes it via `tee` regardless of what Claude does or doesn't write.
+    # size > 100 guards against an empty file created right as the stage starts.
+    _stage1_log = os.path.join(PIPE_DIR, "stage_logs", f"{slug}.{ep_id}.stage_1.log")
+    _stage1_done = os.path.isfile(_stage1_log) and os.path.getsize(_stage1_log) > 100
 
     llm_stages = {
         "stage_0": {
             "done": _stage0_done,
-            "artifacts": [root_rel("episode_direction.txt")],
+            "artifacts": [ep_rel("pipeline_vars.sh")],
         },
         "stage_1": {
-            "done": check(ep("StoryPrompt.json")),   # proxy: stage 1 done if stage 2 output exists
-            "artifacts": [],
+            "done": _stage1_done,
+            "artifacts": [ep_rel("stage_1_check.txt")],
         },
         "stage_2": {
             "done": check(ep("StoryPrompt.json")),
@@ -3338,22 +3584,11 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         if loc != "en" and check(os.path.join(ep_dir, "renders", loc, "youtube_dubbed.aac"))
     ]
 
-    # Detect which story_N.txt produced this episode by scanning pipeline_vars.*.sh
+    # story.txt is in the episode folder (written by Create Episode in web UI)
     story_file_detected = ""
-    for _vp in sorted(_glob.glob(os.path.join(PIPE_DIR, "pipeline_vars.*.sh")), reverse=True):
-        try:
-            _vc = open(_vp, encoding="utf-8").read()
-            _slug_match = (f'PROJECT_SLUG="{slug}"' in _vc or f"PROJECT_SLUG={slug}\n" in _vc
-                           or f"PROJECT_SLUG={slug}\r" in _vc)
-            _ep_match   = (f'EPISODE_ID="{ep_id}"' in _vc or f"EPISODE_ID={ep_id}\n" in _vc
-                           or f"EPISODE_ID={ep_id}\r" in _vc)
-            if _slug_match and _ep_match:
-                _m = re.match(r"pipeline_vars\.(.+)\.sh$", os.path.basename(_vp))
-                if _m:
-                    story_file_detected = f"{_m.group(1)}.txt"
-                    break
-        except Exception:
-            pass
+    _ep_story = os.path.join(ep_dir, "story.txt")
+    if os.path.isfile(_ep_story):
+        story_file_detected = f"projects/{slug}/episodes/{ep_id}/story.txt"
 
     # ── VoiceCast.json (project-level, written by Stage 0) ───────────────
     voice_cast = None
@@ -3362,6 +3597,37 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         try:
             with open(vc_path, encoding="utf-8") as _f:
                 voice_cast = json.load(_f)
+        except Exception:
+            pass
+
+    # ── Metadata: prefer meta.json (user-saved), fall back to pipeline_vars.*.sh ─
+    meta_title  = ""
+    meta_genre  = ""
+    meta_format = "episodic"
+    meta_locales_str = ",".join(locales) if locales else "en"
+    meta_no_music = False
+
+    _meta_json_path = os.path.join(ep_dir, "meta.json")
+    if os.path.isfile(_meta_json_path):
+        try:
+            _mj = json.load(open(_meta_json_path, encoding="utf-8"))
+            # Support both new-style (story_title/series_genre) and old-style (title/genre) fields
+            meta_title       = _mj.get("story_title",  _mj.get("title",  ""))
+            meta_genre       = _mj.get("series_genre", _mj.get("genre",  ""))
+            meta_format      = _mj.get("story_format", "episodic")
+            meta_locales_str = _mj.get("locales", meta_locales_str)
+            meta_no_music    = bool(_mj.get("no_music", False))
+        except Exception:
+            pass
+    elif os.path.isfile(_pipeline_vars):
+        # Fall back to pipeline_vars.sh (legacy episodes without meta.json)
+        try:
+            _vc = open(_pipeline_vars, encoding="utf-8").read()
+            _vars = dict(re.findall(r'export\s+(\w+)="([^"]*)"', _vc))
+            meta_title       = _vars.get("STORY_TITLE", "")
+            meta_genre       = _vars.get("SERIES_GENRE", "")
+            meta_format      = _vars.get("STORY_FORMAT", "episodic")
+            meta_locales_str = _vars.get("LOCALES", meta_locales_str)
         except Exception:
             pass
 
@@ -3374,6 +3640,11 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "ready_dubbed": ready_dubbed,
         "story_file": story_file_detected,
         "voice_cast": voice_cast,
+        "title":        meta_title,
+        "genre":        meta_genre,
+        "story_format": meta_format,
+        "locales_str":  meta_locales_str,
+        "no_music":     meta_no_music,
     }
 
 
@@ -3514,15 +3785,22 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/read_story":
             params     = parse_qs(parsed.query)
             story_file = unquote_plus(params.get("story_file", [""])[0]).strip()
-            # Restrict to story_N.txt in the pipe root — no directory traversal
+            # Accept either:
+            #   story_N.txt                              (legacy root-level file)
+            #   projects/<slug>/episodes/<ep>/story.txt  (episode-folder file)
+            _ep_story_pat = r"^projects/[^/]+/episodes/[^/]+/story\.txt$"
             if story_file and re.match(r"^story_\d+\.txt$", story_file):
                 full_path = os.path.join(PIPE_DIR, story_file)
-                if os.path.isfile(full_path):
-                    with open(full_path, encoding="utf-8") as _fh:
-                        content = _fh.read()
-                    payload = {"ok": True, "content": content, "filename": story_file}
-                else:
-                    payload = {"ok": False, "error": "file not found"}
+            elif story_file and re.match(_ep_story_pat, story_file):
+                full_path = os.path.join(PIPE_DIR, story_file)
+            else:
+                full_path = None
+            if full_path and os.path.isfile(full_path):
+                with open(full_path, encoding="utf-8") as _fh:
+                    content = _fh.read()
+                payload = {"ok": True, "content": content, "filename": story_file}
+            elif full_path:
+                payload = {"ok": False, "error": "file not found"}
             else:
                 payload = {"ok": False, "error": "invalid filename"}
             body = json.dumps(payload).encode()
@@ -3564,10 +3842,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
-        # SSE stream  —  runs: bash run.sh <story_file> <from> <to>
+        # SSE stream  —  runs: bash run.sh <ep_dir> <from> <to>
         elif parsed.path == "/stream":
             params        = parse_qs(parsed.query)
-            story_file    = unquote_plus(params.get("story_file", [""])[0]).strip()
+            ep_dir_param  = unquote_plus(params.get("ep_dir",      [""])[0]).strip()
             from_stage    = params.get("from",    ["0"])[0].strip()
             to_stage      = params.get("to",      ["9"])[0].strip()
             test_mode     = params.get("test",    ["1"])[0].strip() == "1"
@@ -3575,10 +3853,8 @@ class Handler(BaseHTTPRequestHandler):
             if render_profile not in ("preview_local", "draft_720p", "high"):
                 render_profile = "preview_local"
             no_music     = params.get("no_music", ["0"])[0].strip() == "1"
-            locales      = params.get("locales",       ["en"])[0].strip()
-            story_format = params.get("story_format",  ["episodic"])[0].strip()
 
-            # Sanitise: digits only, 0–9
+            # Sanitise: digits only, 0–10
             from_stage = str(max(0, min(10, int(from_stage)))) if from_stage.isdigit() else "0"
             to_stage   = str(max(0, min(10, int(to_stage))))   if to_stage.isdigit()   else "10"
 
@@ -3589,11 +3865,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
-            if not story_file:
-                self.wfile.write(sse("error_line", "No story_file provided."))
+            if not ep_dir_param:
+                self.wfile.write(sse("error_line", "No ep_dir provided."))
                 self.wfile.write(sse("done", "1"))
                 self.wfile.flush()
                 return
+
+            # Read no_music from meta.json if not explicitly overridden via checkbox
+            _meta_path = os.path.join(PIPE_DIR, ep_dir_param, "meta.json")
+            if not no_music and os.path.isfile(_meta_path):
+                try:
+                    _m = json.load(open(_meta_path, encoding="utf-8"))
+                    no_music = bool(_m.get("no_music", False))
+                except Exception:
+                    pass
 
             # Build subprocess environment
             run_env = os.environ.copy()
@@ -3603,16 +3888,13 @@ class Handler(BaseHTTPRequestHandler):
             run_env["RENDER_PROFILE"] = render_profile   # preview_local or high
             if no_music:
                 run_env["NO_MUSIC"] = "1"
-            if locales:
-                run_env["LOCALES"] = locales
-            if story_format in ("episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"):
-                run_env["STORY_FORMAT"] = story_format
+            # Note: LOCALES and STORY_FORMAT are sourced from pipeline_vars.sh by run.sh
 
             client = self.client_address
             proc   = None
             try:
                 proc = subprocess.Popen(
-                    ["bash", "run.sh", story_file, from_stage, to_stage],
+                    ["bash", "run.sh", ep_dir_param, from_stage, to_stage],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -4359,6 +4641,139 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(resp)
 
+        # Create a new episode: dir + story.txt + meta.json + pipeline_vars.sh stub
+        elif self.path == "/api/create_episode":
+            try:
+                import random as _random
+                from datetime import datetime as _dt
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+                slug         = payload.get("slug", "").strip()
+                ep_id        = payload.get("ep_id", "").strip()
+                story_text   = payload.get("story", "").strip()
+                title        = payload.get("title", "").strip()
+                genre        = payload.get("genre", "").strip()
+                story_format = payload.get("story_format", "episodic").strip()
+                locales      = payload.get("locales", "en").strip()
+                no_music     = bool(payload.get("no_music", False))
+
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                if not story_text:
+                    raise ValueError("story text is required")
+
+                # Derive episode_number from ep_id (s01e03 → "03", ep0018 → "18")
+                import re as _re3
+                _ep_num_match = _re3.search(r"e(\d+)$", ep_id, _re3.IGNORECASE)
+                episode_number = _ep_num_match.group(1) if _ep_num_match else ep_id
+
+                # Create episode directory
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                os.makedirs(ep_dir, exist_ok=True)
+
+                # Write story.txt
+                with open(os.path.join(ep_dir, "story.txt"), "w", encoding="utf-8") as _f:
+                    _f.write(story_text)
+
+                # Write meta.json with full schema (field names match what p_0.txt reads)
+                gen_seed = _random.randint(100_000_000, 999_999_999)
+                meta = {
+                    "schema_id":      "EpisodeMeta",
+                    "story_title":    title,
+                    "project_slug":   slug,
+                    "episode_id":     ep_id,
+                    "episode_number": episode_number,
+                    "series_genre":   genre,
+                    "story_format":   story_format,
+                    "locales":        locales,
+                    "generation_seed": gen_seed,
+                    "render_profile": "preview_local",
+                    "no_music":       no_music,
+                    "created_at":     _dt.now().isoformat(),
+                }
+                with open(os.path.join(ep_dir, "meta.json"), "w", encoding="utf-8") as _f:
+                    json.dump(meta, _f, indent=2, ensure_ascii=False)
+
+                # Write pipeline_vars.sh stub (Stage 0 will overwrite with full version)
+                _locs_clean = ",".join(l.strip() for l in locales.split(",") if l.strip())
+                vars_content = (
+                    f'export STORY_TITLE="{title}"\n'
+                    f'export EPISODE_NUMBER="{episode_number}"\n'
+                    f'export EPISODE_ID="{ep_id}"\n'
+                    f'export LOCALES="{_locs_clean}"\n'
+                    f'export PROJECT_SLUG="{slug}"\n'
+                    f'export SERIES_GENRE="{genre}"\n'
+                    f'export GENERATION_SEED="{gen_seed}"\n'
+                    f'export RENDER_PROFILE="preview_local"\n'
+                    f'export STORY_FORMAT="{story_format}"\n'
+                    f'export PROJECT_DIR="projects/{slug}"\n'
+                    f'export EPISODE_DIR="projects/{slug}/episodes/{ep_id}"\n'
+                )
+                with open(os.path.join(ep_dir, "pipeline_vars.sh"), "w", encoding="utf-8") as _f:
+                    _f.write(vars_content)
+
+                ep_dir_rel = f"projects/{slug}/episodes/{ep_id}"
+                print(f"  Created episode  {ep_dir_rel}")
+                resp = json.dumps({"ok": True, "ep_dir": ep_dir_rel,
+                                   "slug": slug, "ep_id": ep_id}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
+        # Save episode metadata (title, genre, format, locales) → merge into meta.json
+        elif self.path == "/api/save_episode_meta":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                if not os.path.isdir(ep_dir):
+                    raise ValueError(f"Episode directory not found: {ep_dir}")
+                meta_path = os.path.join(ep_dir, "meta.json")
+                # Read existing meta.json (to preserve schema_id, episode_id, slug, seed, etc.)
+                existing_meta: dict = {}
+                if os.path.isfile(meta_path):
+                    try:
+                        existing_meta = json.load(open(meta_path, encoding="utf-8"))
+                    except Exception:
+                        pass
+                # Merge user-edited fields (use new-style field names)
+                existing_meta["story_title"]  = payload.get("title", "").strip()
+                existing_meta["series_genre"] = payload.get("genre", "").strip()
+                existing_meta["story_format"] = payload.get("story_format", "episodic").strip()
+                existing_meta["locales"]      = payload.get("locales", "en").strip()
+                existing_meta["no_music"]     = bool(payload.get("no_music", False))
+                with open(meta_path, "w", encoding="utf-8") as _f:
+                    json.dump(existing_meta, _f, indent=2, ensure_ascii=False)
+                print(f"  Saved meta.json  slug={slug}  ep={ep_id}")
+                resp = json.dumps({"ok": True, "path": meta_path}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -4371,7 +4786,8 @@ class Handler(BaseHTTPRequestHandler):
                   "/pipeline_status", "/serve_media", "/run_locale",
                   "/api/azure_voices", "/api/voice_presets", "/api/voice_index",
                   "/api/preview_voice", "/api/save_voice_cast",
-                  "/api/check_slug", "/api/next_episode_id"}
+                  "/api/check_slug", "/api/next_episode_id",
+                  "/api/create_episode", "/api/save_episode_meta"}
         if not any(path == s or path.startswith(s + "?") for s in silent):
             print(f"  {self.address_string()}  {fmt % args}")
 

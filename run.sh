@@ -4,28 +4,68 @@
 # ══════════════════════════════════════════════════════════════════════
 #
 # Usage:
-#   ./run.sh [STORY_FILE] [FROM_STAGE] [TO_STAGE]
+#   ./run.sh <ep_dir> [from_stage] [to_stage]
+#
+# Arguments:
+#   ep_dir      — path to episode directory
+#                 e.g.  projects/my-project/episodes/s01e01
+#   from_stage  — first stage to run  (default: 0)
+#   to_stage    — last  stage to run  (default: 10)
 #
 # Examples:
-#   ./run.sh                        # story_2.txt, stages 0–9
-#   ./run.sh story_2.txt            # all stages
-#   ./run.sh story_2.txt 2 4        # re-run stages 2–4 only
-#   ./run.sh story_2.txt 9 9        # re-run stage 9 only (after media-agent)
+#   ./run.sh projects/my-project/episodes/s01e01          # stages 0–10
+#   ./run.sh projects/my-project/episodes/s01e01 2 4      # re-run stages 2–4
+#   ./run.sh projects/my-project/episodes/s01e01 9 9      # re-run stage 9 only
+#
+# NOTE: The old ./run.sh story_N.txt interface is gone. New interface only.
+#
+# Prerequisites (handled by Prepare before this script runs):
+#   • ep_dir/story.txt              — the episode story file
+#   • ep_dir/pipeline_vars.sh      — stub (or full) vars file
+#
+# Stage 0 overwrites ep_dir/pipeline_vars.sh adding VOICE_CAST_FILE and
+# other derived vars; run.sh re-sources it after Stage 0 completes.
 #
 # Each stage prompt is filled (placeholders substituted) → temp file →
 # claude -p <temp>  and output is tee'd to both stdout (web UI) and
-# stage_logs/stage_N.log for debugging.
+# stage_logs/<slug>.<ep_id>.stage_N.log for debugging.
 # ══════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
-STORY_FILE="${1:-story_2.txt}"
+EP_DIR="${1:-}"
 FROM_STAGE="${2:-0}"
 TO_STAGE="${3:-10}"
 
-# Per-story vars file — keyed by story filename so concurrent runs don't clobber each other.
-# e.g. story_2.txt → pipeline_vars.story_2.sh
-VARS_FILE="pipeline_vars.${STORY_FILE%.txt}.sh"
+# ── Validate inputs ────────────────────────────────────────────────────
+if [[ -z "$EP_DIR" ]]; then
+  echo "✗ ERROR: ep_dir argument is required" >&2
+  echo "  Usage: ./run.sh <ep_dir> [from_stage] [to_stage]" >&2
+  exit 1
+fi
+if [[ ! -d "$EP_DIR" ]]; then
+  echo "✗ ERROR: ep_dir is not a directory: $EP_DIR" >&2
+  exit 1
+fi
+
+STORY_FILE="${EP_DIR}/story.txt"
+VARS_FILE="${EP_DIR}/pipeline_vars.sh"
+
+if [[ ! -f "$STORY_FILE" ]]; then
+  echo "✗ ERROR: story file not found: $STORY_FILE" >&2
+  exit 1
+fi
+if [[ "$FROM_STAGE" -gt "$TO_STAGE" ]]; then
+  echo "✗ ERROR: FROM_STAGE ($FROM_STAGE) > TO_STAGE ($TO_STAGE)" >&2
+  exit 1
+fi
+if [[ ! -f "$VARS_FILE" ]]; then
+  echo "✗ ERROR: $VARS_FILE not found." >&2
+  echo "  Use the ✦ Create Episode button in the web UI to create the episode first." >&2
+  exit 1
+fi
+
+export STORY_FILE
 
 # ── Model selection ────────────────────────────────────────────────────
 #
@@ -33,8 +73,8 @@ VARS_FILE="pipeline_vars.${STORY_FILE%.txt}.sh"
 #   haiku  — fast/cheap, used for mechanical extraction & JSON assembly
 #   sonnet — balanced,   used for creative writing & complex derivation
 #
-# Override all stages:  MODEL=opus ./run.sh story.txt
-# Override one stage:   STAGE_MODEL_3=opus ./run.sh story.txt
+# Override all stages:  MODEL=opus ./run.sh ep_dir
+# Override one stage:   STAGE_MODEL_3=opus ./run.sh ep_dir
 #
 get_stage_model() {
   local n="$1"
@@ -47,11 +87,11 @@ get_stage_model() {
   # Defaults
   case "$n" in
     2|3|4|5|8) echo "sonnet" ;;   # creative writing / complex JSON derivation
-    *)       echo "haiku"  ;;   # variable extraction, diffs, assembly
+    *)          echo "haiku"  ;;   # variable extraction, diffs, assembly
   esac
 }
 
-# ── Stage human-readable labels ────────────────────────────────────────────────
+# ── Stage human-readable labels ────────────────────────────────────────
 stage_label() {
   case "$1" in
     0) echo "Extract story variables & set up project" ;;
@@ -69,7 +109,7 @@ stage_label() {
   esac
 }
 
-# ── Stage 10: asset merge + render (no LLM) ────────────────────────────────
+# ── Stage 10: asset merge + render (no LLM) ────────────────────────────
 run_stage_10() {
   local label
   label=$(stage_label "10")
@@ -79,14 +119,13 @@ run_stage_10() {
   echo "  locales: ${LOCALES:-en}"
   echo "══════════════════════════════════════════════════════════════"
 
-  local code_dir ep_dir
+  local code_dir
   code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
-  ep_dir="projects/${PROJECT_SLUG}/episodes/${EPISODE_ID}"
 
   # ── [1/8] Music clips — locale-free, runs once, skips if no resources ─
   echo "  [1/8] Generating music clips (skips gracefully if no resources)…"
   python3 "${code_dir}/gen_music_clip.py" \
-    --manifest "${ep_dir}/AssetManifest_draft.shared.json"
+    --manifest "${EP_DIR}/AssetManifest_draft.shared.json"
 
   # ── Per-locale steps ──────────────────────────────────────────────────
   # Parse comma-separated locales (e.g. "en, zh-Hans")
@@ -101,44 +140,44 @@ run_stage_10() {
 
     echo "  [2/8] Merging shared + locale manifests…"
     python3 "${code_dir}/manifest_merge.py" \
-      --shared "${ep_dir}/AssetManifest_draft.shared.json" \
-      --locale "${ep_dir}/AssetManifest_draft.${locale}.json" \
-      --out    "${ep_dir}/AssetManifest_merged.${locale}.json"
+      --shared "${EP_DIR}/AssetManifest_draft.shared.json" \
+      --locale "${EP_DIR}/AssetManifest_draft.${locale}.json" \
+      --out    "${EP_DIR}/AssetManifest_merged.${locale}.json"
 
     echo "  [3/8] Generating voice-over audio…"
     python3 "${code_dir}/gen_tts_cloud.py" \
-      --manifest "${ep_dir}/AssetManifest_merged.${locale}.json"
+      --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
 
     echo "  [4/8] Analysing voice timing…"
     python3 "${code_dir}/post_tts_analysis.py" \
-      --manifest "${ep_dir}/AssetManifest_merged.${locale}.json"
+      --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
 
     echo "  [5/8] Resolving asset file paths…"
     python3 "${code_dir}/resolve_assets.py" \
-      --manifest "${ep_dir}/AssetManifest_merged.${locale}.json" \
-      --out      "${ep_dir}/AssetManifest.media.${locale}.json"
+      --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+      --out      "${EP_DIR}/AssetManifest.media.${locale}.json"
 
     echo "  [6/8] Building per-shot render plan…"
     python3 "${code_dir}/gen_render_plan.py" \
-      --manifest "${ep_dir}/AssetManifest_merged.${locale}.json" \
-      --media    "${ep_dir}/AssetManifest.media.${locale}.json"
+      --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+      --media    "${EP_DIR}/AssetManifest.media.${locale}.json"
 
     echo "  [7/8] Rendering video…"
     python3 "${code_dir}/render_video.py" \
-      --plan    "${ep_dir}/RenderPlan.${locale}.json" \
+      --plan    "${EP_DIR}/RenderPlan.${locale}.json" \
       --locale  "${locale}" \
-      --out     "${ep_dir}/renders/${locale}" \
+      --out     "${EP_DIR}/renders/${locale}" \
       --profile "${RENDER_PROFILE:-preview_local}" \
       ${NO_MUSIC:+--no-music}
 
-    echo "  ✓ ${locale}  →  ${ep_dir}/renders/${locale}/output.mp4"
+    echo "  ✓ ${locale}  →  ${EP_DIR}/renders/${locale}/output.mp4"
 
     echo "  [8/8] Exporting YouTube dubbed audio…"
     if [[ "$locale" != "en" ]]; then
       python3 "${code_dir}/export_youtube_dubbed.py" \
-        "${ep_dir}" \
+        "${EP_DIR}" \
         "${locale}"
-      echo "  ✓ ${locale}  →  ${ep_dir}/renders/${locale}/youtube_dubbed.aac"
+      echo "  ✓ ${locale}  →  ${EP_DIR}/renders/${locale}/youtube_dubbed.aac"
     else
       echo "  ↷ ${locale}  English is the primary upload — dubbed audio export skipped"
     fi
@@ -197,23 +236,17 @@ inline_files_into_prompt() {
   rm -f "$files_tmp"
 }
 
-# ── Validate inputs ────────────────────────────────────────────────────
-if [[ ! -f "$STORY_FILE" ]]; then
-  echo "✗ ERROR: story file not found: $STORY_FILE" >&2
-  exit 1
-fi
-if [[ "$FROM_STAGE" -gt "$TO_STAGE" ]]; then
-  echo "✗ ERROR: FROM_STAGE ($FROM_STAGE) > TO_STAGE ($TO_STAGE)" >&2
-  exit 1
-fi
-
 # ── Helpers ────────────────────────────────────────────────────────────
 mkdir -p stage_logs
 
 fill_and_run() {
   local N="$1"
   local prompt_src="prompts/p_${N}.txt"
-  local log_file="stage_logs/stage_${N}.log"
+  # Per-project log so concurrent / sequential runs on different projects don't
+  # overwrite each other.  Falls back to generic name before Stage 0 sets PROJECT_SLUG.
+  local _log_slug="${PROJECT_SLUG:-unknown}"
+  local _log_ep="${EPISODE_ID:-unknown}"
+  local log_file="stage_logs/${_log_slug}.${_log_ep}.stage_${N}.log"
   local model
   model=$(get_stage_model "$N")
   local tmp tmp2
@@ -230,6 +263,7 @@ fill_and_run() {
 
   # 1. Substitute all {{PLACEHOLDER}} tokens
   sed \
+    -e "s|{{EPISODE_DIR}}|${EP_DIR}|g" \
     -e "s|{{STORY_FILE}}|${STORY_FILE}|g" \
     -e "s|{{PROJECT_SLUG}}|${PROJECT_SLUG:-}|g" \
     -e "s|{{EPISODE_ID}}|${EPISODE_ID:-}|g" \
@@ -285,38 +319,29 @@ echo "  [8]  Translate & adapt for each language"
 echo "  [9]  Finalize assets & build render plan  ← conditional"
 echo "  [10] Merge assets, render video & export dubbed audio"
 echo "══════════════════════════════════════════════════════════════"
-echo "  Input story  : $STORY_FILE"
+echo "  Episode dir : $EP_DIR"
+echo "  Story file  : $STORY_FILE"
 echo "  Running stages $FROM_STAGE → $TO_STAGE"
 echo "══════════════════════════════════════════════════════════════"
 
+# ── Source vars from pipeline_vars.sh (stub written by Prepare, full after Stage 0) ──
+# shellcheck disable=SC1091
+source "$VARS_FILE"
+echo "  Loaded vars from $VARS_FILE"
+echo "  PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
+
 # ── Stage 0: read story, write pipeline_vars.sh ────────────────────────
 if [[ "$FROM_STAGE" -le 0 && "$TO_STAGE" -ge 0 ]]; then
-  export STORY_FILE="$STORY_FILE"
   fill_and_run 0
 
-  if [[ ! -f pipeline_vars.sh ]]; then
-    echo "✗ ERROR: Stage 0 did not produce pipeline_vars.sh" >&2
+  if [[ ! -f "$VARS_FILE" ]]; then
+    echo "✗ ERROR: Stage 0 did not produce ${VARS_FILE}" >&2
     exit 1
   fi
-  # Rename to per-story file so concurrent runs don't clobber each other
-  mv pipeline_vars.sh "$VARS_FILE"
   # shellcheck disable=SC1091
   source "$VARS_FILE"
   echo "  Loaded vars: PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
   echo "  Vars file  : $VARS_FILE"
-fi
-
-# ── If starting from stage > 0, load vars from prior run ──────────────
-if [[ "$FROM_STAGE" -gt 0 ]]; then
-  if [[ ! -f "$VARS_FILE" ]]; then
-    echo "✗ ERROR: $VARS_FILE not found." >&2
-    echo "  Run stage 0 first:  ./run.sh $STORY_FILE 0 0" >&2
-    exit 1
-  fi
-  # shellcheck disable=SC1091
-  source "$VARS_FILE"
-  echo "  Loaded vars from $VARS_FILE"
-  echo "  PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
 fi
 
 # ── Stages 1–9 (LLM) ─────────────────────────────────────────────────
@@ -335,14 +360,14 @@ fi
 echo ""
 echo "══════════════════════════════════════════════════════════════"
 echo "  PIPELINE COMPLETE  (stages $FROM_STAGE → $TO_STAGE)"
-echo "  Episode dir: projects/${PROJECT_SLUG:-?}/episodes/${EPISODE_ID:-?}/"
+echo "  Episode dir: ${EP_DIR}/"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 echo "Stage logs:"
 for N in $(seq "$FROM_STAGE" "$TO_STAGE"); do
-  log="stage_logs/stage_${N}.log"
+  log="stage_logs/${PROJECT_SLUG:-unknown}.${EPISODE_ID:-unknown}.stage_${N}.log"
   if [[ -f "$log" ]]; then
     size=$(wc -c < "$log")
-    echo "  stage_${N}.log  →  ${size} bytes"
+    echo "  $(basename "$log")  →  ${size} bytes"
   fi
 done

@@ -1,98 +1,72 @@
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 0 — Read Story File & Extract Pipeline Variables
+# STAGE 0 — Voice Casting
 # ══════════════════════════════════════════════════════════════════════
 #
-# 📥 PLACEHOLDER (replaced by run.sh via sed before calling claude -p):
-#     {{STORY_FILE}}  →  path to the input story file, e.g. "story_2.txt"
-#     {{LOCALES}}     →  e.g. "en, zh-Hans"
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}  →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}    →  e.g. "s01e02"
+#     {{EPISODE_DIR}}   →  e.g. "projects/the-pharaoh-who-defied-death/episodes/s01e02"
+#     {{LOCALES}}       →  e.g. "en, zh-Hans"
+#     {{STORY_FORMAT}}  →  e.g. "episodic"
 #
 # 📥 FILES READ:
-#     {{STORY_FILE}}                            (the story)
-#     projects/azure_tts_styles.txt             (inlined by run.sh)
+#     {{EPISODE_DIR}}/meta.json             (all pipeline variables — source of truth)
+#     {{EPISODE_DIR}}/story.txt             (story content, used for voice casting only)
+#     projects/azure_tts_styles.txt         (inlined by run.sh)
 #
 # 📤 OUTPUT (stdout printed to web UI + files written to disk):
 #     • Stdout: variable confirmation block  (web UI sees this)
-#     • pipeline_vars.sh                  ← sourced by run.sh for all later stages
-#     • episode_direction.txt             ← full direction text for later stages
-#     • projects/<slug>/VoiceCast.json    ← voice casting (append-only across episodes)
-#     • projects/<slug>/                           (directories created)
-#     • projects/<slug>/episodes/<id>/
+#     • projects/{{PROJECT_SLUG}}/VoiceCast.json   ← voice casting (append-only across episodes)
+#     • {{EPISODE_DIR}}/pipeline_vars.sh           ← overwritten with full content
 #
 # ▶ Invoked by run.sh as:
 #     claude -p prompts/p_0_filled.txt
 # ══════════════════════════════════════════════════════════════════════
 
 You are Stage 0 of a 10-stage AI narrative pipeline.
-Your ONLY job: read a story file, extract variables, cast voices,
-write output files, create directories, and print a confirmation block.
+Your ONLY jobs: read meta.json, cast voices, write VoiceCast.json,
+and overwrite pipeline_vars.sh with full content.
 Do NOT generate any story content.
+Do NOT re-derive, change, or "correct" any variable values from meta.json.
 
 ---
 
 ## Task
 
-Print: `▶ [0/9] Stage 0 — Read story file  …`
-
-Read these files before doing anything:
-  1. {{STORY_FILE}}
-  2. projects/azure_tts_styles.txt
-
-Read the story file at path: {{STORY_FILE}}
-
-Extract these variables (the file may use any human-readable format —
-use judgement to map content to each field):
-
-| Variable          | Source rule                                                                |
-|-------------------|----------------------------------------------------------------------------|
-| STORY_TITLE       | "Story title", "Title", or first prominent title line                      |
-| EPISODE_NUMBER    | "Episode", "Episode number", or integer near "episode"                     |
-| EPISODE_ID        | "Episode id" verbatim (e.g. "s01e02"); fall back to ep<zero-padded num>   |
-| EPISODE_DIRECTION | "Direction", "Synopsis", "Summary", or full narrative description block    |
-| LOCALES           | "Locales" / "Languages" field; default to "en" if absent                  |
-| PROJECT_SLUG      | "Project slug" if present; else slugify STORY_TITLE (lowercase, hyphens)  |
-| SERIES_GENRE      | "Genre"; infer from tone/setting if not explicit                           |
-| GENERATION_SEED   | "Seed" if present; else compute int(sha256(STORY_TITLE+EPISODE_ID)[:8])   |
-| RENDER_PROFILE    | "Render profile"; default "preview_local" if absent                        |
-| STORY_FORMAT      | "Story format" / "Format" if present; otherwise detect from content: sleep/meditation/mindfulness → continuous_narration, children's story/fable/fairy tale → illustrated_narration, documentary/explainer/educational → documentary, diary/confession/speech/first-person → monologue; default "episodic" |
-
-After extraction, print this exact confirmation block to stdout:
-
-```
-── Stage 0 complete ────────────────────────────────────────────────────
-STORY_TITLE      : <value>
-EPISODE_NUMBER   : <value>
-EPISODE_ID       : <value>
-EPISODE_DIRECTION: <first 80 chars of value> …
-LOCALES          : <value>
-PROJECT_SLUG     : <value>
-SERIES_GENRE     : <value>
-GENERATION_SEED  : <value>
-RENDER_PROFILE   : <value>
-STORY_FORMAT     : <value>
-────────────────────────────────────────────────────────────────────────
-```
-
-Then write these two files (File 1 format is detailed in the sub-task below):
-
-### File 2 — episode_direction.txt
-Path: episode_direction.txt  (current working directory)
-Content: the FULL EPISODE_DIRECTION text, untruncated.
-
-### Directories
-Create if they do not exist:
-  projects/<PROJECT_SLUG>/
-  projects/<PROJECT_SLUG>/episodes/<EPISODE_ID>/
+Print: `▶ [0/9] Stage 0 — Voice casting …`
 
 ---
 
-### Sub-task: Cast voices for each locale
+### Step 1 — Read inputs
 
-Run this AFTER extracting variables and creating directories,
-BEFORE writing pipeline_vars.sh.
+Read these files:
+  1. `{{EPISODE_DIR}}/meta.json`  — all pipeline variables are here; use them exactly as-is
+  2. `{{EPISODE_DIR}}/story.txt`  — story content, used for voice casting only
+  3. `projects/azure_tts_styles.txt` — available Azure voices and styles
+
+Extract these variables from meta.json:
+
+| Variable          | meta.json field       |
+|-------------------|-----------------------|
+| STORY_TITLE       | story_title           |
+| EPISODE_ID        | episode_id            |
+| LOCALES           | locales               |
+| PROJECT_SLUG      | project_slug          |
+| SERIES_GENRE      | series_genre          |
+| STORY_FORMAT      | story_format          |
+| EPISODE_NUMBER    | episode_number        |
+| GENERATION_SEED   | generation_seed       |
+| RENDER_PROFILE    | render_profile        |
+
+**Do NOT re-derive, change, or "correct" any of these values.**
+
+---
+
+### Step 2 — Cast voices for each locale
 
 Using the story file and projects/azure_tts_styles.txt you already read:
 
-#### Step 1 — Identify main characters
+#### Step 2a — Identify main characters
 
 **Format-aware cast scope — apply BEFORE listing characters:**
 
@@ -111,7 +85,7 @@ For `monologue`: the protagonist speaks directly to the audience and fills the n
 role. Do NOT add a "narrator" entry — Stage 3 will use the protagonist's character_id
 for all lines.
 
-#### Step 2 — For each character × each locale in {{LOCALES}}
+#### Step 2b — For each character × each locale in LOCALES
 
   a. Note gender and personality traits (commanding, fearful, ancient, young, etc.).
 
@@ -137,9 +111,11 @@ for all lines.
        - Villain:     pitch "-5%",  break_ms 500
        - Young child: pitch "+5%",  break_ms 350
 
-#### Step 3 — Write VoiceCast.json
+---
 
-Path: projects/<PROJECT_SLUG>/VoiceCast.json
+### Step 3 — Write VoiceCast.json
+
+Path: `projects/{{PROJECT_SLUG}}/VoiceCast.json`
 
 If this file already exists, READ it first.  Only ADD entries whose
 character_id is not already present — NEVER overwrite existing entries
@@ -179,33 +155,47 @@ Format:
 Rules:
   • character_id must be a lowercase slug (e.g. "narrator", "pharaoh", "anubis").
     Stage 3 MUST use these exact IDs as cast[].character_id in Script.json.
-  • Include ONLY locales present in {{LOCALES}}.
+  • Include ONLY locales present in LOCALES (from meta.json).
   • available_styles: copy exactly from azure_tts_styles.txt for the chosen voice.
-
-#### Step 4 — Add to pipeline_vars.sh
-
-Append this line to pipeline_vars.sh (written in the next step):
-  export VOICE_CAST_FILE="projects/<PROJECT_SLUG>/VoiceCast.json"
 
 ---
 
-### File 1 — pipeline_vars.sh  (updated)
+### Step 4 — Overwrite pipeline_vars.sh
 
-Path: pipeline_vars.sh  (current working directory)
-Content — fill in actual values, include the VOICE_CAST_FILE line:
+Path: `{{EPISODE_DIR}}/pipeline_vars.sh`
+
+Overwrite the file completely. Fill in actual values read from meta.json:
+
 ```bash
-export STORY_TITLE="<value>"
-export EPISODE_NUMBER="<value>"
-export EPISODE_ID="<value>"
-export LOCALES="<value>"
-export PROJECT_SLUG="<value>"
-export SERIES_GENRE="<value>"
-export GENERATION_SEED="<value>"
-export RENDER_PROFILE="<value>"
-export STORY_FORMAT="<value>"
+export STORY_TITLE="<from meta.json: story_title>"
+export EPISODE_NUMBER="<from meta.json: episode_number>"
+export EPISODE_ID="<from meta.json: episode_id>"
+export LOCALES="<from meta.json: locales>"
+export PROJECT_SLUG="<from meta.json: project_slug>"
+export SERIES_GENRE="<from meta.json: series_genre>"
+export GENERATION_SEED="<from meta.json: generation_seed>"
+export RENDER_PROFILE="<from meta.json: render_profile>"
+export STORY_FORMAT="<from meta.json: story_format>"
 export PROJECT_DIR="projects/<PROJECT_SLUG>"
 export EPISODE_DIR="projects/<PROJECT_SLUG>/episodes/<EPISODE_ID>"
 export VOICE_CAST_FILE="projects/<PROJECT_SLUG>/VoiceCast.json"
 ```
 
-Print: `✓ [0/9] Stage 0 — Read story file  done`
+After writing, print this exact confirmation block to stdout:
+
+```
+── Stage 0 complete ────────────────────────────────────────────────────
+STORY_TITLE      : <value>
+EPISODE_NUMBER   : <value>
+EPISODE_ID       : <value>
+LOCALES          : <value>
+PROJECT_SLUG     : <value>
+SERIES_GENRE     : <value>
+GENERATION_SEED  : <value>
+RENDER_PROFILE   : <value>
+STORY_FORMAT     : <value>
+VOICE_CAST_FILE  : <value>
+────────────────────────────────────────────────────────────────────────
+```
+
+Print: `✓ [0/9] Stage 0 — Voice casting done`

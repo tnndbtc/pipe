@@ -1,0 +1,849 @@
+# Regression Verification Guideline — AI Narrative Pipeline
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# PURPOSE: Before or after any modification to this codebase, verify all
+# workflows described here still function correctly end-to-end.  Each section
+# lists the exact files involved, the invariants that must hold, and the
+# specific things most likely to break when that area is touched.
+#
+# CODEBASE ROOT: /home/tnnd/data/code/pipe
+# ══════════════════════════════════════════════════════════════════════════════
+
+---
+
+## PART 1 — SYSTEM ARCHITECTURE
+
+The pipeline converts a plain-text story into a multi-locale rendered video episode.
+It has three layers:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Web UI  (test_server.py — single-file Python HTTP server)  │
+│  • Runs on localhost:8080                                   │
+│  • Serves HTML+JS UI as a large inline string               │
+│  • Orchestrates all workflows via HTTP endpoints            │
+└────────────────────────┬────────────────────────────────────┘
+                         │  spawns subprocess
+┌────────────────────────▼────────────────────────────────────┐
+│  run.sh  (pipeline orchestrator)                            │
+│  • Stages 0–9: calls `claude -p <filled_prompt>`            │
+│  • Stage 10: calls Python scripts directly                  │
+│  • Sources pipeline_vars.sh between stages                  │
+│  • Streams stdout back to browser via SSE                   │
+└────────────────────────┬────────────────────────────────────┘
+                         │  writes/reads
+┌────────────────────────▼────────────────────────────────────┐
+│  projects/{PROJECT_SLUG}/                                   │
+│  ├── VoiceCast.json            (Stage 0, shared across eps) │
+│  ├── canon.json                (Stage 7, grows per ep)      │
+│  └── episodes/{EPISODE_ID}/                                 │
+│      ├── story.txt             (input, written by UI)       │
+│      ├── meta.json             (written by Create Episode)  │
+│      ├── pipeline_vars.sh      (stub→full, Stage 0)         │
+│      ├── StoryPrompt.json      (Stage 2)                    │
+│      ├── Script.json           (Stage 3)                    │
+│      ├── ShotList.json         (Stage 4)                    │
+│      ├── AssetManifest_draft.shared.json  (Stage 5)         │
+│      ├── AssetManifest_draft.{locale}.json (Stage 5 / 8)   │
+│      ├── canon_diff.json       (Stage 6)                    │
+│      ├── AssetManifest_merged.{locale}.json  (Stage 10[2]) │
+│      ├── AssetManifest.media.{locale}.json   (Stage 10[5]) │
+│      ├── RenderPlan.{locale}.json            (Stage 10[6]) │
+│      └── renders/{locale}/output.mp4         (Stage 10[7]) │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## PART 2 — WORKFLOW A: NEW EPISODE CREATION (Prepare → Create Episode)
+
+### Files involved
+- `code/http/test_server.py` — JS functions: `runPrepare()`, `createEpisode()`, `applyPreparedMeta()`
+- `code/http/test_server.py` — API endpoints: `POST /api/infer_story_meta`, `GET /api/check_slug`, `GET /api/next_episode_id`, `POST /api/create_episode`
+
+### Step-by-step flow
+
+**Step 1 — User pastes story into textarea and clicks "⚙ Prepare"**
+- JS: `runPrepare()` (search: `async function runPrepare`)
+- Calls `POST /api/infer_story_meta` with `{story: <text>}`
+- Server runs: `claude -p --model haiku` with a one-shot extraction prompt
+- Returns: `{title, slug, genre, story_format, metadata_found[], slug_exists, slug_suggested}`
+- JS stores result in `_preparedMeta`, sets `_selectedFormat`
+- JS calls `applyPreparedMeta(d)` to populate the info bar fields
+
+**Step 2 — applyPreparedMeta() branch on slug_exists**
+- `slug_exists == false` (new project):
+  - Calls `GET /api/next_episode_id?slug=<slug>`
+  - Server returns `{"next_ep_id": "s01e01"}` (scans `projects/<slug>/episodes/` for highest sNNeNN)
+  - JS: `_preparedEpId = nd.next_ep_id || 's01e01'`  ← KEY: reads `next_ep_id`, not `ep_id`
+  - Shows "✦ Create Episode" button; disables Run button
+- `slug_exists == true` (existing project):
+  - JS: `_preparedEpId = null`
+  - Calls `loadRunProjects().then(onRunProjectChange)` — auto-selects project in Run tab
+  - Run button becomes enabled once `onRunProjectChange` → `loadEpisodeDetails` sets `currentSlug`/`currentEpId`
+
+**Step 3 — User clicks "✦ Create Episode"**
+- JS: `createEpisode()` (search: `async function createEpisode`)
+- Calls `POST /api/create_episode` with: `{slug, ep_id, story, title, genre, story_format, locales, no_music}`
+- Server creates:
+  1. `projects/{slug}/episodes/{ep_id}/` directory
+  2. `story.txt` — raw story content
+  3. `meta.json` — full episode metadata (see schema below)
+  4. `pipeline_vars.sh` — stub with all vars EXCEPT `VOICE_CAST_FILE` (Stage 0 adds that)
+- Server returns: `{ok: true, ep_dir: "projects/slug/episodes/ep_id", slug, ep_id}`
+- JS: sets `currentSlug = d.slug`, `currentEpId = d.ep_id`, enables Run button
+
+### meta.json schema (written by /api/create_episode)
+```json
+{
+  "schema_id":       "EpisodeMeta",
+  "story_title":     "...",
+  "project_slug":    "...",
+  "episode_id":      "s01e01",
+  "episode_number":  "01",
+  "series_genre":    "...",
+  "story_format":    "episodic",
+  "locales":         "en",
+  "generation_seed": 123456789,
+  "render_profile":  "preview_local",
+  "no_music":        false,
+  "created_at":      "2026-02-28T..."
+}
+```
+
+### pipeline_vars.sh stub (written by /api/create_episode)
+```bash
+export STORY_TITLE="..."
+export EPISODE_NUMBER="01"
+export EPISODE_ID="s01e01"
+export LOCALES="en"
+export PROJECT_SLUG="..."
+export SERIES_GENRE="..."
+export GENERATION_SEED="123456789"
+export RENDER_PROFILE="preview_local"
+export STORY_FORMAT="episodic"
+export PROJECT_DIR="projects/..."
+export EPISODE_DIR="projects/.../episodes/s01e01"
+# NOTE: VOICE_CAST_FILE is NOT in the stub — Stage 0 adds it
+```
+
+### Regression risks for Workflow A
+1. `/api/next_episode_id` returns key `"next_ep_id"` — JS must read `nd.next_ep_id`, NOT `nd.ep_id`
+2. Fallback episode ID must be `'s01e01'` (not `'ep0001'` or other formats)
+3. `currentSlug` and `currentEpId` must be set BEFORE Run button is enabled
+4. `createEpisode()` must POST to `/api/create_episode` and receive `{ok, slug, ep_id}`
+5. `meta.json` field names must match what `p_0.txt` reads: `story_title`, `project_slug`, `episode_id`, `episode_number`, `series_genre`, `story_format`, `locales`, `generation_seed`, `render_profile`
+6. `pipeline_vars.sh` stub must export all vars that `run.sh` uses via `{{PLACEHOLDER}}` substitution (see PART 3)
+
+---
+
+## PART 3 — WORKFLOW B: PIPELINE EXECUTION (run.sh Stages 0–10)
+
+### Entry point
+File: `run.sh`
+Invoked by: web UI `/stream` endpoint as `bash run.sh <ep_dir> <from_stage> <to_stage>`
+Working directory: `PIPE_DIR` (repo root)
+
+### How run.sh works
+
+**Invocation signature:**
+```bash
+./run.sh projects/{slug}/episodes/{ep_id} [from_stage=0] [to_stage=10]
+```
+
+**On startup, run.sh:**
+1. Validates `ep_dir` exists and `story.txt` + `pipeline_vars.sh` are present
+2. Sources `pipeline_vars.sh` immediately (stub values available before Stage 0)
+3. Runs stages `FROM_STAGE` through `TO_STAGE` inclusive
+
+**fill_and_run(N) — called for each LLM stage:**
+1. Reads `prompts/p_N.txt`
+2. Runs `sed` substitution replacing all `{{PLACEHOLDER}}` tokens:
+   - `{{EPISODE_DIR}}`    → `$EP_DIR`  (e.g. `projects/slug/episodes/s01e01`)
+   - `{{STORY_FILE}}`     → `${EP_DIR}/story.txt`
+   - `{{PROJECT_SLUG}}`   → from pipeline_vars.sh
+   - `{{EPISODE_ID}}`     → from pipeline_vars.sh
+   - `{{EPISODE_NUMBER}}` → from pipeline_vars.sh
+   - `{{STORY_TITLE}}`    → from pipeline_vars.sh
+   - `{{SERIES_GENRE}}`   → from pipeline_vars.sh
+   - `{{GENERATION_SEED}}`→ from pipeline_vars.sh
+   - `{{RENDER_PROFILE}}` → from pipeline_vars.sh (default: preview_local)
+   - `{{LOCALES}}`        → from pipeline_vars.sh (default: en)
+   - `{{STORY_FORMAT}}`   → from pipeline_vars.sh (default: episodic)
+3. Calls `inline_files_into_prompt` — detects lines matching `  N. some/path.json` and pre-embeds the file content into the prompt (eliminates Read tool calls in Claude)
+4. Calls `claude -p --model <model> --dangerously-skip-permissions --no-session-persistence --append-system-prompt "<exec_directive>" <filled_prompt>`
+5. Tees output to `stage_logs/{slug}.{ep_id}.stage_N.log` and stdout
+
+**Model selection (get_stage_model):**
+- Stages 2, 3, 4, 5, 8 → `sonnet` (creative/complex)
+- All others → `haiku` (extraction/assembly)
+- Global override: `MODEL=opus ./run.sh` overrides all
+- Per-stage override: `STAGE_MODEL_3=opus ./run.sh` overrides one stage
+
+**After Stage 0 specifically:** run.sh re-sources `pipeline_vars.sh` to pick up `VOICE_CAST_FILE` and `EPISODE_DIR` exports that Stage 0 added.
+
+### Regression risks for run.sh
+1. Every `{{PLACEHOLDER}}` used in any `prompts/p_N.txt` MUST have a matching `-e "s|{{...}}|...|g"` line in `fill_and_run`'s `sed` block. Adding a new placeholder to any prompt REQUIRES adding the corresponding sed rule.
+2. The `inline_files_into_prompt` function detects file paths using regex `^[[:space:]]+[0-9]+\.[[:space:]]+([^[:space:]]+\.(json|txt|sh))[[:space:]]*`. Only `.json`, `.txt`, `.sh` are inlined. If a prompt references other file types with the numbered-list format, they won't be inlined.
+3. `set -euo pipefail` means any stage failure exits the whole script immediately.
+4. Stage 0 MUST write `pipeline_vars.sh` — run.sh checks for its existence after Stage 0 and exits with error if missing.
+5. `NO_MUSIC=1` env var: Stage 10 passes `--no-music` to `render_video.py` only if this is set. The web UI `/stream` handler reads `no_music` from `meta.json` if not overridden by checkbox.
+
+---
+
+## PART 4 — PIPELINE STAGES 0–9 (LLM-driven)
+
+### Stage 0 — Voice Casting
+**File:** `prompts/p_0.txt`
+**Model:** haiku
+**Reads:**
+- `{{EPISODE_DIR}}/meta.json` — all pipeline variables (source of truth)
+- `{{EPISODE_DIR}}/story.txt` — for voice casting decisions only
+- `projects/azure_tts_styles.txt` — available Azure TTS voices and styles
+
+**Writes:**
+- `projects/{{PROJECT_SLUG}}/VoiceCast.json` — append-only per character_id (preserves voices across episodes)
+- `{{EPISODE_DIR}}/pipeline_vars.sh` — FULL version replacing stub; adds `VOICE_CAST_FILE` and `EPISODE_DIR` exports
+
+**Critical invariants:**
+- MUST NOT change/correct any values from meta.json — copies exactly
+- VoiceCast.json is APPEND-ONLY: only adds characters not already present
+- Every character gets a DIFFERENT azure_voice per locale
+- For `monologue` format: NO narrator entry — protagonist IS the narrator
+- For `continuous_narration`, `illustrated_narration`, `documentary`: narrator ONLY, no other characters
+- pipeline_vars.sh MUST include all vars used by run.sh for stages 1–9
+
+**What breaks if Stage 0 fails or writes wrong values:**
+- All downstream stages source `pipeline_vars.sh` — wrong values propagate everywhere
+- VoiceCast character_ids must match what Stage 3 uses as `cast[].character_id`
+
+---
+
+### Stage 1 — Canon Check
+**File:** `prompts/p_1.txt`
+**Model:** haiku
+**Reads:** `projects/{{PROJECT_SLUG}}/canon.json` (may not exist for ep 1)
+**Writes:** `{{EPISODE_DIR}}/stage_1_check.txt`
+
+**Critical invariants:**
+- If canon.json doesn't exist: NOT an error; episode is treated as episode 1
+- Output is informational only; no downstream stage reads `stage_1_check.txt`
+
+---
+
+### Stage 2 — Produce StoryPrompt.json
+**File:** `prompts/p_2.txt`
+**Model:** sonnet
+**Reads:** `episode_direction.txt` (legacy path), `projects/{{PROJECT_SLUG}}/canon.json` (optional), `contracts/schemas/StoryPrompt.v1.json`
+**Writes:** `{{EPISODE_DIR}}/StoryPrompt.json`
+
+**Validates against:** `contracts/schemas/StoryPrompt.v1.json`
+
+**Required fields:** `schema_id`, `schema_version`, `prompt_id`, `episode_goal`, `generation_seed`, `series.title`, `series.genre`, `series.tone`, `setting.primary_location`, `characters[]` (min 2), `constraints.max_scenes`
+
+**Regression risks:**
+- `characters[]` must have ≥ 2 entries or schema validation fails
+- `generation_seed` must be an integer (not string)
+
+---
+
+### Stage 3 — Produce Script.json
+**File:** `prompts/p_3.txt`
+**Model:** sonnet
+**Reads:** `episode_direction.txt`, `projects/{{PROJECT_SLUG}}/VoiceCast.json`, `{{EPISODE_DIR}}/StoryPrompt.json`, `contracts/schemas/Script.v1.json`
+**Writes:** `{{EPISODE_DIR}}/Script.json`
+
+**Validates against:** `contracts/schemas/Script.v1.json`
+
+**Required top-level fields:** `schema_id`, `schema_version`, `script_id`, `title`, `cast[]`, `scenes[]`
+
+**Critical bindings (regression-sensitive):**
+- `cast[].character_id` MUST match `VoiceCast.json` character IDs — Stage 5 looks up voice params by these IDs
+- `cast[].gender` field is required — Stage 5 copies it into `AssetManifest.character_packs[].gender`
+- `scenes[].dialogue[].speaker_id` MUST match a `cast[].character_id`
+- Maximum 5 scenes
+
+**Story format rules ({{STORY_FORMAT}} affects ALL of these):**
+| Format | Script rule |
+|--------|-------------|
+| `episodic` | Multi-character dialogue, narrator for transitions |
+| `continuous_narration` | ALL lines `speaker_id: "narrator"`, no scene divisions |
+| `illustrated_narration` | ALL lines `speaker_id: "narrator"`, characters appear visually only |
+| `documentary` | ALL lines `speaker_id: "narrator"`, topic-driven sections |
+| `monologue` | ALL lines use protagonist's character_id (NOT "narrator") |
+
+---
+
+### Stage 4 — Produce ShotList.json
+**File:** `prompts/p_4.txt`
+**Model:** sonnet
+**Reads:** `{{EPISODE_DIR}}/Script.json`, `contracts/schemas/ShotList.v1.json`
+**Writes:** `{{EPISODE_DIR}}/ShotList.json`
+
+**Validates against:** `contracts/schemas/ShotList.v1.json`
+
+**Required fields per shot:** `shot_id`, `scene_id`, `duration_sec`, `camera_framing`, `camera_movement`, `characters[]`, `background_id`, `audio_intent`
+
+**Required audio_intent sub-fields:**
+- `sfx_tags[]` — list of sound effect descriptions
+- `music_mood` — one phrase or null
+- `vo_speaker_id` — character_id or null
+- `vo_text` — verbatim dialogue or null
+- `vo_item_ids[]` — IDs like `"vo-<scene_id>-<NNN>"` (EVERY VO line assigned to exactly one shot)
+- `sfx_item_ids[]` — IDs like `"sfx-{shot_id}-{NNN}"` (parallel with sfx_tags)
+- `music_item_id` — `"music-{shot_id}"` or null
+
+**Critical invariants:**
+- Total episode duration must be 60–120 seconds
+- Every VO line in Script.json must appear in exactly one shot's `vo_item_ids`
+- `timing_lock_hash` = SHA256 of sorted shot_ids list — used by render pipeline to detect shot list changes
+
+**Story format rules:**
+| Format | Shot rule |
+|--------|-----------|
+| `continuous_narration` | `characters: []` (empty) on all shots |
+| `documentary` | `characters: []` (empty) on all shots |
+| `monologue` | Single protagonist, always `position: "center"` |
+| `illustrated_narration` | Characters in `characters[]` but no VO assigned to them |
+
+---
+
+### Stage 5 — Produce AssetManifest drafts
+**File:** `prompts/p_5.txt`
+**Model:** sonnet
+**Reads:** `{{EPISODE_DIR}}/ShotList.json`, `{{EPISODE_DIR}}/Script.json` (for `cast[].gender`), `projects/{{PROJECT_SLUG}}/VoiceCast.json`, `episode_direction.txt`, `contracts/schemas/AssetManifest.v1.json`
+**Writes:**
+- `{{EPISODE_DIR}}/AssetManifest_draft.shared.json` — locale-free (images, SFX, music)
+- `{{EPISODE_DIR}}/AssetManifest_draft.en.json` — English VO only
+
+**Validates against:** `contracts/schemas/AssetManifest.v1.json`
+
+**Shared manifest structure:**
+```
+locale_scope: "shared"
+vo_items: []              ← always empty
+character_packs: [...]    ← one per unique character in ShotList
+backgrounds: [...]        ← one per unique background_id in ShotList
+sfx_items: [...]          ← derived from sfx_item_ids in ShotList
+music_items: [...]        ← derived from music_item_id in ShotList
+```
+
+**Locale manifest (en) structure:**
+```
+locale_scope: "locale"
+locale: "en"
+shared_ref: "AssetManifest_draft.shared.json"
+character_packs: []        ← always empty (lives in shared)
+backgrounds: []            ← always empty (lives in shared)
+background_overrides: []   ← always empty at draft time (post_tts_analysis fills this)
+vo_items: [...]            ← one per VO line, with full tts_prompt
+```
+
+**Critical bindings:**
+- `character_packs[].gender` comes from `Script.json cast[].gender` — NOT guessed
+- `vo_items[].tts_prompt.azure_voice` must match `VoiceCast.json character[en].azure_voice`
+- `vo_items[].tts_prompt.azure_style` must be chosen from `VoiceCast.json character[en].available_styles` (fallback chain applies)
+- `vo_items[].tts_prompt.azure_style_degree` copied EXACTLY from VoiceCast.json — do NOT per-line override
+- `vo_items[].tts_prompt.azure_rate` copied EXACTLY from VoiceCast.json — do NOT per-line override
+- DO NOT add `start_sec`, `end_sec`, `duration_sec` to vo_items — those are written by `post_tts_analysis.py`
+
+**Story format rules:**
+- `continuous_narration`, `documentary`: `character_packs: []` — no character images
+- All other formats: character_packs generated normally
+
+**Whisper special case:** when `azure_style = "whispering"`, set `azure_break_ms = 0` (pauses sound robotic in whispers)
+
+---
+
+### Stage 6 — Write canon_diff.json
+**File:** `prompts/p_6.txt`
+**Model:** haiku
+**Reads:** `episode_direction.txt`, `{{EPISODE_DIR}}/Script.json`, `{{EPISODE_DIR}}/ShotList.json`, `projects/{{PROJECT_SLUG}}/canon.json` (optional), `contracts/schemas/CanonDiff.v1.json`
+**Writes:** `{{EPISODE_DIR}}/canon_diff.json`
+
+**Validates against:** `contracts/schemas/CanonDiff.v1.json`
+
+**Structure:**
+```json
+{
+  "episode": "s01e01",
+  "added_characters": [...],     ← NEW characters only
+  "updated_states": [...],       ← existing characters whose status changed
+  "new_world_facts": [...],
+  "new_unresolved_threads": [...],
+  "resolved_threads": [...]
+}
+```
+
+---
+
+### Stage 7 — Update canon.json
+**File:** `prompts/p_7.txt`
+**Model:** haiku
+**Reads:** `{{EPISODE_DIR}}/canon_diff.json`, `projects/{{PROJECT_SLUG}}/canon.json` (may not exist), `contracts/schemas/Canon.v1.json`
+**Writes:** `projects/{{PROJECT_SLUG}}/canon.json` (created or updated)
+
+**Validates against:** `contracts/schemas/Canon.v1.json`
+
+**Merge rules:**
+- If canon.json didn't exist: create fresh from diff
+- If it existed: append new characters, update states, append world_facts (no duplicates), merge threads, append episode_summaries entry for this episode_id
+
+---
+
+### Stage 8 — Produce locale variants
+**File:** `prompts/p_8.txt`
+**Model:** sonnet
+**Reads:** All Stage 2–7 outputs for en locale + `VoiceCast.json` + `contracts/schemas/AssetManifest.v1.json`
+**Writes:** For each non-en locale in LOCALES:
+- `{{EPISODE_DIR}}/StoryPrompt.{locale}.json`
+- `{{EPISODE_DIR}}/Script.{locale}.json`
+- `{{EPISODE_DIR}}/ShotList.{locale}.json`
+- `{{EPISODE_DIR}}/AssetManifest_draft.{locale}.json`
+- `{{EPISODE_DIR}}/canon_diff.{locale}.json`
+- `projects/{{PROJECT_SLUG}}/canon.{locale}.json`
+
+**EARLY EXIT: if LOCALES is "en" only**, prints skip message and exits without writing anything.
+
+**Locale AssetManifest structure (critical — different from shared/en):**
+```json
+{
+  "locale_scope": "locale",
+  "locale": "zh-Hans",
+  "shared_ref": "AssetManifest_draft.shared.json",
+  "character_packs": [],        ← ALWAYS empty
+  "backgrounds": [],            ← ALWAYS empty
+  "background_overrides": [],   ← ALWAYS empty at draft time
+  "vo_items": [...],            ← translated VO with locale voice params
+  "sfx_items": NOT INCLUDED,
+  "music_items": NOT INCLUDED
+}
+```
+
+**Critical invariants for Stage 8:**
+- Story format guard: `continuous_narration`/`documentary` → NO `character_packs`, translate narrator VO only
+- Voice replacement: look up `VoiceCast.json character[<locale>]` fields for each vo_item
+- azure_style fallback chain (in order): angry→shouting→unfriendly→serious→(omit), fearful→terrified→whispering→sad→(omit), cheerful→excited→friendly→hopeful→(omit), etc.
+- For DragonHD voices (whose available_styles are archetype names like "assassin", "captain"): use `VoiceCast.json character[locale].azure_style` when no emotion fallback matches
+- Duration Matching Rule: translated text should take same time to speak as English (±20%)
+- DO NOT include `start_sec`, `end_sec` in translated vo_items
+- DO NOT translate: `search_prompt`, `ai_prompt`, `motion.description`, any `*_id` field
+
+---
+
+### Stage 9 — DEPRECATED (replaced by gen_render_plan.py in Stage 10)
+**File:** `prompts/p_9.txt` — still present but largely superseded.
+**Gate check:** exits without writing if `AssetManifest.media.{locale}.json` doesn't exist.
+**NOTE:** In the current architecture, `gen_render_plan.py` (Stage 10[6]) replaces the LLM-based approach in p_9.txt. The `p_9.txt` prompt references the old single-locale `AssetManifest.media.json` path. Do not rely on p_9.txt output in the current pipeline.
+
+---
+
+## PART 5 — STAGE 10: PYTHON POST-PROCESSING SCRIPTS
+
+Stage 10 runs entirely without LLM calls. Invoked by `run_stage_10()` in `run.sh`.
+Iterates over each locale in `${LOCALES}` (comma-separated, trimmed).
+
+**Sub-step [1/8] — gen_music_clip.py** (locale-free, runs once)
+```
+Input:  projects/{slug}/episodes/{ep_id}/AssetManifest_draft.shared.json
+Output: projects/{slug}/episodes/{ep_id}/assets/music/{item_id}.wav
+        (one clip per music_items[] entry in the shared manifest)
+```
+- Reads MOOD tags from source files in `projects/resources/music/`
+- Uses CLAP model to match `music_mood` text to best music segment
+- Skips gracefully if no resources dir or no music_items
+- Requires: `pip install laion-clap mutagen librosa soundfile numpy scipy`
+- Checkpoint auto-downloaded to `~/.cache/laion_clap/` on first run
+
+**Sub-step [2/8] — manifest_merge.py** (per locale)
+```
+Input:  --shared  AssetManifest_draft.shared.json
+        --locale  AssetManifest_draft.{locale}.json
+Output: AssetManifest_merged.{locale}.json  (locale_scope: "merged")
+```
+- Merges shared + locale manifest into single resolved view
+- Computes `duck_intervals` per shot from VO `start_sec`/`end_sec` + `music.fade_sec`
+- Computes a per-locale `timing_lock_hash`
+- Requires: stdlib only
+
+**Sub-step [3/8] — gen_tts_cloud.py** (per locale)
+```
+Input:  AssetManifest_merged.{locale}.json  (reads vo_items[].tts_prompt)
+Output: assets/{locale}/audio/vo/{item_id}.wav
+        assets/{locale}/audio/vo/licenses/{item_id}.license.json
+        assets/meta/gen_tts_cloud_results.json
+```
+- Calls Azure Cognitive Services Speech SDK
+- Requires env vars: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`
+- Uses SSML with: `<voice>`, `<mstts:express-as style= styledegree=>`, `<prosody rate= pitch=>`, `<break time='Nms'/>`
+- Voice selection priority: `azure_voice` field > `character_packs[].gender` > `voice_style` > hardcoded default
+- Requires: `pip install azure-cognitiveservices-speech>=1.38.0`
+
+**Sub-step [4/8] — post_tts_analysis.py** (per locale)
+```
+Input:  AssetManifest_draft.{locale}.json  (mutates IN PLACE)
+        assets/{locale}/audio/vo/{item_id}.wav  (measures duration)
+Output: AssetManifest_draft.{locale}.json  (adds start_sec, end_sec to vo_items[])
+        Also writes background_overrides[] for overflow shots
+```
+- Measures actual WAV durations with soundfile
+- Computes sequential VO placement: `start_sec[0]=0`, `start_sec[n+1]=end_sec[n]+0.3`
+- Detects overflow when total VO duration > shot `duration_sec`
+- Overflow handling: writes `background_overrides[]` with extended `duration_sec` + `_music_item.duration_sec` patches
+- **Must run BEFORE manifest_merge.py for accurate duck_intervals** (but run.sh runs it after; see ordering note below)
+- Requires: `pip install soundfile`
+
+**Sub-step [5/8] — resolve_assets.py** (per locale)
+```
+Input:  AssetManifest_merged.{locale}.json
+Output: AssetManifest.media.{locale}.json
+```
+- Probes local filesystem for each asset — no network calls
+- Emits `file://` URIs for found files, `placeholder://` for missing
+- Asset path conventions:
+  - VO:         `assets/{locale}/audio/vo/{item_id}.{wav|mp3|ogg}`
+  - Music:      `assets/music/{item_id}.{wav|mp3|ogg}`
+  - SFX:        `assets/sfx/{item_id}.{wav|mp3|ogg}`
+  - Background: `assets/{asset_id}.{ext}` (then `assets/backgrounds/` subdir)
+  - Character:  `projects/{project_id}/characters/` (project-level first), then `assets/characters/`, then `assets/` root; also tries stripping `char-` prefix and `-vN` suffix
+- Requires: stdlib only
+
+**Sub-step [6/8] — gen_render_plan.py** (per locale)
+```
+Input:  --manifest  AssetManifest_merged.{locale}.json
+        --media     AssetManifest.media.{locale}.json
+Output: AssetManifest_final.{locale}.json
+        RenderPlan.{locale}.json
+```
+- Deterministic replacement for p_9.txt LLM stage
+- VO `timeline_in_ms`/`timeline_out_ms` come from measured `start_sec`/`end_sec` (NOT evenly distributed)
+- `duration_ms` respects `background_overrides` for overflow shots
+- `timing_lock_hash` comes from `AssetManifest_merged` (locale-adjusted)
+- Passes `duck_intervals`/`duck_db`/`fade_sec` into each shot's music entry
+- Requires: stdlib only
+
+**Sub-step [7/8] — render_video.py** (per locale)
+```
+Input:  --plan    RenderPlan.{locale}.json
+        --locale  {locale}
+        --out     renders/{locale}/
+        --profile preview_local | draft_720p | high
+        --no-music (if NO_MUSIC=1)
+Output: renders/{locale}/output.mp4
+        renders/{locale}/output.srt
+        renders/{locale}/render_output.json
+```
+- Per-shot MKV intermediates in `.shots/`, then concat → output.mp4
+- Character compositing: 1=center, 2=left/right thirds, 3=even thirds, 4+=quarters
+- Active speaker: scale×1.05 opacity 1.0; inactive: scale×0.95 opacity 0.80
+- Audio mixing: VO at 0 dB, music at -6 dB (ducked via volume=expr), SFX at -3 dB
+- Loudnorm: -16 LUFS (linear=true) applied in concat pass
+- Music continuity: same `music_asset_id` across shots = seamless; different = hard cut
+- n_chars == 0 case (continuous_narration/documentary): no character compositing; verified handled at line ~401
+- Requires: FFmpeg in PATH
+
+**Sub-step [8/8] — export_youtube_dubbed.py** (per non-en locale only)
+```
+Input:  renders/{locale}/output.mp4
+Output: renders/{locale}/youtube_dubbed.aac
+```
+- Extracts mixed audio track as standalone AAC (192 kbps, 48 kHz, stereo)
+- Skipped for `en` locale (primary upload uses the video's own audio)
+- Requires: FFmpeg in PATH
+
+### CRITICAL ORDERING NOTE for Stage 10
+The sub-steps in run.sh run in this order within each locale:
+```
+[1] gen_music_clip (shared, once)
+[2] manifest_merge  ← runs BEFORE TTS
+[3] gen_tts_cloud   ← generates WAVs
+[4] post_tts_analysis ← measures WAVs, writes start_sec/end_sec into locale manifest
+[5] resolve_assets
+[6] gen_render_plan
+[7] render_video
+[8] export_youtube_dubbed
+```
+manifest_merge [2] runs BEFORE TTS [3] and post_tts_analysis [4], meaning on the first run,
+`start_sec`/`end_sec` don't exist yet and duck_intervals will be empty.
+This is intentional — re-running from step [2] after step [4] produces accurate duck intervals.
+
+---
+
+## PART 6 — WORKFLOW C: VOICE CAST EDITOR
+
+### Files involved
+`code/http/test_server.py` — JS functions: `vcOpen()`, `vcSave()`, `vcContinue()`, `buildVcCard()`, presetSel change handler
+API endpoints: `GET /api/voice_index`, `GET /api/voice_presets`, `GET /api/azure_voices`, `POST /save_voice_cast`
+
+### Flow
+1. After Stage 0 completes (or existing episode loaded), user opens Voice Cast editor
+2. `vcOpen()` loads `VoiceCast.json` into `_vcData` (in-memory)
+3. UI renders one card per character per locale
+4. User can preview voice clips via "▶ Play" button
+5. User can apply presets (stored per voice in a presets dir)
+6. User saves edits → `vcSave()` → `POST /save_voice_cast` → writes `VoiceCast.json`
+7. User clicks "Continue" (optional) → `vcContinue()` → calls `startPipeStep` to run stages 1–N
+
+### Voice presets
+- Source: `GET /api/voice_presets?voice=<azure_voice_name>`
+- Files: `projects/resources/voice_presets/{voice_name}/*.json`
+- Each preset: `{style, style_degree, rate, pitch, break_ms, hash, label}`
+- "— no preset —" selection: restores `_voiceIndex[voice].clips[style].params` defaults (does NOT early-return without resetting)
+
+### Regression risks for Voice Cast
+1. When user selects "— no preset —", the Emotion/Speak Speed/Pitch/Break fields MUST reset to the voice index defaults for that voice+style combination. The old bug was `if (!preset) return;` skipping this reset — FIXED. The correct code looks up `_voiceIndex?.[voiceSel.value]?.clips?.[styleSel.value]?.params` and restores those values before returning.
+2. `_voiceIndex` is loaded from `GET /api/voice_index` — must be loaded before presetSel change handler fires
+3. `vcContinue()` builds `ep_dir` from `currentSlug`/`currentEpId` — both must be set before voice cast can be opened for a running episode
+
+---
+
+## PART 7 — WORKFLOW D: EXISTING PROJECT LOAD
+
+### Files involved
+`code/http/test_server.py` — JS functions: `loadRunProjects()`, `onRunProjectChange()`, `onRunEpisodeChange()`, `loadEpisodeDetails()`
+API endpoints: `GET /list_projects`, `GET /pipeline_status`
+
+### Flow
+1. User selects a project from `run-project-sel` dropdown
+2. `onRunProjectChange()` called:
+   - Populates `run-episode-sel` with episode IDs from `_runProjectList`
+   - Sets `_usingExistingEp = true`
+   - Calls `loadEpisodeDetails(slug, firstEpId)`
+3. `loadEpisodeDetails(slug, epId)`:
+   - Sets `currentSlug = slug; currentEpId = epId;` **immediately on first line (synchronous)**
+   - Calls `GET /pipeline_status?slug=...&ep_id=...`
+   - Calls `syncRunTabFromPipeline(...)` to update UI state
+
+### Regression risks
+1. `loadEpisodeDetails` sets `currentSlug`/`currentEpId` synchronously on its first line — this is why `setRunBtnEnabled(true)` in `onRunProjectChange` is safe to call before the async fetch completes
+2. `onRunProjectChange()` assumes `_runProjectList` is already populated. If a new episode was just created but `loadRunProjects()` hasn't been called since, the episode dropdown may miss it
+3. `GET /list_projects` returns `{slug, episodes: [{id, files: [...]}]}` — any change to this format breaks the episode dropdown population in `onRunProjectChange`
+
+---
+
+## PART 8 — WEB SERVER API ENDPOINTS REFERENCE
+
+All endpoints implemented in `code/http/test_server.py`. Server runs on `localhost:8080`.
+
+### GET endpoints
+| Path | Parameters | Returns |
+|------|-----------|---------|
+| `/stream` | `ep_dir`, `from`, `to`, `test`, `profile`, `no_music` | SSE stream of run.sh output |
+| `/run_step` | `step`, `slug`, `ep_id`, `locale`, `profile`, `no_music` | SSE stream of single post-proc step |
+| `/run_locale` | `slug`, `ep_id`, `locale`, `profile`, `no_music` | SSE stream of all post-proc steps for locale |
+| `/list_projects` | — | `[{slug, episodes: [{id, files:[]}]}]` |
+| `/pipeline_status` | `slug`, `ep_id` | `{story_file, voice_cast, stages: {N: bool}}` |
+| `/view_artifact` | `slug`, `ep_id`, `artifact` | JSON content of named artifact file |
+| `/api/check_slug` | `slug` | `{exists: bool, suggested: slug}` |
+| `/api/next_episode_id` | `slug` | **`{"next_ep_id": "s01e01"}`** ← key is `next_ep_id` |
+| `/api/voice_index` | — | Voice index JSON from `projects/resources/voices/index.json` |
+| `/api/voice_presets` | `voice` | Array of presets for that voice |
+| `/api/azure_voices` | — | Parsed `projects/azure_tts_styles.txt` catalog |
+| `/serve_media` | `path` | Binary file content (for audio preview) |
+
+### POST endpoints
+| Path | Body | Returns |
+|------|------|---------|
+| `/stop` | — | Kills running subprocess |
+| `/save_story` | `{story}` | `{filename, num}` |
+| `/delete_episode_dir` | `{path}` | `{ok}` |
+| `/api/infer_story_meta` | `{story}` | `{title, slug, genre, story_format, metadata_found[], slug_exists, slug_suggested}` |
+| `/api/create_episode` | `{slug, ep_id, story, title, genre, story_format, locales, no_music}` | `{ok, ep_dir, slug, ep_id}` |
+| `/save_voice_cast` | `{slug, voice_cast_json}` | `{ok}` |
+
+### Key invariants for API endpoints
+- `/api/next_episode_id` returns key `"next_ep_id"` — JS client reads `nd.next_ep_id`
+- `/stream` expects `ep_dir=` param (relative path from PIPE_DIR), NOT `story_file=`
+- `/stream` reads `no_music` from `meta.json` if the checkbox is not checked (fallback from meta)
+- `/stop` terminates ALL running procs for the current client address
+- `/delete_episode_dir` only allows deletion inside `projects/<slug>/episodes/<id>/` (depth ≥ 4 safety check)
+
+---
+
+## PART 9 — CROSS-CUTTING INVARIANTS (must hold after ANY modification)
+
+### 1. Placeholder substitution chain
+Every `{{PLACEHOLDER}}` token used in any `prompts/p_N.txt` MUST have a corresponding sed rule in `fill_and_run()` in `run.sh`. Current complete list:
+```
+{{EPISODE_DIR}}    ← must be first, as other paths are derived from it
+{{STORY_FILE}}
+{{PROJECT_SLUG}}
+{{EPISODE_ID}}
+{{EPISODE_NUMBER}}
+{{STORY_TITLE}}
+{{SERIES_GENRE}}
+{{GENERATION_SEED}}
+{{RENDER_PROFILE}}
+{{LOCALES}}
+{{STORY_FORMAT}}
+```
+**If you add a placeholder to any prompt, you MUST add its sed rule to run.sh.**
+
+### 2. character_id binding chain
+The character identifier flows through 5 stages and must be identical at each step:
+```
+VoiceCast.json characters[].character_id
+  → Stage 3: Script.json cast[].character_id  (copied from VoiceCast, not invented)
+  → Stage 4: ShotList.json shots[].audio_intent.vo_speaker_id
+  → Stage 5: AssetManifest vo_items[].speaker_id
+  → Stage 5: AssetManifest character_packs[].character_id
+  → gen_tts_cloud.py: looks up voice params from VoiceCast.json by speaker_id
+```
+Breaking any link in this chain causes voice assignment to fall back to gender defaults or fail entirely.
+
+### 3. item_id cross-reference chain
+Shot audio item IDs are assigned in Stage 4 and must be referenced consistently:
+```
+ShotList.shots[].audio_intent.vo_item_ids[] = ["vo-<scene_id>-<NNN>"]
+  → Stage 5: AssetManifest vo_items[].item_id must match these IDs exactly
+  → gen_render_plan.py: joins on item_id to build RenderPlan.shots[].vo_lines[]
+
+ShotList.shots[].audio_intent.sfx_item_ids[] = ["sfx-{shot_id}-{NNN}"]
+  → Stage 5: AssetManifest sfx_items[].item_id must match
+
+ShotList.shots[].audio_intent.music_item_id = "music-{shot_id}" | null
+  → Stage 5: AssetManifest music_items[].item_id must match
+```
+
+### 4. Manifest split invariant
+- `AssetManifest_draft.shared.json`: `locale_scope: "shared"`, contains character_packs, backgrounds, sfx_items, music_items; `vo_items: []` (always empty)
+- `AssetManifest_draft.{locale}.json`: `locale_scope: "locale"`, contains ONLY vo_items; NO character_packs/backgrounds/sfx_items/music_items
+- `AssetManifest_merged.{locale}.json`: `locale_scope: "merged"`, contains ALL sections merged by manifest_merge.py
+
+### 5. post_tts_analysis writes; no LLM writes
+- `start_sec` and `end_sec` on `vo_items[]` are ONLY written by `post_tts_analysis.py`
+- No LLM stage (p_0 through p_9) should write these fields
+- `background_overrides[]` is ONLY written by `post_tts_analysis.py`
+- `duck_intervals` are ONLY computed by `manifest_merge.py`
+
+### 6. VoiceCast.json is append-only per project
+- Stage 0 reads VoiceCast.json first, then only adds characters not already present
+- Existing character entries are NEVER modified by Stage 0
+- This preserves voice consistency across all episodes of the same project
+- VoiceCast.json lives at `projects/{slug}/VoiceCast.json` — project-level, NOT episode-level
+
+### 7. run.sh ep_dir interface
+The `/stream` endpoint passes `ep_dir=` to `run.sh` as arg 1.
+`run.sh` takes: `./run.sh <ep_dir> [from_stage] [to_stage]`
+**The old interface** (`./run.sh story_N.txt`) **is completely removed.**
+Any code that passes `story_file=` to `/stream`, or that builds a command like `./run.sh story_N.txt`, is broken.
+
+### 8. Stage 10 script execution order within a locale
+Must NOT be reordered:
+```
+[1] gen_music_clip (shared)   → writes assets/music/*.wav
+[2] manifest_merge            → reads locale manifest (start_sec may be absent on first run)
+[3] gen_tts_cloud             → writes assets/{locale}/audio/vo/*.wav
+[4] post_tts_analysis         → mutates locale manifest: adds start_sec/end_sec; writes background_overrides
+[5] resolve_assets            → reads merged manifest, probes filesystem → AssetManifest.media.{locale}.json
+[6] gen_render_plan           → reads merged + media → AssetManifest_final + RenderPlan
+[7] render_video              → reads RenderPlan → output.mp4
+[8] export_youtube_dubbed     → reads output.mp4 → youtube_dubbed.aac (skipped for en)
+```
+
+---
+
+## PART 10 — SCHEMA REFERENCE
+
+All schemas in `contracts/schemas/`. Claude validates artifacts using `python -c "import jsonschema; jsonschema.validate(...)"`.
+
+| Schema file | Used by | Key required fields |
+|-------------|---------|---------------------|
+| `StoryPrompt.v1.json` | Stage 2 | schema_id, schema_version, prompt_id, episode_goal, generation_seed, series.{title,genre,tone}, setting.primary_location, characters[≥2], constraints.max_scenes |
+| `Script.v1.json` | Stage 3 | schema_id, schema_version, script_id, title, cast[], scenes[] |
+| `ShotList.v1.json` | Stage 4 | schema_id, schema_version, shotlist_id, script_ref, timing_lock_hash, shots[] |
+| `AssetManifest.v1.json` | Stage 5, 8 | schema_id, schema_version, manifest_id, project_id, episode_id, locale_scope |
+| `CanonDiff.v1.json` | Stage 6 | episode, added_characters[], updated_states[], new_world_facts[], new_unresolved_threads[], resolved_threads[] |
+| `Canon.v1.json` | Stage 7 | project_id, characters{}, world_facts[], unresolved_threads[], episode_summaries[] |
+| `AssetManifest_final.v1.json` | gen_render_plan | schema_id, schema_version, manifest_id, project_id, shotlist_ref, items[] |
+| `RenderPlan.v1.json` | gen_render_plan | schema_id, schema_version, plan_id, project_id, timing_lock_hash, profile, shots[] |
+
+---
+
+## PART 11 — STORY FORMAT IMPACT MATRIX
+
+When `STORY_FORMAT` is changed or a new format is added, these are ALL the places that must handle it:
+
+| Stage/Script | What changes for non-episodic formats |
+|---|---|
+| `p_0.txt` (Stage 0) | `continuous_narration`/`illustrated_narration`/`documentary`: narrator ONLY; `monologue`: protagonist only, NO narrator entry |
+| `p_3.txt` (Stage 3) | `continuous_narration`/`illustrated_narration`/`documentary`: ALL `speaker_id: "narrator"`; `monologue`: protagonist's id only |
+| `p_4.txt` (Stage 4) | `continuous_narration`/`documentary`: `characters: []` on all shots; `monologue`: protagonist always center |
+| `p_5.txt` (Stage 5) | `continuous_narration`/`documentary`: `character_packs: []` — no character images |
+| `p_8.txt` (Stage 8) | `continuous_narration`/`documentary`: skip character_packs translation, translate narrator VO only |
+| `render_video.py` (Stage 10[7]) | `n_chars == 0` case (no character compositing) — handled at line ~401 |
+
+**STORY_FORMAT flows via:**
+`meta.json.story_format` → `pipeline_vars.sh export STORY_FORMAT=...` → `run.sh sed {{STORY_FORMAT}}` → prompt content → LLM behavior
+
+---
+
+## PART 12 — REGRESSION CHECKLIST
+
+Run through the relevant items after any modification:
+
+### After modifying prompts/p_N.txt
+- [ ] Every `{{PLACEHOLDER}}` in the modified prompt has a sed rule in `run.sh`
+- [ ] The file referenced in "Read these files" section still exists at that path
+- [ ] The output file path still matches what downstream stages expect to read
+- [ ] Schema validation call references the correct schema file
+- [ ] Format-specific branches cover all 5 formats: episodic, continuous_narration, illustrated_narration, documentary, monologue
+- [ ] No new `start_sec`/`end_sec`/`duration_sec` fields added to vo_items (those belong to post_tts_analysis)
+
+### After modifying run.sh
+- [ ] All 11 placeholders still substituted ({{EPISODE_DIR}} through {{STORY_FORMAT}})
+- [ ] Stage 10 sub-step sequence preserved (music→merge→tts→post_tts→resolve→renderplan→render→export)
+- [ ] Stage 0 re-source of `pipeline_vars.sh` still happens after Stage 0 completes
+- [ ] `run.sh` still accepts `<ep_dir> [from] [to]` signature (not story_file)
+- [ ] `fill_and_run` still passes `--dangerously-skip-permissions --no-session-persistence` to claude
+
+### After modifying test_server.py
+- [ ] `/stream` passes `ep_dir=` (not `story_file=`) to `run.sh`
+- [ ] `runPrompt()` guards on `currentSlug && currentEpId` before building ep_dir
+- [ ] `createEpisode()` calls `/api/create_episode` and sets `currentSlug`/`currentEpId` from response
+- [ ] `vcContinue()` builds `ep_dir` from `currentSlug`/`currentEpId`
+- [ ] `startPipeStep({type:'llm'})` passes `ep_dir=` to `/stream`
+- [ ] `runPrepare()` reads `nd.next_ep_id` (NOT `nd.ep_id`) from `/api/next_episode_id` response
+- [ ] Fallback episode ID is `'s01e01'` (NOT `'ep0001'`)
+- [ ] `/api/next_episode_id` server handler returns JSON key `"next_ep_id"` (not `"ep_id"`)
+- [ ] `presetSel` change handler — when "— no preset —" is selected — restores `_voiceIndex[voice].clips[style].params` defaults before returning (does NOT early-return without resetting)
+- [ ] `loadEpisodeDetails` still sets `currentSlug = slug; currentEpId = epId;` on its FIRST line (before any await)
+
+### After modifying any Stage 10 Python script
+- [ ] CLI arg names unchanged (`--manifest`, `--shared`, `--locale`, `--media`, `--plan`, `--out`, etc.)
+- [ ] Output file paths still match what the next script reads as input
+- [ ] `_build_step_cmd()` in `test_server.py` references correct script name and args
+- [ ] `run_stage_10()` in `run.sh` still calls script with correct args
+
+### After modifying contracts/schemas/*.v1.json
+- [ ] All LLM-written artifacts still validate against updated schema
+- [ ] Fields added as "required" must be generated by the relevant stage
+- [ ] Fields removed from schema must not be depended on by downstream Python scripts
+
+---
+
+## PART 13 — KNOWN ARCHITECTURE DECISIONS (do not accidentally revert)
+
+1. **Prepare → Create Episode → Stage 0 separation**
+   The web UI creates the episode directory structure (`meta.json`, `pipeline_vars.sh` stub, `story.txt`) BEFORE Stage 0 runs. Stage 0 ONLY does voice casting — does NOT derive project metadata from story. All metadata comes from meta.json written by `/api/create_episode`.
+
+2. **run.sh old interface is gone**
+   `./run.sh story_N.txt` no longer works. Only `./run.sh <ep_dir> [from] [to]`. This was changed in commit `61d570d`.
+
+3. **`VOICE_CAST_FILE` not in stub**
+   `pipeline_vars.sh` written by Create Episode does NOT include `VOICE_CAST_FILE`. Stage 0 adds it when it writes the full version. Any code that reads `VOICE_CAST_FILE` before Stage 0 has run will find it undefined.
+
+4. **VoiceCast.json is project-level, not episode-level**
+   Lives at `projects/{slug}/VoiceCast.json`, shared across all episodes of a series for voice consistency. Stage 0 appends new characters but never overwrites existing ones.
+
+5. **Stage 9 (p_9.txt) is superseded**
+   `gen_render_plan.py` (Stage 10[6]) does the same job deterministically. `p_9.txt` still exists as a fallback but is not the primary path in the current pipeline.
+
+6. **manifest_merge runs before TTS (by design)**
+   First run produces approximate duck_intervals (since WAV durations aren't known yet). Re-running steps [2]–[6] after step [4] gives accurate timing. The web UI `/run_locale` endpoint supports re-running individual steps.
+
+7. **azure_style_degree and azure_rate are user-tuned values**
+   Stage 5 copies them EXACTLY from VoiceCast.json. No LLM stage may override these per-line. This is the user's tuning controlled by the Voice Cast editor.
+
+8. **generation_seed is random per episode**
+   Set once by `/api/create_episode` using `random.randint(100_000_000, 999_999_999)`. Stored in `meta.json` and `pipeline_vars.sh`. Never changes after episode creation. Same seed = same LLM output (deterministic runs).
