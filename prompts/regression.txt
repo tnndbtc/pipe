@@ -55,10 +55,10 @@ It has three layers:
 
 ---
 
-## PART 2 — WORKFLOW A: NEW EPISODE CREATION (Prepare → Create Episode)
+## PART 2 — WORKFLOW A: NEW EPISODE CREATION (Prepare → Run)
 
 ### Files involved
-- `code/http/test_server.py` — JS functions: `runPrepare()`, `createEpisode()`, `applyPreparedMeta()`
+- `code/http/test_server.py` — JS functions: `runPrepare()`, `createEpisode()`, `applyPreparedMeta()`, `runPrompt()`
 - `code/http/test_server.py` — API endpoints: `POST /api/infer_story_meta`, `GET /api/check_slug`, `GET /api/next_episode_id`, `POST /api/create_episode`
 
 ### Step-by-step flow
@@ -76,22 +76,31 @@ It has three layers:
   - Calls `GET /api/next_episode_id?slug=<slug>`
   - Server returns `{"next_ep_id": "s01e01"}` (scans `projects/<slug>/episodes/` for highest sNNeNN)
   - JS: `_preparedEpId = nd.next_ep_id || 's01e01'`  ← KEY: reads `next_ep_id`, not `ep_id`
-  - Shows "✦ Create Episode" button; disables Run button
+  - Displays the next episode ID in the info bar (🆔 Episode field)
+  - **Enables the Run button immediately** — there is NO separate "Create Episode" button
 - `slug_exists == true` (existing project):
   - JS: `_preparedEpId = null`
   - Calls `loadRunProjects().then(onRunProjectChange)` — auto-selects project in Run tab
   - Run button becomes enabled once `onRunProjectChange` → `loadEpisodeDetails` sets `currentSlug`/`currentEpId`
 
-**Step 3 — User clicks "✦ Create Episode"**
-- JS: `createEpisode()` (search: `async function createEpisode`)
-- Calls `POST /api/create_episode` with: `{slug, ep_id, story, title, genre, story_format, locales, no_music}`
-- Server creates:
-  1. `projects/{slug}/episodes/{ep_id}/` directory
-  2. `story.txt` — raw story content
-  3. `meta.json` — full episode metadata (see schema below)
-  4. `pipeline_vars.sh` — stub with all vars EXCEPT `VOICE_CAST_FILE` (Stage 0 adds that)
-- Server returns: `{ok: true, ep_dir: "projects/slug/episodes/ep_id", slug, ep_id}`
-- JS: sets `currentSlug = d.slug`, `currentEpId = d.ep_id`, enables Run button
+**Step 3 — User clicks "▶ Run"**
+- JS: `runPrompt()` detects that `currentSlug`/`currentEpId` are not yet set (new project)
+- Automatically calls `createEpisode()` before starting the SSE stream:
+  - `createEpisode()` calls `POST /api/create_episode` with: `{slug, ep_id, story, title, genre, story_format, locales, no_music}`
+  - Server creates:
+    1. `projects/{slug}/episodes/{ep_id}/` directory
+    2. `story.txt` — raw story content
+    3. `meta.json` — full episode metadata (see schema below)
+    4. `pipeline_vars.sh` — stub with all vars EXCEPT `VOICE_CAST_FILE` (Stage 0 adds that)
+  - Server returns: `{ok: true, ep_dir: "projects/slug/episodes/ep_id", slug, ep_id}`
+  - JS: sets `currentSlug = d.slug`, `currentEpId = d.ep_id`
+- `runPrompt()` then proceeds to open the SSE stream with `ep_dir` built from the now-set `currentSlug`/`currentEpId`
+
+**NOTE — No "Create Episode" button exists:**
+`createEpisode()` is an internal async helper, not a user-facing button. It is called
+automatically by `runPrompt()` the first time the user clicks Run for a new project.
+Do NOT add a standalone "Create Episode" button — it breaks the workflow by requiring
+an extra click and creates ambiguity about when the episode dir exists.
 
 ### meta.json schema (written by /api/create_episode)
 ```json
@@ -130,10 +139,11 @@ export EPISODE_DIR="projects/.../episodes/s01e01"
 ### Regression risks for Workflow A
 1. `/api/next_episode_id` returns key `"next_ep_id"` — JS must read `nd.next_ep_id`, NOT `nd.ep_id`
 2. Fallback episode ID must be `'s01e01'` (not `'ep0001'` or other formats)
-3. `currentSlug` and `currentEpId` must be set BEFORE Run button is enabled
+3. `currentSlug` and `currentEpId` must be set by `createEpisode()` BEFORE the SSE stream opens (inside `runPrompt()`, synchronously awaited)
 4. `createEpisode()` must POST to `/api/create_episode` and receive `{ok, slug, ep_id}`
 5. `meta.json` field names must match what `p_0.txt` reads: `story_title`, `project_slug`, `episode_id`, `episode_number`, `series_genre`, `story_format`, `locales`, `generation_seed`, `render_profile`
 6. `pipeline_vars.sh` stub must export all vars that `run.sh` uses via `{{PLACEHOLDER}}` substitution (see PART 3)
+7. `runPrompt()` auto-create guard: must check `!currentSlug || !currentEpId` (both) before calling `createEpisode()` — avoids duplicate creation if Run is clicked again on an existing episode
 
 ---
 
@@ -228,6 +238,19 @@ Working directory: `PIPE_DIR` (repo root)
 **Critical invariants:**
 - If canon.json doesn't exist: NOT an error; episode is treated as episode 1
 - Output is informational only; no downstream stage reads `stage_1_check.txt`
+
+**Pipeline tab done detection (important):**
+Stage 1 done status in the Pipeline tab is determined by the **stage log file**, NOT by
+`stage_1_check.txt`. This is because Claude often only prints the canon report to stdout
+without writing the file. The log file is always written by `run.sh` via `| tee "$log_file"`
+regardless of Claude's behavior.
+
+Done signal: `stage_logs/{slug}.{ep_id}.stage_1.log`  exists AND  size > 100 bytes
+Implemented in: `_pipeline_status()` in `test_server.py`
+
+Do NOT change Stage 1 done detection back to checking `stage_1_check.txt` — that was the
+root cause of Stage 1 never showing ✓ in the Pipeline tab despite completing successfully
+in the Run tab.
 
 ---
 
@@ -808,6 +831,7 @@ Run through the relevant items after any modification:
 - [ ] `/api/next_episode_id` server handler returns JSON key `"next_ep_id"` (not `"ep_id"`)
 - [ ] `presetSel` change handler — when "— no preset —" is selected — restores `_voiceIndex[voice].clips[style].params` defaults before returning (does NOT early-return without resetting)
 - [ ] `loadEpisodeDetails` still sets `currentSlug = slug; currentEpId = epId;` on its FIRST line (before any await)
+- [ ] `_pipeline_status()` Stage 1 done detection uses `stage_logs/{slug}.{ep_id}.stage_1.log` (size > 100), NOT `stage_1_check.txt` — do not revert this
 
 ### After modifying any Stage 10 Python script
 - [ ] CLI arg names unchanged (`--manifest`, `--shared`, `--locale`, `--media`, `--plan`, `--out`, etc.)
