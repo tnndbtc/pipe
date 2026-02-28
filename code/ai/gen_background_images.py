@@ -1,6 +1,7 @@
 # =============================================================================
 # gen_background_images.py
 # Generate wide cinematic background plate images for s01e01.
+# STATUS: VALIDATED
 # =============================================================================
 #
 # requirements.txt (pip install before running):

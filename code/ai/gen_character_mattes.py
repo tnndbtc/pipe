@@ -3,6 +3,8 @@
 # Remove backgrounds from character portrait PNGs, producing RGBA images
 # with transparent backgrounds ready for compositing over background plates.
 # Run AFTER gen_character_images.py.
+# STATUS: VALIDATED — script works, but RGBA outputs already exist in assets.
+#         No need to re-run unless character images are regenerated.
 # =============================================================================
 #
 # requirements.txt (pip install before running):
