@@ -1,6 +1,7 @@
 # =============================================================================
 # gen_tts.py
 # Generate spoken voice-over audio for every dialogue line in s01e01.
+# STATUS: VALIDATED
 # Supports multiple TTS backends: Kokoro (default), XTTS v2, MeloTTS.
 # Use --tts_model [kokoro|xtts|melo|all] to select or compare.
 # =============================================================================

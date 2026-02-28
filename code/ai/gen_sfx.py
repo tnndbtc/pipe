@@ -1,6 +1,7 @@
 # =============================================================================
 # gen_sfx.py
 # Generate short sound-effect audio clips from text descriptions.
+# STATUS: VALIDATED
 # Supports two backends selected via --backend:
 #   audiogen       — Meta AudioGen (default, MIT licence, 4–8 GB VRAM)
 #   stable_audio_2 — Stability AI Stable Audio 2.0 (>=16 GB VRAM recommended)

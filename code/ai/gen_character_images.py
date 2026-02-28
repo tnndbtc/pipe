@@ -1,6 +1,7 @@
 # =============================================================================
 # gen_character_images.py
 # Generate photorealistic character portrait images for s01e01.
+# STATUS: VALIDATED
 # =============================================================================
 #
 # requirements.txt (pip install before running):

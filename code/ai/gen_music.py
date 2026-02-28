@@ -1,6 +1,7 @@
 # =============================================================================
 # gen_music.py
 # Generate background music tracks for each shot in s01e01.
+# STATUS: VALIDATED
 # =============================================================================
 #
 # requirements.txt (pip install before running):
