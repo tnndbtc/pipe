@@ -64,6 +64,7 @@ huggingface_hub>=0.21.0    # hf_hub_download(), snapshot_download()
 safetensors>=0.4.0         # fast weight loading
 bitsandbytes>=0.43.0       # 4-bit quantisation for FLUX (gen_character_images)
 sentencepiece>=0.1.99      # tokeniser for CogVideoX text encoder
+peft>=0.11.0               # required by diffusers load_lora_weights() (AnimateDiff motion LoRAs)
 
 
 # ---------------------------------------------------------------------------
