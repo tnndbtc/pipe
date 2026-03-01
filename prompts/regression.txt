@@ -209,7 +209,7 @@ Working directory: `PIPE_DIR` (repo root)
 **Reads:**
 - `{{EPISODE_DIR}}/meta.json` — all pipeline variables (source of truth)
 - `{{EPISODE_DIR}}/story.txt` — for voice casting decisions only
-- `projects/azure_tts_styles.txt` — available Azure TTS voices and styles
+- `prompts/azure_tts_styles.txt` — styled voices only (62 entries); pre-embedded by run.sh
 
 **Writes:**
 - `projects/{{PROJECT_SLUG}}/VoiceCast.json` — append-only per character_id (preserves voices across episodes)
@@ -222,6 +222,8 @@ Working directory: `PIPE_DIR` (repo root)
 - For `monologue` format: NO narrator entry — protagonist IS the narrator
 - For `continuous_narration`, `illustrated_narration`, `documentary`: narrator ONLY, no other characters
 - pipeline_vars.sh MUST include all vars used by run.sh for stages 1–9
+- Do NOT cast a `styles(0): []` (no-style) voice for any character requiring emotional expression (antagonist, emotional lead, anger, fear, grief). No-style voices are only suitable for narrator roles in documentary/narration formats or minor neutral-delivery characters
+- NEVER cast a `[MULTITALKER]` voice as a character voice — these are Azure pair-synthesis voices, not usable as individual character voices; they produce broken TTS output
 
 **What breaks if Stage 0 fails or writes wrong values:**
 - All downstream stages source `pipeline_vars.sh` — wrong values propagate everywhere
@@ -300,7 +302,7 @@ in the Run tab.
 ### Stage 4 — Produce ShotList.json
 **File:** `prompts/p_4.txt`
 **Model:** sonnet
-**Reads:** `{{EPISODE_DIR}}/Script.json`, `contracts/schemas/ShotList.v1.json`
+**Reads:** `{{EPISODE_DIR}}/Script.json`, `projects/{{PROJECT_SLUG}}/VoiceCast.json`, `contracts/schemas/ShotList.v1.json`
 **Writes:** `{{EPISODE_DIR}}/ShotList.json`
 
 **Validates against:** `contracts/schemas/ShotList.v1.json`
@@ -320,6 +322,8 @@ in the Run tab.
 - Total episode duration must be 60–120 seconds
 - Every VO line in Script.json must appear in exactly one shot's `vo_item_ids`
 - `timing_lock_hash` = SHA256 of sorted shot_ids list — used by render pipeline to detect shot list changes
+- `vo_item_ids` format: `"vo-{scene_id}-{NNN}"` where `{scene_id}` is the EXACT `scenes[].scene_id` from Script.json — do NOT invent a descriptive slug
+- **VO count validation (built into prompt):** after writing ShotList.json, p_4.txt runs a Python assertion: `total vo_item_ids across all shots == total dialogue actions in Script.json`. If it fails, the LLM must fix and retry before finishing Stage 4.
 
 **Story format rules:**
 | Format | Shot rule |
@@ -328,6 +332,11 @@ in the Run tab.
 | `documentary` | `characters: []` (empty) on all shots |
 | `monologue` | Single protagonist, always `position: "center"` |
 | `illustrated_narration` | Characters in `characters[]` but no VO assigned to them |
+
+**Duration rules (added alongside character/format rules):**
+- `continuous_narration` / `documentary` / `illustrated_narration`: `duration_sec` must be VO-anchored — derived from word count ÷ effective_wpm (adjusted for `azure_rate` read from VoiceCast.json) + break padding + 2 s buffer. Do NOT assign a cinematic/creative duration that ignores VO length.
+- `episodic` / `monologue`: keep creative duration; soft constraint: `duration_sec ≤ estimated_VO_time + 8 s`
+- VoiceCast.json must be read at Stage 4 to compute `effective_wpm`; it is pre-embedded by `inline_files_into_prompt` via the "Read these files" list
 
 ---
 
@@ -364,6 +373,8 @@ vo_items: [...]            ← one per VO line, with full tts_prompt
 
 **Critical bindings:**
 - `character_packs[].gender` comes from `Script.json cast[].gender` — NOT guessed
+- `vo_items[].item_id` must be copied EXACTLY from `ShotList.json vo_item_ids[]` — do NOT rephrase or abbreviate
+- `vo_items[].text` comes from `Script.json scenes[].actions[].line` (individual dialogue lines, in order) — NOT from `ShotList.shots[].audio_intent.vo_text` which is only a summary
 - `vo_items[].tts_prompt.azure_voice` must match `VoiceCast.json character[en].azure_voice`
 - `vo_items[].tts_prompt.azure_style` must be chosen from `VoiceCast.json character[en].available_styles` (fallback chain applies)
 - `vo_items[].tts_prompt.azure_style_degree` copied EXACTLY from VoiceCast.json — do NOT per-line override
@@ -449,6 +460,7 @@ vo_items: [...]            ← one per VO line, with full tts_prompt
 - azure_style fallback chain (in order): angry→shouting→unfriendly→serious→(omit), fearful→terrified→whispering→sad→(omit), cheerful→excited→friendly→hopeful→(omit), etc.
 - For DragonHD voices (whose available_styles are archetype names like "assassin", "captain"): use `VoiceCast.json character[locale].azure_style` when no emotion fallback matches
 - Duration Matching Rule: translated text should take same time to speak as English (±20%)
+- **`item_id` must be copied byte-for-byte from `AssetManifest_draft.en.json`** — Stage 8 produces a brand-new locale manifest but must NOT invent new item IDs. WAV filenames = `{item_id}.wav`; any deviation means TTS writes to a different filename than gen_render_plan.py looks up.
 - DO NOT include `start_sec`, `end_sec` in translated vo_items
 - DO NOT translate: `search_prompt`, `ai_prompt`, `motion.description`, any `*_id` field
 
@@ -499,7 +511,12 @@ Output: assets/{locale}/audio/vo/{item_id}.wav
 - Calls Azure Cognitive Services Speech SDK
 - Requires env vars: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`
 - Uses SSML with: `<voice>`, `<mstts:express-as style= styledegree=>`, `<prosody rate= pitch=>`, `<break time='Nms'/>`
+- **Null-style rule:** when `azure_style` is null or empty, `<mstts:express-as>` is omitted entirely — bare `<voice>` + `<prosody>` is valid SSML; Azure rejects `style=""` attribute
 - Voice selection priority: `azure_voice` field > `character_packs[].gender` > `voice_style` > hardcoded default
+- **Batch path (default):** builds one multi-speaker SSML per locale with `<bookmark mark="{item_id}"/>` as the FIRST CHILD INSIDE each `<voice>` block (NOT as a sibling before `<voice>`); single `speak_ssml_async()` call returns one WAV; `BookmarkReached` events give per-item byte offsets; WAV is split into individual `{item_id}.wav` files. `--asset-id` flag bypasses batch and uses per-item path
+- **SSML bookmark placement is critical:** `<bookmark>` must be inside `<voice>`: `<voice name='...'><bookmark mark='id'/>{text}</voice>`. Azure error 1007 ("RootSpeak should not contain node [bookmark]") fires if bookmark is placed as direct child of `<speak>`.
+- **Azure SDK EventSignal:** `synthesizer.bookmark_reached` uses `.connect(cb)` and `.disconnect_all()` — there is NO `.disconnect(cb)` method. Calling `disconnect(cb)` in a `finally` block raises `AttributeError` even when synthesis succeeded, causing every batch call to fall back to per-item.
+- **Stale WAV cleanup:** before synthesis, `gen_tts_cloud.py` deletes any `.wav` in the locale vo dir whose stem is not in the current manifest's `item_id` set. This prevents re-runs from silently reusing audio from a previous run with different item IDs.
 - Requires: `pip install azure-cognitiveservices-speech>=1.38.0`
 
 **Sub-step [4/8] — post_tts_analysis.py** (per locale)
@@ -543,6 +560,9 @@ Output: AssetManifest_final.{locale}.json
 - `duration_ms` respects `background_overrides` for overflow shots
 - `timing_lock_hash` comes from `AssetManifest_merged` (locale-adjusted)
 - Passes `duck_intervals`/`duck_db`/`fade_sec` into each shot's music entry
+- **VO_TAIL_MS floor (all formats):** `duration_ms = max(duration_ms, last_vo_out_ms + 2000)` — every shot gets at least 2 s after the final spoken word regardless of format. Applied before the ceiling.
+- **Narrative-format ceiling (narrative formats only):** for `continuous_narration`/`documentary`/`illustrated_narration`, `duration_ms` is further capped at `last_vo_out_ms + 2000` — floor and ceiling converge to the same value, pinning duration exactly. Music item `end_ms` and `duck_interval` endpoints are also clamped to the corrected duration.
+- **VO completeness guard:** after building `shotlist_vo_ids`, any `vo_item` in the merged manifest that has a valid `shot_id` but is NOT in any shot's `vo_item_ids` is auto-injected into that shot before building `vo_lines`. Prints `[VO-INJECT]` log. Protects against Stage 4 LLM silently dropping the last line of a scene from `vo_item_ids`.
 - Requires: stdlib only
 
 **Sub-step [7/8] — render_video.py** (per locale)
@@ -613,10 +633,22 @@ API endpoints: `GET /api/voice_index`, `GET /api/voice_presets`, `GET /api/azure
 - Each preset: `{style, style_degree, rate, pitch, break_ms, hash, label}`
 - "— no preset —" selection: restores `_voiceIndex[voice].clips[style].params` defaults (does NOT early-return without resetting)
 
+### Voice catalog files
+- `prompts/azure_tts_styles.txt` — Stage 0 input: **styled voices only** (62 entries + `supports()` lines); pre-embedded by `inline_files_into_prompt`; small enough for haiku context
+- `prompts/azure_tts_styles_full.txt` — VC editor input: **full catalog** (275 voices including no-style and bridge voices); read only by `/api/azure_voices`; NOT embedded in any prompt
+- `build_voice_catalog.py` generates both files from `projects/azure_tts_en_all.txt` + `projects/azure_tts_zh_all.txt` + existing `azure_tts_styles.txt`
+
+### Voice picker (two-tier UI)
+- Default view: shows only styled voices (`has_styles === true`) — same 62 as before expansion
+- "Show all voices" toggle: reveals full catalog grouped by locale (`<optgroup>`)
+- `has_styles` bool is included in `/api/azure_voices` response per voice entry
+
 ### Regression risks for Voice Cast
 1. When user selects "— no preset —", the Emotion/Speak Speed/Pitch/Break fields MUST reset to the voice index defaults for that voice+style combination. The old bug was `if (!preset) return;` skipping this reset — FIXED. The correct code looks up `_voiceIndex?.[voiceSel.value]?.clips?.[styleSel.value]?.params` and restores those values before returning.
 2. `_voiceIndex` is loaded from `GET /api/voice_index` — must be loaded before presetSel change handler fires
 3. `vcContinue()` builds `ep_dir` from `currentSlug`/`currentEpId` — both must be set before voice cast can be opened for a running episode
+4. `/api/azure_voices` must read from `prompts/azure_tts_styles_full.txt` (NOT `azure_tts_styles.txt`) — the full catalog is needed for the VC editor picker
+5. Stage 0 must read from `prompts/azure_tts_styles.txt` (styled-only) — the full catalog is too large for haiku context
 
 ---
 
@@ -653,7 +685,8 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 |------|-----------|---------|
 | `/stream` | `ep_dir`, `from`, `to`, `test`, `profile`, `no_music` | SSE stream of run.sh output |
 | `/run_step` | `step`, `slug`, `ep_id`, `locale`, `profile`, `no_music` | SSE stream of single post-proc step |
-| `/run_locale` | `slug`, `ep_id`, `locale`, `profile`, `no_music` | SSE stream of all post-proc steps for locale |
+| `/run_locale` | `slug`, `ep_id`, `locale`, `profile`, `no_music`, `purge` (default=1), `from` | SSE stream of all post-proc steps for locale |
+| `/run_stage10` | `slug`, `ep_id`, `from`, `profile`, `no_music`, `purge` (default=1) | SSE stream of shared Stage 10 steps then all-locale steps |
 | `/list_projects` | — | `[{slug, episodes: [{id, files:[]}]}]` |
 | `/pipeline_status` | `slug`, `ep_id` | `{story_file, voice_cast, stages: {N: bool}}` |
 | `/view_artifact` | `slug`, `ep_id`, `artifact` | JSON content of named artifact file |
@@ -661,7 +694,8 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/api/next_episode_id` | `slug` | **`{"next_ep_id": "s01e01"}`** ← key is `next_ep_id` |
 | `/api/voice_index` | — | Voice index JSON from `projects/resources/voices/index.json` |
 | `/api/voice_presets` | `voice` | Array of presets for that voice |
-| `/api/azure_voices` | — | Parsed `projects/azure_tts_styles.txt` catalog |
+| `/api/azure_voices` | — | Parsed `prompts/azure_tts_styles_full.txt` catalog (all 275 voices); each entry includes `has_styles: bool` for client-side filtering |
+| `/api/status_report` | `slug`, `ep_id` | `{text}` — full contents of `status_report.txt` for that episode (empty string if file doesn't exist) |
 | `/serve_media` | `path` | Binary file content (for audio preview) |
 
 ### POST endpoints
@@ -673,6 +707,7 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/api/infer_story_meta` | `{story}` | `{title, slug, genre, story_format, metadata_found[], slug_exists, slug_suggested}` |
 | `/api/create_episode` | `{slug, ep_id, story, title, genre, story_format, locales, no_music}` | `{ok, ep_dir, slug, ep_id}` |
 | `/save_voice_cast` | `{slug, voice_cast_json}` | `{ok}` |
+| `/api/append_status_report` | `{slug, ep_id, text}` | `{ok}` — appends timestamped entry to `status_report.txt` |
 
 ### Key invariants for API endpoints
 - `/api/next_episode_id` returns key `"next_ep_id"` — JS client reads `nd.next_ep_id`
@@ -680,6 +715,26 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 - `/stream` reads `no_music` from `meta.json` if the checkbox is not checked (fallback from meta)
 - `/stop` terminates ALL running procs for the current client address
 - `/delete_episode_dir` only allows deletion inside `projects/<slug>/episodes/<id>/` (depth ≥ 4 safety check)
+
+### Purge cache endpoint behavior
+
+`_purge_episode_assets(slug, ep_id, locale="")` is a Python helper called from `/run_locale` and
+`/run_stage10` when `purge=1` (the default):
+
+- **Per-locale purge** (`locale="zh-Hans"`, from `/run_locale`): deletes the target locale's WAVs
+  (`assets/{locale}/audio/vo/*.wav`), locale image assets, renders (`output.mp4`, `output.srt`,
+  `render_output.json`), merged manifest, media manifest, and render plan. Shared assets are
+  untouched.
+- **All-locale purge** (`locale=""`, from `/run_stage10`): discovers all locales from
+  `AssetManifest_draft.*.json` filenames, purges each locale as above, PLUS deletes shared music
+  WAVs, shared background/character images, and `assets/meta/gen_tts_cloud_results.json`.
+- After purge, `force_run = True` is set for that invocation, bypassing all "already done"
+  checkpoint skips for every step in the loop.
+- The **🗑 Purge Cache checkbox** (`id="chk-purge-assets"`, JS global `purgeAssets = true`)
+  defaults to **checked**. Both `/run_locale` and `/run_stage10` URL builders append
+  `&purge=1` when checked, `&purge=0` when unchecked.
+- Purpose: prevent stale WAVs (from a previous run using different `item_id` names) or stale
+  images from being silently reused when the pipeline is re-run after an LLM stage changed.
 
 ---
 
@@ -719,6 +774,8 @@ Shot audio item IDs are assigned in Stage 4 and must be referenced consistently:
 ```
 ShotList.shots[].audio_intent.vo_item_ids[] = ["vo-<scene_id>-<NNN>"]
   → Stage 5: AssetManifest vo_items[].item_id must match these IDs exactly
+  → Stage 8: locale AssetManifest vo_items[].item_id must copy from en manifest byte-for-byte
+  → gen_tts_cloud.py: writes {item_id}.wav
   → gen_render_plan.py: joins on item_id to build RenderPlan.shots[].vo_lines[]
 
 ShotList.shots[].audio_intent.sfx_item_ids[] = ["sfx-{shot_id}-{NNN}"]
@@ -727,6 +784,8 @@ ShotList.shots[].audio_intent.sfx_item_ids[] = ["sfx-{shot_id}-{NNN}"]
 ShotList.shots[].audio_intent.music_item_id = "music-{shot_id}" | null
   → Stage 5: AssetManifest music_items[].item_id must match
 ```
+
+**VO completeness guard (gen_render_plan.py):** If a vo_item exists in the merged manifest with a valid `shot_id` but is absent from the ShotList's `vo_item_ids`, gen_render_plan.py auto-injects it into the correct shot and prints `[VO-INJECT]`. This is a safety net — Stage 4's VO count validation should prevent the gap from occurring in the first place.
 
 ### 4. Manifest split invariant
 - `AssetManifest_draft.shared.json`: `locale_scope: "shared"`, contains character_packs, backgrounds, sfx_items, music_items; `vo_items: []` (always empty)
@@ -737,7 +796,7 @@ ShotList.shots[].audio_intent.music_item_id = "music-{shot_id}" | null
 - `start_sec` and `end_sec` on `vo_items[]` are ONLY written by `post_tts_analysis.py`
 - No LLM stage (p_0 through p_9) should write these fields
 - `background_overrides[]` is ONLY written by `post_tts_analysis.py`
-- `duck_intervals` are ONLY computed by `manifest_merge.py`
+- `duck_intervals` are initially computed by `manifest_merge.py`; `gen_render_plan.py` may clamp their endpoints for narrative-format shots when the shot duration is shortened by the ceiling rule — this is intentional and not a violation of this invariant
 
 ### 6. VoiceCast.json is append-only per project
 - Stage 0 reads VoiceCast.json first, then only adds characters not already present
@@ -791,7 +850,7 @@ When `STORY_FORMAT` is changed or a new format is added, these are ALL the place
 |---|---|
 | `p_0.txt` (Stage 0) | `continuous_narration`/`illustrated_narration`/`documentary`: narrator ONLY; `monologue`: protagonist only, NO narrator entry |
 | `p_3.txt` (Stage 3) | `continuous_narration`/`illustrated_narration`/`documentary`: ALL `speaker_id: "narrator"`; `monologue`: protagonist's id only |
-| `p_4.txt` (Stage 4) | `continuous_narration`/`documentary`: `characters: []` on all shots; `monologue`: protagonist always center |
+| `p_4.txt` (Stage 4) | `continuous_narration`/`documentary`: `characters: []` on all shots; `monologue`: protagonist always center; **all narrative formats**: `duration_sec` VO-anchored (word_count ÷ effective_wpm + breaks + 2 s buffer) — NOT creative guess |
 | `p_5.txt` (Stage 5) | `continuous_narration`/`documentary`: `character_packs: []` — no character images |
 | `p_8.txt` (Stage 8) | `continuous_narration`/`documentary`: skip character_packs translation, translate narrator VO only |
 | `render_video.py` (Stage 10[7]) | `n_chars == 0` case (no character compositing) — handled at line ~401 |
@@ -832,12 +891,21 @@ Run through the relevant items after any modification:
 - [ ] `presetSel` change handler — when "— no preset —" is selected — restores `_voiceIndex[voice].clips[style].params` defaults before returning (does NOT early-return without resetting)
 - [ ] `loadEpisodeDetails` still sets `currentSlug = slug; currentEpId = epId;` on its FIRST line (before any await)
 - [ ] `_pipeline_status()` Stage 1 done detection uses `stage_logs/{slug}.{ep_id}.stage_1.log` (size > 100), NOT `stage_1_check.txt` — do not revert this
+- [ ] `stopRun()` calls **both** `hideStageProgress()` AND `pipeRunning = null` in addition to `setStatus('idle')`. There are two separate spinner elements: `spinnerEl` (run-tab status bar, hidden by `setStatus('idle')`) and `stage-progress-spinner` (stage progress bar, hidden only by `hideStageProgress()`). Calling only `setStatus('idle')` leaves the stage progress bar spinning after the user clicks Stop.
+- [ ] `log_message(fmt, *args)` converts `args[0]` with `str()` before calling `.split()`. `send_error()` passes an `HTTPStatus` enum as the `code` argument — enums have no `.split()` method and crash without the explicit `str()` conversion.
+- [ ] **Purge Cache flow**: JS global `purgeAssets` defaults to `true`; `chk-purge-assets` checkbox defaults to `checked` (with `accent-color:#e06c75` red accent); both `/run_locale` and `/run_stage10` URL builders append `&purge=1` or `&purge=0`; server-side handlers parse `purge` and call `_purge_episode_assets()` before the step loop when `purge=1`, then set `force_run = True`.
 
 ### After modifying any Stage 10 Python script
 - [ ] CLI arg names unchanged (`--manifest`, `--shared`, `--locale`, `--media`, `--plan`, `--out`, etc.)
 - [ ] Output file paths still match what the next script reads as input
 - [ ] `_build_step_cmd()` in `test_server.py` references correct script name and args
 - [ ] `run_stage_10()` in `run.sh` still calls script with correct args
+- [ ] `gen_tts_cloud.py` SSML: `<bookmark>` is inside `<voice>` block — do NOT move it outside
+- [ ] `gen_tts_cloud.py` EventSignal: uses `.disconnect_all()` not `.disconnect(cb)` in finally block
+- [ ] `gen_tts_cloud.py` stale WAV cleanup: loop over `out_dir.glob("*.wav")` still present before `run()`
+- [ ] `gen_render_plan.py` VO completeness guard: loop over `merged.get("vo_items")` injecting missing IDs still present before `build_shot()` calls
+- [ ] `gen_render_plan.py` VO_TAIL_MS = 2000 still applied as floor: `duration_ms = max(duration_ms, vo_end_ms + VO_TAIL_MS)`
+- [ ] `resolve_assets.py` backgrounds use `bg.get("asset_id") or bg["item_id"]` — backgrounds use `item_id` key, not `asset_id`
 
 ### After modifying contracts/schemas/*.v1.json
 - [ ] All LLM-written artifacts still validate against updated schema
@@ -871,3 +939,34 @@ Run through the relevant items after any modification:
 
 8. **generation_seed is random per episode**
    Set once by `/api/create_episode` using `random.randint(100_000_000, 999_999_999)`. Stored in `meta.json` and `pipeline_vars.sh`. Never changes after episode creation. Same seed = same LLM output (deterministic runs).
+
+9. **azure_tts_styles.txt is split into two files with different consumers**
+   `prompts/azure_tts_styles.txt` — Stage 0 (haiku) only: 62 styled voices + `supports()` lines. Token-budget-safe. Pre-embedded by `inline_files_into_prompt`.
+   `prompts/azure_tts_styles_full.txt` — VC editor (`/api/azure_voices`) only: all 275 voices including no-style and bridge voices. Never embedded in any LLM prompt.
+   Do NOT merge these back into a single file — the full catalog (~17–22K tokens) exceeds haiku's practical context budget for Stage 0.
+
+10. **WAV item_id names are tied to scene_id values in the Script**
+    Stage 4 assigns `vo_item_ids = ["vo-{scene_id}-{NNN}"]` where `{scene_id}` is the slug from
+    `Script.json scenes[].scene_id`. If Stage 3 is re-run and scene IDs change (e.g. old slug
+    `scene_001_river_night` → new slug `s1`), Stage 5 and all subsequent Stage 10 re-runs produce
+    WAVs with the new naming scheme. Old WAV files from the previous run (e.g.
+    `vo-scene_001_river_night-001.wav`) remain on disk alongside the new ones (`vo-s1-001.wav`).
+    `resolve_assets.py` may find and silently reuse stale WAVs if it happens to probe an old
+    `item_id`. The **Purge Cache** feature (`_purge_episode_assets()`) was introduced specifically
+    to clean these stale files before a re-run. Without purging, audio in the output mp4 may not
+    match the current Script.json even though the SRT subtitles (generated from the current script)
+    look correct.
+
+12. **SSML bookmark must be inside `<voice>`, not before it**
+    `gen_tts_cloud.py` `build_episode_ssml()` places `<bookmark mark='{id}'/>` as the first child of each `<voice>` block. Azure error 1007 ("RootSpeak should not contain node [bookmark]") fires if the bookmark is placed as a direct child of `<speak>`. Do not "simplify" the SSML structure by hoisting bookmarks outside `<voice>`.
+
+13. **Status Report is per-episode, append-only**
+    `projects/{slug}/episodes/{ep_id}/status_report.txt` — each entry is a timestamped block appended by `/api/append_status_report`. Never overwritten. Displayed in the "Status Report" sub-tab of the Run panel. Used to track issues, fixes, and manual steps across pipeline runs.
+
+11. **Purge-before-run is the safe default**
+    Any time Stages 1–8 are re-run (which may change scene IDs, VO text, speaker assignments, or
+    locale manifests), Stage 10 caches become stale. The 🗑 Purge Cache checkbox defaults to ON so
+    that clicking "Run Locale" or "Run Stage 10" always rebuilds from scratch. Users who know the
+    caches are still valid (e.g. only re-running render_video after a render-plan tweak) can
+    uncheck it to reuse existing WAVs and images. Re-running Stage 10 without purging after
+    Stage 3 changed is the most common source of "wrong audio" or "stale image" bugs.

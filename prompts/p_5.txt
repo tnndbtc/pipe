@@ -206,9 +206,13 @@ Required top-level fields:
 Derive from ShotList.shots[].audio_intent.vo_item_ids.
 
 Required fields per entry:
-  item_id      : the id from vo_item_ids (e.g. "vo-s01e02-sc01-001")
+  item_id      : copy EXACTLY from vo_item_ids — do NOT rephrase, abbreviate,
+                 or expand the id (e.g. if ShotList says "vo-s1-001" write
+                 "vo-s1-001"; if it says "vo-sc01-001" write "vo-sc01-001")
   speaker_id   : the character id who speaks this line
-  text         : the English dialogue text (from shot.audio_intent.vo_text)
+  text         : the English dialogue text from Script.json — find the dialogue
+                 action matching this vo_item_id's position within the scene
+                 (do NOT use shot.audio_intent.vo_text — that is a summary)
   license_type : "proprietary_cleared"
 
 **tts_prompt** per entry — set ALL fields below:

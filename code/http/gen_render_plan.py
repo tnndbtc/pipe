@@ -45,6 +45,12 @@ RENDER_RESOLUTION = "1280x720"
 RENDER_ASPECT    = "16:9"
 RENDER_FPS       = 24
 INTER_LINE_PAUSE_MS = 300   # 0.3s gap between consecutive VO lines (matches post_tts_analysis)
+VO_TAIL_MS          = 2000  # minimum silence after last spoken line before shot ends
+
+# Formats where VO IS the shot — duration is capped to VO_end + VO_TAIL_MS.
+# For these formats any silence gap beyond 2 s is jarring (no characters on
+# screen, no lip-sync or acting to fill the gap — only narration + background).
+NARRATIVE_FORMATS = {"continuous_narration", "documentary", "illustrated_narration"}
 
 
 # ── I/O helpers ───────────────────────────────────────────────────────────────
@@ -157,6 +163,7 @@ def build_shot(
     vo_map:       dict[str, dict],
     music_map:    dict[str, dict],
     override_map: dict[str, float],
+    story_format: str = "episodic",
 ) -> dict:
     """
     Build one RenderedShot entry for RenderPlan.shots[].
@@ -244,11 +251,13 @@ def build_shot(
             "timeline_out_ms": timeline_out_ms,
         })
 
-    # If VO overruns the shot, extend duration_ms to fit
+    # Ensure at least VO_TAIL_MS of silence after the last spoken line.
+    # When VO overflows the ShotList estimate this also prevents the shot from
+    # ending at the exact frame "Good night." finishes (zero-tail bug observed
+    # in production: sh02/sh04/sh05 had duration_ms == last_vo_out_ms).
     if vo_lines:
         vo_end_ms = vo_lines[-1]["timeline_out_ms"]
-        if vo_end_ms > duration_ms:
-            duration_ms = vo_end_ms
+        duration_ms = max(duration_ms, vo_end_ms + VO_TAIL_MS)
 
     # sfx_asset_ids — skip placeholder SFX
     sfx_asset_ids: list[str] = []
@@ -281,6 +290,36 @@ def build_shot(
             music_extra["duck_db"]        = duck_db
             music_extra["music_fade_sec"] = fade_sec
 
+    # ── Dynamic ceiling for narrative formats (EXEC STEP 3 / Proposal 3) ────────
+    #
+    # For continuous_narration / documentary / illustrated_narration the VO IS
+    # the shot.  There are no characters on screen, no lip-sync or acting to
+    # fill a silence gap — only background + narration.  Any gap beyond the
+    # 2-second tail buffer is immediately jarring to the listener.
+    #
+    # If Stage 4 estimated a duration much longer than the actual VO (common
+    # when the LLM cannot know TTS rate/style at planning time), we cap it.
+    #
+    # The floor (VO_TAIL_MS) was already applied above, so for narrative formats
+    # both floor and ceiling converge to  last_vo_out_ms + VO_TAIL_MS,
+    # effectively pinning duration to exactly that value.
+    #
+    # For episodic / monologue we keep creative timing — only the floor applies.
+    if story_format in NARRATIVE_FORMATS and vo_lines:
+        last_vo_out_ms = vo_lines[-1]["timeline_out_ms"]
+        ceiling_ms = last_vo_out_ms + VO_TAIL_MS
+        if duration_ms > ceiling_ms:
+            print(f"  [CEILING] {shot_id}: {duration_ms} ms → {ceiling_ms} ms "
+                  f"(VO ends {last_vo_out_ms} ms, format={story_format})")
+            duration_ms = ceiling_ms
+            # Cap duck_intervals so no endpoint exceeds the shortened duration.
+            # duck_intervals are stored in seconds; compare against duration_sec.
+            duration_sec = duration_ms / 1000.0
+            for di in music_extra.get("duck_intervals", []):
+                di[1] = min(di[1], duration_sec)   # cap end_sec
+                di[0] = min(di[0], duration_sec)   # cap start_sec (in case of edge)
+    # ── end ceiling logic ─────────────────────────────────────────────────────
+
     rendered: dict = {
         "shot_id":              shot_id,
         "scene_id":             scene_id,
@@ -298,11 +337,12 @@ def build_shot(
 # ── RenderPlan builder ────────────────────────────────────────────────────────
 
 def build_plan(
-    merged:    dict,
-    media:     dict,
-    final:     dict,
-    shotlist:  dict,
-    profile:   str,
+    merged:       dict,
+    media:        dict,
+    final:        dict,
+    shotlist:     dict,
+    profile:      str,
+    story_format: str = "episodic",
 ) -> dict:
     """Build the full RenderPlan document."""
     project_id = merged.get("project_id", "")
@@ -326,9 +366,33 @@ def build_plan(
         for item in final.get("items", [])
     ]
 
+    # ── VO completeness guard ─────────────────────────────────────────────
+    # Stage 4 (ShotList LLM) sometimes drops the last line of a scene from
+    # vo_item_ids.  The merged manifest is authoritative (Stage 5 reads Script
+    # directly), so any vo_item that has a shot_id but is not referenced by any
+    # ShotList vo_item_ids list is silently injected here.
+    shotlist_vo_ids: set[str] = {
+        vid
+        for shot in shotlist.get("shots", [])
+        for vid in shot.get("audio_intent", {}).get("vo_item_ids", [])
+    }
+    shot_map: dict[str, dict] = {s["shot_id"]: s for s in shotlist.get("shots", [])}
+    injected = 0
+    for vo_item in merged.get("vo_items", []):
+        vid = vo_item.get("item_id", "")
+        sid = vo_item.get("shot_id", "")
+        if vid and sid and vid not in shotlist_vo_ids and sid in shot_map:
+            shot_map[sid].setdefault("audio_intent", {}).setdefault("vo_item_ids", []).append(vid)
+            shotlist_vo_ids.add(vid)
+            injected += 1
+            print(f"  [VO-INJECT] {vid} → {sid} (missing from ShotList, added from manifest)")
+    if injected:
+        print(f"  [VO-INJECT] {injected} item(s) injected — ShotList vo_item_ids were incomplete")
+    # ── end VO completeness guard ──────────────────────────────────────────
+
     # shots: one RenderedShot per ShotList shot
     shots = [
-        build_shot(shot, media_map, vo_map, music_map, override_map)
+        build_shot(shot, media_map, vo_map, music_map, override_map, story_format)
         for shot in shotlist.get("shots", [])
     ]
 
@@ -401,6 +465,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-plan",  default=None, metavar="PATH",
                    help="Output for RenderPlan. "
                         "Default: RenderPlan.{locale}.json in episode dir.")
+    p.add_argument("--story-format", default="episodic",
+                   choices=["episodic", "continuous_narration", "illustrated_narration",
+                            "documentary", "monologue"],
+                   help="Story format from pipeline_vars.sh (default: episodic). "
+                        "Narrative formats apply a shot duration ceiling = "
+                        "last_vo_out_ms + 2000 ms to prevent silence gaps.")
     return p.parse_args()
 
 
@@ -469,6 +539,7 @@ def main() -> None:
     print(f"  ShotList    : {shotlist_path.name}")
     print(f"  Locale      : {locale}")
     print(f"  Profile     : {args.profile}")
+    print(f"  Format      : {args.story_format}")
     print(f"  Out-final   : {out_final.name}")
     print(f"  Out-plan    : {out_plan.name}")
     print("=" * 60)
@@ -481,7 +552,7 @@ def main() -> None:
     print(f"  AssetManifest_final  : {n_final} items  ({n_placeholder_final} placeholders)")
 
     # Build RenderPlan
-    plan = build_plan(merged, media, final, shotlist, args.profile)
+    plan = build_plan(merged, media, final, shotlist, args.profile, args.story_format)
     save_json(plan, out_plan)
 
     n_shots   = len(plan["shots"])
@@ -492,10 +563,19 @@ def main() -> None:
     )
     n_with_music = sum(1 for s in plan["shots"] if s.get("music_asset_id"))
     n_with_duck  = sum(1 for s in plan["shots"] if s.get("duck_intervals"))
+    # Count shots where the ceiling was applied (duration < ShotList estimate)
+    shotlist_dur_map = {s["shot_id"]: round(s.get("duration_sec", 0) * 1000)
+                        for s in shotlist.get("shots", [])}
+    n_ceiling = sum(
+        1 for s in plan["shots"]
+        if s["duration_ms"] < shotlist_dur_map.get(s["shot_id"], s["duration_ms"])
+    )
 
     print(f"  RenderPlan shots     : {n_shots}")
     print(f"  VO lines             : {n_vo_lines}")
     print(f"  Overflow shots       : {n_overflow}")
+    print(f"  Ceiling applied      : {n_ceiling} shots  "
+          f"({'narrative ceiling active' if args.story_format in NARRATIVE_FORMATS else 'n/a — episodic/monologue'})")
     print(f"  Shots with music     : {n_with_music}")
     print(f"  Shots with ducking   : {n_with_duck}")
     print(f"  Timing lock hash     : {plan['timing_lock_hash'][:16]}…")

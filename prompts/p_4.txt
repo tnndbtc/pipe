@@ -34,6 +34,7 @@ Story format  : {{STORY_FORMAT}}
 Read these files before writing anything:
   1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
   2. contracts/schemas/ShotList.v1.json   — inspect all required fields
+  3. projects/{{PROJECT_SLUG}}/VoiceCast.json  — narrator voice settings (azure_rate)
 
 ---
 
@@ -54,6 +55,40 @@ Story format: **{{STORY_FORMAT}}**
 **documentary**: Every shot must have `"characters": []` (empty array). Shots represent topic segments. Backgrounds are informational b-roll visuals.
 
 **monologue**: One or very few shots. The single protagonist is always centred (`position: "center"`). Background is minimal — a single consistent setting. No scene changes.
+
+---
+
+## Shot Duration Rules
+
+### For `continuous_narration` / `documentary` / `illustrated_narration`
+
+The voiceover IS the shot. Duration must be derived from VO content length,
+not assigned as a cinematic guess. Follow this formula for every shot:
+
+1. Read the embedded `projects/{{PROJECT_SLUG}}/VoiceCast.json`.
+   Find the narrator character's `azure_rate` for the English locale.
+   Parse the rate string to a decimal:
+     e.g. "-35%" → -0.35,  "0%" → 0.0,  "+10%" → +0.10
+   Compute:
+     effective_wpm = 130 × (1 + rate_decimal)
+   If azure_rate is absent or VoiceCast.json is unavailable, use effective_wpm = 110.
+
+2. For each shot, count the words in ALL VO lines assigned to that shot.
+   Compute:
+     base_secs    = word_count / effective_wpm × 60
+     break_secs   = number_of_VO_lines_in_shot × 0.6
+     duration_sec = base_secs + break_secs + 2.0
+   Do NOT round up to a "cinematic" number (e.g. do not change 14.3 → 15).
+
+3. After assigning all shots, sanity-check:
+   If sum(all duration_sec) > total_estimated_VO_time + 15:
+     Reduce each shot's buffer from 2.0 to 1.0 and recalculate.
+
+### For `episodic` / `monologue`
+
+Keep the current creative duration logic.
+Add one soft constraint: `duration_sec` must not exceed the estimated VO
+speaking time for that shot plus 8 seconds.
 
 ---
 
@@ -84,9 +119,15 @@ the same background_id.
 
 vo_item_ids rules:
   • Every VO line in the episode must be assigned to exactly one shot.
-  • Use format "vo-<scene_id>-<NNN>" (NNN = zero-padded line number).
+  • Use format "vo-<scene_id>-<NNN>" (NNN = zero-padded line number, starting at 001).
+  • <scene_id> MUST be the exact scene_id value from Script.json scenes[].scene_id.
+    Do NOT invent a descriptive slug (e.g. "scene_001_river_night") — use the raw
+    id as written in Script.json (e.g. "s1", "sc01", "scene_1" — whatever it is).
   • Use [] for shots with no VO.
   • This array is the explicit shot→VO link used by Stage 9.
+  • Before writing the file: count total dialogue actions in Script.json,
+    then count total IDs across all vo_item_ids arrays — they MUST be equal.
+    If not, find the missing IDs and add them before proceeding.
 
 sfx_item_ids rules:
   • One entry per tag in sfx_tags[]. Order must match sfx_tags[].
@@ -111,6 +152,21 @@ Total episode duration must be 60–120 seconds.
 
 Validate the artifact against contracts/schemas/ShotList.v1.json using
 Python + jsonschema.  If validation fails, fix and retry.
+
+Also run this VO completeness check in Python and fix before writing if it fails:
+```python
+import json
+script  = json.load(open("projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json"))
+shotlist = json.load(open("projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json"))
+script_vo_count  = sum(1 for s in script["scenes"] for a in s["actions"] if a["type"] == "dialogue")
+shotlist_vo_ids  = [vid for shot in shotlist["shots"] for vid in shot["audio_intent"].get("vo_item_ids", [])]
+assert len(shotlist_vo_ids) == script_vo_count, (
+    f"VO count mismatch: ShotList has {len(shotlist_vo_ids)} IDs, "
+    f"Script has {script_vo_count} dialogue lines"
+)
+assert len(shotlist_vo_ids) == len(set(shotlist_vo_ids)), "Duplicate vo_item_ids found"
+print(f"VO completeness: {len(shotlist_vo_ids)}/{script_vo_count} ✓")
+```
 
 Write the validated artifact to:
   projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json

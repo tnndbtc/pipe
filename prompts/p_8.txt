@@ -137,8 +137,13 @@ For each locale OTHER than "en":
     - tts_prompt.azure_rate   → character[<locale>].azure_rate from VoiceCast.json
     - tts_prompt.azure_style  → apply Emotion Policy (see below)
 
-  **Keep unchanged:**
-    - item_id, speaker_id, license_type
+  **Keep unchanged (copy byte-for-byte from AssetManifest_draft.en.json):**
+    - item_id        ← CRITICAL: copy the exact string; never invent a new id
+    - speaker_id     ← CRITICAL: copy the exact string (e.g. "narrator"); do NOT omit
+    - shot_id        (may be null — copy the null)
+    - type           (may be null — copy the null)
+    - license_type
+    - visual         (boolean)
     - tts_prompt.voice_style  (gender hint — still valid across locales)
     - tts_prompt.emotion      (English label kept for debugging)
     - tts_prompt.pace         (same pace intent)

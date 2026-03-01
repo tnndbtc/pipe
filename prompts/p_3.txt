@@ -42,6 +42,7 @@ Read these files before writing anything:
   2. projects/{{PROJECT_SLUG}}/VoiceCast.json   — voice casting from Stage 0
   3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
   4. contracts/schemas/Script.v1.json   — inspect all required fields
+  5. {{STORY_FILE}}                 — original story text (primary source; required for completeness check)
 
 ---
 
@@ -67,6 +68,46 @@ Apply these rules based on the format:
 **documentary**: ALL lines must use `speaker_id: "narrator"`. Structure as topic-driven sections (each scene = one topic/point). No character dialogue. The narrator explains, describes, educates.
 
 **monologue**: ALL lines must use `speaker_id` set to the SINGLE protagonist character_id (NOT "narrator"). This character speaks directly to the audience. No other characters speak. Single continuous take with no scene changes. Do NOT create a narrator entry — the protagonist IS the narrator.
+
+---
+
+### Narration completeness rule — REQUIRED for continuous_narration / illustrated_narration / documentary
+
+Story format: **{{STORY_FORMAT}}**
+
+If `STORY_FORMAT` is `continuous_narration`, `illustrated_narration`, or `documentary`:
+
+  **Every sentence in story.txt MUST appear as a narrator dialogue line.**
+
+  Before writing scenes[], do the following:
+
+  1. Read story.txt (file 5 above) from start to finish.
+  2. List every sentence and short line it contains — including one-word or
+     two-word lines such as "Slowly.", "Quietly.", "Like breathing.", "Good night."
+  3. For each sentence/line from story.txt, confirm it will appear verbatim
+     (or near-verbatim) in a `{ "type": "dialogue", "speaker_id": "narrator",
+     "line": "..." }` action.
+  4. Only after confirming full coverage may you write scenes[].
+
+  **Rules — strictly enforced:**
+  - Do NOT omit any sentence, line, or short phrase from story.txt.
+  - Do NOT summarise multiple sentences into one line.
+  - Do NOT paraphrase or rephrase the story text.
+  - Do NOT invent new sentences not present in story.txt.
+  - Do NOT reorder sentences — preserve the exact sequence from story.txt.
+  - Short standalone lines ("Slowly.", "Like breathing.", "Good night.") must
+    each be their own `dialogue` line — do not merge them with adjacent sentences.
+  - You MAY group 2–3 consecutive sentences into one `dialogue` line ONLY when
+    they form an unbroken breath unit in the original text AND each sentence is
+    reproduced word-for-word.
+
+  **Self-check before writing:**
+  Count the sentences in story.txt.  Count the dialogue lines you have planned.
+  The dialogue count must be ≥ the story sentence count.  If it is lower, you
+  have omitted content — go back and add the missing lines.
+
+For `episodic` and `monologue` formats: this completeness rule does NOT apply —
+write creative dialogue consistent with the story direction.
 
 ---
 

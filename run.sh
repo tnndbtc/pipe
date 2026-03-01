@@ -159,8 +159,9 @@ run_stage_10() {
 
     echo "  [6/8] Building per-shot render plan…"
     python3 "${code_dir}/gen_render_plan.py" \
-      --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
-      --media    "${EP_DIR}/AssetManifest.media.${locale}.json"
+      --manifest      "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+      --media         "${EP_DIR}/AssetManifest.media.${locale}.json" \
+      --story-format  "${STORY_FORMAT:-episodic}"
 
     echo "  [7/8] Rendering video…"
     python3 "${code_dir}/render_video.py" \

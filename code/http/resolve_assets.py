@@ -208,7 +208,7 @@ def resolve_all(merged: dict, assets_root: Path) -> list[dict]:
     proj_bg_dir = PIPE_DIR / "projects" / project_id / "backgrounds"
     bg_search = [proj_bg_dir, assets_root, assets_root / "backgrounds"]
     for bg in merged.get("backgrounds", []):
-        aid = bg["asset_id"]
+        aid = bg.get("asset_id") or bg["item_id"]
         lt  = bg.get("license_type", "proprietary_cleared")
         f   = search_dirs(bg_search, aid, IMAGE_EXTS + AUDIO_EXTS)
         if f:

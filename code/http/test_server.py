@@ -809,6 +809,33 @@ HTML = r"""<!DOCTYPE html>
     min-height: 200px; max-height: 420px;
   }
   #vc-locale-tabs { display: flex; gap: 4px; flex-shrink: 0; }
+  #sr-panel {
+    display: none; flex-direction: column; gap: 8px;
+    min-height: 200px; max-height: 420px;
+  }
+  #sr-content {
+    flex: 1; overflow-y: auto; background: #0a0a0e; border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 14px; font-family: var(--mono); font-size: 0.78em;
+    color: var(--text); white-space: pre-wrap; word-break: break-word; min-height: 120px;
+  }
+  #sr-content .sr-sep   { color: var(--border); }
+  #sr-content .sr-ts    { color: var(--dim); }
+  #sr-content .sr-issue { color: #e05c5c; font-weight: 700; }
+  #sr-content .sr-fix   { color: var(--green); }
+  #sr-content .sr-manual{ color: var(--gold); font-weight: 700; }
+  .sr-add-row {
+    display: flex; gap: 6px; flex-shrink: 0; align-items: flex-start;
+  }
+  #sr-note-input {
+    flex: 1; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 5px; color: var(--text); font-family: var(--mono);
+    font-size: 0.78em; padding: 6px 10px; resize: vertical; min-height: 52px;
+  }
+  #btn-sr-add {
+    background: #5b9cf614; color: var(--blue); border: 1px solid #5b9cf650;
+    border-radius: 5px; font-size: 0.78em; padding: 6px 12px; cursor: pointer;
+    font-weight: 700; white-space: nowrap; align-self: flex-end;
+  }
 
   /* ── Voice Cast editor character cards ── */
   .vc-char-card {
@@ -910,13 +937,7 @@ HTML = r"""<!DOCTYPE html>
     <button class="tab"        data-tab="pipeline" onclick="switchTab('pipeline')">🎬 Pipeline</button>
     <button class="tab"        data-tab="browse"   onclick="switchTab('browse')"  >📁 Browse</button>
   </nav>
-  <div class="toggle-wrap" id="toggle-test"
-       onclick="toggleTestMode()" tabindex="0"
-       title="Test mode ON — cheapest model (haiku) for all stages">
-    <span class="toggle-label toggle-left">🧪 Test</span>
-    <div class="toggle-track"><div class="toggle-thumb"></div></div>
-    <span class="toggle-label toggle-right">🎬 Prod</span>
-  </div>
+
   <div class="toggle-wrap" id="toggle-render"
        onclick="toggleRenderMode()" tabindex="0"
        title="Preview — fast encode (CRF 28) for review">
@@ -936,6 +957,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="section-label" style="margin:0">Story Input</div>
       <button class="btn-story-tab active" data-tab="story" onclick="switchStoryTab('story')">Story</button>
       <button class="btn-story-tab"        data-tab="vc"    onclick="switchStoryTab('vc')">Voice Cast</button>
+      <button class="btn-story-tab"        data-tab="sr"    onclick="switchStoryTab('sr')">Status Report</button>
       <span id="vc-saved-badge" style="display:none">✓ Saved</span>
       <span class="file-badge" id="file-badge" style="margin-left:auto">story_1.txt</span>
     </div>
@@ -968,6 +990,13 @@ Direction    : …"></textarea>
         </button>
       </div>
     </div>
+    <div id="sr-panel">
+      <div id="sr-content"><span style="color:var(--dim);font-style:italic">No episode selected.</span></div>
+      <div class="sr-add-row">
+        <textarea id="sr-note-input" placeholder="Add a status note (issue / fix / manual step)…"></textarea>
+        <button id="btn-sr-add" onclick="appendStatusNote()">＋ Add Note</button>
+      </div>
+    </div>
   </div>
 
   <!-- hidden: stage range always 0–10; split into 0+1–N handled in runPrompt() -->
@@ -982,6 +1011,14 @@ Direction    : …"></textarea>
       <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()" checked
              style="width:14px; height:14px; cursor:pointer; accent-color:var(--gold);">
       🔇 No Music
+    </label>
+    <label style="display:flex; align-items:center; gap:6px; cursor:pointer;
+                  font-size:0.82em; font-family:var(--mono); color:var(--dim);
+                  user-select:none;"
+           title="Delete cached WAVs, images, renders and manifests before each Stage 10 run — ensures a clean rebuild from scratch">
+      <input type="checkbox" id="chk-purge-assets" onchange="togglePurgeMode()" checked
+             style="width:14px; height:14px; cursor:pointer; accent-color:#e06c75;">
+      🗑 Purge Cache
     </label>
     <button id="btn-prepare" onclick="runPrepare()" title="Analyse story and detect project name, format and genre">⚙ Prepare</button>
     <div class="btn-group" style="margin:0;">
@@ -1156,9 +1193,10 @@ Direction    : …"></textarea>
   let lineCount = 0;
   let currentSlug = null;
   let currentEpId = null;
-  let testMode   = true;     // default ON — use cheapest model
+
   let renderProd = false;    // false = preview_local (CRF 28), true = high (CRF 18)
   let noMusic    = true;     // true = skip music by default (faster renders during development)
+  let purgeAssets = true;   // true = purge cached WAVs/images/renders before each run (default ON)
 
   let _preparedMeta  = null;   // result from last /api/infer_story_meta call
   let _preparedEpId  = null;   // next episode ID fetched during Prepare (e.g. "s01e01")
@@ -1296,6 +1334,8 @@ Direction    : …"></textarea>
     if (pipeStepEs) { pipeStepEs.close(); pipeStepEs = null; }
     fetch('/stop', { method: 'POST' }).catch(() => {});
     appendLine('[ Stopped by user ]', 'sys');
+    pipeRunning = null;
+    hideStageProgress();
     setStatus('idle');
   }
 
@@ -1402,13 +1442,12 @@ Direction    : …"></textarea>
     const ep_dir = 'projects/' + currentSlug + '/episodes/' + currentEpId;
 
     // ── Show command preview ─────────────────────────────────────────────────
-    const modeTag = testMode ? '  [MODEL=haiku 🧪]' : '  [per-stage models 🎬]';
     const vcSplitNote = (_vcPendingTo != null) ? `  →  then 1–${_vcPendingTo} after Voice Cast` : '';
-    cmdText.textContent      = `./run.sh ${ep_dir} ${from} ${to}${vcSplitNote}${modeTag}`;
+    cmdText.textContent      = `./run.sh ${ep_dir} ${from} ${to}${vcSplitNote}  [per-stage models 🎬]`;
     cmdPreview.style.display = 'block';
 
     // ── Open SSE stream ──────────────────────────────────────────────────────
-    const url = `/stream?ep_dir=${encodeURIComponent(ep_dir)}&from=${from}&to=${to}&test=${testMode ? '1' : '0'}&profile=${renderProd ? 'high' : 'preview_local'}&no_music=${noMusic ? '1' : '0'}`;
+    const url = `/stream?ep_dir=${encodeURIComponent(ep_dir)}&from=${from}&to=${to}&test=0&profile=${renderProd ? 'high' : 'preview_local'}&no_music=${noMusic ? '1' : '0'}`;
     es = new EventSource(url);
 
     es.addEventListener('line', e => {
@@ -1471,6 +1510,7 @@ Direction    : …"></textarea>
         appendLine('[ ✓ Done — output.mp4 ready ]', 'done');
         setStatus('idle');
         switchTab('pipeline');   // jump to video player
+        setTimeout(() => refreshPipeline(), 600);   // re-fetch after files settle
       } else {
         appendLine(`[ Exited with code ${code} ]`, 'err');
         setStatus('error');
@@ -1486,14 +1526,7 @@ Direction    : …"></textarea>
   }
 
   // ── Test / Production mode toggle ────────────────────────────────────────────
-  function toggleTestMode() {
-    testMode = !testMode;
-    const wrap = document.getElementById('toggle-test');
-    wrap.classList.toggle('prod', !testMode);
-    wrap.title = testMode
-      ? 'Test mode ON — cheapest model (haiku) for all stages'
-      : 'Production mode — quality models per stage (sonnet for creative, haiku for mechanical)';
-  }
+
   function toggleRenderMode() {
     renderProd = !renderProd;
     const wrap = document.getElementById('toggle-render');
@@ -1506,13 +1539,13 @@ Direction    : …"></textarea>
     const chk = document.getElementById('chk-no-music');
     noMusic = chk ? chk.checked : !noMusic;
   }
+  function togglePurgeMode() {
+    const chk = document.getElementById('chk-purge-assets');
+    purgeAssets = chk ? chk.checked : !purgeAssets;
+  }
 
   // Allow keyboard activation (Space / Enter)
   document.addEventListener('keydown', e => {
-    if (e.target === document.getElementById('toggle-test') &&
-        (e.key === ' ' || e.key === 'Enter')) {
-      e.preventDefault(); toggleTestMode();
-    }
     if (e.target === document.getElementById('toggle-render') &&
         (e.key === ' ' || e.key === 'Enter')) {
       e.preventDefault(); toggleRenderMode();
@@ -1520,6 +1553,8 @@ Direction    : …"></textarea>
   });
 
   // ── Tab switching ───────────────────────────────────────────────────────────
+  let _pipePoller = null;   // setInterval handle for Pipeline tab auto-refresh
+
   function switchTab(name) {
     document.querySelectorAll('.tab').forEach(t =>
       t.classList.toggle('active', t.dataset.tab === name));
@@ -1527,7 +1562,22 @@ Direction    : …"></textarea>
     document.getElementById('panel-browse').style.display   = name === 'browse'   ? 'flex' : 'none';
     document.getElementById('panel-pipeline').style.display = name === 'pipeline' ? 'flex' : 'none';
     if (name === 'browse')   loadProjects();
-    if (name === 'pipeline') initPipelineTab();
+    if (name === 'pipeline') {
+      initPipelineTab();
+      // Auto-refresh every 5 s while Pipeline tab is open
+      if (!_pipePoller) {
+        _pipePoller = setInterval(() => {
+          if (document.getElementById('panel-pipeline').style.display !== 'none') {
+            refreshPipeline();
+          } else {
+            clearInterval(_pipePoller); _pipePoller = null;
+          }
+        }, 5000);
+      }
+    } else {
+      // Leaving Pipeline tab — stop auto-refresh
+      if (_pipePoller) { clearInterval(_pipePoller); _pipePoller = null; }
+    }
   }
 
   // ── Voice Cast editor ────────────────────────────────────────────────────────
@@ -1644,6 +1694,7 @@ Direction    : …"></textarea>
       b.classList.toggle('active', b.dataset.tab === tab));
     document.getElementById('story').style.display     = tab === 'story' ? '' : 'none';
     document.getElementById('vc-editor').style.display = tab === 'vc'    ? 'flex' : 'none';
+    document.getElementById('sr-panel').style.display  = tab === 'sr'    ? 'flex' : 'none';
     if (tab === 'vc') {
       const cardsEl = document.getElementById('vc-cards');
       if (!_vcData || !_voiceCatalog) {
@@ -1655,7 +1706,69 @@ Direction    : …"></textarea>
       }
       // else: cards already rendered — preserve any in-progress edits
     }
+    if (tab === 'sr') {
+      loadStatusReport();
+    }
   }
+
+  // ── Status Report ─────────────────────────────────────────────────────────
+  function _srColorize(raw) {
+    // Very light syntax highlight: lines starting with known keywords get color
+    return raw
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .split('\n').map(line => {
+        if (/^={3,}/.test(line))           return `<span class="sr-sep">${line}</span>`;
+        if (/^\d{4}-\d{2}-\d{2}/.test(line)) return `<span class="sr-ts">${line}</span>`;
+        if (/^(ISSUE|ERROR|BUG|PROBLEM)/i.test(line.trim()))
+                                           return `<span class="sr-issue">${line}</span>`;
+        if (/^(FIX|FIXED|RESOLVED|APPLIED)/i.test(line.trim()))
+                                           return `<span class="sr-fix">${line}</span>`;
+        if (/^(MANUAL|ACTION REQUIRED|TODO)/i.test(line.trim()))
+                                           return `<span class="sr-manual">${line}</span>`;
+        return line;
+      }).join('\n');
+  }
+
+  async function loadStatusReport() {
+    const el = document.getElementById('sr-content');
+    if (!currentSlug || !currentEpId) {
+      el.innerHTML = '<span style="color:var(--dim);font-style:italic">No episode selected.</span>';
+      return;
+    }
+    try {
+      const res  = await fetch('/api/status_report?slug=' + encodeURIComponent(currentSlug)
+                              + '&ep_id=' + encodeURIComponent(currentEpId));
+      const data = await res.json();
+      if (!data.text || !data.text.trim()) {
+        el.innerHTML = '<span style="color:var(--dim);font-style:italic">No entries yet for this episode.</span>';
+      } else {
+        el.innerHTML = _srColorize(data.text);
+        el.scrollTop = el.scrollHeight;   // scroll to latest entry
+      }
+    } catch(e) {
+      el.textContent = 'Error loading status report: ' + e;
+    }
+  }
+
+  async function appendStatusNote() {
+    const input = document.getElementById('sr-note-input');
+    const text  = input.value.trim();
+    if (!text || !currentSlug || !currentEpId) return;
+    const btn = document.getElementById('btn-sr-add');
+    btn.disabled = true;
+    try {
+      await fetch('/api/append_status_report', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({slug: currentSlug, ep_id: currentEpId, text}),
+      });
+      input.value = '';
+      await loadStatusReport();
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  // ── end Status Report ──────────────────────────────────────────────────────
 
   // ── loadVoiceCatalog() ───────────────────────────────────────────────────────
   async function loadVoiceCatalog() {
@@ -2388,6 +2501,8 @@ Direction    : …"></textarea>
   let pipeStoryFile = null;   // auto-detected from pipeline_vars.*.sh
   let pipeRunning   = null;   // { from, to } while an llm range is running; null otherwise
   let activeVideoLocale = null;  // currently selected video locale tab
+  let _lastSyncedEp          = null;  // "slug|ep_id" — guards syncRunTabFromPipeline from firing every poll
+  let _lastStatusFingerprint = null;  // JSON fingerprint — skips DOM re-render when nothing changed
   let _pipeTabInited = false;
 
   async function initPipelineTab() {
@@ -2406,11 +2521,14 @@ Direction    : …"></textarea>
           sel.appendChild(opt);
         });
       });
-      // Auto-select if we have a current episode from Run tab, or restore prev selection
-      if (!prev && currentSlug && currentEpId) {
+      // Always follow the Run tab's current episode when available.
+      // If that option isn't in the dropdown yet (episode still being created),
+      // sel.value silently stays empty — fall through to prev as the backup.
+      if (currentSlug && currentEpId) {
         sel.value = currentSlug + '|' + currentEpId;
-      } else if (prev) {
-        sel.value = prev;
+      }
+      if (!sel.value && prev) {
+        sel.value = prev;   // restore previous selection when Run tab has nothing
       }
       if (sel.value) onPipeEpChange();
       loadRunProjects();  // keep Run tab project dropdown in sync
@@ -2436,10 +2554,21 @@ Direction    : …"></textarea>
   async function refreshPipeline() {
     if (!pipeEpSlug || !pipeEpId) return;
     const body = document.getElementById('pipe-body');
-    body.innerHTML = '<div style="color:var(--dim);font-style:italic;font-size:0.83em;padding:4px 0">Loading…</div>';
+    // Show "Loading…" only on first load (panel empty); skip on background auto-polls
+    // so the existing content doesn't flicker/disappear every 5 seconds.
+    const firstLoad = !body.children.length ||
+      (body.children.length === 1 && body.children[0].textContent.includes('Select an episode'));
+    if (firstLoad) {
+      body.innerHTML = '<div style="color:var(--dim);font-style:italic;font-size:0.83em;padding:4px 0">Loading…</div>';
+    }
     try {
-      const res = await fetch('/pipeline_status?slug=' + encodeURIComponent(pipeEpSlug) +
-                              '&ep_id=' + encodeURIComponent(pipeEpId));
+      // cache:'no-store' prevents browser from serving a stale cached copy even
+      // when the server's Cache-Control header is respected inconsistently.
+      const res = await fetch(
+        '/pipeline_status?slug=' + encodeURIComponent(pipeEpSlug) +
+        '&ep_id='                + encodeURIComponent(pipeEpId),
+        { cache: 'no-store' }
+      );
       if (!res.ok) throw new Error('HTTP ' + res.status);
       pipeStatus = await res.json();
       renderPipelineStatus(pipeStatus);
@@ -2564,8 +2693,29 @@ Direction    : …"></textarea>
     // Store the auto-detected story file for loading story text into the textarea
     pipeStoryFile = status.story_file || null;
 
-    // Sync Run tab: restore story textarea + VoiceCast on episode load/reload
-    syncRunTabFromPipeline(pipeEpSlug, pipeEpId, pipeStoryFile, status.voice_cast, status);
+    // Sync Run tab (story textarea, currentSlug/epId, VoiceCast, metadata) only
+    // when the episode selection changes — NOT on every 5-second background poll.
+    // Without this guard the auto-poller would overwrite currentSlug/currentEpId
+    // and user-visible fields (no_music, locales, format) every 5 s.
+    const _epKey = (pipeEpSlug || '') + '|' + (pipeEpId || '');
+    if (_epKey !== _lastSyncedEp) {
+      _lastSyncedEp = _epKey;
+      _lastStatusFingerprint = null;  // new episode → force full re-render
+      syncRunTabFromPipeline(pipeEpSlug, pipeEpId, pipeStoryFile, status.voice_cast, status);
+    }
+
+    // Skip full DOM re-render when nothing has changed — prevents collapsing
+    // expanded detail panels and resetting video tab state on every 5-second poll.
+    const _fp = JSON.stringify({
+      llm:     status.llm_stages,
+      locale:  status.locale_steps,
+      shared:  status.shared_steps,
+      videos:  status.ready_videos,
+      dubbed:  status.ready_dubbed,
+      running: pipeRunning   // client-side: forces re-render when run starts/stops
+    });
+    if (_fp === _lastStatusFingerprint) return;
+    _lastStatusFingerprint = _fp;
 
     const body = document.getElementById('pipe-body');
     body.innerHTML = '';
@@ -2610,12 +2760,16 @@ Direction    : …"></textarea>
       });
     }
 
-    // If stages are actively running, clear their stale ✓ so Pipeline tab
-    // doesn't show completed state for a stage that is currently re-running.
+    // If stages are actively running, clear their stale ✓ and artifact links
+    // so Pipeline tab doesn't show completed state for a stage that is
+    // currently re-running.
     if (pipeRunning) {
       llmDefs.forEach(({ n, key }) => {
         if (n >= pipeRunning.from && n <= pipeRunning.to) {
-          if (stagesMap[key]) stagesMap[key].done = false;
+          if (stagesMap[key]) {
+            stagesMap[key].done      = false;
+            stagesMap[key].artifacts = [];   // hide stale links while re-running
+          }
         }
       });
     }
@@ -2674,6 +2828,7 @@ Direction    : …"></textarea>
           { num: 10, step: 'render_video',   label: '10 — render'  },
         ];
         const localeStepsMap = status.locale_steps || {};
+        const sharedStepsMap = status.shared_steps || {};
         const locales        = status.locales || [];
 
         function makeRunBtn(label, onclick) {
@@ -2692,8 +2847,12 @@ Direction    : …"></textarea>
           { num: 3, step: 'gen_backgrounds', label: '3 — gen_backgrounds' },
           { num: 4, step: 'gen_sfx',         label: '4 — gen_sfx'         },
         ].forEach(({ num, step, label }) => {
+          const done = (sharedStepsMap[step] || {}).done || false;
           const row = document.createElement('div');
           row.className = 'pipe-substep-row';
+          row.appendChild(Object.assign(document.createElement('span'), {
+            innerHTML: statusIcon(done), style: 'flex-shrink:0'
+          }));
           const nameSpan = document.createElement('span');
           nameSpan.className = 'pipe-substep-locale';
           nameSpan.style.cssText = 'min-width:0;flex:1';
@@ -2704,6 +2863,9 @@ Direction    : …"></textarea>
           btnWrap.appendChild(makeRunBtn('Run ' + num, () =>
             startPipeStep({ type: 'post', step,
                             slug: pipeEpSlug, ep_id: pipeEpId, locale: '' })));
+          btnWrap.appendChild(makeRunBtn('Run ' + num + '→10', () =>
+            startPipeStep({ type: 'shared_chain', from_step: step,
+                            slug: pipeEpSlug, ep_id: pipeEpId })));
           row.appendChild(btnWrap);
           detailEl.appendChild(row);
         });
@@ -3250,7 +3412,7 @@ Direction    : …"></textarea>
     if (params.type === 'llm') {
       url = '/stream?ep_dir=' + encodeURIComponent(params.ep_dir) +
             '&from=' + params.from + '&to=' + params.to +
-            '&test=' + (testMode ? '1' : '0') +
+            '&test=0' +
             '&profile=' + profile;
     } else if (params.type === 'locale') {
       url = '/run_locale?slug='   + encodeURIComponent(params.slug) +
@@ -3258,7 +3420,16 @@ Direction    : …"></textarea>
             '&locale=' + encodeURIComponent(params.locale) +
             '&profile=' + profile +
             '&no_music=' + (noMusic ? '1' : '0') +
+            '&purge='  + (purgeAssets ? '1' : '0') +
             (params.from_step ? '&from=' + encodeURIComponent(params.from_step) : '');
+    } else if (params.type === 'shared_chain') {
+      // Run shared steps from_step→4 then all locale steps 5→10 for every locale
+      url = '/run_stage10?slug='  + encodeURIComponent(params.slug) +
+            '&ep_id='  + encodeURIComponent(params.ep_id) +
+            '&from='   + encodeURIComponent(params.from_step) +
+            '&profile=' + profile +
+            '&no_music=' + (noMusic ? '1' : '0') +
+            '&purge='  + (purgeAssets ? '1' : '0');
     } else {
       url = '/run_step?step='   + encodeURIComponent(params.step) +
             '&slug='   + encodeURIComponent(params.slug) +
@@ -3465,13 +3636,12 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
 
     def check(*paths): return all(os.path.isfile(p) for p in paths)
 
-    # Detect locale variant files (StoryPrompt.{locale}.json)
-    stage8_done = False
-    if os.path.isdir(ep_dir):
-        stage8_done = any(
-            f.startswith("StoryPrompt.") and f.endswith(".json") and f != "StoryPrompt.json"
-            for f in os.listdir(ep_dir)
-        )
+    # Helper: True if stage N's log file has meaningful content (> 100 bytes).
+    # run.sh always writes stage logs via `tee`, so this is reliable even when
+    # Claude skips writing an output file (e.g. Stage 1 canon check).
+    def _log_done(n: int) -> bool:
+        _p = os.path.join(PIPE_DIR, "stage_logs", f"{slug}.{ep_id}.stage_{n}.log")
+        return os.path.isfile(_p) and os.path.getsize(_p) > 100
 
     # Stage 0 is done when pipeline_vars.sh in ep_dir contains VOICE_CAST_FILE
     # (Stage 0 writes that; the Prepare-created stub does not have it)
@@ -3485,13 +3655,21 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         except Exception:
             pass
 
-    # Stage 1 is done when its stage log has content.
-    # Claude often only prints the canon report to stdout without writing
-    # stage_1_check.txt, so we use the log file instead — run.sh always
-    # writes it via `tee` regardless of what Claude does or doesn't write.
-    # size > 100 guards against an empty file created right as the stage starts.
-    _stage1_log = os.path.join(PIPE_DIR, "stage_logs", f"{slug}.{ep_id}.stage_1.log")
-    _stage1_done = os.path.isfile(_stage1_log) and os.path.getsize(_stage1_log) > 100
+    # Stage 1: no reliable output file — use log size.
+    _stage1_done = _log_done(1)
+
+    # Stage 8 is done when either:
+    #   (a) locale variant StoryPrompt files exist  — multi-locale projects
+    #   (b) the stage log has content               — en-only projects produce
+    #       no locale files so (a) would never fire
+    stage8_done = False
+    if os.path.isdir(ep_dir):
+        stage8_done = any(
+            f.startswith("StoryPrompt.") and f.endswith(".json") and f != "StoryPrompt.json"
+            for f in os.listdir(ep_dir)
+        )
+    if not stage8_done:
+        stage8_done = _log_done(8)
 
     llm_stages = {
         "stage_0": {
@@ -3515,7 +3693,12 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             "artifacts": [ep_rel("ShotList.json")],
         },
         "stage_5": {
-            "done": check(ep("AssetManifest_draft.shared.json")) and check(ep("AssetManifest_draft.en.json")),
+            # Primary: both canonical output files exist.
+            # Fallback: stage log (handles non-en locale configs where
+            # AssetManifest_draft.en.json might not be the written locale).
+            "done": (
+                check(ep("AssetManifest_draft.shared.json")) and check(ep("AssetManifest_draft.en.json"))
+            ) or _log_done(5),
             "artifacts": [ep_rel("AssetManifest_draft.shared.json"), ep_rel("AssetManifest_draft.en.json")],
         },
         "stage_6": {
@@ -3584,6 +3767,18 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         if loc != "en" and check(os.path.join(ep_dir, "renders", loc, "youtube_dubbed.aac"))
     ]
 
+    # Shared (locale-free) post-processing steps — steps 1–4 in the Stage 10 panel
+    def _any_files(d: str, ext: str) -> bool:
+        return os.path.isdir(d) and any(f.endswith(ext) for f in os.listdir(d))
+
+    _assets_dir = os.path.join(ep_dir, "assets")
+    shared_steps = {
+        "gen_music_clip":  {"done": _any_files(os.path.join(_assets_dir, "music"),  ".wav")},
+        "gen_characters":  {"done": _any_files(os.path.join(proj_dir, "characters"), ".png")},
+        "gen_backgrounds": {"done": _any_files(os.path.join(_assets_dir, "backgrounds"), ".png")},
+        "gen_sfx":         {"done": _any_files(os.path.join(_assets_dir, "sfx"),    ".wav")},
+    }
+
     # story.txt is in the episode folder (written by Create Episode in web UI)
     story_file_detected = ""
     _ep_story = os.path.join(ep_dir, "story.txt")
@@ -3636,6 +3831,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "llm_stages": llm_stages,
         "locales": locales,
         "locale_steps": locale_steps,   # kept for /run_step recovery endpoint
+        "shared_steps": shared_steps,   # steps 1–4: gen_music_clip, gen_characters, gen_backgrounds, gen_sfx
         "ready_videos": ready_videos,
         "ready_dubbed": ready_dubbed,
         "story_file": story_file_detected,
@@ -3685,6 +3881,99 @@ def _delete_step_output(step: str, slug: str, ep_id: str, locale: str) -> None:
             os.remove(path)
         except FileNotFoundError:
             pass
+
+
+def _purge_episode_assets(slug: str, ep_id: str, locale: str = "") -> list[str]:
+    """
+    Delete all generated media assets for an episode (or one locale).
+
+    Purges:
+      - assets/{locale}/audio/vo/*.wav       — TTS voice files
+      - assets/{locale}/audio/vo/licenses/   — TTS license sidecars
+      - assets/music/*.wav|mp3               — generated music  (shared, only when locale="")
+      - assets/{locale}/backgrounds/*        — generated background images
+      - assets/backgrounds/*                 — shared backgrounds (only when locale="")
+      - assets/{locale}/characters/*         — generated character images (if locale-specific)
+      - assets/characters/*                  — shared characters (only when locale="")
+      - assets/{locale}/sfx/*.wav            — generated SFX
+      - assets/sfx/*.wav                     — shared SFX (only when locale="")
+      - renders/{locale}/output.mp4|srt|json — render outputs
+      - AssetManifest_merged.{locale}.json   — merged manifests
+      - AssetManifest.media.{locale}.json    — resolved media manifests
+      - RenderPlan.{locale}.json             — render plans
+      - assets/meta/gen_tts_cloud_results.json (only when locale="")
+
+    Returns list of deleted file paths (for logging).
+    """
+    ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+    deleted: list[str] = []
+
+    def _rm(path: str) -> None:
+        try:
+            os.remove(path)
+            deleted.append(path)
+        except FileNotFoundError:
+            pass
+
+    def _rm_dir_contents(directory: str, exts: tuple | None = None) -> None:
+        """Delete files inside a directory (non-recursive). exts=None means all files."""
+        if not os.path.isdir(directory):
+            return
+        for fname in os.listdir(directory):
+            fpath = os.path.join(directory, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if exts is None or fname.lower().endswith(exts):
+                _rm(fpath)
+
+    # Determine which locales to purge
+    if locale:
+        locales = [locale]
+        purge_shared = False   # shared assets only purged on full-episode purge
+    else:
+        locales = []
+        if os.path.isdir(ep_dir):
+            for f in sorted(os.listdir(ep_dir)):
+                m = re.match(r"AssetManifest_draft\.(.+)\.json$", f)
+                if m and m.group(1) != "shared":
+                    locales.append(m.group(1))
+        purge_shared = True
+
+    for loc in locales:
+        assets_loc = os.path.join(ep_dir, "assets", loc)
+
+        # TTS voice WAVs + license sidecars
+        _rm_dir_contents(os.path.join(assets_loc, "audio", "vo"), (".wav",))
+        _rm_dir_contents(os.path.join(assets_loc, "audio", "vo", "licenses"), (".json",))
+
+        # Locale-specific generated images
+        _rm_dir_contents(os.path.join(assets_loc, "backgrounds"), (".png", ".jpg", ".jpeg", ".webp"))
+        _rm_dir_contents(os.path.join(assets_loc, "characters"),  (".png", ".jpg", ".jpeg", ".webp"))
+        _rm_dir_contents(os.path.join(assets_loc, "sfx"),         (".wav", ".mp3"))
+
+        # Render outputs
+        render_loc = os.path.join(ep_dir, "renders", loc)
+        for fname in ("output.mp4", "output.srt", "render_output.json"):
+            _rm(os.path.join(render_loc, fname))
+
+        # Per-locale derived manifests
+        for pat in (f"AssetManifest_merged.{loc}.json",
+                    f"AssetManifest.media.{loc}.json",
+                    f"RenderPlan.{loc}.json"):
+            _rm(os.path.join(ep_dir, pat))
+
+    if purge_shared:
+        assets_shared = os.path.join(ep_dir, "assets")
+        # Shared music
+        _rm_dir_contents(os.path.join(assets_shared, "music"),      (".wav", ".mp3"))
+        # Shared (non-locale) backgrounds / characters / sfx
+        _rm_dir_contents(os.path.join(assets_shared, "backgrounds"), (".png", ".jpg", ".jpeg", ".webp"))
+        _rm_dir_contents(os.path.join(assets_shared, "characters"),  (".png", ".jpg", ".jpeg", ".webp"))
+        _rm_dir_contents(os.path.join(assets_shared, "sfx"),         (".wav", ".mp3"))
+        # TTS results meta
+        _rm(os.path.join(assets_shared, "meta", "gen_tts_cloud_results.json"))
+
+    return deleted
 
 
 def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
@@ -3744,11 +4033,23 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
             "--out",      ep(f"AssetManifest.media.{locale}.json"),
         ]
     elif step == "gen_render_plan":
+        # Read story_format from meta.json so the ceiling logic in gen_render_plan.py
+        # knows whether this is a narrative format (continuous_narration, documentary,
+        # illustrated_narration) or an episodic/monologue format.
+        _story_format = "episodic"
+        _meta_path = ep("meta.json")
+        if os.path.isfile(_meta_path):
+            try:
+                _mj = json.load(open(_meta_path, encoding="utf-8"))
+                _story_format = _mj.get("story_format", "episodic")
+            except Exception:
+                pass
         return [
             "python3", os.path.join(code_dir, "gen_render_plan.py"),
-            "--manifest", ep(f"AssetManifest_merged.{locale}.json"),
-            "--media",    ep(f"AssetManifest.media.{locale}.json"),
-            "--profile",  profile,
+            "--manifest",     ep(f"AssetManifest_merged.{locale}.json"),
+            "--media",        ep(f"AssetManifest.media.{locale}.json"),
+            "--profile",      profile,
+            "--story-format", _story_format,
         ]
     elif step == "render_video":
         out_dir = os.path.join(ep_dir, "renders", locale)
@@ -4075,6 +4376,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif parsed.path == "/api/status_report":
+            params = parse_qs(parsed.query)
+            slug   = unquote_plus(params.get("slug",  [""])[0]).strip()
+            ep_id  = unquote_plus(params.get("ep_id", [""])[0]).strip()
+            sr_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id, "status_report.txt")
+            text = ""
+            if slug and ep_id and os.path.exists(sr_path):
+                with open(sr_path, "r", encoding="utf-8") as fh:
+                    text = fh.read()
+            body = json.dumps({"text": text}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.end_headers()
             self.wfile.write(body)
 
@@ -4152,6 +4471,7 @@ class Handler(BaseHTTPRequestHandler):
             profile    = unquote_plus(params.get("profile", ["preview_local"])[0]).strip()
             from_step  = unquote_plus(params.get("from",    [""])[0]).strip()
             no_music   = params.get("no_music", ["0"])[0].strip() == "1"
+            purge      = params.get("purge",    ["1"])[0].strip() == "1"
 
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -4179,6 +4499,17 @@ class Handler(BaseHTTPRequestHandler):
             client = self.client_address
 
             try:
+                # ── Purge stale assets before running ────────────────────────
+                if purge:
+                    self.wfile.write(sse("line",
+                        f"\n🗑  Purging cached assets for [{locale}]…"))
+                    self.wfile.flush()
+                    removed = _purge_episode_assets(slug, ep_id, locale)
+                    self.wfile.write(sse("line",
+                        f"   Deleted {len(removed)} file(s)"))
+                    self.wfile.flush()
+                    force_run = True   # purge implies force-run all steps
+
                 for step in LOCALE_STEPS[from_idx:]:
                     if force_run:
                         _delete_step_output(step, slug, ep_id, locale)
@@ -4230,6 +4561,149 @@ class Handler(BaseHTTPRequestHandler):
 
                 self.wfile.write(sse("line",
                     f"\n✓ [{locale}] All post-processing steps complete"))
+                self.wfile.write(sse("done", "0"))
+                self.wfile.flush()
+
+            except BrokenPipeError:
+                pass
+            except Exception as exc:
+                try:
+                    self.wfile.write(sse("error_line", f"Server error: {exc}"))
+                    self.wfile.write(sse("done", "1"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+            finally:
+                if proc and proc.poll() is None:
+                    proc.terminate()
+
+        # SSE stream: shared steps N-4 then all locale steps 5-10 (Run N→10 from shared step)
+        elif parsed.path == "/run_stage10":
+            params    = parse_qs(parsed.query)
+            slug      = unquote_plus(params.get("slug",    [""])[0]).strip()
+            ep_id     = unquote_plus(params.get("ep_id",   [""])[0]).strip()
+            from_step = unquote_plus(params.get("from",    [""])[0]).strip()
+            profile   = unquote_plus(params.get("profile", ["preview_local"])[0]).strip()
+            no_music  = params.get("no_music", ["0"])[0].strip() == "1"
+            purge     = params.get("purge",    ["1"])[0].strip() == "1"
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            if not slug or not ep_id:
+                self.wfile.write(sse("error_line", "Missing slug or ep_id"))
+                self.wfile.write(sse("done", "1"))
+                self.wfile.flush()
+                return
+
+            _SHARED_STEPS = ["gen_music_clip", "gen_characters", "gen_backgrounds", "gen_sfx"]
+            _LOCALE_STEPS_ALL = ["manifest_merge", "gen_tts", "post_tts",
+                                  "resolve_assets", "gen_render_plan", "render_video"]
+            from_idx = _SHARED_STEPS.index(from_step) if from_step in _SHARED_STEPS else 0
+
+            # Detect locales from AssetManifest_draft.{locale}.json files
+            _ep_dir_s10 = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+            _locales_s10: list[str] = []
+            if os.path.isdir(_ep_dir_s10):
+                for _f in sorted(os.listdir(_ep_dir_s10)):
+                    _m = re.match(r"AssetManifest_draft\.(.+)\.json$", _f)
+                    if _m and _m.group(1) != "shared":
+                        _locales_s10.append(_m.group(1))
+
+            step_env = os.environ.copy()
+            step_env.pop("CLAUDECODE", None)
+            client = self.client_address
+            proc = None
+
+            def _run_cmd_s10(cmd):
+                nonlocal proc
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                )
+                with _lock:
+                    _procs[client] = proc
+                for raw_line in proc.stdout:
+                    self.wfile.write(sse("line", raw_line.rstrip("\n")))
+                    self.wfile.flush()
+                proc.wait()
+                with _lock:
+                    _procs.pop(client, None)
+                return proc.returncode
+
+            try:
+                # ── Purge stale assets (all locales) before running ───────────
+                if purge:
+                    self.wfile.write(sse("line",
+                        "\n🗑  Purging cached assets for all locales…"))
+                    self.wfile.flush()
+                    _total_removed = _purge_episode_assets(slug, ep_id, "")
+                    self.wfile.write(sse("line",
+                        f"   Deleted {len(_total_removed)} file(s)"))
+                    self.wfile.flush()
+
+                # ── Shared steps (locale-free) ────────────────────────────────
+                for _step in _SHARED_STEPS[from_idx:]:
+                    self.wfile.write(sse("line",
+                        f"\n── {_step} (shared) ────────────────────────────────"))
+                    self.wfile.flush()
+                    _cmd = _build_step_cmd(_step, slug, ep_id, "", profile, no_music)
+                    if not _cmd:
+                        self.wfile.write(sse("error_line", f"Unknown step: {_step!r}"))
+                        self.wfile.write(sse("done", "1"))
+                        self.wfile.flush()
+                        return
+                    _rc = _run_cmd_s10(_cmd)
+                    if _rc != 0:
+                        self.wfile.write(sse("error_line",
+                            f"✗ {_step} failed (exit {_rc})"))
+                        self.wfile.write(sse("done", str(_rc)))
+                        self.wfile.flush()
+                        return
+                    self.wfile.write(sse("line", f"✓ {_step}"))
+                    self.wfile.flush()
+
+                # ── Per-locale steps ──────────────────────────────────────────
+                if not _locales_s10:
+                    self.wfile.write(sse("error_line",
+                        "No locales found — run Stage 9 first to create manifests"))
+                    self.wfile.write(sse("done", "1"))
+                    self.wfile.flush()
+                    return
+
+                for _locale in _locales_s10:
+                    self.wfile.write(sse("line",
+                        f"\n── locale: {_locale} ────────────────────────────────"))
+                    self.wfile.flush()
+                    for _step in _LOCALE_STEPS_ALL:
+                        self.wfile.write(sse("line",
+                            f"\n── {_step} [{_locale}] ──────────────────────────"))
+                        self.wfile.flush()
+                        _cmd = _build_step_cmd(_step, slug, ep_id, _locale, profile, no_music)
+                        if not _cmd:
+                            self.wfile.write(sse("error_line", f"Unknown step: {_step!r}"))
+                            self.wfile.write(sse("done", "1"))
+                            self.wfile.flush()
+                            return
+                        _rc = _run_cmd_s10(_cmd)
+                        if _rc != 0:
+                            self.wfile.write(sse("error_line",
+                                f"✗ {_step} [{_locale}] failed (exit {_rc})"))
+                            self.wfile.write(sse("done", str(_rc)))
+                            self.wfile.flush()
+                            return
+                        self.wfile.write(sse("line", f"✓ {_step} [{_locale}]"))
+                        self.wfile.flush()
+                    self.wfile.write(sse("line",
+                        f"✓ [{_locale}] all locale steps complete"))
+                    self.wfile.flush()
+
+                self.wfile.write(sse("line", "\n✓ Stage 10 — all steps complete"))
                 self.wfile.write(sse("done", "0"))
                 self.wfile.flush()
 
@@ -4562,6 +5036,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(resp)
 
+        elif self.path == "/api/append_status_report":
+            try:
+                from datetime import datetime as _dt
+                length   = int(self.headers.get("Content-Length", 0))
+                req      = json.loads(self.rfile.read(length))
+                slug     = req.get("slug",  "").strip()
+                ep_id    = req.get("ep_id", "").strip()
+                text     = req.get("text",  "").strip()
+                if not (slug and ep_id and text):
+                    raise ValueError("slug, ep_id, and text are required")
+                ep_dir  = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                os.makedirs(ep_dir, exist_ok=True)
+                sr_path = os.path.join(ep_dir, "status_report.txt")
+                ts      = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+                entry   = f"\n{'='*60}\n{ts}\n{'='*60}\n{text}\n"
+                with open(sr_path, "a", encoding="utf-8") as fh:
+                    fh.write(entry)
+                resp = json.dumps({"ok": True}).encode()
+            except Exception as exc:
+                resp = json.dumps({"error": str(exc)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
         elif self.path == "/api/infer_story_meta":
             length  = int(self.headers.get("Content-Length", 0))
             body    = json.loads(self.rfile.read(length).decode())
@@ -4779,13 +5279,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, fmt, *args):
-        path = args[0].split()[1] if args else ""
+        first = str(args[0]) if args else ""
+        parts = first.split()
+        path = parts[1] if len(parts) > 1 else ""
         # Silence noisy but uninteresting routes
         silent = {"/", "/stop", "/next_story_num", "/check_episode", "/read_story",
                   "/list_projects", "/view_artifact", "/list_stories",
-                  "/pipeline_status", "/serve_media", "/run_locale",
+                  "/pipeline_status", "/serve_media", "/run_locale", "/run_stage10",
                   "/api/azure_voices", "/api/voice_presets", "/api/voice_index",
                   "/api/preview_voice", "/api/save_voice_cast",
+                  "/api/status_report", "/api/append_status_report",
                   "/api/check_slug", "/api/next_episode_id",
                   "/api/create_episode", "/api/save_episode_meta"}
         if not any(path == s or path.startswith(s + "?") for s in silent):
