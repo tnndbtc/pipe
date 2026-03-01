@@ -4,7 +4,9 @@
 # quality when composited over 1280×720 background plates.
 # Input:  char-*-rgba.png  (512×768, from gen_character_mattes.py)
 # Output: char-*-upscaled.png  (1024×1536, RGBA preserved)
-# Run AFTER gen_character_mattes.py.
+# Run AFTER gen_character_mattes.py (or use --auto-matte via gen_upscale.py directly).
+# STATUS: VALIDATED — runs on RTX 4060 8 GB (~2 GB VRAM). Auto-runs
+#         gen_character_mattes.py if RGBA inputs are missing.
 # =============================================================================
 #
 # requirements.txt (pip install before running):
@@ -14,7 +16,7 @@
 #   Pillow>=10.0.0
 #   numpy>=1.24.0,<2.0.0
 #   opencv-python>=4.9.0
-#   huggingface_hub>=0.21.0
+#   (weights downloaded directly from GitHub releases — no huggingface_hub needed)
 #
 # NOTE: basicsr/realesrgan install can fail on newer environments.
 # If `pip install realesrgan basicsr` errors, try:
@@ -111,8 +113,12 @@ UPSCALE_TARGETS = [
     # },
 ]
 
-REALESRGAN_MODEL_ID = "xinntao/Real-ESRGAN"
-REALESRGAN_FILENAME = "RealESRGAN_x4plus.pth"
+REALESRGAN_FILENAME    = "RealESRGAN_x4plus.pth"
+REALESRGAN_GITHUB_URL  = (
+    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/"
+    "RealESRGAN_x4plus.pth"
+)
+REALESRGAN_CACHE_DIR   = Path(__file__).resolve().parent.parent.parent / ".cache" / "realesrgan"
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +153,10 @@ def parse_args():
         "--asset-id", type=str, default=None, dest="asset_id",
         help="Process only this asset_id (requires --manifest).",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Re-upscale even if output already exists.",
+    )
     return parser.parse_args()
 
 
@@ -176,18 +186,20 @@ def load_from_manifest(manifest_path: str, asset_id_filter):
 # ---------------------------------------------------------------------------
 def load_upsampler(tile: int):
     """
-    Download Real-ESRGAN x4plus weights from HuggingFace and initialise
-    the RealESRGANer inference object.
+    Download Real-ESRGAN x4plus weights from GitHub releases and initialise
+    the RealESRGANer inference object.  Weights are cached in .cache/realesrgan/.
     """
+    import urllib.request
     from basicsr.archs.rrdbnet_arch import RRDBNet
     from realesrgan import RealESRGANer
-    from huggingface_hub import hf_hub_download
 
-    print(f"[MODEL] Downloading {REALESRGAN_FILENAME} from {REALESRGAN_MODEL_ID}...")
-    weight_path = hf_hub_download(
-        repo_id=REALESRGAN_MODEL_ID,
-        filename=REALESRGAN_FILENAME,
-    )
+    REALESRGAN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    weight_path = REALESRGAN_CACHE_DIR / REALESRGAN_FILENAME
+    if not weight_path.exists():
+        print(f"[MODEL] Downloading {REALESRGAN_FILENAME} from GitHub releases...")
+        urllib.request.urlretrieve(REALESRGAN_GITHUB_URL, str(weight_path))
+    else:
+        print(f"[MODEL] Using cached weights: {weight_path}")
     print(f"[MODEL] Weights at: {weight_path}")
 
     # RRDBNet architecture for x4plus (23 RRDB blocks)
@@ -201,7 +213,7 @@ def load_upsampler(tile: int):
     print(f"[MODEL] Loading RealESRGAN on {device} (FP16={'yes' if device=='cuda' else 'no/CPU'})...")
     upsampler = RealESRGANer(
         scale=4,
-        model_path=weight_path,
+        model_path=str(weight_path),
         model=rrdb_model,
         tile=tile,
         tile_pad=10,
@@ -262,6 +274,29 @@ def upscale_image(upsampler, input_path: Path, output_path: Path, target_scale: 
 # Helpers
 # ---------------------------------------------------------------------------
 
+def ensure_mattes(manifest_path, output_dir: Path) -> None:
+    """
+    Auto-run gen_character_mattes.py when RGBA inputs are missing.
+    Called before the upscale loop so the user only needs to run gen_upscale.py.
+    """
+    import subprocess
+    import sys
+
+    mattes_script = Path(__file__).resolve().parent / "gen_character_mattes.py"
+    if not mattes_script.exists():
+        print(f"[AUTO-MATTE] gen_character_mattes.py not found at {mattes_script} — skipping.")
+        return
+
+    print("\n[AUTO-MATTE] RGBA inputs missing — running gen_character_mattes.py first...")
+    cmd = [sys.executable, str(mattes_script), "--output_dir", str(output_dir)]
+    if manifest_path:
+        cmd += ["--manifest", manifest_path]
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print("[AUTO-MATTE] gen_character_mattes.py exited with errors — some inputs may still be missing.")
+    print()
+
+
 def locale_from_manifest_path(path: str) -> str:
     """Extract locale from manifest filename.
     'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
@@ -288,6 +323,10 @@ def main():
             print("[WARN] No matching character_packs in manifest. Nothing to do.")
             return
 
+    # Auto-matte: if any RGBA inputs are missing, run gen_character_mattes.py first
+    if any(not (out_dir / t["input"]).exists() for t in upscale_targets):
+        ensure_mattes(args.manifest, out_dir)
+
     upsampler = load_upsampler(args.tile)
 
     results = []
@@ -298,7 +337,7 @@ def main():
         output_path = out_dir / target["output"]
         print(f"\n[{idx}/{total}] Upscaling {target['asset_id']} ({target['scale']}×)...")
 
-        if output_path.exists():
+        if output_path.exists() and not args.force:
             print(f"  [SKIP] {target['output']} already exists")
             results.append({
                 "asset_id": target["asset_id"],
