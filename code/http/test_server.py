@@ -184,10 +184,8 @@ def save_presets(data: dict) -> None:
 def parse_azure_tts_styles() -> dict:
     """Parse voice catalog; return voices grouped by story locale.
 
-    Reads prompts/azure_tts_styles.txt — a single file containing all
-    voices (styled + no-style en/zh-capable + multitalker sections).
-    Run build_voice_catalog.py once to expand it from the original 62
-    styled voices to the full catalog.
+    Reads prompts/azure_tts_styles.txt — single file containing all 275
+    voices (styled + no-style en/zh-capable + bridge + multitalker sections).
 
     Returns: { "en": [VoiceEntry, ...], "zh-Hans": [...], ... }
     VoiceEntry: {

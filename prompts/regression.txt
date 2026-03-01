@@ -635,30 +635,32 @@ API endpoints: `GET /api/voice_index`, `GET /api/voice_presets`, `GET /api/azure
 - "— no preset —" selection: restores `_voiceIndex[voice].clips[style].params` defaults (does NOT early-return without resetting)
 
 ### Voice catalog files
-- `prompts/azure_tts_styles.txt` — Stage 0 input: **styled voices only** (62 entries + `supports()` lines); pre-embedded by `inline_files_into_prompt`; small enough for haiku context
-- `prompts/azure_tts_styles_full.txt` — VC editor input: **full catalog** (275 voices including no-style and bridge voices); read only by `/api/azure_voices`; NOT embedded in any prompt
-- `build_voice_catalog.py` generates both files from `projects/azure_tts_en_all.txt` + `projects/azure_tts_zh_all.txt` + existing `azure_tts_styles.txt`
+- `prompts/azure_tts_styles.txt` — **single file** used by BOTH Stage 0 (pre-embedded) AND `/api/azure_voices` (VC editor)
+  - 275 voices: styled voices (62) + no-style en/zh-capable voices + bridge voices + multitalker section
+  - Pre-embedded by `inline_files_into_prompt` into Stage 0 prompts
+  - Parsed by `parse_azure_tts_styles()` in `test_server.py` for the VC editor dropdown
+- There is NO separate `azure_tts_styles_full.txt` — both Stage 0 and VC editor use the same file
 
 ### Voice picker (two-tier UI)
 - Default view: shows only styled voices (`has_styles === true`) — same 62 as before expansion
 - "Show all voices" toggle: reveals full catalog grouped by locale (`<optgroup>`)
-- `has_styles` bool is included in `/api/azure_voices` response per voice entry
+- `has_styles` bool annotated by `parse_azure_tts_styles()`, included in `/api/azure_voices` response
 
 ### parse_azure_tts_styles() parser safety
-The parser uses three regexes: `VOICE_RE = r'^(\S+Neural)'`, `LOCALE_RE`, `STYLES_RE`.
+The parser uses `VOICE_RE` (matches `[STANDARD]` or `[DRAGON]` tier bracket), `LOCALE_RE`, `STYLES_RE`, `SUPPORTS_RE`.
 New content added by `build_voice_catalog.py` is silently safe:
 - Section header lines (`====== EN-CAPABLE ======`, etc.) — do not match `VOICE_RE` → ignored ✓
-- `supports(N): [...]` lines — no regex for them → ignored ✓ (parser only needs voice/locale/gender/styles)
+- `supports(N): [...]` lines — matched by `SUPPORTS_RE` → stored in `entry["supports"]` ✓
 - All 275 voice entries follow the same format as existing entries → parse correctly ✓
 - `styles(0): []` voices parse as `styles: []` → `has_styles = False` → filtered out of default VC picker ✓
-Do NOT change the VOICE_RE pattern to match section headers or this safety breaks.
+- `is_multitalker` set to `True` if "ultitalker" in voice name (case-insensitive) ✓
+Do NOT change `VOICE_RE` to match section headers — the tier bracket anchor is intentional.
 
 ### Regression risks for Voice Cast
 1. When user selects "— no preset —", the Emotion/Speak Speed/Pitch/Break fields MUST reset to the voice index defaults for that voice+style combination. The old bug was `if (!preset) return;` skipping this reset — FIXED. The correct code looks up `_voiceIndex?.[voiceSel.value]?.clips?.[styleSel.value]?.params` and restores those values before returning.
 2. `_voiceIndex` is loaded from `GET /api/voice_index` — must be loaded before presetSel change handler fires
 3. `vcContinue()` builds `ep_dir` from `currentSlug`/`currentEpId` — both must be set before voice cast can be opened for a running episode
-4. `/api/azure_voices` must read from `prompts/azure_tts_styles_full.txt` (NOT `azure_tts_styles.txt`) — the full catalog is needed for the VC editor picker
-5. Stage 0 must read from `prompts/azure_tts_styles.txt` (styled-only) — the full catalog is too large for haiku context
+4. Both Stage 0 AND `/api/azure_voices` read from the SAME `prompts/azure_tts_styles.txt` — do NOT introduce a separate `_full.txt` unless Stage 0 haiku token budget becomes a problem after expansion to 275 entries (~17–22K tokens)
 
 ---
 
@@ -704,7 +706,7 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/api/next_episode_id` | `slug` | **`{"next_ep_id": "s01e01"}`** ← key is `next_ep_id` |
 | `/api/voice_index` | — | Voice index JSON from `projects/resources/voices/index.json` |
 | `/api/voice_presets` | `voice` | Array of presets for that voice |
-| `/api/azure_voices` | — | Parsed `prompts/azure_tts_styles_full.txt` catalog (all 275 voices); each entry includes `has_styles: bool` for client-side filtering |
+| `/api/azure_voices` | — | Parsed `prompts/azure_tts_styles.txt` catalog; each entry includes `has_styles: bool` and `is_multitalker: bool` for client-side filtering |
 | `/api/status_report` | `slug`, `ep_id` | `{text}` — full contents of `status_report.txt` for that episode (empty string if file doesn't exist) |
 | `/serve_media` | `path` | Binary file content (for audio preview) |
 
@@ -917,14 +919,12 @@ Run through the relevant items after any modification:
 - [ ] `gen_render_plan.py` VO_TAIL_MS = 2000 still applied as floor: `duration_ms = max(duration_ms, vo_end_ms + VO_TAIL_MS)`
 - [ ] `resolve_assets.py` backgrounds use `bg.get("asset_id") or bg["item_id"]` — backgrounds use `item_id` key, not `asset_id`
 
-### After modifying prompts/azure_tts_styles.txt or azure_tts_styles_full.txt
-- [ ] `azure_tts_styles.txt` stays ≤ ~4,500 tokens (Stage 0 haiku context budget) — verify after any expansion
-- [ ] Every entry in `azure_tts_styles.txt` has ≥1 style (no-style voices belong only in `_full.txt`)
-- [ ] `supports()` lines are present on all en-capable and zh-capable entries in `azure_tts_styles.txt`
-- [ ] `azure_tts_styles_full.txt` is NOT listed in any `p_N.txt` "Read these files" section — must never be pre-embedded by `run.sh`
-- [ ] `parse_azure_tts_styles()` in `test_server.py` reads `azure_tts_styles.txt` for Stage 0; `/api/azure_voices` may read `_full.txt` when it exists, falling back to `azure_tts_styles.txt`
-- [ ] New section headers (e.g. `====== EN-CAPABLE ======`) do not break `parse_azure_tts_styles()` — confirmed safe (VOICE_RE only matches lines starting with a non-whitespace Neural name)
-- [ ] `build_voice_catalog.py` generates both files atomically (write tmp → rename) — partial writes must not corrupt either file
+### After modifying prompts/azure_tts_styles.txt
+- [ ] `supports()` lines present on all en-capable and zh-capable entries
+- [ ] No-style voices (`styles(0): []`) are correctly tagged — `parse_azure_tts_styles()` annotates `has_styles=False` automatically
+- [ ] MULTITALKER voices appear in a clearly labeled section at the end — `is_multitalker` detected via "ultitalker" in voice name
+- [ ] Section headers (e.g. `====== EN-CAPABLE ======`) do not use `[STANDARD]` or `[DRAGON]` — those brackets are reserved for voice tier lines matched by `VOICE_RE`
+- [ ] ⚠ Token budget: 275 entries already adds ~17–22K tokens to Stage 0 (haiku). Monitor for quality degradation.
 
 ### After modifying contracts/schemas/*.v1.json
 - [ ] All LLM-written artifacts still validate against updated schema
@@ -959,11 +959,9 @@ Run through the relevant items after any modification:
 8. **generation_seed is random per episode**
    Set once by `/api/create_episode` using `random.randint(100_000_000, 999_999_999)`. Stored in `meta.json` and `pipeline_vars.sh`. Never changes after episode creation. Same seed = same LLM output (deterministic runs).
 
-9. **azure_tts_styles.txt is split into two files with different consumers**
-   `prompts/azure_tts_styles.txt` — Stage 0 (haiku) only: 62 styled voices + `supports()` lines. Token-budget-safe. Pre-embedded by `inline_files_into_prompt`.
-   `prompts/azure_tts_styles_full.txt` — VC editor (`/api/azure_voices`) only: all 275 voices including no-style and bridge voices. Never embedded in any LLM prompt.
-   Do NOT merge these back into a single file — the full catalog (~17–22K tokens) exceeds haiku's practical context budget for Stage 0.
-   Token budget target: `azure_tts_styles.txt` must stay ≤ ~4,500 tokens after any expansion. Verify with `claude --print-token-count` or equivalent before committing changes to that file.
+9. **azure_tts_styles.txt is a single file shared by Stage 0 and the VC editor**
+   `prompts/azure_tts_styles.txt` is the only voice catalog file. 275 voices. Pre-embedded by `inline_files_into_prompt` into Stage 0 AND read by `parse_azure_tts_styles()` for `/api/azure_voices`.
+   ⚠ Token budget watch: the expanded 275-entry file adds ~17–22K tokens to Stage 0 (haiku). If Stage 0 quality degrades, consider splitting into a styled-only file for Stage 0 and the full file for the VC editor at that point.
 
 10. **WAV item_id names are tied to scene_id values in the Script**
     Stage 4 assigns `vo_item_ids = ["vo-{scene_id}-{NNN}"]` where `{scene_id}` is the slug from
