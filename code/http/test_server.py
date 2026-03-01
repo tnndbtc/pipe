@@ -2835,16 +2835,23 @@ Direction    : …"></textarea>
       });
     }
 
-    // If stages are actively running, clear their stale ✓ and artifact links
-    // so Pipeline tab doesn't show completed state for a stage that is
-    // currently re-running.
+    // If stages are actively running, clear stale ✓ only for stages the server
+    // has NOT yet confirmed as done (output files don't exist yet).
+    // Stages that already completed mid-run (server says done=true because their
+    // output files exist on disk) keep their ✓ — never overwrite confirmed work.
     if (pipeRunning) {
+      const _serverStages = status.llm_stages || {};
       llmDefs.forEach(({ n, key }) => {
         if (n >= pipeRunning.from && n <= pipeRunning.to) {
-          if (stagesMap[key]) {
-            stagesMap[key].done      = false;
-            stagesMap[key].artifacts = [];   // hide stale links while re-running
+          const serverConfirmed = _serverStages[key]?.done === true;
+          if (!serverConfirmed) {
+            // Server hasn't confirmed this stage yet — clear any stale ✓
+            if (stagesMap[key]) {
+              stagesMap[key].done      = false;
+              stagesMap[key].artifacts = [];
+            }
           }
+          // serverConfirmed=true → stage finished during this run → leave ✓ intact
         }
       });
     }
@@ -2905,8 +2912,10 @@ Direction    : …"></textarea>
         const localeStepsMap = status.locale_steps || {};
         const sharedStepsMap = status.shared_steps || {};
         const locales        = status.locales || [];
-        // True when any run that covers Stage 10 is active — clears stale sub-step ✓s
-        const stage10Running = !!(pipeRunning && pipeRunning.from <= 10 && pipeRunning.to >= 10);
+        // stage10Running is kept for reference but no longer used to hard-clear ✓s.
+        // Sub-step done state is sourced directly from the server (file-existence checks)
+        // so completed steps stay checked even while Stage 10 is still running.
+        const stage10Running = !!(pipeRunning && pipeRunning.from <= 10 && pipeRunning.to >= 10); // eslint-disable-line no-unused-vars
 
         function makeRunBtn(label, onclick) {
           const b = document.createElement('button');
@@ -2924,7 +2933,7 @@ Direction    : …"></textarea>
           { num: 3, step: 'gen_backgrounds', label: '3 — gen_backgrounds' },
           { num: 4, step: 'gen_sfx',         label: '4 — gen_sfx'         },
         ].forEach(({ num, step, label }) => {
-          const done = stage10Running ? false : ((sharedStepsMap[step] || {}).done || false);
+          const done = (sharedStepsMap[step] || {}).done || false;
           const row = document.createElement('div');
           row.className = 'pipe-substep-row';
           row.appendChild(Object.assign(document.createElement('span'), {
@@ -2963,7 +2972,7 @@ Direction    : …"></textarea>
 
             const lsteps = localeStepsMap[locale] || {};
             LOCALE_STEPS.forEach(({ num, step, label }) => {
-              const done = stage10Running ? false : ((lsteps[step] || {}).done || false);
+              const done = (lsteps[step] || {}).done || false;
               const row  = document.createElement('div');
               row.className = 'pipe-substep-row';
               // status icon
