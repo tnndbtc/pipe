@@ -49,7 +49,7 @@ def export_dubbed_audio(episode_dir: str, locale: str = "zh-Hans") -> Path:
         SystemExit: if the source render MP4 is missing or ffmpeg fails.
     """
     source = Path(episode_dir) / "renders" / locale / "output.mp4"
-    output = Path(episode_dir) / "renders" / locale / "youtube_dubbed.aac"
+    output = Path(episode_dir) / "renders" / locale / "youtube_dubbed.m4a"
 
     # Pre-flight: verify source render exists before starting any work
     if not source.exists():
@@ -93,7 +93,7 @@ def export_dubbed_audio(episode_dir: str, locale: str = "zh-Hans") -> Path:
 
     print(f"   Duration : {duration_sec:.1f}s")
     print(f"   Size     : {size_mb:.1f} MB")
-    print(f"✓  youtube_dubbed.aac ready — upload via YouTube Studio > Dubbing")
+    print(f"✓  youtube_dubbed.m4a ready — upload via YouTube Studio > Dubbing")
 
     return output
 

@@ -178,7 +178,7 @@ run_stage_10() {
       python3 "${code_dir}/export_youtube_dubbed.py" \
         "${EP_DIR}" \
         "${locale}"
-      echo "  ✓ ${locale}  →  ${EP_DIR}/renders/${locale}/youtube_dubbed.aac"
+      echo "  ✓ ${locale}  →  ${EP_DIR}/renders/${locale}/youtube_dubbed.m4a"
     else
       echo "  ↷ ${locale}  English is the primary upload — dubbed audio export skipped"
     fi

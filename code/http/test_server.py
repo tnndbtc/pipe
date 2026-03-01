@@ -3024,7 +3024,7 @@ Direction    : …"></textarea>
   function playLocaleDubbedAudio(locale) {
     const audio = document.getElementById('pipe-audio');
     const path  = 'projects/' + pipeEpSlug + '/episodes/' + pipeEpId +
-                  '/renders/' + locale + '/youtube_dubbed.aac';
+                  '/renders/' + locale + '/youtube_dubbed.m4a';
     audio.pause();
     audio.src = '/serve_media?path=' + encodeURIComponent(path);
     audio.load();
@@ -3766,7 +3766,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
     # Dubbed audio tracks ready for YouTube Studio upload (non-en locales only)
     ready_dubbed: list[str] = [
         loc for loc in locales
-        if loc != "en" and check(os.path.join(ep_dir, "renders", loc, "youtube_dubbed.aac"))
+        if loc != "en" and check(os.path.join(ep_dir, "renders", loc, "youtube_dubbed.m4a"))
     ]
 
     # Shared (locale-free) post-processing steps — steps 1–4 in the Stage 10 panel
@@ -3955,7 +3955,7 @@ def _purge_episode_assets(slug: str, ep_id: str, locale: str = "") -> list[str]:
 
         # Render outputs
         render_loc = os.path.join(ep_dir, "renders", loc)
-        for fname in ("output.mp4", "output.srt", "render_output.json"):
+        for fname in ("output.mp4", "output.srt", "render_output.json", "youtube_dubbed.m4a", "youtube_dubbed.aac"):
             _rm(os.path.join(render_loc, fname))
 
         # Per-locale derived manifests
@@ -4741,7 +4741,7 @@ class Handler(BaseHTTPRequestHandler):
             ext  = os.path.splitext(full_path)[1].lower().lstrip(".")
             mime = {"mp4": "video/mp4", "webm": "video/webm", "ogg": "video/ogg",
                     "mp3": "audio/mpeg", "wav": "audio/wav",
-                    "aac": "audio/aac"}.get(ext, "application/octet-stream")
+                    "aac": "audio/aac", "m4a": "audio/mp4"}.get(ext, "application/octet-stream")
 
             file_size = os.path.getsize(full_path)
             range_hdr = self.headers.get("Range", "")
