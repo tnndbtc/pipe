@@ -2,6 +2,11 @@
 # gen_background_video.py
 # Generate short cinematic background video clips for shots that require
 # camera motion (pan, crane, zoom) in s01e01.
+# STATUS: VALIDATED-PENDING-GPU — pipeline code is correct but cogvideox-2b
+#         uses ~10.8 GB VRAM (spills to system RAM, produces blank output on
+#         RTX 4060 8 GB). ltx-video loads but produces static/no-movement clips.
+#         Re-validate on A100 40 GB via RunPod/Vast.ai, or use fal.ai API.
+#         See GPU rental plan in gen_character_animation.py comments.
 # =============================================================================
 #
 # requirements.txt (pip install before running):
@@ -153,6 +158,11 @@ def parse_args():
             + model_help +
             "\n\n  auto           Tries cogvideox-2b, falls back to ltx-video on failure."
             "\n  all            Runs every model above in sequence for comparison."
+            "\n\nNext test command (bg-karnak-hypostyle-hall, 4 sec, slow dolly between columns):\n\n"
+            "  Option 1 — ltx-video (lighter, try first on 8 GB):\n"
+            "  python code\\ai\\gen_background_video.py --model ltx-video --manifest ..\\AssetManifest_draft.json --asset-id bg-karnak-hypostyle-hall --output_dir projects\\the-pharaoh-who-defied-death\\episodes\\s01e01\\assets\\en\n\n"
+            "  Option 2 — cogvideox-2b at reduced resolution (if ltx-video unavailable):\n"
+            "  python code\\ai\\gen_background_video.py --model cogvideox-2b --manifest ..\\AssetManifest_draft.json --asset-id bg-karnak-hypostyle-hall --output_dir projects\\the-pharaoh-who-defied-death\\episodes\\s01e01\\assets\\en --width 480 --height 320 --num-frames 17"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -160,7 +170,17 @@ def parse_args():
     parser.add_argument("--fps",   type=int, default=FPS)
     parser.add_argument("--steps", type=int, default=None,
                         help="Override inference steps (default: per-model value).")
+    parser.add_argument("--guidance", type=float, default=None,
+                        help="Override guidance scale (default: per-model value). Higher = follows prompt more strictly.")
     parser.add_argument("--seed",  type=int, default=42)
+    parser.add_argument("--force", action="store_true",
+                        help="Overwrite existing output files instead of skipping them.")
+    parser.add_argument("--width",  type=int, default=None,
+                        help="Override output width (default: per-model value). Reduce to save VRAM.")
+    parser.add_argument("--height", type=int, default=None,
+                        help="Override output height (default: per-model value). Reduce to save VRAM.")
+    parser.add_argument("--num-frames", type=int, default=None, dest="num_frames",
+                        help="Override frame count (default: from manifest/job). Reduce to save VRAM.")
     parser.add_argument(
         "--model",
         choices=ALL_MODEL_KEYS + ["auto", "all"],
@@ -201,7 +221,7 @@ def load_from_manifest(manifest_path: str, asset_id_filter):
         num_frames = int(duration * 8) + 1
         videos.append({
             "asset_id":           aid,
-            "prompt":             bg["ai_prompt"] + ", slow camera motion",
+            "prompt":             motion.get("description", "slow camera motion") + ", " + bg["ai_prompt"],
             "negative_prompt":    "blurry, low quality, modern, fast motion, shaky",
             "motion_description": motion.get("description", "slow camera motion"),
             "duration_sec":       duration,
@@ -222,8 +242,10 @@ def load_cogvideox_pipeline(model_key: str):
     print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — FP16 + CPU offload...")
     pipe = CogVideoXPipeline.from_pretrained(cfg["model_id"], torch_dtype=torch.float16)
     pipe.enable_model_cpu_offload()
-    pipe.enable_vae_slicing()   # frame-sliced VAE decode
-    pipe.enable_vae_tiling()    # spatial tiling per frame
+    if hasattr(pipe, "enable_vae_slicing"):
+        pipe.enable_vae_slicing()
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
     print(f"[MODEL] {model_key} ready.")
     return pipe
 
@@ -236,8 +258,10 @@ def load_ltx_pipeline(model_key: str):
     print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — bfloat16 + CPU offload...")
     pipe = LTXPipeline.from_pretrained(cfg["model_id"], torch_dtype=torch.bfloat16)
     pipe.enable_model_cpu_offload()
-    pipe.enable_vae_slicing()
-    pipe.enable_vae_tiling()
+    if hasattr(pipe, "enable_vae_slicing"):
+        pipe.enable_vae_slicing()
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
     print(f"[MODEL] {model_key} ready.")
     return pipe
 
@@ -265,19 +289,25 @@ def unload_pipeline(pipe):
 # ---------------------------------------------------------------------------
 def generate_video(pipe, model_key: str, job: dict, args) -> list:
     """Run inference and return a list of PIL Image frames."""
-    cfg       = MODELS[model_key]
-    steps     = args.steps if args.steps is not None else cfg["steps"]
-    device    = "cuda" if torch.cuda.is_available() else "cpu"
-    generator = torch.Generator(device=device).manual_seed(args.seed)
+    cfg        = MODELS[model_key]
+    steps      = args.steps    if args.steps    is not None else cfg["steps"]
+    width      = args.width    if args.width    is not None else cfg["width"]
+    height     = args.height   if args.height   is not None else cfg["height"]
+    num_frames = args.num_frames if args.num_frames is not None else job["num_frames"]
+    guidance   = args.guidance if args.guidance is not None else cfg["guidance"]
+    device     = "cuda" if torch.cuda.is_available() else "cpu"
+    generator  = torch.Generator(device=device).manual_seed(args.seed)
+
+    print(f"    Inference: {width}×{height}  {num_frames} frames  {steps} steps  guidance={guidance}")
 
     result = pipe(
         prompt=job["prompt"],
         negative_prompt=job["negative_prompt"],
-        height=cfg["height"],
-        width=cfg["width"],
-        num_frames=job["num_frames"],
+        height=height,
+        width=width,
+        num_frames=num_frames,
         num_inference_steps=steps,
-        guidance_scale=cfg["guidance"],
+        guidance_scale=guidance,
         generator=generator,
     )
     # Both CogVideoX and LTX return result.frames[0] as a list of PIL Images
@@ -347,7 +377,7 @@ def run_model(model_key: str, video_backgrounds: list, out_dir: Path, args,
         print(f"    Duration: {job['duration_sec']}s  Frames: {job['num_frames']}  @ {args.fps} fps  Steps: {steps}")
         print(f"    Res     : {cfg['width']}×{cfg['height']}")
 
-        if out_path.exists():
+        if out_path.exists() and not args.force:
             print(f"    [SKIP] already exists")
             results.append({
                 "asset_id":  job["asset_id"],
@@ -359,17 +389,27 @@ def run_model(model_key: str, video_backgrounds: list, out_dir: Path, args,
             continue
 
         try:
+            import time
+            torch.cuda.reset_peak_memory_stats()
+            t0 = time.time()
             frames = generate_video(pipe, model_key, job, args)
             export_to_video(frames, str(out_path), fps=args.fps)
+            elapsed = time.time() - t0
+            peak_vram_gb = torch.cuda.max_memory_allocated() / 1024 ** 3
             size = out_path.stat().st_size
-            print(f"    [OK] {len(frames)} frames, {size:,} bytes")
+            mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(out_path.stat().st_mtime))
+            print(f"    [OK] {out_path.resolve()}")
+            print(f"         {len(frames)} frames  |  {elapsed:.1f}s  |  peak VRAM {peak_vram_gb:.2f} GB  |  {size:,} bytes")
+            print(f"         file timestamp: {mtime}")
             results.append({
-                "asset_id":   job["asset_id"],
-                "model":      model_key,
-                "output":     str(out_path),
-                "size_bytes": size,
-                "num_frames": len(frames),
-                "status":     "success",
+                "asset_id":     job["asset_id"],
+                "model":        model_key,
+                "output":       str(out_path),
+                "size_bytes":   size,
+                "num_frames":   len(frames),
+                "elapsed_sec":  round(elapsed, 1),
+                "peak_vram_gb": round(peak_vram_gb, 2),
+                "status":       "success",
             })
         except Exception as exc:
             print(f"    [ERROR] {exc}")
