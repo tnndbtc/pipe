@@ -1,5 +1,5 @@
 ==============================
-SUMMARY BY LOCALE (styled voices)
+SUMMARY BY LOCALE (styled voices — en/zh-capable voices extended below)
 ==============================
 
 de-DE: voices_with_styles=1, dragon_voices=0
@@ -56,86 +56,107 @@ de-DE-ConradNeural  [STANDARD]
 en-GB-RyanNeural  [STANDARD]
   locale=en-GB  gender=Male  local_name=Ryan
   styles(4): ['cheerful', 'chat', 'whispering', 'sad']
+  supports(1): ['en-GB']
 ------------------------------------------------------------------------
 en-GB-SoniaNeural  [STANDARD]
   locale=en-GB  gender=Female  local_name=Sonia
   styles(2): ['cheerful', 'sad']
+  supports(1): ['en-GB']
 ------------------------------------------------------------------------
 en-IN-NeerjaNeural  [STANDARD]
   locale=en-IN  gender=Female  local_name=Neerja
   styles(3): ['newscast', 'cheerful', 'empathetic']
+  supports(1): ['en-IN']
 ------------------------------------------------------------------------
 en-US-AndrewMultilingualNeural  [STANDARD]
   locale=en-US  gender=Male  local_name=Andrew Multilingual
   styles(2): ['empathetic', 'relieved']
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
 ------------------------------------------------------------------------
 en-US-AriaNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Aria
   styles(16): ['chat', 'customerservice', 'narration-professional', 'newscast-casual', 'newscast-formal', 'cheerful', 'empathetic', 'angry', 'sad', 'excited', 'friendly', 'terrified', 'shouting', 'unfriendly', 'whispering', 'hopeful']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-AvaNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Ava
   styles(3): ['angry', 'fearful', 'sad']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-DavisMultilingualNeural  [STANDARD]
   locale=en-US  gender=Male  local_name=Davis Multilingual
   styles(3): ['empathetic', 'funny', 'relieved']
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
 ------------------------------------------------------------------------
 en-US-DavisNeural  [STANDARD]
   locale=en-US  gender=Male  local_name=Davis
   styles(11): ['chat', 'angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-DerekMultilingualNeural  [STANDARD]
   locale=en-US  gender=Male  local_name=Derek Multilingual
   styles(4): ['empathetic', 'excited', 'relieved', 'shy']
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
 ------------------------------------------------------------------------
 en-US-GuyNeural  [STANDARD]
   locale=en-US  gender=Male  local_name=Guy
   styles(11): ['newscast', 'angry', 'cheerful', 'sad', 'excited', 'friendly', 'terrified', 'shouting', 'unfriendly', 'whispering', 'hopeful']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-JaneNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Jane
   styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-JasonNeural  [STANDARD]
   locale=en-US  gender=Male  local_name=Jason
   styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-JennyNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Jenny
   styles(14): ['assistant', 'chat', 'customerservice', 'newscast', 'angry', 'cheerful', 'sad', 'excited', 'friendly', 'terrified', 'shouting', 'unfriendly', 'whispering', 'hopeful']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-KaiNeural  [STANDARD]
   locale=en-US  gender=Male  local_name=Kai
   styles(1): ['conversation']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-LunaNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Luna
   styles(1): ['conversation']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-NancyMultilingualNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Nancy Multilingual
   styles(5): ['excited', 'friendly', 'funny', 'relieved', 'shy']
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
 ------------------------------------------------------------------------
 en-US-NancyNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Nancy
   styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-PhoebeMultilingualNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Phoebe Multilingual
   styles(3): ['empathetic', 'sad', 'serious']
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
 ------------------------------------------------------------------------
 en-US-SaraNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Sara
   styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 en-US-SerenaMultilingualNeural  [STANDARD]
   locale=en-US  gender=Female  local_name=Serena Multilingual
   styles(7): ['empathetic', 'excited', 'friendly', 'shy', 'serious', 'relieved', 'sad']
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
 ------------------------------------------------------------------------
 en-US-TonyNeural  [STANDARD]
   locale=en-US  gender=Male  local_name=Tony
   styles(10): ['angry', 'cheerful', 'excited', 'friendly', 'hopeful', 'sad', 'shouting', 'terrified', 'unfriendly', 'whispering']
+  supports(1): ['en-US']
 ------------------------------------------------------------------------
 es-ES-AlvaroNeural  [STANDARD]
   locale=es-ES  gender=Male  local_name=Álvaro
@@ -188,118 +209,1234 @@ pt-PT-RaquelNeural  [STANDARD]
 zh-CN-Xiaoshuang:DragonHDFlashLatestNeural  [DRAGON]
   locale=zh-CN  gender=Female  local_name=Xiaoshuang Dragon HD Flash Latest
   styles(1): ['chat']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-Xiaoxiao2:DragonHDFlashLatestNeural  [DRAGON]
   locale=zh-CN  gender=Female  local_name=Xiaoxiao2 Dragon HD Flash Latest
   styles(20): ['affectionate', 'angry', 'anxious', 'cheerful', 'curious', 'disappointed', 'empathetic', 'encouragement', 'excited', 'fearful', 'guilty', 'lonely', 'poetry-reading', 'sad', 'surprised', 'sentiment', 'sorry', 'story', 'whisper', 'tired']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-Xiaoxiao:DragonHDFlashLatestNeural  [DRAGON]
   locale=zh-CN  gender=Female  local_name=Xiaoxiao Dragon HD Flash Latest
   styles(8): ['angry', 'chat', 'cheerful', 'excited', 'fearful', 'sad', 'voiceassistant', 'customerservice']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-Xiaoyi:DragonHDFlashLatestNeural  [DRAGON]
   locale=zh-CN  gender=Female  local_name=Xiaoyi Dragon HD Flash Latest
   styles(9): ['angry', 'cheerful', 'complaining', 'cutesy', 'gentle', 'nervous', 'sad', 'shy', 'strict']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-Xiaoyou:DragonHDFlashLatestNeural  [DRAGON]
   locale=zh-CN  gender=Female  local_name=Xiaoyou Dragon HD Flash Latest
   styles(7): ['chat', 'angry', 'cheerful', 'poetry-reading', 'sad', 'story', 'cute']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-Xiaoyu:DragonHDFlashLatestNeural  [DRAGON]
   locale=zh-CN  gender=Female  local_name=Xiaoyu Dragon HD Flash Latest
   styles(6): ['argue', 'angry', 'cheerful', 'comfort', 'sad', 'sorry']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-Yunxia:DragonHDFlashLatestNeural  [DRAGON]
   locale=zh-CN  gender=Male  local_name=Yunxia Dragon HD Flash Latest
   styles(9): ['affectionate', 'angry', 'comfort', 'cheerful', 'encourage', 'excited', 'fearful', 'sad', 'surprised']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-Yunyi:DragonHDFlashLatestNeural  [DRAGON]
   locale=zh-CN  gender=Male  local_name=Yunyi Dragon HD Flash Latest
   styles(7): ['assassin', 'captain', 'cavalier', 'drake', 'gamenarrator', 'geomancer', 'poet']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-XiaochenNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓辰
   styles(1): ['livecommercial']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-XiaohanNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓涵
   styles(10): ['calm', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad', 'gentle', 'affectionate', 'embarrassed']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-XiaomengNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓梦
   styles(1): ['chat']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-XiaomoNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓墨
   styles(12): ['embarrassed', 'calm', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad', 'depressed', 'affectionate', 'gentle', 'envious']
   roles(8): ['YoungAdultFemale', 'YoungAdultMale', 'OlderAdultFemale', 'OlderAdultMale', 'SeniorFemale', 'SeniorMale', 'Girl', 'Boy']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-XiaoruiNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓睿
   styles(4): ['calm', 'fearful', 'angry', 'sad']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-XiaoshuangMultilingualNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓双 多语言
   styles(1): ['chat']
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
 ------------------------------------------------------------------------
 zh-CN-XiaoshuangNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓双
   styles(1): ['chat']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-XiaoxiaoMultilingualNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓晓 多语言
   styles(7): ['affectionate', 'cheerful', 'empathetic', 'excited', 'poetry-reading', 'sorry', 'story']
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
 ------------------------------------------------------------------------
 zh-CN-XiaoxiaoNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓晓
   styles(20): ['assistant', 'chat', 'customerservice', 'newscast', 'affectionate', 'angry', 'calm', 'cheerful', 'disgruntled', 'fearful', 'gentle', 'lyrical', 'sad', 'serious', 'poetry-reading', 'friendly', 'chat-casual', 'whispering', 'sorry', 'excited']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-XiaoyiNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓伊
   styles(9): ['angry', 'disgruntled', 'affectionate', 'cheerful', 'fearful', 'sad', 'embarrassed', 'serious', 'gentle']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-XiaoyouMultilingualNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓悠 多语言
   styles(7): ['chat', 'angry', 'cheerful', 'poetry-reading', 'sad', 'story', 'cute']
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
 ------------------------------------------------------------------------
 zh-CN-XiaozhenNeural  [STANDARD]
   locale=zh-CN  gender=Female  local_name=晓甄
   styles(6): ['angry', 'disgruntled', 'cheerful', 'fearful', 'sad', 'serious']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-YunfengNeural  [STANDARD]
   locale=zh-CN  gender=Male  local_name=云枫
   styles(7): ['angry', 'disgruntled', 'cheerful', 'fearful', 'sad', 'serious', 'depressed']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-YunhaoNeural  [STANDARD]
   locale=zh-CN  gender=Male  local_name=云皓
   styles(1): ['advertisement-upbeat']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-YunjianNeural  [STANDARD]
   locale=zh-CN  gender=Male  local_name=云健
   styles(10): ['narration-relaxed', 'sports-commentary', 'sports-commentary-excited', 'angry', 'disgruntled', 'cheerful', 'sad', 'serious', 'depressed', 'documentary-narration']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-YunxiNeural  [STANDARD]
   locale=zh-CN  gender=Male  local_name=云希
   styles(12): ['narration-relaxed', 'embarrassed', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad', 'depressed', 'chat', 'assistant', 'newscast']
   roles(3): ['Narrator', 'YoungAdultMale', 'Boy']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-YunxiaNeural  [STANDARD]
   locale=zh-CN  gender=Male  local_name=云夏
   styles(5): ['calm', 'fearful', 'cheerful', 'angry', 'sad']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-YunyangNeural  [STANDARD]
   locale=zh-CN  gender=Male  local_name=云扬
   styles(3): ['customerservice', 'narration-professional', 'newscast-casual']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-YunyeNeural  [STANDARD]
   locale=zh-CN  gender=Male  local_name=云野
   styles(8): ['embarrassed', 'calm', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad']
   roles(8): ['YoungAdultFemale', 'YoungAdultMale', 'OlderAdultFemale', 'OlderAdultMale', 'SeniorFemale', 'SeniorMale', 'Girl', 'Boy']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 zh-CN-YunzeNeural  [STANDARD]
   locale=zh-CN  gender=Male  local_name=云泽
   styles(9): ['calm', 'fearful', 'cheerful', 'disgruntled', 'serious', 'angry', 'sad', 'depressed', 'documentary-narration']
   roles(2): ['OlderAdultMale', 'SeniorMale']
+  supports(1): ['zh-CN']
 ------------------------------------------------------------------------
 
+==============================
+EN-CAPABLE VOICES
+(primary locale = en-*  ·  source: azure_tts_en_all.txt)
+==============================
 
+en-AU-AnnetteNeural  [STANDARD]
+  locale=en-AU  gender=Female  local_name=Annette
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-CarlyNeural  [STANDARD]
+  locale=en-AU  gender=Female  local_name=Carly
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-DarrenNeural  [STANDARD]
+  locale=en-AU  gender=Male  local_name=Darren
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-DuncanNeural  [STANDARD]
+  locale=en-AU  gender=Male  local_name=Duncan
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-ElsieNeural  [STANDARD]
+  locale=en-AU  gender=Female  local_name=Elsie
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-FreyaNeural  [STANDARD]
+  locale=en-AU  gender=Female  local_name=Freya
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-JoanneNeural  [STANDARD]
+  locale=en-AU  gender=Female  local_name=Joanne
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-KenNeural  [STANDARD]
+  locale=en-AU  gender=Male  local_name=Ken
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-KimNeural  [STANDARD]
+  locale=en-AU  gender=Female  local_name=Kim
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-NatashaNeural  [STANDARD]
+  locale=en-AU  gender=Female  local_name=Natasha
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-NeilNeural  [STANDARD]
+  locale=en-AU  gender=Male  local_name=Neil
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-TimNeural  [STANDARD]
+  locale=en-AU  gender=Male  local_name=Tim
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-TinaNeural  [STANDARD]
+  locale=en-AU  gender=Female  local_name=Tina
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-AU-WilliamMultilingualNeural  [STANDARD]
+  locale=en-AU  gender=Male  local_name=William Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-AU-WilliamNeural  [STANDARD]
+  locale=en-AU  gender=Male  local_name=William
+  styles(0): []
+  supports(1): ['en-AU']
+------------------------------------------------------------------------
+en-CA-ClaraNeural  [STANDARD]
+  locale=en-CA  gender=Female  local_name=Clara
+  styles(0): []
+  supports(1): ['en-CA']
+------------------------------------------------------------------------
+en-CA-LiamNeural  [STANDARD]
+  locale=en-CA  gender=Male  local_name=Liam
+  styles(0): []
+  supports(1): ['en-CA']
+------------------------------------------------------------------------
+en-GB-AbbiNeural  [STANDARD]
+  locale=en-GB  gender=Female  local_name=Abbi
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-Ada:DragonHDLatestNeural  [DRAGON]
+  locale=en-GB  gender=Female  local_name=Ada Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-GB-AdaMultilingualNeural  [STANDARD]
+  locale=en-GB  gender=Female  local_name=Ada Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-GB-AlfieNeural  [STANDARD]
+  locale=en-GB  gender=Male  local_name=Alfie
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-BellaNeural  [STANDARD]
+  locale=en-GB  gender=Female  local_name=Bella
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-ElliotNeural  [STANDARD]
+  locale=en-GB  gender=Male  local_name=Elliot
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-EthanNeural  [STANDARD]
+  locale=en-GB  gender=Male  local_name=Ethan
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-HollieNeural  [STANDARD]
+  locale=en-GB  gender=Female  local_name=Hollie
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-LibbyNeural  [STANDARD]
+  locale=en-GB  gender=Female  local_name=Libby
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-MaisieNeural  [STANDARD]
+  locale=en-GB  gender=Female  local_name=Maisie
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-MiaNeural  [STANDARD]
+  locale=en-GB  gender=Female  local_name=Mia
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-NoahNeural  [STANDARD]
+  locale=en-GB  gender=Male  local_name=Noah
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-OliverNeural  [STANDARD]
+  locale=en-GB  gender=Male  local_name=Oliver
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-OliviaNeural  [STANDARD]
+  locale=en-GB  gender=Female  local_name=Olivia
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-GB-Ollie:DragonHDLatestNeural  [DRAGON]
+  locale=en-GB  gender=Male  local_name=Ollie Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-GB-OllieMultilingualNeural  [STANDARD]
+  locale=en-GB  gender=Male  local_name=Ollie Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-GB-ThomasNeural  [STANDARD]
+  locale=en-GB  gender=Male  local_name=Thomas
+  styles(0): []
+  supports(1): ['en-GB']
+------------------------------------------------------------------------
+en-HK-SamNeural  [STANDARD]
+  locale=en-HK  gender=Male  local_name=Sam
+  styles(0): []
+  supports(1): ['en-HK']
+------------------------------------------------------------------------
+en-HK-YanNeural  [STANDARD]
+  locale=en-HK  gender=Female  local_name=Yan
+  styles(0): []
+  supports(1): ['en-HK']
+------------------------------------------------------------------------
+en-IE-ConnorNeural  [STANDARD]
+  locale=en-IE  gender=Male  local_name=Connor
+  styles(0): []
+  supports(1): ['en-IE']
+------------------------------------------------------------------------
+en-IE-EmilyNeural  [STANDARD]
+  locale=en-IE  gender=Female  local_name=Emily
+  styles(0): []
+  supports(1): ['en-IE']
+------------------------------------------------------------------------
+en-IN-AaravNeural  [STANDARD]
+  locale=en-IN  gender=Male  local_name=Aarav
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-Aarti:DragonHDLatestNeural  [DRAGON]
+  locale=en-IN  gender=Female  local_name=Aarti Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-IN-AartiIndicNeural  [STANDARD]
+  locale=en-IN  gender=Female  local_name=Aarti Indic
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-AartiNeural  [STANDARD]
+  locale=en-IN  gender=Female  local_name=Aarti
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-AashiNeural  [STANDARD]
+  locale=en-IN  gender=Female  local_name=Aashi
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-AnanyaNeural  [STANDARD]
+  locale=en-IN  gender=Female  local_name=Ananya
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-Arjun:DragonHDLatestNeural  [DRAGON]
+  locale=en-IN  gender=Male  local_name=Arjun Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-IN-ArjunIndicNeural  [STANDARD]
+  locale=en-IN  gender=Male  local_name=Arjun Indic
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-ArjunNeural  [STANDARD]
+  locale=en-IN  gender=Male  local_name=Arjun
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-KavyaNeural  [STANDARD]
+  locale=en-IN  gender=Female  local_name=Kavya
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-KunalNeural  [STANDARD]
+  locale=en-IN  gender=Male  local_name=Kunal
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-Meera:DragonHDLatestNeural  [DRAGON]
+  locale=en-IN  gender=Female  local_name=Meera Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-IN-NeerjaIndicNeural  [STANDARD]
+  locale=en-IN  gender=Female  local_name=Neerja Indic
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-PrabhatIndicNeural  [STANDARD]
+  locale=en-IN  gender=Male  local_name=Prabhat Indic
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-PrabhatNeural  [STANDARD]
+  locale=en-IN  gender=Male  local_name=Prabhat
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-IN-RehaanNeural  [STANDARD]
+  locale=en-IN  gender=Male  local_name=Rehaan
+  styles(0): []
+  supports(1): ['en-IN']
+------------------------------------------------------------------------
+en-KE-AsiliaNeural  [STANDARD]
+  locale=en-KE  gender=Female  local_name=Asilia
+  styles(0): []
+  supports(1): ['en-KE']
+------------------------------------------------------------------------
+en-KE-ChilembaNeural  [STANDARD]
+  locale=en-KE  gender=Male  local_name=Chilemba
+  styles(0): []
+  supports(1): ['en-KE']
+------------------------------------------------------------------------
+en-NG-AbeoNeural  [STANDARD]
+  locale=en-NG  gender=Male  local_name=Abeo
+  styles(0): []
+  supports(1): ['en-NG']
+------------------------------------------------------------------------
+en-NG-EzinneNeural  [STANDARD]
+  locale=en-NG  gender=Female  local_name=Ezinne
+  styles(0): []
+  supports(1): ['en-NG']
+------------------------------------------------------------------------
+en-NZ-MitchellNeural  [STANDARD]
+  locale=en-NZ  gender=Male  local_name=Mitchell
+  styles(0): []
+  supports(1): ['en-NZ']
+------------------------------------------------------------------------
+en-NZ-MollyNeural  [STANDARD]
+  locale=en-NZ  gender=Female  local_name=Molly
+  styles(0): []
+  supports(1): ['en-NZ']
+------------------------------------------------------------------------
+en-PH-JamesNeural  [STANDARD]
+  locale=en-PH  gender=Male  local_name=James
+  styles(0): []
+  supports(1): ['en-PH']
+------------------------------------------------------------------------
+en-PH-RosaNeural  [STANDARD]
+  locale=en-PH  gender=Female  local_name=Rosa
+  styles(0): []
+  supports(1): ['en-PH']
+------------------------------------------------------------------------
+en-SG-LunaNeural  [STANDARD]
+  locale=en-SG  gender=Female  local_name=Luna
+  styles(0): []
+  supports(1): ['en-SG']
+------------------------------------------------------------------------
+en-SG-WayneNeural  [STANDARD]
+  locale=en-SG  gender=Male  local_name=Wayne
+  styles(0): []
+  supports(1): ['en-SG']
+------------------------------------------------------------------------
+en-TZ-ElimuNeural  [STANDARD]
+  locale=en-TZ  gender=Male  local_name=Elimu
+  styles(0): []
+  supports(1): ['en-TZ']
+------------------------------------------------------------------------
+en-TZ-ImaniNeural  [STANDARD]
+  locale=en-TZ  gender=Female  local_name=Imani
+  styles(0): []
+  supports(1): ['en-TZ']
+------------------------------------------------------------------------
+en-US-Adam:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Adam Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-AdamMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Adam Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-AIGenerate1Neural  [STANDARD]
+  locale=en-US  gender=Male  local_name=AIGenerate1
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-AIGenerate2Neural  [STANDARD]
+  locale=en-US  gender=Female  local_name=AIGenerate2
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Alloy:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Alloy Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-AlloyTurboMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Alloy Turbo Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-AmandaMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Amanda Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-AmberNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Amber
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-AnaNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Ana
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Andrew2:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Andrew2 Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Andrew3:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Andrew3 Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Andrew:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Andrew Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Andrew:DragonHDOmniLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Andrew Dragon HD Omni Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-AndrewNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Andrew
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Aria:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Aria Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-AshleyNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Ashley
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-AshTurboMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Ash Turbo Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Ava3:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Ava3 Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Ava:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Ava Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-us-ava:DragonHDOmniLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=ava Dragon HD Omni Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-AvaMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Ava Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-BlueNeural  [STANDARD]
+  locale=en-US  gender=Neutral  local_name=Blue
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-BrandonMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Brandon Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-BrandonNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Brandon
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Bree:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Bree Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Brian:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Brian Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-BrianMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Brian Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-BrianNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Brian
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Caleb:DragonHDOmniLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Caleb Dragon HD Omni Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-ChristopherMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Christopher Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-ChristopherNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Christopher
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-CoraMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Cora Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-CoraNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Cora
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Dana:DragonHDOmniLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Dana Dragon HD Omni Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Davis:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Davis Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-DustinMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Dustin Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-EchoTurboMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Echo Turbo Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-ElizabethNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Elizabeth
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Emma2:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Emma2 Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Emma:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Emma Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-EmmaMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Emma Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-EmmaNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Emma
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-EricNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Eric
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-EvelynMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Evelyn Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-FableTurboMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Neutral  local_name=Fable Turbo Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-JacobNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Jacob
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Jane:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Jane Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Jenny:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Jenny Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-JennyMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Jenny Multilingual
+  styles(0): []
+  supports(10): ['en-AU', 'en-CA', 'en-GB', 'en-HK', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Jimmie:DragonHDFlashLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Jimmie Dragon HD Flash Latest
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Lewis:DragonHDOmniLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Lewis Dragon HD Omni Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-LewisMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Lewis Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-LolaMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Lola Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-MichelleNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Michelle
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-MonicaNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Monica
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Noa:MAI-Voice-1  [STANDARD]
+  locale=en-US  gender=Neutral  local_name=en-US-Noa:MAI-Voice-1
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Nova:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Nova Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-NovaTurboMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Nova Turbo Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-OnyxTurboMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Onyx Turbo Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Phoebe:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Phoebe Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Phoebe:DragonHDOmniLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Phoebe Dragon HD Omni Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-RogerNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Roger
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-RyanMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Ryan Multilingual
+  styles(0): []
+  supports(10): ['en-AU', 'en-CA', 'en-GB', 'en-HK', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-SamuelMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Samuel Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Serena:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Serena Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-ShimmerTurboMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Female  local_name=Shimmer Turbo Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-Steffan:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Steffan Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-SteffanMultilingualNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Steffan Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+en-US-SteffanNeural  [STANDARD]
+  locale=en-US  gender=Male  local_name=Steffan
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Teo:MAI-Voice-1  [STANDARD]
+  locale=en-US  gender=Neutral  local_name=en-US-Teo:MAI-Voice-1
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Tiana:DragonHDFlashLatestNeural  [DRAGON]
+  locale=en-US  gender=Female  local_name=Tiana Dragon HD Flash Latest
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Tyler:DragonHDFlashLatestNeural  [DRAGON]
+  locale=en-US  gender=Male  local_name=Tyler Dragon HD Flash Latest
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-ZA-LeahNeural  [STANDARD]
+  locale=en-ZA  gender=Female  local_name=Leah
+  styles(0): []
+  supports(1): ['en-ZA']
+------------------------------------------------------------------------
+en-ZA-LukeNeural  [STANDARD]
+  locale=en-ZA  gender=Male  local_name=Luke
+  styles(0): []
+  supports(1): ['en-ZA']
+------------------------------------------------------------------------
+
+==============================
+ZH-CAPABLE VOICES
+(primary locale = zh-*  ·  source: azure_tts_zh_all.txt)
+==============================
+
+zh-CN-Xiaochen:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Female  local_name=Xiaochen Dragon HD Flash Latest
+  styles(0): []
+  supports(1): ['zh-CN']
+------------------------------------------------------------------------
+zh-CN-Xiaochen:DragonHDLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Female  local_name=Xiaochen Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-XiaochenMultilingualNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓辰 多语言
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-XiaoqiuNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓秋
+  styles(0): []
+  supports(1): ['zh-CN']
+------------------------------------------------------------------------
+zh-CN-XiaorouNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓柔
+  styles(0): []
+  supports(1): ['zh-CN']
+------------------------------------------------------------------------
+zh-CN-XiaoxiaoDialectsNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓晓 方言
+  styles(0): []
+  supports(11): ['zh-CN', 'zh-CN-anhui', 'zh-CN-gansu', 'zh-CN-henan', 'zh-CN-hunan', 'zh-CN-liaoning', 'zh-CN-shaanxi', 'zh-CN-shandong', 'zh-CN-shanxi', 'zh-CN-sichuan', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-XiaoyanNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓颜
+  styles(0): []
+  supports(1): ['zh-CN']
+------------------------------------------------------------------------
+zh-CN-XiaoyouNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓悠
+  styles(0): []
+  supports(1): ['zh-CN']
+------------------------------------------------------------------------
+zh-CN-Xiaoyue:DragonHDOmniLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Female  local_name=Xiaoyue Dragon HD Omni Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-XiaoyuMultilingualNeural  [STANDARD]
+  locale=zh-CN  gender=Female  local_name=晓宇 多语言
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-Yunfan:DragonHDLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Male  local_name=Yunfan Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-YunfanMultilingualNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=Yunfan Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-YunjieNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云杰
+  styles(0): []
+  supports(1): ['zh-CN']
+------------------------------------------------------------------------
+zh-CN-Yunqi:DragonHDOmniLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Male  local_name=Yunqi Dragon HD Omni Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-Yunxiao:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Male  local_name=Yunxiao Dragon HD Flash Latest
+  styles(0): []
+  supports(1): ['zh-CN']
+------------------------------------------------------------------------
+zh-CN-YunxiaoMultilingualNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=Yunxiao Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-Yunye:DragonHDFlashLatestNeural  [DRAGON]
+  locale=zh-CN  gender=Male  local_name=Yunye Dragon HD Flash Latest
+  styles(0): []
+  supports(1): ['zh-CN']
+------------------------------------------------------------------------
+zh-CN-YunyiMultilingualNeural  [STANDARD]
+  locale=zh-CN  gender=Male  local_name=云逸 多语言
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+zh-CN-guangxi-YunqiNeural  [STANDARD]
+  locale=zh-CN-guangxi  gender=Male  local_name=云奇 广西
+  styles(0): []
+  supports(1): ['zh-CN-guangxi']
+------------------------------------------------------------------------
+zh-CN-henan-YundengNeural  [STANDARD]
+  locale=zh-CN-henan  gender=Male  local_name=云登
+  styles(0): []
+  supports(1): ['zh-CN-henan']
+------------------------------------------------------------------------
+zh-CN-liaoning-XiaobeiNeural  [STANDARD]
+  locale=zh-CN-liaoning  gender=Female  local_name=晓北 辽宁
+  styles(0): []
+  supports(1): ['zh-CN-liaoning']
+------------------------------------------------------------------------
+zh-CN-liaoning-YunbiaoNeural  [STANDARD]
+  locale=zh-CN-liaoning  gender=Male  local_name=云彪 辽宁
+  styles(0): []
+  supports(1): ['zh-CN-liaoning']
+------------------------------------------------------------------------
+zh-CN-shaanxi-XiaoniNeural  [STANDARD]
+  locale=zh-CN-shaanxi  gender=Female  local_name=晓妮
+  styles(0): []
+  supports(1): ['zh-CN-shaanxi']
+------------------------------------------------------------------------
+zh-CN-shandong-YunxiangNeural  [STANDARD]
+  locale=zh-CN-shandong  gender=Male  local_name=云翔
+  styles(0): []
+  supports(1): ['zh-CN-shandong']
+------------------------------------------------------------------------
+zh-CN-sichuan-YunxiNeural  [STANDARD]
+  locale=zh-CN-sichuan  gender=Male  local_name=云希 四川
+  styles(0): []
+  supports(1): ['zh-CN-sichuan']
+------------------------------------------------------------------------
+zh-HK-HiuGaaiNeural  [STANDARD]
+  locale=zh-HK  gender=Female  local_name=曉佳
+  styles(0): []
+  supports(1): ['zh-HK']
+------------------------------------------------------------------------
+zh-HK-HiuMaanNeural  [STANDARD]
+  locale=zh-HK  gender=Female  local_name=曉曼
+  styles(0): []
+  supports(1): ['zh-HK']
+------------------------------------------------------------------------
+zh-HK-WanLungNeural  [STANDARD]
+  locale=zh-HK  gender=Male  local_name=雲龍
+  styles(0): []
+  supports(1): ['zh-HK']
+------------------------------------------------------------------------
+zh-TW-HsiaoChenNeural  [STANDARD]
+  locale=zh-TW  gender=Female  local_name=曉臻
+  styles(0): []
+  supports(1): ['zh-TW']
+------------------------------------------------------------------------
+zh-TW-HsiaoYuNeural  [STANDARD]
+  locale=zh-TW  gender=Female  local_name=曉雨
+  styles(0): []
+  supports(1): ['zh-TW']
+------------------------------------------------------------------------
+zh-TW-YunJheNeural  [STANDARD]
+  locale=zh-TW  gender=Male  local_name=雲哲
+  styles(0): []
+  supports(1): ['zh-TW']
+------------------------------------------------------------------------
+
+==============================
+MULTILINGUAL BRIDGES
+(non-en/zh primary locale  ·  support en AND/OR zh)
+==============================
+
+de-DE-Florian:DragonHDLatestNeural  [DRAGON]
+  locale=de-DE  gender=Male  local_name=Florian Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+de-DE-FlorianMultilingualNeural  [STANDARD]
+  locale=de-DE  gender=Male  local_name=Florian Mehrsprachig
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+de-DE-Seraphina:DragonHDLatestNeural  [DRAGON]
+  locale=de-DE  gender=Female  local_name=Seraphina Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+de-DE-SeraphinaMultilingualNeural  [STANDARD]
+  locale=de-DE  gender=Female  local_name=Seraphina Mehrsprachig
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-ES-ArabellaMultilingualNeural  [STANDARD]
+  locale=es-ES  gender=Female  local_name=Arabella Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-ES-IsidoraMultilingualNeural  [STANDARD]
+  locale=es-ES  gender=Female  local_name=Isidora Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-ES-Tristan:DragonHDLatestNeural  [DRAGON]
+  locale=es-ES  gender=Male  local_name=Tristan Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-ES-TristanMultilingualNeural  [STANDARD]
+  locale=es-ES  gender=Male  local_name=Tristan Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-ES-Ximena:DragonHDLatestNeural  [DRAGON]
+  locale=es-ES  gender=Female  local_name=Ximena Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-ES-XimenaMultilingualNeural  [STANDARD]
+  locale=es-ES  gender=Female  local_name=Ximena Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-MX-DaliaMultilingualNeural  [STANDARD]
+  locale=es-MX  gender=Female  local_name=Dalia Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-MX-JorgeMultilingualNeural  [STANDARD]
+  locale=es-MX  gender=Male  local_name=Jorge Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-MX-Tristan:DragonHDLatestNeural  [DRAGON]
+  locale=es-MX  gender=Male  local_name=Tristan Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+es-MX-Ximena:DragonHDLatestNeural  [DRAGON]
+  locale=es-MX  gender=Female  local_name=Ximena Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+fr-CA-Sylvie:DragonHDLatestNeural  [DRAGON]
+  locale=fr-CA  gender=Female  local_name=Sylvie Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+fr-CA-Thierry:DragonHDLatestNeural  [DRAGON]
+  locale=fr-CA  gender=Male  local_name=Thierry Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+fr-FR-LucienMultilingualNeural  [STANDARD]
+  locale=fr-FR  gender=Male  local_name=Lucien Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+fr-FR-Remy:DragonHDLatestNeural  [DRAGON]
+  locale=fr-FR  gender=Male  local_name=Remy Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+fr-FR-RemyMultilingualNeural  [STANDARD]
+  locale=fr-FR  gender=Male  local_name=Rémy Multilingue
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+fr-FR-Vivienne:DragonHDLatestNeural  [DRAGON]
+  locale=fr-FR  gender=Female  local_name=Vivienne Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+fr-FR-VivienneMultilingualNeural  [STANDARD]
+  locale=fr-FR  gender=Female  local_name=Vivienne Multilingue
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+it-IT-Alessio:DragonHDLatestNeural  [DRAGON]
+  locale=it-IT  gender=Male  local_name=Alessio Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+it-IT-AlessioMultilingualNeural  [STANDARD]
+  locale=it-IT  gender=Male  local_name=Alessio Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+it-IT-GiuseppeMultilingualNeural  [STANDARD]
+  locale=it-IT  gender=Male  local_name=Giuseppe Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+it-IT-Isabella:DragonHDLatestNeural  [DRAGON]
+  locale=it-IT  gender=Female  local_name=Isabella Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+it-IT-IsabellaMultilingualNeural  [STANDARD]
+  locale=it-IT  gender=Female  local_name=Isabella Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+it-IT-MarcelloMultilingualNeural  [STANDARD]
+  locale=it-IT  gender=Male  local_name=Marcello Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+ja-JP-Masaru:DragonHDLatestNeural  [DRAGON]
+  locale=ja-JP  gender=Male  local_name=Masaru Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+ja-JP-MasaruMultilingualNeural  [STANDARD]
+  locale=ja-JP  gender=Male  local_name=勝 多言語
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+ja-JP-Nanami:DragonHDLatestNeural  [DRAGON]
+  locale=ja-JP  gender=Female  local_name=Nanami Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+ko-KR-Hyunsu:DragonHDLatestNeural  [DRAGON]
+  locale=ko-KR  gender=Male  local_name=Hyunsu Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+ko-KR-HyunsuMultilingualNeural  [STANDARD]
+  locale=ko-KR  gender=Male  local_name=Hyunsu Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+ko-KR-SunHi:DragonHDLatestNeural  [DRAGON]
+  locale=ko-KR  gender=Female  local_name=SunHi Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+pt-BR-Macerio:DragonHDLatestNeural  [DRAGON]
+  locale=pt-BR  gender=Male  local_name=Macerio Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+pt-BR-MacerioMultilingualNeural  [STANDARD]
+  locale=pt-BR  gender=Male  local_name=Macerio Multilingual
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+pt-BR-Thalita:DragonHDLatestNeural  [DRAGON]
+  locale=pt-BR  gender=Female  local_name=Thalita Dragon HD Latest
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+pt-BR-ThalitaMultilingualNeural  [STANDARD]
+  locale=pt-BR  gender=Female  local_name=Thalita multilíngue
+  styles(0): []
+  supports(9): ['en-AU', 'en-CA', 'en-GB', 'en-IE', 'en-IN', 'en-US', 'zh-CN', 'zh-HK', 'zh-TW']
+------------------------------------------------------------------------
+
+==============================
+MULTITALKER VOICES
+NOT for individual character casting.
+Reserved for future two-speaker SSML batch synthesis only.
+==============================
+
+en-Multitalker-1:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Neutral  local_name=Multitalker Set1 Dragon HD Latest
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-MultiTalker-Ava-Andrew:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Neutral  local_name=Ava & Andrew MultiTalker Dragon HD Latest
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-MultiTalker-Ava-Steffan:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Neutral  local_name=Ava & Steffan MultiTalker Dragon HD Latest
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+en-US-Multitalker-Set1:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Neutral  local_name=Multitalker Set1 Dragon HD Latest
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------
+zh-CN-Multitalker-Xiaochen-Yunhan:DragonHDLatestNeural  [DRAGON]
+  locale=en-US  gender=Neutral  local_name=Xiaochen&Yunhan Multitalker Dragon HD Latest
+  styles(0): []
+  supports(1): ['en-US']
+------------------------------------------------------------------------

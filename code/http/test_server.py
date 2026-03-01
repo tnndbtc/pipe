@@ -138,19 +138,29 @@ def _load_index_cache() -> dict:
     return _index_cache
 
 def _is_default_clip(voice: str, style: str | None, h: str) -> bool:
-    """Return True when hash h matches the pre-cached index entry for voice+style.
+    """Return True when hash h matches the index entry for voice+style.
 
-    Same hash means the user's params are identical to the index defaults,
-    so no custom preset should be created.
+    Uses "" as the clips key for no-style voices so they participate in the
+    same default-vs-preset logic as styled voices.
     """
-    if not style:
-        return False
-    idx = _load_index_cache()
-    clip = idx.get(voice, {}).get("clips", {}).get(style)
+    idx       = _load_index_cache()
+    style_key = style or ""
+    clip      = idx.get(voice, {}).get("clips", {}).get(style_key)
     if not clip:
         return False
     # index stores full 64-char SHA256; h is the first 16 chars
     return clip.get("hash", "")[:16] == h
+
+
+def save_index(voices_dict: dict) -> None:
+    """Atomic write of index.json; also updates the in-process cache."""
+    global _index_cache
+    _INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {"schema_version": "1.0", "voices": voices_dict}
+    tmp  = _INDEX_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(_INDEX_FILE)
+    _index_cache = voices_dict  # keep in-process cache in sync
 
 
 def load_presets() -> dict:
@@ -172,35 +182,52 @@ def save_presets(data: dict) -> None:
 
 
 def parse_azure_tts_styles() -> dict:
-    """Parse prompts/azure_tts_styles.txt; return voice catalog grouped by story locale.
+    """Parse voice catalog; return voices grouped by story locale.
+
+    Reads prompts/azure_tts_styles.txt — a single file containing all
+    voices (styled + no-style en/zh-capable + multitalker sections).
+    Run build_voice_catalog.py once to expand it from the original 62
+    styled voices to the full catalog.
 
     Returns: { "en": [VoiceEntry, ...], "zh-Hans": [...], ... }
-    VoiceEntry: { voice, azure_locale, gender, local_name, styles }
+    VoiceEntry: {
+        voice, azure_locale, gender, local_name, styles,
+        has_styles   bool   — True if the voice has ≥1 style (suitable for emotional roles),
+        is_multitalker bool — True for pair-synthesis voices (not for solo casting)
+    }
     Result is cached at module level (parsed once on first request).
     """
     global _voice_catalog_cache
     if _voice_catalog_cache is not None:
         return _voice_catalog_cache
 
-    styles_path = os.path.join(PIPE_DIR, "prompts", "azure_tts_styles.txt")
-    # BUG-1 fix: r'^(\S+Neural)' captures Dragon HD names with colon
-    #   e.g. "zh-CN-Xiaoxiao2:DragonHDFlashLatestNeural" — broken if \w+ is used
-    VOICE_RE  = re.compile(r'^(\S+Neural)')
-    LOCALE_RE = re.compile(r'locale=(\S+)\s+gender=(\S+)\s+local_name=(.+)')
-    STYLES_RE = re.compile(r"styles\(\d+\):\s*\[(.+)\]")
+    catalog_path = os.path.join(PIPE_DIR, "prompts", "azure_tts_styles.txt")
+
+    # Match any voice header line: "VoiceName  [STANDARD]" or "[DRAGON]"
+    # Covers Neural, MAI-Voice-*, DragonHD, etc. — anchored on the tier bracket.
+    VOICE_RE    = re.compile(r'^(\S+)\s+\[(?:STANDARD|DRAGON)\]')
+    LOCALE_RE   = re.compile(r'locale=(\S+)\s+gender=(\S+)\s+local_name=(.+)')
+    STYLES_RE   = re.compile(r"styles\(\d+\):\s*\[(.+)\]")
+    SUPPORTS_RE = re.compile(r"supports\(\d+\):\s*\[(.+)\]")
 
     entries: list[dict] = []
     cur: dict | None    = None
 
-    if os.path.isfile(styles_path):
-        with open(styles_path, encoding="utf-8") as fh:
+    if os.path.isfile(catalog_path):
+        with open(catalog_path, encoding="utf-8") as fh:
             for line in fh:
                 line = line.rstrip("\n")
                 vm = VOICE_RE.match(line)
                 if vm:
                     if cur and "azure_locale" in cur:
                         entries.append(cur)
-                    cur = {"voice": vm.group(1), "styles": []}
+                    vname = vm.group(1)
+                    cur = {
+                        "voice":          vname,
+                        "styles":         [],
+                        "supports":       [],
+                        "is_multitalker": "ultitalker" in vname.lower(),
+                    }
                     continue
                 lm = LOCALE_RE.search(line)
                 if lm and cur:
@@ -211,20 +238,36 @@ def parse_azure_tts_styles() -> dict:
                 sm = STYLES_RE.search(line)
                 if sm and cur:
                     cur["styles"] = re.findall(r"'([^']+)'", sm.group(1))
+                    continue
+                pm = SUPPORTS_RE.search(line)
+                if pm and cur:
+                    cur["supports"] = re.findall(r"'([^']+)'", pm.group(1))
         if cur and "azure_locale" in cur:
             entries.append(cur)
 
-    # Group by story locale: "en" → azure_locale.startswith("en-")
+    # Annotate has_styles (after styles are populated)
+    for e in entries:
+        e["has_styles"] = bool(e.get("styles"))
+
+    # Group by story locale using BOTH azure_locale AND supports() list.
+    # A voice belongs to "en" if its primary locale OR any supported locale is en-*.
+    # Same for "zh-Hans".  A multilingual voice (e.g. en-US-AndrewMultilingualNeural
+    # that supports zh-CN/zh-HK) will appear in BOTH groups.
     catalog: dict[str, list] = {}
     for entry in entries:
-        al = entry.get("azure_locale", "")
-        if al.startswith("en-"):
-            group = "en"
-        elif al.startswith("zh-"):
-            group = "zh-Hans"
-        else:
-            group = al.split("-")[0] if "-" in al else al
-        catalog.setdefault(group, []).append(entry)
+        al      = entry.get("azure_locale", "")
+        sup     = entry.get("supports", [])
+        groups: set[str] = set()
+        for loc in ([al] if al else []) + sup:
+            if loc.startswith("en-"):
+                groups.add("en")
+            elif loc.startswith("zh-"):
+                groups.add("zh-Hans")
+        # Non-en/zh voices (de, fr, …) fall back to their primary locale prefix
+        if not groups and al:
+            groups.add(al.split("-")[0] if "-" in al else al)
+        for group in groups:
+            catalog.setdefault(group, []).append(entry)
 
     _voice_catalog_cache = catalog
     return catalog
@@ -1984,17 +2027,20 @@ Direction    : …"></textarea>
     (_vcData.characters || []).forEach(char => {
       let charLoc = char[locale];
 
+      // Role-based defaults — defined here (outside if-block) so the voiceSel
+      // onChange closure can always reference rd when resetting sliders.
+      const roleDefaults = {
+        narrator:    { pitch: '-5',  break_ms: 600, rate: '0'  },
+        protagonist: { pitch: '0',   break_ms: 400, rate: '0'  },
+        antagonist:  { pitch: '-5',  break_ms: 500, rate: '0'  },
+        default:     { pitch: '0',   break_ms: 500, rate: '0'  },
+      };
+      const rd = roleDefaults[char.role] || roleDefaults.default;
+
       // No data for this locale yet — synthesise defaults so user can assign manually
       // Borrow pitch/break/rate from the 'en' locale if it exists, otherwise use role defaults
       if (!charLoc) {
         const enLoc = char['en'] || {};
-        const roleDefaults = {
-          narrator:    { pitch: '-5',  break_ms: 600, rate: '0'  },
-          protagonist: { pitch: '0',   break_ms: 400, rate: '0'  },
-          antagonist:  { pitch: '-5',  break_ms: 500, rate: '0'  },
-          default:     { pitch: '0',   break_ms: 500, rate: '0'  },
-        };
-        const rd = roleDefaults[char.role] || roleDefaults.default;
         charLoc = {
           azure_voice:        voiceList[0]?.voice || '',
           azure_style:        null,
@@ -2030,13 +2076,27 @@ Direction    : …"></textarea>
 
       const voiceSel = document.createElement('select');
       voiceSel.className = 'vc-voice-select';
-      voiceList.forEach(v => {
-        const opt = document.createElement('option');
-        opt.value = v.voice;
-        opt.textContent = v.voice + ' (' + v.gender + ')';
-        if (v.voice === charLoc.azure_voice) opt.selected = true;
-        voiceSel.appendChild(opt);
+
+      // All non-multitalker voices, grouped by azure_locale for easy browsing
+      const allVoices = voiceList.filter(v => !v.is_multitalker);
+      const grpMap = {};
+      allVoices.forEach(v => { (grpMap[v.azure_locale] = grpMap[v.azure_locale] || []).push(v); });
+      Object.keys(grpMap).sort().forEach(loc => {
+        const grp = document.createElement('optgroup');
+        grp.label = loc;
+        grpMap[loc].forEach(v => {
+          const opt = new Option((v.local_name || v.voice) + ' — ' + v.gender + ' — ' + v.voice, v.voice);
+          if (v.voice === charLoc.azure_voice) opt.selected = true;
+          grp.appendChild(opt);
+        });
+        voiceSel.appendChild(grp);
       });
+      // Ensure the currently assigned voice is always selectable
+      if (charLoc.azure_voice && !voiceSel.value) {
+        const opt = new Option(charLoc.azure_voice, charLoc.azure_voice);
+        opt.selected = true;
+        voiceSel.add(opt);
+      }
 
       voiceRow.appendChild(voiceSel);
       body.appendChild(voiceRow);
@@ -2144,10 +2204,10 @@ Direction    : …"></textarea>
       );
       if (_matchedPreset) presetSel.value = _matchedPreset.hash;
 
-      // ── Voice select onChange → rebuild style + preset dropdowns ──
+      // ── Voice select onChange → rebuild style + preset dropdowns, reset params to role defaults ──
       voiceSel.addEventListener('change', () => {
-        const newV     = voiceList.find(v => v.voice === voiceSel.value);
-        const curStyle = styleSel.value;
+        const newV = voiceList.find(v => v.voice === voiceSel.value);
+        // Rebuild style dropdown (clear selection — new voice may not have the old style)
         styleSel.innerHTML = '';
         const blank2 = document.createElement('option');
         blank2.value = ''; blank2.textContent = '\u2014 no style \u2014';
@@ -2155,9 +2215,16 @@ Direction    : …"></textarea>
         (newV?.styles || []).forEach(s => {
           const opt = document.createElement('option');
           opt.value = s; opt.textContent = s;
-          if (s === curStyle) opt.selected = true;
           styleSel.appendChild(opt);
         });
+        styleSel.value = ''; // always reset style to "— no style —"
+        // Reset all param sliders to role-based defaults (Option A: clean slate)
+        card.querySelector('[data-field=degree]').value = 1.0;
+        card.querySelector('[data-field=rate]').value   = rd.rate;
+        card.querySelector('[data-field=pitch]').value  = rd.pitch;
+        card.querySelector('[data-field=break]').value  = rd.break_ms;
+        ['degree','rate','pitch','break'].forEach(f =>
+          card.querySelector(`[data-field=${f}]`).dispatchEvent(new Event('input')));
         rebuildPresetSelect(card, voiceSel.value);
         card.querySelector('.vc-preset-select').selectedIndex = 0;
       });
@@ -2288,10 +2355,18 @@ Direction    : …"></textarea>
 
         audio.play();
 
+        // New preset auto-saved → add to in-memory list + update dropdown
         if (data.preset) {
           (_vcPresets[params.azure_voice] ??= []).push(data.preset);
           rebuildPresetSelect(card, params.azure_voice);
           card.querySelector('.vc-preset-select').value = data.preset.hash;
+        }
+        // First-ever preview for this voice+style → sync _voiceIndex so
+        // style-change auto-populate and "— no preset —" restore work correctly.
+        if (data.index_params) {
+          _voiceIndex ??= {};
+          (_voiceIndex[params.azure_voice] ??= { clips: {} })
+            .clips[params.style || ''] = { params: data.index_params };
         }
       } else {
         appendLine('\u26A0 TTS preview failed: ' + (data.error || 'unknown error'), 'err');
@@ -4960,17 +5035,45 @@ class Handler(BaseHTTPRequestHandler):
                 # BUG-I1: relative URL so serve_media can resolve it
                 url = "/serve_media?path=" + str(cache_path.relative_to(_pipe_path))
 
-                # Auto-save preset only when params differ from index defaults.
-                # Same hash as the pre-cached clip = user hasn't customised anything
-                # → skip, so the preset list stays clean.
+                # ── Update index.json ──────────────────────────────────────
+                # The FIRST preview of any voice+style combination becomes its
+                # "default" entry in index.json.  Subsequent previews with the
+                # same params match the default (same hash) → no preset.
+                # Subsequent previews with DIFFERENT params → saved as preset.
+                idx       = _load_index_cache()
+                style_key = style or ""   # "" key for no-style voices
+                is_new_to_index = style_key not in idx.get(azure_voice, {}).get("clips", {})
+                if is_new_to_index:
+                    ve = idx.setdefault(azure_voice, {
+                        "locale":       azure_locale,
+                        "locale_group": azure_locale.split("-")[0],
+                        "clips":        {},
+                    })
+                    ve.setdefault("clips", {})[style_key] = {
+                        "hash":   h,
+                        "file":   str(cache_path.relative_to(_pipe_path)),
+                        "text":   text,
+                        "params": {
+                            "style":        style,
+                            "style_degree": style_degree,
+                            "rate":         rate,
+                            "pitch":        pitch or "",
+                            "break_ms":     break_ms,
+                        },
+                    }
+                    save_index(idx)
+
+                # ── Auto-save preset ────────────────────────────────────────
+                # Only when this is NOT the first preview (already in index)
+                # AND params differ from the stored default.
                 new_preset = None
-                if style and not _is_default_clip(azure_voice, style, h):
+                if not is_new_to_index and not _is_default_clip(azure_voice, style, h):
                     pdata = load_presets()
                     vp    = pdata["presets"].setdefault(azure_voice, [])
                     if not any(p["hash"] == h for p in vp):
                         new_preset = {
                             "name":         f"custom{len(vp) + 1}",
-                            "style":        style,
+                            "style":        style or "",
                             "style_degree": style_degree,
                             "rate":         rate,
                             "pitch":        pitch or "",
@@ -4980,7 +5083,24 @@ class Handler(BaseHTTPRequestHandler):
                         vp.append(new_preset)
                         save_presets(pdata)
 
-                resp = json.dumps({"url": url, "preset": new_preset}).encode()
+                # ── Tell JS the index-default params so it can sync _voiceIndex ──
+                # Sent only on the FIRST preview (is_new_to_index=True) so the JS
+                # in-memory cache stays in sync without a round-trip to /api/voice_index.
+                index_params = None
+                if is_new_to_index:
+                    index_params = {
+                        "style":        style,
+                        "style_degree": style_degree,
+                        "rate":         rate,
+                        "pitch":        pitch or "",
+                        "break_ms":     break_ms,
+                    }
+
+                resp = json.dumps({
+                    "url":          url,
+                    "preset":       new_preset,
+                    "index_params": index_params,   # non-null only on first preview
+                }).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(resp)))

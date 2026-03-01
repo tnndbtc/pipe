@@ -12,7 +12,7 @@
 # 📥 FILES READ:
 #     {{EPISODE_DIR}}/meta.json             (all pipeline variables — source of truth)
 #     {{EPISODE_DIR}}/story.txt             (story content, used for voice casting only)
-#     projects/azure_tts_styles.txt         (inlined by run.sh)
+#     prompts/azure_tts_styles.txt          (inlined by run.sh)
 #
 # 📤 OUTPUT (stdout printed to web UI + files written to disk):
 #     • Stdout: variable confirmation block  (web UI sees this)
@@ -42,7 +42,7 @@ Print: `▶ [0/9] Stage 0 — Voice casting …`
 Read these files:
   1. `{{EPISODE_DIR}}/meta.json`  — all pipeline variables are here; use them exactly as-is
   2. `{{EPISODE_DIR}}/story.txt`  — story content, used for voice casting only
-  3. `projects/azure_tts_styles.txt` — available Azure voices and styles
+  3. `prompts/azure_tts_styles.txt`  — available Azure voices and styles
 
 Extract these variables from meta.json:
 
@@ -64,7 +64,7 @@ Extract these variables from meta.json:
 
 ### Step 2 — Cast voices for each locale
 
-Using the story file and projects/azure_tts_styles.txt you already read:
+Using the story file and prompts/azure_tts_styles.txt you already read:
 
 #### Step 2a — Identify main characters
 
@@ -101,6 +101,26 @@ for all lines.
          Narrator and protagonist especially must never share a voice.
          If fewer distinct voices exist than characters, prioritise:
          protagonist → antagonist → narrator → minor characters (minor may share).
+
+  b2. **Supports() check:**
+       When selecting a voice for a locale, verify its `supports()` list includes
+       that locale.  Multilingual voices may list both en-* and zh-* in supports()
+       and may be assigned to either locale.
+
+  b3. **Emotional role casting rule:**
+       Do NOT assign a voice with `styles(0): []` to any character who requires
+       emotional expression: antagonist, emotional lead, anger, fear, grief,
+       warmth, suspense.  No-style voices produce flat, affectless output.
+       No-style voices are only suitable for:
+         – narrator in documentary / illustrated_narration / continuous_narration
+         – minor background characters with neutral delivery
+
+  b4. **Multitalker restriction:**
+       NEVER assign a MULTITALKER voice as a character voice.
+       Voices in the [MULTITALKER] section are Azure pair-synthesis voices; they
+       require two named speakers inside one SSML call and cannot be used as a
+       single character voice.  Assigning one produces broken or silent TTS output.
+       Treat every [MULTITALKER] entry as reserved — skip them during casting.
 
   c. List the styles that voice actually supports (copy from azure_tts_styles.txt).
 
