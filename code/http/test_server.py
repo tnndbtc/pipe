@@ -2830,6 +2830,8 @@ Direction    : …"></textarea>
         const localeStepsMap = status.locale_steps || {};
         const sharedStepsMap = status.shared_steps || {};
         const locales        = status.locales || [];
+        // True when any run that covers Stage 10 is active — clears stale sub-step ✓s
+        const stage10Running = !!(pipeRunning && pipeRunning.from <= 10 && pipeRunning.to >= 10);
 
         function makeRunBtn(label, onclick) {
           const b = document.createElement('button');
@@ -2847,7 +2849,7 @@ Direction    : …"></textarea>
           { num: 3, step: 'gen_backgrounds', label: '3 — gen_backgrounds' },
           { num: 4, step: 'gen_sfx',         label: '4 — gen_sfx'         },
         ].forEach(({ num, step, label }) => {
-          const done = (sharedStepsMap[step] || {}).done || false;
+          const done = stage10Running ? false : ((sharedStepsMap[step] || {}).done || false);
           const row = document.createElement('div');
           row.className = 'pipe-substep-row';
           row.appendChild(Object.assign(document.createElement('span'), {
@@ -2886,7 +2888,7 @@ Direction    : …"></textarea>
 
             const lsteps = localeStepsMap[locale] || {};
             LOCALE_STEPS.forEach(({ num, step, label }) => {
-              const done = (lsteps[step] || {}).done || false;
+              const done = stage10Running ? false : ((lsteps[step] || {}).done || false);
               const row  = document.createElement('div');
               row.className = 'pipe-substep-row';
               // status icon
