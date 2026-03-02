@@ -42,6 +42,7 @@ TTS_MIN_INTERVAL      = 3.5               # seconds (F0: 20 req/60 s → safe ra
 TTS_RETRY_BACKOFF     = [5, 10, 20]       # seconds; sleep before each 429 retry
 _voice_catalog_cache  = None              # set once by parse_azure_tts_styles()
 _tts_synth            = None              # lazy singleton; created on first preview request
+_diagnose_cache: dict = {}               # key: "{slug}|{ep_id}|{mtime_hash}" → Claude result
 
 # Lazy-import Azure SDK so server starts even when SDK is not installed
 try:
@@ -54,6 +55,14 @@ except ImportError:
     _build_ssml    = None  # type: ignore
     _speechsdk     = None  # type: ignore
     _TTS_AVAILABLE = False
+
+# ── VO polish thresholds — single source of truth is polish_locale_vo
+try:
+    from polish_locale_vo import THRESHOLD      as _VO_POLISH_THRESHOLD, \
+                                  THRESHOLD_HIGH as _VO_POLISH_THRESHOLD_HIGH
+except Exception:
+    _VO_POLISH_THRESHOLD      = 0.90  # fallback if module not yet on path
+    _VO_POLISH_THRESHOLD_HIGH = 1.10
 
 
 # ── Story-file helpers ─────────────────────────────────────────────────────────
@@ -247,25 +256,28 @@ def parse_azure_tts_styles() -> dict:
     for e in entries:
         e["has_styles"] = bool(e.get("styles"))
 
-    # Group by story locale using BOTH azure_locale AND supports() list.
-    # A voice belongs to "en" if its primary locale OR any supported locale is en-*.
-    # Same for "zh-Hans".  A multilingual voice (e.g. en-US-AndrewMultilingualNeural
-    # that supports zh-CN/zh-HK) will appear in BOTH groups.
+    # Group by language family: all en-* → "en", all zh-* → "zh-Hans".
+    # Additionally expand any voice that has zh-* locales in supports() into
+    # zh-Hans with azure_locale set to that zh locale, so e.g.
+    # en-GB-Ada:DragonHDLatestNeural (supports zh-HK) appears under zh-HK optgroup.
     catalog: dict[str, list] = {}
     for entry in entries:
-        al      = entry.get("azure_locale", "")
-        sup     = entry.get("supports", [])
-        groups: set[str] = set()
-        for loc in ([al] if al else []) + sup:
-            if loc.startswith("en-"):
-                groups.add("en")
-            elif loc.startswith("zh-"):
-                groups.add("zh-Hans")
-        # Non-en/zh voices (de, fr, …) fall back to their primary locale prefix
-        if not groups and al:
-            groups.add(al.split("-")[0] if "-" in al else al)
-        for group in groups:
-            catalog.setdefault(group, []).append(entry)
+        al = entry.get("azure_locale", "")
+        if not al:
+            continue
+        # Primary bucket
+        if al.startswith("en-"):
+            catalog.setdefault("en", []).append(entry)
+        elif al.startswith("zh-"):
+            catalog.setdefault("zh-Hans", []).append(entry)
+        else:
+            catalog.setdefault(al, []).append(entry)
+        # Expand into zh-Hans for every zh-* locale in supports()
+        for loc in entry.get("supports", []):
+            if loc.startswith("zh-") and loc != al:
+                e2 = dict(entry)
+                e2["azure_locale"] = loc
+                catalog.setdefault("zh-Hans", []).append(e2)
 
     _voice_catalog_cache = catalog
     return catalog
@@ -322,7 +334,7 @@ def _preview_build_ssml(text: str, azure_voice: str, azure_locale: str,
     """Build SSML for a preview request (identical format to pre_cache_voices.py)."""
     escaped = (text.replace("&", "&amp;").replace("<", "&lt;")
                    .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
-    spoken = escaped
+    spoken = f'<lang xml:lang="{azure_locale}">{escaped}</lang>'
     if break_ms:
         spoken = f'{spoken}<break time="{break_ms}ms"/>'
     rate_attr  = f' rate="{rate}"'   if rate  and rate  != "0%" else ""
@@ -864,6 +876,24 @@ HTML = r"""<!DOCTYPE html>
   #sr-content .sr-issue { color: #e05c5c; font-weight: 700; }
   #sr-content .sr-fix   { color: var(--green); }
   #sr-content .sr-manual{ color: var(--gold); font-weight: 700; }
+  /* ── VO Alignment panel ── */
+  #sr-alignment {
+    font-family: var(--mono); font-size: 0.76em; color: var(--text);
+    background: #0a0a0e; border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 14px; display: none; flex-direction: column; gap: 4px;
+  }
+  #sr-alignment.visible { display: flex; }
+  .al-hdr  { color: var(--gold); font-weight: 700; margin-bottom: 2px; }
+  .al-stats{ color: var(--dim); margin-bottom: 6px; }
+  .al-row  { display: grid; grid-template-columns: 1fr 80px 80px; gap: 8px;
+             padding: 2px 0; border-top: 1px solid #1a1a24; }
+  .al-id   { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .al-good { color: var(--green); text-align: right; }
+  .al-bad  { color: #e05c5c;      text-align: right; }
+  .al-chars{ color: var(--dim);   text-align: right; }
+  .al-txt  { grid-column: 1 / -1; padding: 2px 0 4px 12px; }
+  .al-txt-before { color: #e05c5c;      font-style: italic; }
+  .al-txt-after  { color: var(--green); }
   .sr-add-row {
     display: flex; gap: 6px; flex-shrink: 0; align-items: flex-start;
   }
@@ -877,6 +907,31 @@ HTML = r"""<!DOCTYPE html>
     border-radius: 5px; font-size: 0.78em; padding: 6px 12px; cursor: pointer;
     font-weight: 700; white-space: nowrap; align-self: flex-end;
   }
+  #sr-next-step {
+    flex-shrink: 0; border-radius: 6px; padding: 8px 14px;
+    font-size: 0.82em; font-family: var(--mono); font-weight: 600; display: none;
+  }
+  #sr-next-step.ns-action  { display: block; background: #1a2f4a; color: var(--blue);  border: 1px solid #5b9cf650; }
+  #sr-next-step.ns-running { display: block; background: #2a2010; color: var(--gold);  border: 1px solid #b8860b80; }
+  #sr-next-step.ns-done    { display: block; background: #0e2718; color: var(--green); border: 1px solid #4caf5060; }
+  #sr-banner-row { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  #sr-banner-row #sr-next-step { flex: 1; }
+  #btn-diagnose {
+    flex-shrink: 0; background: #1a1a2e; color: #a78bfa;
+    border: 1px solid #7c3aed60; border-radius: 6px;
+    font-size: 0.78em; font-weight: 700; padding: 6px 12px;
+    cursor: pointer; white-space: nowrap;
+  }
+  #btn-diagnose:hover   { background: #2a1a4e; border-color: #a78bfa80; }
+  #btn-diagnose:disabled{ opacity: 0.5; cursor: default; }
+  #sr-diagnose-result {
+    display: none; flex-shrink: 0; border-radius: 6px; padding: 8px 14px;
+    font-size: 0.80em; font-family: var(--mono); line-height: 1.5;
+  }
+  #sr-diagnose-result.srd-action  { display: block; background: #1a2f4a; color: var(--blue);  border: 1px solid #5b9cf650; font-weight: 600; }
+  #sr-diagnose-result.srd-done    { display: block; background: #0e2718; color: var(--green); border: 1px solid #4caf5060; font-weight: 600; }
+  #sr-diagnose-result.srd-running { display: block; background: #1a1a2e; color: #a78bfa;      border: 1px solid #7c3aed50; font-style: italic; }
+  #sr-diagnose-result.srd-error   { display: block; background: #2a0e0e; color: var(--red);   border: 1px solid #e05c5c50; }
 
   /* ── Voice Cast editor character cards ── */
   .vc-char-card {
@@ -1032,7 +1087,13 @@ Direction    : …"></textarea>
       </div>
     </div>
     <div id="sr-panel">
+      <div id="sr-banner-row">
+        <div id="sr-next-step"></div>
+        <button id="btn-diagnose" onclick="runDiagnose()" title="Ask Claude which stage to re-run based on file timestamps">🤖 Diagnose</button>
+      </div>
+      <div id="sr-diagnose-result"></div>
       <div id="sr-content"><span style="color:var(--dim);font-style:italic">No episode selected.</span></div>
+      <div id="sr-alignment"></div>
       <div class="sr-add-row">
         <textarea id="sr-note-input" placeholder="Add a status note (issue / fix / manual step)…"></textarea>
         <button id="btn-sr-add" onclick="appendStatusNote()">＋ Add Note</button>
@@ -1291,6 +1352,20 @@ Direction    : …"></textarea>
     spinnerEl.style.display = state === 'running' ? 'inline' : 'none';
     btnRun.disabled       = state === 'running';
     btnStop.style.display = state === 'running' ? 'block' : 'none';
+  }
+
+  function appendLineTs(text, cls) {
+    const ts = fmtNow();
+    const prefix = `<span class="ts">[${ts}] </span>`;
+    const atBottom =
+      outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight < 40;
+    outputEl.insertAdjacentHTML(
+      'beforeend',
+      prefix + (cls ? `<span class="${cls}">${escHtml(text)}\n</span>`
+                    : `<span>${escHtml(text)}\n</span>`));
+    lineCount++;
+    lineCountEl.textContent = lineCount + (lineCount === 1 ? ' line' : ' lines');
+    if (atBottom) outputEl.scrollTop = outputEl.scrollHeight;
   }
 
   function appendLine(text, cls) {
@@ -1725,7 +1800,12 @@ Direction    : …"></textarea>
   function vcSampleText(locale, style) {
     const cat  = (style && VC_STYLE_CATEGORY[style]) ?? 'bedtime';
     const bank = VC_SAMPLE[cat] ?? VC_SAMPLE.bedtime;
-    return bank[locale] ?? bank['en'];
+    // zh-HK / zh-TW / zh-SG etc. → use zh-Hans text so Azure reads Chinese
+    // characters in the correct locale pronunciation (e.g. Cantonese for zh-HK).
+    const key = bank[locale] !== undefined ? locale
+              : locale.startsWith('zh-')   ? 'zh-Hans'
+              : 'en';
+    return bank[key] ?? bank['en'];
   }
 
   // ── switchStoryTab(tab) ──────────────────────────────────────────────────────
@@ -1774,6 +1854,8 @@ Direction    : …"></textarea>
     const el = document.getElementById('sr-content');
     if (!currentSlug || !currentEpId) {
       el.innerHTML = '<span style="color:var(--dim);font-style:italic">No episode selected.</span>';
+      _renderAlignment(null);
+      renderNextStep();
       return;
     }
     try {
@@ -1789,6 +1871,63 @@ Direction    : …"></textarea>
     } catch(e) {
       el.textContent = 'Error loading status report: ' + e;
     }
+    // Load VO alignment panel
+    try {
+      const ar = await fetch('/api/vo_alignment?slug=' + encodeURIComponent(currentSlug)
+                            + '&ep_id=' + encodeURIComponent(currentEpId));
+      const ad = await ar.json();
+      _lastAlignmentData = ad;
+      _renderAlignment(ad);
+    } catch(e) { _lastAlignmentData = null; _renderAlignment(null); }
+    renderNextStep();
+  }
+
+  function _renderAlignment(data) {
+    const el = document.getElementById('sr-alignment');
+    if (!data || !data.locales || !data.locales.length) {
+      el.classList.remove('visible'); el.innerHTML = ''; return;
+    }
+    const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let html = '';
+    for (const loc of data.locales) {
+      const fl = loc.flagged_count, total = loc.total_lines;
+      const conv = loc.converged_count;
+      const wb = loc.worst_ratio_before.toFixed(2);
+      const wa = loc.worst_ratio_after.toFixed(2);
+      const bb = (loc.best_ratio_before ?? loc.worst_ratio_before).toFixed(2);
+      const ba = (loc.best_ratio_after  ?? loc.worst_ratio_after).toFixed(2);
+      const ok = fl === 0 || (loc.worst_ratio_after >= __VO_THRESH__ && (loc.best_ratio_after ?? 0) <= __VO_THRESH_HIGH__);
+      html += `<div class="al-hdr">── VO Alignment: ${esc(loc.locale)}  `
+            + `<span style="color:var(--dim);font-weight:normal;font-size:0.9em">`
+            + `updated ${esc(loc.updated)}</span></div>`;
+      html += `<div class="al-stats">`
+            + `${total} lines · ${fl} flagged (ratio &lt; __VO_THRESH__ or &gt; __VO_THRESH_HIGH__) · `
+            + `${conv}/${total} converged · `
+            + `range: <span style="color:${ok?'var(--green)':'#e05c5c'}">[${wb}..${bb}] → [${wa}..${ba}]</span>`
+            + `</div>`;
+      if (loc.lines && loc.lines.length) {
+        html += `<div class="al-row" style="color:var(--dim);font-size:0.9em;border-top:none">`
+              + `<span>item_id</span><span style="text-align:right">ratio</span>`
+              + `<span style="text-align:right">chars</span></div>`;
+        for (const line of loc.lines) {
+          const fixed = line.ratio_after >= __VO_THRESH__ && line.ratio_after <= __VO_THRESH_HIGH__;
+          const rCls  = fixed ? 'al-good' : 'al-bad';
+          html += `<div class="al-row">`
+                + `<span class="al-id" title="${esc(line.item_id)}">${esc(line.item_id)}</span>`
+                + `<span class="${rCls}">${line.ratio_before.toFixed(2)}→${line.ratio_after.toFixed(2)}</span>`
+                + `<span class="al-chars">${line.chars_before}→${line.chars_after}</span>`
+                + `</div>`;
+          if (line.rewritten) {
+            html += `<div class="al-txt">`
+                  + `<div class="al-txt-before">− ${esc(line.text_before)}</div>`
+                  + `<div class="al-txt-after">+ ${esc(line.text_after)}</div>`
+                  + `</div>`;
+          }
+        }
+      }
+    }
+    el.innerHTML = html;
+    el.classList.add('visible');
   }
 
   async function appendStatusNote() {
@@ -1810,6 +1949,141 @@ Direction    : …"></textarea>
     }
   }
   // ── end Status Report ──────────────────────────────────────────────────────
+
+  // ── Next Step banner ──────────────────────────────────────────────────────────
+  // Computes the recommended next action from live pipeline status.
+  function computeNextStep(status) {
+    if (!status) return { state: 'idle', msg: '' };
+    if (pipeRunning) {
+      return { state: 'running',
+               msg: '🔄  Pipeline running — stages ' + pipeRunning.from + ' → ' + pipeRunning.to + '…' };
+    }
+    const stagesMap = status.llm_stages || {};
+    const llmKeys = [
+      { n:0, key:'stage_0'  }, { n:1,  key:'stage_1'  }, { n:2,  key:'stage_2'  },
+      { n:3, key:'stage_3'  }, { n:4,  key:'stage_4'  }, { n:5,  key:'stage_5'  },
+      { n:6, key:'stage_6'  }, { n:7,  key:'stage_7'  }, { n:8,  key:'stage_8'  },
+      { n:9, key:'stage_9'  }, { n:10, key:'stage_10' },
+    ];
+    const stageLabels = [
+      'Cast voices & pipeline vars',  'Check story consistency',
+      'Write episode direction',       'Write script & dialogue',
+      'Break script into shots',       'List required assets',
+      'Identify new story facts',      'Update story memory',
+      'Translate & adapt locales',     'Finalize assets & render plan',
+      'Merge assets & render video',
+    ];
+    // Sequential done propagation (mirrors renderPipelineStatus)
+    let maxDone = -1;
+    llmKeys.forEach(({ n, key }) => { if ((stagesMap[key] || {}).done) maxDone = n; });
+    for (const { n, key } of llmKeys) {
+      const done = n <= maxDone || ((stagesMap[key] || {}).done === true);
+      if (!done) {
+        return { state: 'action',
+                 msg: '▶  Run ' + n + ' → 10  —  Stage ' + n + ': ' + stageLabels[n] };
+      }
+    }
+    return { state: 'done', msg: '✅  All stages complete — episode is ready.' };
+  }
+
+  // Returns an alignment-based next-step if Stage 10 is done but VO is misaligned.
+  function _alignmentNextStep() {
+    if (!_lastAlignmentData || !_lastAlignmentData.locales) return null;
+    // Only relevant when Stage 10 is already complete
+    if (!((( pipeStatus || {}).llm_stages || {}).stage_10 || {}).done) return null;
+    const badLocs = _lastAlignmentData.locales.filter(
+      loc => loc.total_lines > 0 && loc.flagged_count / loc.total_lines > 0.20
+    );
+    if (!badLocs.length) return null;
+    const parts = badLocs.map(loc => {
+      const pct = Math.round(loc.flagged_count / loc.total_lines * 100);
+      return `${loc.locale} ${loc.flagged_count}/${loc.total_lines}句偏短（最差${loc.worst_ratio_before.toFixed(2)}）`;
+    });
+    return {
+      state: 'action',
+      msg: '⚠️  配音偏短 — ' + parts.join(' · ') + ' — 建议重跑 Stage 8→10',
+    };
+  }
+
+  function renderNextStep() {
+    const el = document.getElementById('sr-next-step');
+    if (!el) return;
+    if (!currentSlug || !currentEpId) { el.className = 'ns-idle'; el.textContent = ''; return; }
+    const ns = _alignmentNextStep() || computeNextStep(pipeStatus);
+    el.className = 'ns-' + ns.state;
+    el.textContent = ns.msg;
+  }
+  // ── end Next Step banner ──────────────────────────────────────────────────────
+
+  // ── 🤖 AI Diagnosis ──────────────────────────────────────────────────────────
+  let _diagnoseResult          = null;   // last Claude result object
+  let _diagnoseForFingerprint  = null;   // _lastStatusFingerprint when result was fetched
+  let _lastAlignmentData       = null;   // last /api/vo_alignment response
+
+  function _renderDiagnoseResult(data) {
+    const el = document.getElementById('sr-diagnose-result');
+    if (!el) return;
+    if (data.error) {
+      el.className = 'srd-error';
+      el.textContent = '✗ Diagnosis error: ' + data.error;
+    } else if (data.from_stage === null || data.from_stage === undefined) {
+      el.className = 'srd-done';
+      el.textContent = '🤖 Nothing stale — ' + (data.reason || 'all outputs are up to date.');
+    } else {
+      el.className = 'srd-action';
+      el.innerHTML =
+        '🤖 Re-run Stage <strong>' + data.from_stage + ' → ' + data.to_stage + '</strong>' +
+        ' <span style="font-weight:400;opacity:0.6">(' + (data.confidence||'') + ' confidence)</span>' +
+        '<br><span style="font-weight:400;opacity:0.85">' + escHtml(data.reason || '') + '</span>';
+    }
+  }
+
+  async function runDiagnose() {
+    if (!currentSlug || !currentEpId) return;
+
+    // Return cached result if pipeline state hasn't changed since last call
+    if (_diagnoseForFingerprint !== null &&
+        _diagnoseForFingerprint === _lastStatusFingerprint &&
+        _diagnoseResult !== null) {
+      _renderDiagnoseResult(_diagnoseResult);
+      return;
+    }
+
+    const btn   = document.getElementById('btn-diagnose');
+    const resEl = document.getElementById('sr-diagnose-result');
+    btn.disabled     = true;
+    btn.textContent  = '⏳ …';
+    resEl.className  = 'srd-running';
+    resEl.textContent = 'Asking Claude haiku — analysing file timestamps…';
+    try {
+      const r    = await fetch('/api/diagnose_pipeline?slug=' + encodeURIComponent(currentSlug)
+                               + '&ep_id=' + encodeURIComponent(currentEpId));
+      const data = await r.json();
+      _diagnoseResult         = data;
+      _diagnoseForFingerprint = _lastStatusFingerprint;
+      _renderDiagnoseResult(data);
+    } catch(e) {
+      const errData = { error: String(e) };
+      _diagnoseResult         = errData;
+      _diagnoseForFingerprint = _lastStatusFingerprint;
+      _renderDiagnoseResult(errData);
+    } finally {
+      btn.disabled    = false;
+      btn.textContent = '🤖 Diagnose';
+    }
+  }
+
+  // Invalidate diagnosis cache whenever pipeline state fingerprint changes
+  function _invalidateDiagnoseIfStale() {
+    if (_diagnoseForFingerprint !== null &&
+        _diagnoseForFingerprint !== _lastStatusFingerprint) {
+      _diagnoseResult         = null;
+      _diagnoseForFingerprint = null;
+      const el = document.getElementById('sr-diagnose-result');
+      if (el) { el.className = ''; el.textContent = ''; }
+    }
+  }
+  // ── end AI Diagnosis ──────────────────────────────────────────────────────────
 
   // ── loadVoiceCatalog() ───────────────────────────────────────────────────────
   async function loadVoiceCatalog() {
@@ -2084,6 +2358,7 @@ Direction    : …"></textarea>
         grp.label = loc;
         grpMap[loc].forEach(v => {
           const opt = new Option((v.local_name || v.voice) + ' — ' + v.gender + ' — ' + v.voice, v.voice);
+          opt.dataset.azureLocale = v.azure_locale;
           if (v.voice === charLoc.azure_voice) opt.selected = true;
           grp.appendChild(opt);
         });
@@ -2289,6 +2564,7 @@ Direction    : …"></textarea>
         if (prevBtn.textContent === '\u23F8 Pause') return;
         previewVoice(card, locale, {
           azure_voice:  voiceSel.value,
+          azure_locale: voiceSel.selectedOptions[0]?.dataset.azureLocale || voiceSel.value.split('-').slice(0,2).join('-'),
           style:        styleSel.value || null,
           style_degree: parseFloat(card.querySelector('[data-field=degree]').value),
           rate:         addPct(card.querySelector('[data-field=rate]').value),
@@ -2316,6 +2592,7 @@ Direction    : …"></textarea>
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           azure_voice:  params.azure_voice,
+          azure_locale: params.azure_locale,
           style:        params.style,
           style_degree: params.style_degree,
           rate:         params.rate,
@@ -2572,7 +2849,8 @@ Direction    : …"></textarea>
   let pipeStatus    = null;
   let pipeStepEs    = null;
   let pipeStoryFile = null;   // auto-detected from pipeline_vars.*.sh
-  let pipeRunning   = null;   // { from, to } while an llm range is running; null otherwise
+  let pipeRunning      = null;   // { from, to } while an llm range is running; null otherwise
+  let _stagesDoneInCurrentRun = new Set(); // stage numbers confirmed done in the CURRENT run
   let activeVideoLocale = null;  // currently selected video locale tab
   let _lastSyncedEp          = null;  // "slug|ep_id" — guards syncRunTabFromPipeline from firing every poll
   let _lastStatusFingerprint = null;  // JSON fingerprint — skips DOM re-render when nothing changed
@@ -2760,6 +3038,27 @@ Direction    : …"></textarea>
       _vcLocales = [];
       document.getElementById('vc-cards').innerHTML = '';  // clear stale cards
     }
+
+    // ── Alignment warning on episode load ────────────────────────────────────
+    // Fetch VO alignment and print a one-line warning to the OUTPUT box so the
+    // user immediately sees if Chinese VO is misaligned — without clicking any tab.
+    // NOTE: pipeStatus may not be loaded yet here, so check alignment data directly.
+    try {
+      const ar = await fetch('/api/vo_alignment?slug=' + encodeURIComponent(slug)
+                            + '&ep_id=' + encodeURIComponent(epId));
+      _lastAlignmentData = await ar.json();
+      const badLocs = (_lastAlignmentData.locales || []).filter(
+        loc => loc.total_lines > 0 && loc.flagged_count / loc.total_lines > 0.20
+      );
+      if (badLocs.length) {
+        const parts = badLocs.map(loc =>
+          `${loc.locale} ${loc.flagged_count}/${loc.total_lines}句偏短（最差${loc.worst_ratio_before.toFixed(2)}）`
+        );
+        appendLine('', null);
+        appendLineTs('── VO 配音对齐检查 ──────────────────────────────────', 'sys');
+        appendLineTs('⚠️  配音偏短 — ' + parts.join(' · ') + ' — 建议重跑 Stage 8→10', null);
+      }
+    } catch(_) {}
   }
 
   function renderPipelineStatus(status) {
@@ -2785,10 +3084,12 @@ Direction    : …"></textarea>
       shared:  status.shared_steps,
       videos:  status.ready_videos,
       dubbed:  status.ready_dubbed,
-      running: pipeRunning   // client-side: forces re-render when run starts/stops
+      running: pipeRunning,   // client-side: forces re-render when run starts/stops
+      doneset: Array.from(_stagesDoneInCurrentRun).sort()  // forces re-render as stages complete
     });
     if (_fp === _lastStatusFingerprint) return;
     _lastStatusFingerprint = _fp;
+    _invalidateDiagnoseIfStale();   // clear cached diagnosis when pipeline state changes
 
     const body = document.getElementById('pipe-body');
     body.innerHTML = '';
@@ -2833,23 +3134,17 @@ Direction    : …"></textarea>
       });
     }
 
-    // If stages are actively running, clear stale ✓ only for stages the server
-    // has NOT yet confirmed as done (output files don't exist yet).
-    // Stages that already completed mid-run (server says done=true because their
-    // output files exist on disk) keep their ✓ — never overwrite confirmed work.
+    // While a run is active, clear stale ✓ for stages in range.
+    // A stage only gets its checkmark back when the CURRENT run's stream
+    // emits "✓ Stage N complete" (tracked in _stagesDoneInCurrentRun).
+    // This is time-independent — no grace-period expiry — and correctly handles
+    // long-running stages (translation, TTS synthesis, etc.).
     if (pipeRunning) {
-      const _serverStages = status.llm_stages || {};
       llmDefs.forEach(({ n, key }) => {
         if (n >= pipeRunning.from && n <= pipeRunning.to) {
-          const serverConfirmed = _serverStages[key]?.done === true;
-          if (!serverConfirmed) {
-            // Server hasn't confirmed this stage yet — clear any stale ✓
-            if (stagesMap[key]) {
-              stagesMap[key].done      = false;
-              stagesMap[key].artifacts = [];
-            }
+          if (!_stagesDoneInCurrentRun.has(n)) {
+            stagesMap[key] = { done: false, artifacts: [] };
           }
-          // serverConfirmed=true → stage finished during this run → leave ✓ intact
         }
       });
     }
@@ -3084,6 +3379,10 @@ Direction    : …"></textarea>
       // Show first available pane on initial render
       switchPane(tabDefs[0].pane);
     }
+  }
+  // Keep Next Step banner in sync whenever Pipeline tab refreshes
+  if (document.getElementById('sr-panel').style.display !== 'none') {
+    renderNextStep();
   }
 
   function playLocaleVideo(locale) {
@@ -3479,12 +3778,23 @@ Direction    : …"></textarea>
     // Track which stage range is running so Pipeline tab doesn't show stale ✓
     pipeRunning = (params.type === 'llm') ? { from: params.from, to: params.to } : null;
     if (params.type === 'llm') {
+      // Reset the per-run completion set — stages only get re-checked as the
+      // stream emits "✓ Stage N complete", not from stale server-side file checks.
+      _stagesDoneInCurrentRun = new Set();
       // Keep progress-dot globals accurate for startPipeStep-driven runs
-      // (vcContinue, runLlmRange from Pipeline tab, etc.)
       _runFromStage = params.from;
       _runToStage   = params.to;
+      // Immediately uncheck stages from..to — instant visual feedback.
+      // renderPipelineStatus will keep them unchecked (via _stagesDoneInCurrentRun)
+      // until the stream confirms each one done.
+      if (pipeStatus && pipeStatus.llm_stages) {
+        for (let n = params.from; n <= params.to; n++) {
+          pipeStatus.llm_stages['stage_' + n] = { done: false, artifacts: [] };
+        }
+        renderPipelineStatus(pipeStatus);
+      }
     }
-    refreshPipeline();   // immediately clear stale ✓ in Pipeline tab
+    refreshPipeline();   // sync with server
 
     // Route output to the Run tab — switch there and clear the output box
     switchTab('run');
@@ -3539,8 +3849,14 @@ Direction    : …"></textarea>
         const elapsed = stageStartMs[n] != null
           ? `  elapsed ${fmtElapsed(Date.now() - stageStartMs[n])}` : '';
         appendLine(`  ⏱  finished ${fmtNow()}${elapsed}`, 'ts');
+        // Record this stage as confirmed done in the current run so that
+        // renderPipelineStatus() will show its checkmark even while pipeRunning is set.
+        _stagesDoneInCurrentRun.add(n);
         markStageDone(n);
         insertReviewButtons(n);
+        // Re-render Pipeline tab immediately so the checkmark appears for this stage
+        // (fingerprint includes doneset, so this will not be a no-op).
+        if (pipeStatus) renderPipelineStatus(pipeStatus);
       }
       const vm = text.match(/PROJECT_SLUG=(\S+)\s+EPISODE_ID=(\S+)/);
       if (vm) { currentSlug = vm[1]; currentEpId = vm[2]; }
@@ -3573,7 +3889,40 @@ Direction    : …"></textarea>
         appendLine(`[ Exited with code ${code} ]`, 'err');
         setStatus('error');
       }
-      setTimeout(() => refreshPipeline(), 600);
+      setTimeout(async () => {
+        await refreshPipeline();
+        // After the status is fresh, print a next-step hint to the output box.
+        if (code === 0) {
+          // Fetch fresh alignment data and check first
+          try {
+            const ar = await fetch('/api/vo_alignment?slug=' + encodeURIComponent(currentSlug)
+                                  + '&ep_id=' + encodeURIComponent(currentEpId));
+            _lastAlignmentData = await ar.json();
+          } catch(e) {}
+          const alignStep = _alignmentNextStep();
+          if (alignStep) {
+            appendLine('', null);
+            appendLineTs('── VO 配音对齐检查 ──────────────────────────────────', 'sys');
+            appendLineTs(alignStep.msg, null);
+            if (_lastAlignmentData && _lastAlignmentData.locales) {
+              for (const loc of _lastAlignmentData.locales) {
+                if (loc.flagged_count > 0) {
+                  appendLineTs(`   原因：Stage 8 字数估算偏高，实测语速 vs 预估存在差距`, 'sys');
+                  appendLineTs(`   建议：重跑 Stage 8→10，使用已校准的 ${loc.locale} 字符速率`, null);
+                }
+              }
+            }
+          } else {
+            const ns = computeNextStep(pipeStatus);
+            if (ns.state === 'action' || ns.state === 'done') {
+              appendLine('', null);
+              appendLineTs('── Next step ────────────────────────────────────────', 'sys');
+              appendLineTs(ns.msg, ns.state === 'done' ? 'done' : null);
+            }
+          }
+          renderNextStep();
+        }
+      }, 600);
     });
     pipeStepEs.onerror = () => {
       if (pipeStepEs) { pipeStepEs.close(); pipeStepEs = null; }
@@ -3585,6 +3934,9 @@ Direction    : …"></textarea>
 </body>
 </html>
 """
+# Inject VO polish thresholds into the JS at startup (source: polish_locale_vo)
+HTML = HTML.replace("__VO_THRESH__",      f"{_VO_POLISH_THRESHOLD:.2f}")
+HTML = HTML.replace("__VO_THRESH_HIGH__", f"{_VO_POLISH_THRESHOLD_HIGH:.2f}")
 
 
 # ── Artifact viewer page ───────────────────────────────────────────────────────
@@ -4481,6 +4833,228 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        # ── VO alignment summary (written by polish_locale_vo.py) ─────────────
+        elif parsed.path == "/api/vo_alignment":
+            params = parse_qs(parsed.query)
+            slug   = unquote_plus(params.get("slug",  [""])[0]).strip()
+            ep_id  = unquote_plus(params.get("ep_id", [""])[0]).strip()
+            locales_data = []
+            if slug and ep_id:
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                if os.path.isdir(ep_dir):
+                    for fname in sorted(os.listdir(ep_dir)):
+                        m = re.match(r"vo_alignment\.(.+)\.json$", fname)
+                        if m:
+                            try:
+                                with open(os.path.join(ep_dir, fname), encoding="utf-8") as fh:
+                                    locales_data.append(json.load(fh))
+                            except Exception:
+                                pass
+            body = json.dumps({"locales": locales_data}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── AI pipeline diagnostics — which stage to re-run? ──────────────────
+        elif parsed.path == "/api/diagnose_pipeline":
+            import hashlib as _hl, tempfile as _tf, datetime as _dt
+            params = parse_qs(parsed.query)
+            slug   = unquote_plus(params.get("slug",  [""])[0]).strip()
+            ep_id  = unquote_plus(params.get("ep_id", [""])[0]).strip()
+
+            if not slug or not ep_id:
+                _b = json.dumps({"error": "missing slug or ep_id"}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(_b)))
+                self.end_headers(); self.wfile.write(_b)
+            else:
+                ep_dir   = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                proj_dir = os.path.join(PIPE_DIR, "projects", slug)
+                def _ep(f): return os.path.join(ep_dir, f)
+                def _pr(f): return os.path.join(proj_dir, f)
+
+                # Detect locales from AssetManifest_draft.{locale}.json files
+                _locales: list[str] = []
+                if os.path.isdir(ep_dir):
+                    for _f in sorted(os.listdir(ep_dir)):
+                        _m = re.match(r"AssetManifest_draft\.(.+)\.json$", _f)
+                        if _m and _m.group(1) != "shared":
+                            _locales.append(_m.group(1))
+
+                # All files that affect staleness
+                _watch = [
+                    _ep("meta.json"), _ep("story.txt"),
+                    _ep("pipeline_vars.sh"), _pr("VoiceCast.json"),
+                    _ep("StoryPrompt.json"), _ep("Script.json"),
+                    _ep("ShotList.json"), _ep("AssetManifest_draft.shared.json"),
+                    _ep("canon_diff.json"), _pr("canon.json"),
+                    _ep("AssetManifest_final.json"), _ep("RenderPlan.json"),
+                ] + [_ep(f"AssetManifest_draft.{l}.json")  for l in _locales] \
+                  + [_ep(f"AssetManifest_merged.{l}.json") for l in _locales] \
+                  + [_ep(f"RenderPlan.{l}.json")           for l in _locales] \
+                  + [_ep(f"renders/{l}/output.mp4")        for l in _locales]
+
+                # Cache key: mtime hash of all watched files
+                _mparts = [
+                    f"{fp}:{os.path.getmtime(fp):.0f}" if os.path.exists(fp) else f"{fp}:0"
+                    for fp in sorted(_watch)
+                ]
+                _cache_key = slug + "|" + ep_id + "|" + _hl.md5("|".join(_mparts).encode()).hexdigest()[:12]
+
+                if _cache_key in _diagnose_cache:
+                    _result = _diagnose_cache[_cache_key]
+                else:
+                    # ── Build dependency status table ────────────────────────
+                    _now = time.time()
+                    _MIN_STALE = 10  # seconds; less than this is timestamp noise
+
+                    def _mtime(f):
+                        try: return os.path.getmtime(f)
+                        except: return None
+
+                    def _fmt_delta(sec):
+                        if sec < 60:   return f"{int(sec)}s"
+                        if sec < 3600: return f"{int(sec/60)}m {int(sec%60)}s"
+                        return f"{sec/3600:.1f}h"
+
+                    def _dep_status(inputs, outputs):
+                        """Returns (tag, description) for one dependency pair."""
+                        missing = [f for f in outputs if not os.path.exists(f)]
+                        if missing:
+                            return "MISSING", "output missing: " + ", ".join(
+                                os.path.basename(f) for f in missing)
+                        out_ts = [_mtime(f) for f in outputs if os.path.exists(f)]
+                        if not out_ts:
+                            return "MISSING", "no output files"
+                        oldest_out = min(t for t in out_ts if t)
+                        in_ts = [(f, _mtime(f)) for f in inputs if os.path.exists(f)]
+                        if not in_ts:
+                            return "FRESH", ""
+                        newest_in_f, newest_in_t = max(in_ts, key=lambda x: x[1] or 0)
+                        if newest_in_t and newest_in_t - oldest_out > _MIN_STALE:
+                            return "STALE", (
+                                f"{os.path.basename(newest_in_f)} is "
+                                f"{_fmt_delta(newest_in_t - oldest_out)} newer than output"
+                            )
+                        return "FRESH", ""
+
+                    _stage_deps = [
+                        (0,  "Cast voices & pipeline_vars.sh",
+                             [_ep("meta.json"), _ep("story.txt")],
+                             [_ep("pipeline_vars.sh"), _pr("VoiceCast.json")]),
+                        (2,  "Write episode direction",
+                             [_pr("VoiceCast.json"), _ep("story.txt")],
+                             [_ep("StoryPrompt.json")]),
+                        (3,  "Write script & dialogue",
+                             [_pr("VoiceCast.json"), _ep("StoryPrompt.json")],
+                             [_ep("Script.json")]),
+                        (4,  "Break script into shots",
+                             [_ep("Script.json")],
+                             [_ep("ShotList.json")]),
+                        (5,  "List required assets",
+                             [_ep("ShotList.json")],
+                             [_ep("AssetManifest_draft.shared.json")]),
+                        (6,  "Identify new story facts",
+                             [_ep("Script.json"), _ep("ShotList.json")],
+                             [_ep("canon_diff.json")]),
+                        (7,  "Update story memory",
+                             [_ep("canon_diff.json")],
+                             [_pr("canon.json")]),
+                        (8,  "Translate & adapt locales",
+                             [_ep("AssetManifest_draft.shared.json"), _pr("VoiceCast.json")],
+                             [_ep(f"AssetManifest_draft.{l}.json") for l in _locales]),
+                        (9,  "Finalize assets & render plan",
+                             [_ep("AssetManifest_draft.shared.json")]
+                             + [_ep(f"AssetManifest_draft.{l}.json") for l in _locales],
+                             [_ep("AssetManifest_final.json"), _ep("RenderPlan.json")]),
+                        (10, "Merge assets & render video",
+                             [_pr("VoiceCast.json"), _ep("RenderPlan.json")]
+                             + [_ep(f"RenderPlan.{l}.json") for l in _locales],
+                             [_ep(f"renders/{l}/output.mp4") for l in _locales]),
+                    ]
+
+                    _dep_lines = []
+                    for (sn, slabel, sins, souts) in _stage_deps:
+                        tag, desc = _dep_status(sins, souts)
+                        suffix = f"  — {desc}" if desc else ""
+                        _dep_lines.append(f"  Stage {sn:2d}  [{tag:7s}]  {slabel}{suffix}")
+                    _dep_summary = "\n".join(_dep_lines)
+
+                    # Status report tail
+                    _sr_path = os.path.join(ep_dir, "status_report.txt")
+                    _sr_tail = ""
+                    if os.path.exists(_sr_path):
+                        with open(_sr_path, encoding="utf-8") as _fh:
+                            _sr_tail = "".join(_fh.readlines()[-30:]).strip()
+
+                    _prompt = f"""You are a pipeline diagnostics tool for a 10-stage AI video pipeline.
+
+File dependency status for episode {slug}/{ep_id}
+(FRESH = outputs newer than inputs; STALE = an input was modified after the output was created; MISSING = output file does not exist):
+
+{_dep_summary}
+
+Locales: {', '.join(_locales) if _locales else 'en only'}
+
+Status report notes (last 30 lines):
+{_sr_tail if _sr_tail else '(empty)'}
+
+Rules:
+- A STALE or MISSING stage means it and all downstream stages must re-run.
+- Find the earliest such stage — that is from_stage; to_stage is always 10.
+- If all FRESH: from_stage = null, to_stage = null.
+- confidence: "high" if timestamps alone are conclusive; "medium" if notes affect the answer; "low" if ambiguous.
+
+Reply with JSON only — no text outside the object:
+{{"from_stage": <int or null>, "to_stage": <int or null>, "reason": "<one concise sentence>", "confidence": "high|medium|low"}}"""
+
+                    # Call claude haiku via CLI
+                    _result = {"error": "unknown"}
+                    try:
+                        with _tf.NamedTemporaryFile(
+                                mode="w", suffix=".txt", delete=False,
+                                encoding="utf-8") as _tmp:
+                            _tmp.write(_prompt)
+                            _tmp_path = _tmp.name
+                        _proc = subprocess.run(
+                            ["claude", "-p", _tmp_path,
+                             "--model", "haiku",
+                             "--dangerously-skip-permissions",
+                             "--no-session-persistence"],
+                            capture_output=True, timeout=45, cwd=PIPE_DIR,
+                        )
+                        os.unlink(_tmp_path)
+                        _raw = _proc.stdout.decode("utf-8", errors="replace").strip()
+                        _j0 = _raw.find("{"); _j1 = _raw.rfind("}") + 1
+                        if _j0 >= 0 and _j1 > _j0:
+                            _result = json.loads(_raw[_j0:_j1])
+                        else:
+                            _result = {"from_stage": None, "to_stage": None,
+                                       "reason": _raw[:300], "confidence": "low"}
+                    except subprocess.TimeoutExpired:
+                        _result = {"error": "claude timed out (>45s)"}
+                    except FileNotFoundError:
+                        _result = {"error": "claude CLI not found — check PATH"}
+                    except Exception as _exc:
+                        _result = {"error": str(_exc)}
+
+                    # Store in cache (cap at 100 entries)
+                    _diagnose_cache[_cache_key] = _result
+                    if len(_diagnose_cache) > 100:
+                        del _diagnose_cache[next(iter(_diagnose_cache))]
+
+                _body = json.dumps(_result).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(_body)))
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.end_headers()
+                self.wfile.write(_body)
+
         # SSE stream for a single post-processing step
         elif parsed.path == "/run_step":
             params   = parse_qs(parsed.query)
@@ -5003,12 +5577,17 @@ class Handler(BaseHTTPRequestHandler):
                 if not azure_voice or not text:
                     raise ValueError("azure_voice and text are required")
 
-                # Derive azure_locale server-side (MIN 1)
-                azure_locale = '-'.join(azure_voice.split('-')[:2])
+                # Use client-supplied azure_locale (needed for multilingual voices
+                # where the user picked the voice under a different locale group,
+                # e.g. en-GB-AdaMultilingualNeural selected under zh-HK).
+                # Fall back to deriving from voice name for old callers.
+                azure_locale = (req.get("azure_locale") or "").strip() \
+                               or '-'.join(azure_voice.split('-')[:2])
 
-                # Cache key (MIN 2 / BUG-B: pitch normalised to "" not "0%")
+                # Cache key — must include azure_locale so the same voice previewed
+                # under different locale groups (e.g. zh-HK vs en-GB) gets separate files.
                 key_dict = {
-                    "v": azure_voice, "s": style or "",
+                    "v": azure_voice, "l": azure_locale, "s": style or "",
                     "d": style_degree, "r": rate,
                     "p": pitch or "", "b": break_ms, "t": text,
                 }
@@ -5418,8 +5997,10 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/azure_voices", "/api/voice_presets", "/api/voice_index",
                   "/api/preview_voice", "/api/save_voice_cast",
                   "/api/status_report", "/api/append_status_report",
+                  "/api/vo_alignment",
                   "/api/check_slug", "/api/next_episode_id",
-                  "/api/create_episode", "/api/save_episode_meta"}
+                  "/api/create_episode", "/api/save_episode_meta",
+                  "/api/diagnose_pipeline"}
         if not any(path == s or path.startswith(s + "?") for s in silent):
             print(f"  {self.address_string()}  {fmt % args}")
 

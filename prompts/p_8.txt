@@ -50,6 +50,12 @@ Read these files before writing anything:
   7. projects/{{PROJECT_SLUG}}/VoiceCast.json
   8. contracts/schemas/AssetManifest.v1.json
 
+For each non-en locale, also try to read (if it exists):
+  • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/vo_hints.<locale>.json
+  (Character-count hints generated from measured EN WAV durations by
+  prep_locale_hints.py.  Available from the second episode run onward.
+  If the file is missing, fall back to the word-count estimation below.)
+
 ---
 
 ## Task
@@ -194,29 +200,47 @@ For each locale OTHER than "en":
     the SAME tts_prompt.pace — takes approximately the same time to speak as
     the English source line.
 
-    Step 1 — Estimate the English speaking duration from word count:
-        estimated_sec = word_count(english_text) / 2.5
-    (English narration at normal pace ≈ 2.5 words / second)
+    Step 1 — Determine the target character count for this item.
 
-    Step 2 — Write target-locale text that fills estimated_sec at natural pace.
+    **If vo_hints.<locale>.json was loaded successfully:**
+      Find the entry with matching item_id.  Use its `target_chars` value
+      directly as your target character count.  Also note `fragment_type`:
+        • fragment_type = "normal"  (en_duration_sec > 1.5 s)  — standard line
+        • fragment_type = "short"   (en_duration_sec ≤ 1.5 s)  — see short note below
+
+    **If vo_hints.<locale>.json is not available (first run):**
+      Estimate from word count:
+        estimated_sec  = word_count(english_text) / 2.5
+        (English narration at normal pace ≈ 2.5 words / second)
+        target_chars   = round(estimated_sec × 3.2)
+        (zh-Hans narration at normal pace ≈ 3.2 chars / second)
+
+    Step 2 — Write target-locale text that hits approximately target_chars.
     Adjust character / word count as needed:
 
-    If the literal translation would be TOO SHORT (locale speaks faster):
+    If the literal translation would be TOO SHORT (fewer chars than target):
       • Add contextual description of the scene or emotion already implied
       • Use the character's title or honorific in full rather than abbreviated
       • Elaborate on a sensory detail (sound, light, atmosphere) present in
         the English
       • Adopt a slightly more classical or formal narrative register
 
-    If the literal translation would be TOO LONG (locale speaks slower):
+    If the literal translation would be TOO LONG (more chars than target):
       • Use concise idioms or set phrases that compress meaning
       • Drop connective filler ("and then", "at that moment") where the
         meaning is clear without it
       • Prefer a direct subject-verb-object structure
 
+    Short-fragment note (fragment_type = "short" or estimated_sec ≤ 1.5 s):
+      These are exclamations, reactions, or single-phrase beats (e.g. "Stop!",
+      "Yes, my lord.").  For short fragments:
+      • Keep the translation punchy — do NOT pad to fill silence
+      • A short line speaking quickly is correct; the renderer handles the gap
+      • Use target_chars as a ceiling, not a floor
+
     Rules:
       • NEVER change tts_prompt.pace — voice quality is critical
-      • Tolerance: ±20 % of estimated_sec is acceptable
+      • Tolerance: ±10 % of target_chars is acceptable
       • Natural, high-quality target-locale prose takes priority over
         exact timing; do NOT pad with meaningless syllables or filler
 

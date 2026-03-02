@@ -164,6 +164,7 @@ def build_shot(
     music_map:    dict[str, dict],
     override_map: dict[str, float],
     story_format: str = "episodic",
+    ref_dur_map:  dict | None = None,
 ) -> dict:
     """
     Build one RenderedShot entry for RenderPlan.shots[].
@@ -320,6 +321,24 @@ def build_shot(
                 di[0] = min(di[0], duration_sec)   # cap start_sec (in case of edge)
     # ── end ceiling logic ─────────────────────────────────────────────────────
 
+    # ── EN reference floor (Phase 2 — Timeline Lock) ──────────────────────────
+    #
+    # When a reference plan (RenderPlan.en.json) is provided, floor the locale
+    # shot duration to the EN shot duration.  This prevents ZH shots from being
+    # shorter than their EN counterparts even after the convergence loop succeeds:
+    # the video was edited to EN timing and cutting it short creates sync
+    # problems with background / SFX / music tracks.
+    #
+    # Applied AFTER the narrative ceiling so that even pinned-short narration
+    # shots are extended to match EN if the EN shot ran longer.
+    if ref_dur_map:
+        en_dur_ms = ref_dur_map.get(shot_id, 0)
+        if en_dur_ms and duration_ms < en_dur_ms:
+            print(f"  [EN-FLOOR] {shot_id}: {duration_ms} ms → {en_dur_ms} ms "
+                  f"(floored to EN reference)")
+            duration_ms = en_dur_ms
+    # ── end EN reference floor ────────────────────────────────────────────────
+
     rendered: dict = {
         "shot_id":              shot_id,
         "scene_id":             scene_id,
@@ -343,6 +362,7 @@ def build_plan(
     shotlist:     dict,
     profile:      str,
     story_format: str = "episodic",
+    ref_dur_map:  dict | None = None,
 ) -> dict:
     """Build the full RenderPlan document."""
     project_id = merged.get("project_id", "")
@@ -392,7 +412,8 @@ def build_plan(
 
     # shots: one RenderedShot per ShotList shot
     shots = [
-        build_shot(shot, media_map, vo_map, music_map, override_map, story_format)
+        build_shot(shot, media_map, vo_map, music_map, override_map,
+                   story_format, ref_dur_map or {})
         for shot in shotlist.get("shots", [])
     ]
 
@@ -471,6 +492,11 @@ def parse_args() -> argparse.Namespace:
                    help="Story format from pipeline_vars.sh (default: episodic). "
                         "Narrative formats apply a shot duration ceiling = "
                         "last_vo_out_ms + 2000 ms to prevent silence gaps.")
+    p.add_argument("--reference-plan", default=None, metavar="PATH",
+                   help="RenderPlan.en.json from the EN locale pass. "
+                        "When supplied, each shot's duration_ms is floored to "
+                        "the EN shot duration so locale VO never under-runs its "
+                        "EN counterpart (Phase 2 — Timeline Lock).")
     return p.parse_args()
 
 
@@ -531,6 +557,18 @@ def main() -> None:
     out_plan  = Path(args.out_plan).resolve()  if args.out_plan \
                 else derive_plan_path(episode_dir, locale)
 
+    # Load optional EN reference plan for Timeline Lock (Phase 2)
+    ref_dur_map: dict[str, int] = {}
+    if args.reference_plan:
+        ref_plan_path = Path(args.reference_plan).resolve()
+        if ref_plan_path.exists():
+            ref_plan = load_json(ref_plan_path)
+            ref_dur_map = {s["shot_id"]: s["duration_ms"]
+                           for s in ref_plan.get("shots", [])
+                           if "shot_id" in s and "duration_ms" in s}
+        else:
+            print(f"  [WARN] --reference-plan not found: {ref_plan_path}", file=sys.stderr)
+
     print("=" * 60)
     print("  gen_render_plan")
     print(f"  Manifest    : {manifest_path.name}")
@@ -540,6 +578,8 @@ def main() -> None:
     print(f"  Locale      : {locale}")
     print(f"  Profile     : {args.profile}")
     print(f"  Format      : {args.story_format}")
+    if ref_dur_map:
+        print(f"  Ref-plan    : {Path(args.reference_plan).name}  ({len(ref_dur_map)} EN shots)")
     print(f"  Out-final   : {out_final.name}")
     print(f"  Out-plan    : {out_plan.name}")
     print("=" * 60)
@@ -552,7 +592,8 @@ def main() -> None:
     print(f"  AssetManifest_final  : {n_final} items  ({n_placeholder_final} placeholders)")
 
     # Build RenderPlan
-    plan = build_plan(merged, media, final, shotlist, args.profile, args.story_format)
+    plan = build_plan(merged, media, final, shotlist, args.profile, args.story_format,
+                      ref_dur_map or None)
     save_json(plan, out_plan)
 
     n_shots   = len(plan["shots"])
@@ -570,12 +611,20 @@ def main() -> None:
         1 for s in plan["shots"]
         if s["duration_ms"] < shotlist_dur_map.get(s["shot_id"], s["duration_ms"])
     )
+    n_en_floor = sum(
+        1 for s in plan["shots"]
+        if ref_dur_map.get(s["shot_id"], 0) and
+           s["duration_ms"] == ref_dur_map.get(s["shot_id"], 0) and
+           s["duration_ms"] > shotlist_dur_map.get(s["shot_id"], 0)
+    ) if ref_dur_map else 0
 
     print(f"  RenderPlan shots     : {n_shots}")
     print(f"  VO lines             : {n_vo_lines}")
     print(f"  Overflow shots       : {n_overflow}")
     print(f"  Ceiling applied      : {n_ceiling} shots  "
           f"({'narrative ceiling active' if args.story_format in NARRATIVE_FORMATS else 'n/a — episodic/monologue'})")
+    if ref_dur_map:
+        print(f"  EN-floor applied     : {n_en_floor} shots  (timeline lock active)")
     print(f"  Shots with music     : {n_with_music}")
     print(f"  Shots with ducking   : {n_with_duck}")
     print(f"  Timing lock hash     : {plan['timing_lock_hash'][:16]}…")

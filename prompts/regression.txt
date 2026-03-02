@@ -6,7 +6,7 @@
 # lists the exact files involved, the invariants that must hold, and the
 # specific things most likely to break when that area is touched.
 #
-# CODEBASE ROOT: /home/tnnd/data/code/pipe
+# CODEBASE ROOT: (repo root — directory containing run.sh)
 # ══════════════════════════════════════════════════════════════════════════════
 
 ---
@@ -520,6 +520,26 @@ Output: assets/{locale}/audio/vo/{item_id}.wav
 - **Stale WAV cleanup:** before synthesis, `gen_tts_cloud.py` deletes any `.wav` in the locale vo dir whose stem is not in the current manifest's `item_id` set. This prevents re-runs from silently reusing audio from a previous run with different item IDs.
 - Requires: `pip install azure-cognitiveservices-speech>=1.38.0`
 
+**Sub-step [3b/8] — polish_locale_vo.py** (per non-en locale only)
+```
+Input:  AssetManifest_merged.{locale}.json
+        assets/{locale}/audio/vo/{item_id}.wav  (zh WAVs just synthesized)
+        assets/en/audio/vo/{item_id}.wav         (EN reference WAVs)
+Output: AssetManifest_merged.{locale}.json   (patched with rewritten text)
+        AssetManifest_draft.{locale}.json    (patched in sync)
+        vo_alignment.{locale}.json           (per-item before/after ratios)
+        prompts/tts_calibration.{locale}.json (chars/sec history, ≤20 entries)
+```
+- Measures zh_dur/en_dur ratio for every VO line; flags lines outside [THRESHOLD, THRESHOLD_HIGH]
+- THRESHOLD = 0.90, THRESHOLD_HIGH = 1.10 — **single source of truth: `polish_locale_vo.py`**
+- Lines below THRESHOLD get `direction="expand"`; lines above THRESHOLD_HIGH get `direction="shorten"`
+- Calls `claude -p --model sonnet` in batches of BATCH_SIZE (default 15) with 300 s timeout per batch
+- MUST unset `CLAUDECODE` env var before spawning the claude subprocess (nested sessions are blocked)
+- After Claude rewrites, patches both merged and draft manifests, then calls `gen_tts_cloud.py --asset-id` per patched item to re-synthesize; repeats up to MAX_ITERS (default 3)
+- **Stale WAV guard in gen_tts_cloud.py --asset-id mode:** uses `all_manifest_ids` (all vo_items in the full manifest) for stale cleanup — NOT the single-item filtered set. This prevents `--asset-id` calls from deleting every other item's WAV.
+- Skipped entirely if locale == "en" or if EN WAV directory doesn't exist
+- Requires: stdlib only (claude CLI must be on PATH; AZURE_SPEECH_KEY needed for re-synthesis)
+
 **Sub-step [4/8] — post_tts_analysis.py** (per locale)
 ```
 Input:  AssetManifest_draft.{locale}.json  (mutates IN PLACE)
@@ -598,14 +618,15 @@ Output: renders/{locale}/youtube_dubbed.aac
 ### CRITICAL ORDERING NOTE for Stage 10
 The sub-steps in run.sh run in this order within each locale:
 ```
-[1] gen_music_clip (shared, once)
-[2] manifest_merge  ← runs BEFORE TTS
-[3] gen_tts_cloud   ← generates WAVs
-[4] post_tts_analysis ← measures WAVs, writes start_sec/end_sec into locale manifest
-[5] resolve_assets
-[6] gen_render_plan
-[7] render_video
-[8] export_youtube_dubbed
+[1]  gen_music_clip    (shared, once)
+[2]  manifest_merge    ← runs BEFORE TTS
+[3]  gen_tts_cloud     ← generates WAVs
+[3b] polish_locale_vo  ← non-en only; rewrites short/long lines, re-synthesizes
+[4]  post_tts_analysis ← measures WAVs, writes start_sec/end_sec into locale manifest
+[5]  resolve_assets
+[6]  gen_render_plan
+[7]  render_video
+[8]  export_youtube_dubbed
 ```
 manifest_merge [2] runs BEFORE TTS [3] and post_tts_analysis [4], meaning on the first run,
 `start_sec`/`end_sec` don't exist yet and duck_intervals will be empty.
@@ -825,14 +846,15 @@ Any code that passes `story_file=` to `/stream`, or that builds a command like `
 ### 8. Stage 10 script execution order within a locale
 Must NOT be reordered:
 ```
-[1] gen_music_clip (shared)   → writes assets/music/*.wav
-[2] manifest_merge            → reads locale manifest (start_sec may be absent on first run)
-[3] gen_tts_cloud             → writes assets/{locale}/audio/vo/*.wav
-[4] post_tts_analysis         → mutates locale manifest: adds start_sec/end_sec; writes background_overrides
-[5] resolve_assets            → reads merged manifest, probes filesystem → AssetManifest.media.{locale}.json
-[6] gen_render_plan           → reads merged + media → AssetManifest_final + RenderPlan
-[7] render_video              → reads RenderPlan → output.mp4
-[8] export_youtube_dubbed     → reads output.mp4 → youtube_dubbed.aac (skipped for en)
+[1]  gen_music_clip    (shared) → writes assets/music/*.wav
+[2]  manifest_merge             → reads locale manifest (start_sec may be absent on first run)
+[3]  gen_tts_cloud              → writes assets/{locale}/audio/vo/*.wav
+[3b] polish_locale_vo (non-en) → rewrites zh lines outside [0.90,1.10]; re-synthesizes; updates manifests
+[4]  post_tts_analysis          → mutates locale manifest: adds start_sec/end_sec; writes background_overrides
+[5]  resolve_assets             → reads merged manifest, probes filesystem → AssetManifest.media.{locale}.json
+[6]  gen_render_plan            → reads merged + media → AssetManifest_final + RenderPlan
+[7]  render_video               → reads RenderPlan → output.mp4
+[8]  export_youtube_dubbed      → reads output.mp4 → youtube_dubbed.aac (skipped for en)
 ```
 
 ---
@@ -906,6 +928,7 @@ Run through the relevant items after any modification:
 - [ ] `stopRun()` calls **both** `hideStageProgress()` AND `pipeRunning = null` in addition to `setStatus('idle')`. There are two separate spinner elements: `spinnerEl` (run-tab status bar, hidden by `setStatus('idle')`) and `stage-progress-spinner` (stage progress bar, hidden only by `hideStageProgress()`). Calling only `setStatus('idle')` leaves the stage progress bar spinning after the user clicks Stop.
 - [ ] `log_message(fmt, *args)` converts `args[0]` with `str()` before calling `.split()`. `send_error()` passes an `HTTPStatus` enum as the `code` argument — enums have no `.split()` method and crash without the explicit `str()` conversion.
 - [ ] **Purge Cache flow**: JS global `purgeAssets` defaults to `true`; `chk-purge-assets` checkbox defaults to `checked` (with `accent-color:#e06c75` red accent); both `/run_locale` and `/run_stage10` URL builders append `&purge=1` or `&purge=0`; server-side handlers parse `purge` and call `_purge_episode_assets()` before the step loop when `purge=1`, then set `force_run = True`.
+- [ ] **[R-001] Stages uncheck instantly on re-run**: When user clicks Run N→10 (e.g. Run 8→10), stages N–10 must uncheck INSTANTLY in the Pipeline tab — must NOT wait for the next server poll and must NOT leave stale ✓ from the previous run. Implemented via `_stagesDoneInCurrentRun` Set that is cleared at run-start and gates the checkmark rendering. Applies to all entry points: Run button, Pipeline tab re-run, alignment-warning re-run link. **Test**: click Run 8→10 on a fully-completed episode → stages 8, 9, 10 uncheck before the first output line appears.
 
 ### After modifying any Stage 10 Python script
 - [ ] CLI arg names unchanged (`--manifest`, `--shared`, `--locale`, `--media`, `--plan`, `--out`, etc.)
@@ -914,7 +937,7 @@ Run through the relevant items after any modification:
 - [ ] `run_stage_10()` in `run.sh` still calls script with correct args
 - [ ] `gen_tts_cloud.py` SSML: `<bookmark>` is inside `<voice>` block — do NOT move it outside
 - [ ] `gen_tts_cloud.py` EventSignal: uses `.disconnect_all()` not `.disconnect(cb)` in finally block
-- [ ] `gen_tts_cloud.py` stale WAV cleanup: loop over `out_dir.glob("*.wav")` still present before `run()`
+- [ ] `gen_tts_cloud.py` stale WAV cleanup: uses `all_manifest_ids` (built from **full** `manifest.get("vo_items", [])`, NOT from the `--asset-id`-filtered `items` list) so that single-item re-synthesis calls do not delete WAVs belonging to other items
 - [ ] `gen_render_plan.py` VO completeness guard: loop over `merged.get("vo_items")` injecting missing IDs still present before `build_shot()` calls
 - [ ] `gen_render_plan.py` VO_TAIL_MS = 2000 still applied as floor: `duration_ms = max(duration_ms, vo_end_ms + VO_TAIL_MS)`
 - [ ] `resolve_assets.py` backgrounds use `bg.get("asset_id") or bg["item_id"]` — backgrounds use `item_id` key, not `asset_id`

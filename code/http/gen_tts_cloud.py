@@ -1068,9 +1068,13 @@ def main() -> None:
     # slugs, different numbering).  WAVs from previous runs are never deleted
     # automatically, so the folder accumulates orphaned files.  Delete any
     # .wav in out_dir that is NOT referenced by the current manifest items.
-    current_ids: set[str] = {it["item_id"] for it in items} if items else set()
+    # NOTE: always use ALL vo_items from the manifest (not the asset_id-filtered
+    # subset) so that single-item re-synthesis calls don't delete WAVs for
+    # other items that are not being re-synthesized right now.
+    all_manifest_ids: set[str] = {
+        it["item_id"] for it in manifest.get("vo_items", [])}
     for wav in out_dir.glob("*.wav"):
-        if wav.stem not in current_ids:
+        if wav.stem not in all_manifest_ids:
             wav.unlink()
             print(f"  [STALE] Deleted orphaned WAV: {wav.name}")
     # ── end stale cleanup ─────────────────────────────────────────────────

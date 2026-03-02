@@ -148,6 +148,22 @@ run_stage_10() {
     python3 "${code_dir}/gen_tts_cloud.py" \
       --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
 
+    # ── [3b/8] Phase 1 — convergence loop (non-EN locales only) ─────────
+    # Read alignment thresholds from their single source of truth.
+    local vo_thresh vo_thresh_high
+    vo_thresh=$(python3 -c "import sys; sys.path.insert(0,'${code_dir}'); from polish_locale_vo import THRESHOLD; print(f'{THRESHOLD:.2f}')" 2>/dev/null || echo "0.90")
+    vo_thresh_high=$(python3 -c "import sys; sys.path.insert(0,'${code_dir}'); from polish_locale_vo import THRESHOLD_HIGH; print(f'{THRESHOLD_HIGH:.2f}')" 2>/dev/null || echo "1.10")
+    # Measures ZH/EN WAV duration ratios; rewrites lines outside [${vo_thresh}, ${vo_thresh_high}]
+    # via Claude sonnet; re-synthesizes; repeats up to 3 times.
+    # Writes calibration data to prompts/tts_calibration.{locale}.json.
+    if [[ "$locale" != "en" ]]; then
+      echo "  [3b/8] Polishing locale VO duration alignment…"
+      python3 "${code_dir}/polish_locale_vo.py" \
+        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+        --locale   "${locale}" \
+        --ep-dir   "${EP_DIR}" || true
+    fi
+
     echo "  [4/8] Analysing voice timing…"
     python3 "${code_dir}/post_tts_analysis.py" \
       --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
@@ -158,10 +174,20 @@ run_stage_10() {
       --out      "${EP_DIR}/AssetManifest.media.${locale}.json"
 
     echo "  [6/8] Building per-shot render plan…"
-    python3 "${code_dir}/gen_render_plan.py" \
-      --manifest      "${EP_DIR}/AssetManifest_merged.${locale}.json" \
-      --media         "${EP_DIR}/AssetManifest.media.${locale}.json" \
-      --story-format  "${STORY_FORMAT:-episodic}"
+    # Phase 2 — Timeline Lock: floor locale shot durations to EN reference
+    # when RenderPlan.en.json exists (i.e. after the EN locale pass).
+    if [[ "$locale" != "en" && -f "${EP_DIR}/RenderPlan.en.json" ]]; then
+      python3 "${code_dir}/gen_render_plan.py" \
+        --manifest       "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+        --media          "${EP_DIR}/AssetManifest.media.${locale}.json" \
+        --story-format   "${STORY_FORMAT:-episodic}" \
+        --reference-plan "${EP_DIR}/RenderPlan.en.json"
+    else
+      python3 "${code_dir}/gen_render_plan.py" \
+        --manifest      "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+        --media         "${EP_DIR}/AssetManifest.media.${locale}.json" \
+        --story-format  "${STORY_FORMAT:-episodic}"
+    fi
 
     echo "  [7/8] Rendering video…"
     python3 "${code_dir}/render_video.py" \
@@ -348,6 +374,24 @@ fi
 # ── Stages 1–9 (LLM) ─────────────────────────────────────────────────
 for N in 1 2 3 4 5 6 7 8 9; do
   if [[ "$N" -ge "$FROM_STAGE" && "$N" -le "$TO_STAGE" ]]; then
+
+    # ── Pre-Stage 8 hook: compute locale character-count hints ──────────
+    # Uses EN WAV durations from the previous Stage 10 run to give Stage 8
+    # (the translation LLM) calibrated target_chars per VO line.
+    # Skips gracefully on the first run when no EN WAVs exist yet.
+    if [[ "$N" -eq 8 ]]; then
+      _hint_code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
+      IFS=',' read -ra _hint_locales <<< "${LOCALES:-en}"
+      for _raw in "${_hint_locales[@]}"; do
+        _loc="$(echo "$_raw" | tr -d ' ')"
+        [[ -z "$_loc" || "$_loc" == "en" ]] && continue
+        echo "  [pre-8] Computing locale hints for ${_loc}…"
+        python3 "${_hint_code_dir}/prep_locale_hints.py" \
+          --manifest "${EP_DIR}/AssetManifest_draft.en.json" \
+          --locale   "${_loc}" || true
+      done
+    fi
+
     fill_and_run "$N"
   fi
 done
