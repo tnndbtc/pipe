@@ -836,6 +836,143 @@ def score_images(
     return results
 
 
+def score_single_video(
+    clip_model: ClipModel,
+    video_path: Path,
+    frames_dir: Path,
+    item:       dict,
+    config:     dict | None = None,
+) -> dict:
+    """
+    Score one video: extract frames → CLIP score (multi-dim or fallback) +
+    calmness → weighted final score.  Write .meta.json sidecar.
+
+    Used by both remote workers and the local fallback path in score_videos().
+
+    Returns a result dict:
+        {"path": str, "score": float, "clip_score": float,
+         "calmness": float, "score_detail": {...}}
+    or on error:
+        {"path": str, "score": 0.0, "clip_score": 0.0, "calmness": 0.0, "error": str}
+    """
+    cfg         = config or {}
+    ai_prompt   = item.get("ai_prompt") or item.get("search_prompt", "")
+    hints       = _resolve_hints(item)
+    dim_weights = _resolve_weights(item, cfg)
+    calm_thresh = _motion_level_threshold(item)
+
+    # Legacy weight fallback
+    w       = cfg.get("score_weights") or {"clip": 0.75, "calmness": 0.25}
+    clip_w  = float(w.get("clip",     0.75))
+    calm_w  = float(w.get("calmness", 0.25))
+
+    vp = video_path
+
+    try:
+        frames = _extract_frames(vp, frames_dir)
+        if not frames:
+            return {
+                "path": str(vp), "score": 0.0,
+                "clip_score": 0.0, "calmness": 0.0,
+                "error": "no_frames",
+            }
+
+        calm = _calmness(frames)
+
+        # Optional: skip video if motion_level demands a calmness floor
+        if calm_thresh is not None and calm < calm_thresh:
+            log.debug(
+                "Calmness pre-filter rejected video %s (calm=%.3f < %.3f)",
+                vp.name, calm, calm_thresh,
+            )
+            return {
+                "path": str(vp), "score": 0.0,
+                "clip_score": 0.0, "calmness": float(calm),
+                "error": "calmness_rejected",
+            }
+
+        # Score the best frame
+        if hints:
+            # Multi-dim: pick frame with highest total clip score
+            best_total = -1.0
+            best_dims:  dict[str, float] = {}
+            best_emb:   list[float] = []
+            best_frame: Path | None = None
+            for fp in frames:
+                try:
+                    img_f = _clip_encode_image(clip_model, fp)
+                    total, dims = _clip_score_multidim(
+                        clip_model, img_f, hints, dim_weights
+                    )
+                    if total > best_total:
+                        best_total = total
+                        best_dims  = dims
+                        best_frame = fp
+                        try:
+                            import numpy as np  # noqa: PLC0415
+                            best_emb = img_f.squeeze(0).cpu().numpy().tolist()
+                        except Exception:  # noqa: BLE001
+                            best_emb = []
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("Frame score error %s: %s", fp.name, exc)
+
+            clip_best = max(0.0, best_total)
+            score     = clip_best  # in multi-dim mode the score is the combined dim score
+            mode      = "multi_dim"
+        else:
+            # Fallback: single-prompt across all frames
+            frame_scores = _clip_scores(clip_model, ai_prompt, frames)
+            clip_best    = max(frame_scores.values()) if frame_scores else 0.0
+            best_dims    = {}
+            score        = clip_w * clip_best + calm_w * calm
+            mode         = "fallback"
+            best_frame   = None
+            best_emb     = []
+
+        # Meta sidecar for best frame (if known)
+        if best_frame is not None and _CV2_AVAILABLE:
+            try:
+                img_bgr  = cv2.imread(str(best_frame))
+                gray_np  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr is not None else None
+                luma     = float(gray_np.mean() / 255.0) if gray_np is not None else 0.0
+                hue_hist = _hue_hist_16(img_bgr) if img_bgr is not None else [0.0] * 16
+                _write_meta_sidecar(vp, best_emb, luma, hue_hist)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Meta sidecar write skipped for %s: %s", vp.name, exc)
+
+        return {
+            "path":       str(vp),
+            "score":      float(score),
+            "clip_score": float(clip_best),
+            "calmness":   float(calm),
+            "score_detail": {
+                "clip_total":   float(clip_best),
+                "clip_dims":    {d: best_dims.get(d, 0.0) for d in DIMS},
+                "calmness":     float(calm),
+                "mode":         mode,
+                "mean_luma":    0.0,
+                "rms_contrast": 0.0,
+                "person_score": None,
+                "phash_flagged": False,
+            },
+        }
+
+    except subprocess.CalledProcessError:
+        log.warning("ffmpeg failed for %s", vp.name)
+        return {
+            "path": str(vp), "score": 0.0,
+            "clip_score": 0.0, "calmness": 0.0,
+            "error": "ffmpeg_failed",
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Score error for %s: %s", vp.name, exc)
+        return {
+            "path": str(vp), "score": 0.0,
+            "clip_score": 0.0, "calmness": 0.0,
+            "error": str(exc),
+        }
+
+
 def score_videos(
     clip_model: ClipModel,
     item:       dict | str,
@@ -876,23 +1013,13 @@ def score_videos(
     if not vid_paths:
         return []
 
-    cfg         = config or {}
-    ai_prompt   = item.get("ai_prompt") or item.get("search_prompt", "")
-    hints       = _resolve_hints(item)
-    dim_weights = _resolve_weights(item, cfg)
-    calm_thresh = _motion_level_threshold(item)
+    cfg          = config or {}
     phash_thresh = cfg.get("phash_dedup_threshold",    8)
     div_thresh   = cfg.get("diversity_phash_threshold", 12)
 
-    # Legacy weight fallback
-    w       = weights or cfg.get("score_weights") or {"clip": 0.75, "calmness": 0.25}
-    clip_w  = float(w.get("clip",     0.75))
-    calm_w  = float(w.get("calmness", 0.25))
-
     log.debug(
-        "Scoring %d videos | mode=%s | cinematic_role=%s",
+        "Scoring %d videos | cinematic_role=%s",
         len(vid_paths),
-        "multi_dim" if hints else "fallback",
         item.get("cinematic_role", "—"),
     )
 
@@ -900,111 +1027,10 @@ def score_videos(
 
     for vp in vid_paths:
         frames_dir = batch_dir / "_frames" / vp.stem
-        try:
-            frames = _extract_frames(vp, frames_dir)
-            if not frames:
-                results.append({
-                    "path": str(vp), "score": 0.0,
-                    "clip_score": 0.0, "calmness": 0.0,
-                    "error": "no_frames",
-                })
-                continue
-
-            calm = _calmness(frames)
-
-            # Optional: skip video if motion_level demands a calmness floor
-            if calm_thresh is not None and calm < calm_thresh:
-                log.debug(
-                    "Calmness pre-filter rejected video %s (calm=%.3f < %.3f)",
-                    vp.name, calm, calm_thresh,
-                )
-                results.append({
-                    "path": str(vp), "score": 0.0,
-                    "clip_score": 0.0, "calmness": float(calm),
-                    "error": "calmness_rejected",
-                })
-                continue
-
-            # Score the best frame
-            if hints:
-                # Multi-dim: pick frame with highest total clip score
-                best_total = -1.0
-                best_dims:  dict[str, float] = {}
-                best_emb:   list[float] = []
-                best_frame: Path | None = None
-                for fp in frames:
-                    try:
-                        img_f = _clip_encode_image(clip_model, fp)
-                        total, dims = _clip_score_multidim(
-                            clip_model, img_f, hints, dim_weights
-                        )
-                        if total > best_total:
-                            best_total = total
-                            best_dims  = dims
-                            best_frame = fp
-                            try:
-                                import numpy as np  # noqa: PLC0415
-                                best_emb = img_f.squeeze(0).cpu().numpy().tolist()
-                            except Exception:  # noqa: BLE001
-                                best_emb = []
-                    except Exception as exc:  # noqa: BLE001
-                        log.debug("Frame score error %s: %s", fp.name, exc)
-
-                clip_best = max(0.0, best_total)
-                score     = clip_best  # in multi-dim mode the score is the combined dim score
-                mode      = "multi_dim"
-            else:
-                # Fallback: single-prompt across all frames
-                frame_scores = _clip_scores(clip_model, ai_prompt, frames)
-                clip_best    = max(frame_scores.values()) if frame_scores else 0.0
-                best_dims    = {}
-                score        = clip_w * clip_best + calm_w * calm
-                mode         = "fallback"
-                best_frame   = None
-                best_emb     = []
-
-            # Meta sidecar for best frame (if known)
-            if best_frame is not None and _CV2_AVAILABLE:
-                try:
-                    img_bgr  = cv2.imread(str(best_frame))
-                    gray_np  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr is not None else None
-                    luma     = float(gray_np.mean() / 255.0) if gray_np is not None else 0.0
-                    hue_hist = _hue_hist_16(img_bgr) if img_bgr is not None else [0.0] * 16
-                    _write_meta_sidecar(vp, best_emb, luma, hue_hist)
-                except Exception as exc:  # noqa: BLE001
-                    log.debug("Meta sidecar write skipped for %s: %s", vp.name, exc)
-
-            results.append({
-                "path":       str(vp),
-                "score":      float(score),
-                "clip_score": float(clip_best),
-                "calmness":   float(calm),
-                "score_detail": {
-                    "clip_total":   float(clip_best),
-                    "clip_dims":    {d: best_dims.get(d, 0.0) for d in DIMS},
-                    "calmness":     float(calm),
-                    "mode":         mode,
-                    "mean_luma":    0.0,
-                    "rms_contrast": 0.0,
-                    "person_score": None,
-                    "phash_flagged": False,
-                },
-            })
-
-        except subprocess.CalledProcessError:
-            log.warning("ffmpeg failed for %s", vp.name)
-            results.append({
-                "path": str(vp), "score": 0.0,
-                "clip_score": 0.0, "calmness": 0.0,
-                "error": "ffmpeg_failed",
-            })
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Score error for %s: %s", vp.name, exc)
-            results.append({
-                "path": str(vp), "score": 0.0,
-                "clip_score": 0.0, "calmness": 0.0,
-                "error": str(exc),
-            })
+        result = score_single_video(
+            clip_model, vp, frames_dir, item, config,
+        )
+        results.append(result)
 
     results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
 

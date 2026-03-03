@@ -46,9 +46,9 @@
   "projects_root": "/data/shared",
   "cache_ttl_days": 7,
 
-  "candidates_per_source_image": 15,
-  "candidates_per_source_video": 5,
-  "max_candidates_per_item":     40,
+  "candidates_per_source_image": 30,
+  "candidates_per_source_video": 15,
+  "max_candidates_per_item":     60,
 
   "sources":          ["pexels", "pixabay"],
 
@@ -89,5 +89,12 @@
   },
 
   "phash_dedup_threshold":     8,
-  "diversity_phash_threshold": 12
+  "diversity_phash_threshold": 12,
+
+  "workers": {
+    "enabled": true,
+    "timeout_seconds": 120,
+    "fallback_grace_seconds": 10,
+    "server_nfs_root": "/data/shared"
+  }
 }

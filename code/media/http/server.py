@@ -33,6 +33,12 @@ Endpoints
     GET  /files/{path:path}              serve cached media files (no auth)
     GET  /health                         server status (no auth)
 
+    Worker endpoints (distributed scoring — no auth):
+    POST /register                       worker self-registration
+    GET  /next_job?worker={name}         poll for next scoring task
+    POST /result                         submit scoring result
+    GET  /workers                        list registered workers + queue status
+
 Authentication
 --------------
     All endpoints except GET /files/ and GET /health require:
@@ -52,13 +58,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import batch_store as bs
 import cleanup
 import downloader
+import job_queue as jq
 import scorer
 import sequence_ranker
 
@@ -137,6 +144,7 @@ SERVER_API_KEY, API_KEYS = _load_api_keys()
 clip_model:   scorer.ClipModel | None = None
 store:        bs.BatchStore | None    = None
 batch_queue:  asyncio.Queue           = asyncio.Queue()
+job_queue:    jq.JobQueue | None      = None
 
 # Per-item download semaphore — sum of max_concurrent across all configured sources
 _sem: asyncio.Semaphore | None = None
@@ -154,7 +162,7 @@ def _make_semaphore() -> asyncio.Semaphore:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global clip_model, store, _sem
+    global clip_model, store, _sem, job_queue
 
     log.info("=== Media Server startup ===")
 
@@ -171,6 +179,15 @@ async def lifespan(app: FastAPI):
 
     # Per-item semaphore
     _sem = _make_semaphore()
+
+    # Job queue for distributed workers
+    workers_cfg = config.get("workers", {})
+    if workers_cfg.get("enabled", False):
+        server_nfs_root = workers_cfg.get("server_nfs_root", config.get("projects_root", "/data/shared"))
+        job_queue = jq.JobQueue(server_nfs_root=server_nfs_root)
+        log.info("Distributed workers ENABLED (server_nfs_root=%s)", server_nfs_root)
+    else:
+        log.info("Distributed workers disabled — using local scoring only")
 
     # Queue worker (single coroutine; batches are processed sequentially)
     worker_task = asyncio.create_task(_queue_worker())
@@ -373,6 +390,78 @@ async def health():
 
 
 # ---------------------------------------------------------------------------
+# Worker endpoints (distributed scoring)
+# ---------------------------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    name:     str
+    hostname: str
+    nfs_root: str = "/mnt/shared"
+
+
+class ResultRequest(BaseModel):
+    job_id: str
+    worker: str
+    result: dict
+
+
+@app.post("/register")
+async def register_worker(body: RegisterRequest):
+    if job_queue is None:
+        raise HTTPException(status_code=503, detail="Distributed workers not enabled")
+    job_queue.register_worker(body.name, body.hostname, body.nfs_root)
+    return {"status": "registered", "name": body.name}
+
+
+@app.get("/next_job")
+async def next_job(worker: str = Query(...)):
+    if job_queue is None:
+        return Response(status_code=204)  # workers not enabled — no work
+
+    # Update last-seen even if no job available
+    if worker in job_queue._workers:
+        import time
+        job_queue._workers[worker].last_seen = time.monotonic()
+
+    task = job_queue.next_job(worker)
+    if task is not None:
+        return task  # 200 OK with job payload
+
+    # Queue empty — is a batch active?
+    if job_queue.batch_id is not None and not job_queue.all_done():
+        # Batch is active but queue temporarily empty (in-flight or requeue pending)
+        return Response(status_code=202)
+
+    # No active batch
+    return Response(status_code=204)
+
+
+@app.post("/result")
+async def submit_result(body: ResultRequest):
+    if job_queue is None:
+        raise HTTPException(status_code=503, detail="Distributed workers not enabled")
+    accepted = job_queue.submit_result(body.job_id, body.result)
+    return {"accepted": accepted, "job_id": body.job_id}
+
+
+@app.get("/workers")
+async def list_workers():
+    if job_queue is None:
+        return {"workers": [], "enabled": False}
+    return {
+        "workers": job_queue.get_workers(),
+        "enabled": True,
+        "batch_id": job_queue.batch_id,
+        "queue": {
+            "pending":   job_queue.pending_count,
+            "in_flight": job_queue.in_flight_count,
+            "completed": job_queue.completed_count,
+            "total":     job_queue.total_count,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Queue worker — processes batches sequentially
 # ---------------------------------------------------------------------------
 
@@ -386,6 +475,63 @@ async def _queue_worker() -> None:
             store.update(batch_id, status="failed", error=str(exc))
         finally:
             batch_queue.task_done()
+
+
+# ---------------------------------------------------------------------------
+# Distributed video scoring via job queue
+# ---------------------------------------------------------------------------
+
+async def _score_videos_distributed(
+    batch_id:  str,
+    item:      dict,
+    vid_paths: list[Path],
+    batch_dir: Path,
+    cfg:       dict,
+) -> list[dict]:
+    """
+    Enqueue video scoring tasks into the job queue and wait for workers
+    to complete them.  Returns scored results list (same shape as
+    scorer.score_videos).
+    """
+    # Build tasks for the queue
+    tasks = []
+    for vp in vid_paths:
+        frames_dir = batch_dir / "_frames" / vp.stem
+        tasks.append({
+            "video_path": str(vp),
+            "frames_dir": str(frames_dir),
+            "item":       item,
+            "config":     {
+                k: cfg[k] for k in (
+                    "score_weights", "scoring_profiles", "content_profile",
+                    "phash_dedup_threshold", "diversity_phash_threshold",
+                ) if k in cfg
+            },
+        })
+
+    workers_cfg    = cfg.get("workers", {})
+    timeout_seconds = workers_cfg.get("timeout_seconds", 120)
+
+    # Enqueue and wait
+    job_queue.enqueue(batch_id, tasks)
+    job_queue.start_reaper(timeout_seconds=timeout_seconds)
+
+    try:
+        log.info("Waiting for %d video scoring jobs (batch %s)…",
+                 len(tasks), batch_id)
+        await job_queue.wait_until_done()
+    finally:
+        job_queue.stop_reaper()
+
+    # Collect results
+    raw_results = job_queue.get_results()
+
+    # Sort by score descending
+    raw_results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+
+    log.info("Distributed scoring complete: %d results for batch %s",
+             len(raw_results), batch_id)
+    return raw_results
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +551,30 @@ async def _run_batch(batch_id: str) -> None:
     log.info("Running batch %s  (%d items)", batch_id, item_count)
 
     batch_dir = store.batch_dir(project, episode_id, batch_id)
+
+    # Check if distributed workers are available
+    workers_cfg     = config.get("workers", {})
+    _use_distributed = False
+    if job_queue is not None and workers_cfg.get("enabled", False):
+        grace = workers_cfg.get("fallback_grace_seconds", 10)
+        if job_queue.worker_count > 0:
+            _use_distributed = True
+            log.info("Batch %s: using %d distributed workers",
+                     batch_id, job_queue.worker_count)
+        elif grace > 0:
+            log.info("Batch %s: waiting up to %ds for workers to register…",
+                     batch_id, grace)
+            deadline = asyncio.get_event_loop().time() + grace
+            while asyncio.get_event_loop().time() < deadline:
+                if job_queue.worker_count > 0:
+                    _use_distributed = True
+                    log.info("Batch %s: %d worker(s) registered — using distributed scoring",
+                             batch_id, job_queue.worker_count)
+                    break
+                await asyncio.sleep(1)
+            if not _use_distributed:
+                log.warning("Batch %s: no workers registered after %ds — falling back to local scoring",
+                            batch_id, grace)
 
     # Shared counter (mutated only from async gather callbacks — safe in asyncio)
     done: list[int] = [0]
@@ -442,9 +612,16 @@ async def _run_batch(batch_id: str) -> None:
             images_ranked  = await asyncio.to_thread(
                 scorer.score_images, clip_model, item, img_paths, weights, config,
             )
-            videos_ranked  = await asyncio.to_thread(
-                scorer.score_videos, clip_model, item, vid_paths, batch_dir, weights, config,
-            )
+
+            # Video scoring: distributed (job queue) or local fallback
+            if _use_distributed and vid_paths:
+                videos_ranked = await _score_videos_distributed(
+                    batch_id, item, vid_paths, batch_dir, config,
+                )
+            else:
+                videos_ranked = await asyncio.to_thread(
+                    scorer.score_videos, clip_model, item, vid_paths, batch_dir, weights, config,
+                )
 
             # Convert absolute paths → relative-to-batch_dir
             images_ranked = _relativise(images_ranked, batch_dir)
