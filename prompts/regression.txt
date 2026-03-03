@@ -617,6 +617,7 @@ Output: AssetManifest.media.{locale}.json
 ```
 - run.sh auto-detects `selections.json` and passes `--selections <path>` if it exists
 - When selections are present, maps stock media URLs/paths to background asset_ids
+- v3 selections (multi-segment): emits one item per segment with `segment_index`, `duration_sec`, `hold_sec` fields
 - Probes local filesystem for each asset — no network calls
 - Emits `file://` URIs for found files, `placeholder://` for missing
 - Asset path conventions:
@@ -656,6 +657,7 @@ Output: renders/{locale}/output.mp4
         renders/{locale}/render_output.json
 ```
 - Per-shot MKV intermediates in `.shots/`, then concat → output.mp4
+- Multi-segment backgrounds (v3): uses FFmpeg `concat` filter to stitch multiple clips/images per shot — no `-stream_loop` seam artifacts; falls back to single-bg loop for v1/v2
 - Character compositing: 1=center, 2=left/right thirds, 3=even thirds, 4+=quarters
 - Active speaker: scale×1.05 opacity 1.0; inactive: scale×0.95 opacity 0.80
 - Audio mixing: VO at 0 dB, music at -6 dB (ducked via volume=expr), SFX at -3 dB
@@ -887,7 +889,8 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/save_voice_cast` | `{slug, voice_cast_json}` | `{ok}` |
 | `/api/append_status_report` | `{slug, ep_id, text}` | `{ok}` — appends timestamped entry to `status_report.txt` |
 | `/api/media_batch` | `{slug, ep_id, server_url}` | `{batch_id, poll_url}` — reads AssetManifest_draft.shared.json, forwards to media server |
-| `/api/media_confirm` | `{slug, ep_id, batch_id, selections}` | `{ok, path, n}` — writes selections.json |
+| `/api/media_confirm` | `{slug, ep_id, batch_id, version, selections}` | `{ok, path, n}` — writes selections.json (version: 1=single, 2=per-shot, 3=multi-segment per shot) |
+| `/api/episode_file` | `?slug=X&ep_id=Y&file=ShotList.json` | raw JSON — whitelisted: ShotList.json, selections.json |
 
 ### Key invariants for API endpoints
 - `/api/next_episode_id` returns key `"next_ep_id"` — JS client reads `nd.next_ep_id`
@@ -1014,7 +1017,13 @@ Must NOT be reordered:
 - Canonical path: `{ep_dir}/assets/media/selections.json`
 - Written by: VC editor `POST /api/media_confirm`
 - Read by: run.sh (hard stop check), resolve_assets.py (`--selections` flag)
-- Format: `{batch_id, slug, episode_id, selections: {item_id: {media_type, url, path, score}}}`
+- Format v1 (single per bg): `{batch_id, slug, episode_id, version: 1, selections: {item_id: {media_type, url, path, score}}}`
+- Format v2 (per-shot): `{batch_id, slug, episode_id, version: 2, selections: {item_id: {per_shot: {shot_id: {media_type, url, path, score}}}}}`
+- Format v3 (multi-segment per shot): `{batch_id, slug, episode_id, version: 3, selections: {item_id: {per_shot: {shot_id: {segments: [{media_type, url, path, score, duration_sec, hold_sec}, ...]}}}}}`
+- `resolve_assets.py` detects `per_shot` key to differentiate v1 vs v2/v3, and `segments` key within per_shot entries for v3 — all three formats must work
+- Per-shot items emitted by `resolve_assets.py` include a `shot_id` field in the output item
+- v3 segment items emitted by `resolve_assets.py` additionally include `segment_index`, `duration_sec`, and `hold_sec` fields
+- `gen_render_plan.py` uses composite key `"bg_id:shot_id"` for per-shot media lookup, falls back to `"bg_id"` for background-level (v1); multi-segment items (with `segment_index`) are grouped in `_segments` dict keyed as `"bg_id:shot_id"` → sorted list
 
 ### 11. Media server backgrounds format compatibility
 - Media server `POST /batches` accepts `manifest.backgrounds` as both list (old) and dict (new)
@@ -1025,6 +1034,38 @@ Must NOT be reordered:
 - Media server writes images/videos to NFS-shared storage using `file://` URIs
 - Browsers block `file://` from `http://` pages — VC editor provides `/api/serve_media_file?url=<encoded>` proxy
 - JS `_mediaThumb()` rewrites `file://` URLs to proxy URLs before setting `img.src` / `vid.src`
+
+### 13. VC editor config file (`code/http/config.json`)
+- Priority chain: env var > config.json > hardcoded default
+- `MEDIA_TOP_N` env var → `config.media.top_n` → `5` (hardcoded)
+- `MEDIA_SERVER_URL` env var → `config.media.default_server_url` → `""` (hardcoded)
+- Config loaded once at module level into `_vc_config` dict
+- Sent to media server via `POST /batches` `top_n` field and to browser via `{{MEDIA_SERVER_URL}}` placeholder
+
+### 14. Per-shot media selection (multi-segment v3)
+- JS fetches `ShotList.json` via `GET /api/episode_file` to build `_mediaShotMap` (bg_id → [shot_id, ...]) and `_mediaShotDur` (shot_id → duration_sec)
+- If ShotList not available (404), `_mediaShotMap = null` → single-selection mode (backward compatible)
+- Per-shot mode (v3): clicking thumbnails appends a segment to the first shot with remaining gap; multiple clips/images stack until shot duration is filled
+- ⚡ Auto-assign stacks candidates per shot: videos use probed `duration_sec`, images auto-fill remaining gap with `hold_sec`
+- Duration badge: video thumbnails show `duration_sec` badge (top-left, e.g. "12.3s") when the media server provides it
+- Shot rows show: expected duration, fill progress bar, segment list with ✕ remove, gap indicator
+- `GET /api/episode_file` whitelisted to `ShotList.json` and `selections.json` only
+- `mediaConfirm()` sends `version: 3` when any selection has segments, `version: 2` when per-shot without segments, `version: 1` when single-selection
+- `POST /api/media_confirm` passes through `version` into `selections.json`
+
+### 15. Media server video duration (FFprobe)
+- `scorer.py` `score_videos()` calls `_probe_duration()` via FFprobe for each video before scoring
+- `duration_sec` field is always present on video results (float or null if probe failed)
+- `server.py` `_add_urls()` copies `duration_sec` through to the batch response automatically (via `dict(r)`)
+- Images do not have `duration_sec` (field is absent, not null)
+
+### 16. Multi-segment background rendering
+- `gen_render_plan.py` `build_shot()` populates `background_segments[]` in RenderPlan shots when v3 segment items are found in the media map
+- `background_segments` is a list of `{asset_id, uri, media_type, duration_sec, hold_sec}` or `null` (for v1/v2 single-background)
+- Primary `background_asset_id` and `background_media_type` are set from the first segment for backward compat
+- `render_video.py` uses FFmpeg `concat` filter for multi-segment backgrounds (NOT `-stream_loop`) — each video segment is trimmed to its `duration_sec`, each image segment is held for `hold_sec`
+- When `background_segments` is `null` or has only 1 entry, render_video.py falls through to existing single-background logic (loop/hold as before)
+- Backward compat: v1/v2 selections.json and old RenderPlans (no `background_segments`) work unchanged
 
 ---
 
@@ -1112,7 +1153,13 @@ Run through the relevant items after any modification:
 - [ ] `gen_tts_cloud.py` stale WAV cleanup: uses `all_manifest_ids` (built from **full** `manifest.get("vo_items", [])`, NOT from the `--asset-id`-filtered `items` list) so that single-item re-synthesis calls do not delete WAVs belonging to other items
 - [ ] `gen_render_plan.py` VO completeness guard: loop over `merged.get("vo_items")` injecting missing IDs still present before `build_shot()` calls
 - [ ] `gen_render_plan.py` VO_TAIL_MS = 2000 still applied as floor: `duration_ms = max(duration_ms, vo_end_ms + VO_TAIL_MS)`
+- [ ] `gen_render_plan.py` `build_media_map()` composite key: per-shot items keyed as `"bg_id:shot_id"`, background-level items keyed as `"bg_id"`, multi-segment items (with `segment_index`) grouped in `"_segments"` dict
+- [ ] `gen_render_plan.py` `build_shot()` bg lookup: tries `_segments["bg_id:shot_id"]` first (multi-segment), then `"bg_id:shot_id"` (per-shot v2), then `"bg_id"` (v1)
+- [ ] `gen_render_plan.py` `build_shot()` sets `background_segments` in rendered shot (list or None)
 - [ ] `resolve_assets.py` backgrounds use `bg.get("asset_id") or bg["item_id"]` — backgrounds use `item_id` key, not `asset_id`
+- [ ] `resolve_assets.py` `_load_selections()` detects `per_shot` key → resolves each shot entry independently via `_resolve_one_entry()`; detects `segments` key within per_shot entries for v3 multi-segment
+- [ ] `resolve_assets.py` per-shot items include `item["shot_id"] = shot_id` — this field enables composite key lookup in `gen_render_plan.py`
+- [ ] `resolve_assets.py` v3 segment items additionally include `segment_index`, `duration_sec`, and `hold_sec` fields
 
 ### After modifying prompts/azure_tts_styles.txt
 - [ ] `supports()` lines present on all en-capable and zh-capable entries
@@ -1127,6 +1174,7 @@ Run through the relevant items after any modification:
 - [ ] `server.py POST /batches` handles both list and dict format for `manifest.backgrounds`
 - [ ] `scorer.py` backward compat: bare string `item` → `{"ai_prompt": item}` (fallback mode)
 - [ ] `scorer.py` multi_dim mode: reads `scoring_hints` dict from item, scores 5 dimensions independently
+- [ ] `scorer.py` `score_videos()` adds `duration_sec` field to every video result via `_probe_duration()` (FFprobe) — float or None; field always present on video results (including error results)
 - [ ] `downloader.py` populates `item["_thumbnails"]` dict for scorer thumbnail pass-1.5
 - [ ] `sequence_ranker.py` reads `.meta.json` sidecars for pairwise discontinuity (hue_hist, mean_luma, clip_embedding)
 
@@ -1134,8 +1182,15 @@ Run through the relevant items after any modification:
 - [ ] JS regex in `_mediaServerUrl()` uses `/\/+$/` — NOT `/\\/+$/` (Python raw string escaping: `\\/` = two chars in HTML, breaks JS regex parsing)
 - [ ] All three media proxy routes (`/api/media_batch`, `/api/media_batches`, `/api/media_batch_status`) inject `MEDIA_API_KEY` from `os.environ`, NOT from request body/query
 - [ ] No `<input>`, JS variable, or query param exposes `MEDIA_API_KEY` to the browser
-- [ ] `{{MEDIA_SERVER_URL}}` placeholder replaced at HTML serve time in `do_GET`
-- [ ] `POST /api/media_confirm` writes to `{ep_dir}/assets/media/selections.json`
+- [ ] `{{MEDIA_SERVER_URL}}` placeholder replaced at HTML serve time in `do_GET` — fallback priority: env var > config.json > empty string
+- [ ] `POST /api/media_confirm` writes to `{ep_dir}/assets/media/selections.json` — includes `version` field (1, 2, or 3)
+- [ ] `GET /api/episode_file` whitelisted to `ShotList.json` and `selections.json` — returns raw JSON, 403 for non-whitelisted files
+- [ ] `_vc_config` loaded once at module level from `code/http/config.json` — server starts even if file missing (empty dict fallback)
+- [ ] `top_n` in `/api/media_batch` uses priority chain: `MEDIA_TOP_N` env var → `config.media.top_n` → `5`
+- [ ] Per-shot mode: `_mediaShotMap` is null when ShotList unavailable (404) → falls back to single-selection mode (old format)
+- [ ] Multi-segment stacking: `_mediaLoadShotMap()` also stores `_mediaShotDur` (shot_id → duration_sec) for fill progress calculation
+- [ ] `mediaConfirm()` detects segments format via `hasSegments` check → sends `version: 3` when any per_shot entry has `segments` array
+- [ ] `render_video.py` multi-segment: uses FFmpeg `concat` filter (NOT `-stream_loop`) for `background_segments[]` with >1 entry — falls back to single-bg when null/single
 
 ### After modifying contracts/schemas/*.v1.json
 - [ ] All LLM-written artifacts still validate against updated schema

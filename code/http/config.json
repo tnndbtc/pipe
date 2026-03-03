@@ -1,0 +1,7 @@
+{
+  "_comment": "VC editor configuration. Env vars override these values.",
+  "media": {
+    "top_n": 20,
+    "default_server_url": "http://192.168.86.33:8200"
+  }
+}

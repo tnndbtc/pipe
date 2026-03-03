@@ -71,10 +71,32 @@ def save_json(doc: dict, path: Path) -> None:
 
 def build_media_map(media: dict) -> dict[str, dict]:
     """
-    Build {asset_id → ResolvedAsset} from AssetManifest.media items.
+    Build media lookup from AssetManifest.media items.
+
+    Per-shot entries (with shot_id) → key = "bg_id:shot_id"
+    Background-level entries        → key = "bg_id"
+    Multi-segment entries (with segment_index) → grouped in "_segments" dict
+        keyed as "bg_id:shot_id" → [items sorted by segment_index]
+
     Used to check is_placeholder and fetch resolved URIs.
     """
-    return {item["asset_id"]: item for item in media.get("items", [])}
+    out: dict[str, dict] = {}
+    segments: dict[str, list] = {}  # "bg_id:shot_id" → [items sorted by segment_index]
+    for item in media.get("items", []):
+        aid = item["asset_id"]
+        if "segment_index" in item:
+            key = f"{aid}:{item['shot_id']}"
+            segments.setdefault(key, []).append(item)
+        elif "shot_id" in item:
+            out[f"{aid}:{item['shot_id']}"] = item
+        else:
+            out[aid] = item
+    # Sort segments by index and store under special key
+    for key, seg_list in segments.items():
+        seg_list.sort(key=lambda x: x.get("segment_index", 0))
+    if segments:
+        out["_segments"] = segments  # type: ignore[assignment]
+    return out
 
 
 def build_vo_map(merged: dict) -> dict[str, dict]:
@@ -182,11 +204,37 @@ def build_shot(
     dur_sec  = override_map.get(shot_id, base_dur)
     duration_ms = round(dur_sec * 1000)
 
-    # background_asset_id + background_media_type
+    # background_asset_id + background_media_type + background_segments
     # background_media_type tells the renderer whether to loop a still image
     # or play (and optionally loop) a video clip.
+    # background_segments (v3): ordered list of media segments that fill the shot
+    # duration via concat (no looping).
     bg_id = shot.get("background_id")
-    bg_media = media_map.get(bg_id) if bg_id else None
+    bg_media = None
+    bg_segments: list[dict] | None = None
+    if bg_id:
+        seg_key = f"{bg_id}:{shot_id}"
+        seg_list = media_map.get("_segments", {}).get(seg_key)
+        if seg_list:
+            # Multi-segment mode (v3)
+            bg_segments = []
+            for seg_item in seg_list:
+                uri = seg_item.get("uri", "")
+                path_part = uri.split("://", 1)[-1] if "://" in uri else uri
+                ext = Path(path_part).suffix.lower()
+                media_type = "video" if ext in {".mp4", ".mov", ".webm", ".mkv"} else "image"
+                bg_segments.append({
+                    "asset_id":     seg_item["asset_id"],
+                    "uri":          uri,
+                    "media_type":   media_type,
+                    "duration_sec": seg_item.get("duration_sec"),
+                    "hold_sec":     seg_item.get("hold_sec"),
+                })
+            # Set primary bg from first segment (for backward compat fields)
+            bg_media = seg_list[0]
+        else:
+            # Try shot-specific media first (per-shot selection), fall back to background-level
+            bg_media = media_map.get(f"{bg_id}:{shot_id}") or media_map.get(bg_id)
     background_asset_id = bg_media["asset_id"] if bg_media else None
 
     background_media_type: str | None = None
@@ -358,6 +406,7 @@ def build_shot(
         "duration_ms":            duration_ms,
         "background_asset_id":    background_asset_id,
         "background_media_type":  background_media_type,   # "image" | "video" | None
+        "background_segments":    bg_segments,              # list or None (v3 multi-segment)
         "character_asset_ids":    character_asset_ids,
         "vo_lines":               vo_lines,
         "sfx_asset_ids":          sfx_asset_ids,
@@ -634,9 +683,11 @@ def main() -> None:
 
     n_bg_video = sum(1 for s in plan["shots"] if s.get("background_media_type") == "video")
     n_bg_image = sum(1 for s in plan["shots"] if s.get("background_media_type") == "image")
+    n_bg_multi = sum(1 for s in plan["shots"]
+                     if s.get("background_segments") and len(s["background_segments"]) > 1)
 
     print(f"  RenderPlan shots     : {n_shots}")
-    print(f"  BG type — video      : {n_bg_video}  image: {n_bg_image}")
+    print(f"  BG type — video      : {n_bg_video}  image: {n_bg_image}  multi-segment: {n_bg_multi}")
     print(f"  VO lines             : {n_vo_lines}")
     print(f"  Overflow shots       : {n_overflow}")
     print(f"  Ceiling applied      : {n_ceiling} shots  "

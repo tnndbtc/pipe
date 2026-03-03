@@ -704,6 +704,16 @@ def _add_urls(ranked: list[dict], state: dict, item_id: str) -> list[dict]:
     for r in ranked:
         r2      = dict(r)
         rel     = r2.get("path", "")
+
+        # Guard: if _relativise() failed and path is still absolute,
+        # extract the portion after the batch_id directory to avoid
+        # building a doubled path like /mount/…/b_xxx//mount/…/b_xxx/…
+        if rel.startswith("/"):
+            marker = f"/assets/media/{batch_id}/"
+            idx    = rel.find(marker)
+            if idx != -1:
+                rel = rel[idx + len(marker):]
+
         ep_path = f"{project}/episodes/{episode_id}/assets/media/{batch_id}/{rel}"
 
         if transport == "file" and file_mount_root:

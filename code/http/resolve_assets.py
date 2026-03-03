@@ -216,12 +216,40 @@ def _placeholder(asset_id: str, asset_type: str) -> dict:
 
 # ── Selections loader ─────────────────────────────────────────────────────────
 
+def _resolve_one_entry(entry: dict, batch_dir: Path | None) -> dict | None:
+    """
+    Resolve a single selection entry to { media_type, abs_path, url, score }.
+
+    Returns None if the entry cannot be resolved (missing path info).
+    """
+    url      = entry.get("url", "")
+    rel_path = entry.get("path", "")
+
+    if url.startswith("file://"):
+        # file transport: URL IS the authoritative path on this machine.
+        # file:///mnt/shared/…/img.jpg  →  Path("/mnt/shared/…/img.jpg")
+        abs_path = Path(url[len("file://"):]).resolve()
+    elif rel_path and batch_dir:
+        # http transport: reconstruct path from batch_dir + rel_path
+        abs_path = (batch_dir / rel_path).resolve()
+    else:
+        return None
+
+    return {
+        "media_type": entry.get("media_type") or entry.get("type", "image"),
+        "abs_path":   abs_path,
+        "url":        url,
+        "score":      entry.get("score"),
+    }
+
+
 def _load_selections(selections_path: Path) -> dict[str, dict]:
     """
     Parse selections.json written by the VC editor.
 
-    Returns a flat dict:
-        { asset_id → { media_type, abs_path, url, score } }
+    Returns:
+      Old format (version 1) → { asset_id → { media_type, abs_path, url, score } }
+      New format (version 2) → { asset_id → { per_shot: { shot_id → { media_type, abs_path, url, score } } } }
 
     The path in selections.json is relative to the batch directory
     (assets/media/<batch_id>/), so we reconstruct the absolute path
@@ -239,25 +267,33 @@ def _load_selections(selections_path: Path) -> dict[str, dict]:
 
     out: dict[str, dict] = {}
     for asset_id, entry in data.get("selections", {}).items():
-        url      = entry.get("url", "")
-        rel_path = entry.get("path", "")
-
-        if url.startswith("file://"):
-            # file transport: URL IS the authoritative path on this machine.
-            # file:///mnt/shared/…/img.jpg  →  Path("/mnt/shared/…/img.jpg")
-            abs_path = Path(url[len("file://"):]).resolve()
-        elif rel_path and batch_dir:
-            # http transport: reconstruct path from batch_dir + rel_path
-            abs_path = (batch_dir / rel_path).resolve()
+        if "per_shot" in entry:
+            # Per-shot format (version 2 or 3)
+            per_shot_resolved: dict[str, dict] = {}
+            for shot_id, shot_entry in entry["per_shot"].items():
+                if "segments" in shot_entry:
+                    # v3: multi-segment per shot
+                    resolved_segs: list[dict] = []
+                    for seg in shot_entry["segments"]:
+                        resolved = _resolve_one_entry(seg, batch_dir)
+                        if resolved:
+                            resolved["duration_sec"] = seg.get("duration_sec")
+                            resolved["hold_sec"]     = seg.get("hold_sec")
+                            resolved_segs.append(resolved)
+                    if resolved_segs:
+                        per_shot_resolved[shot_id] = {"segments": resolved_segs}
+                else:
+                    # v2: single entry per shot
+                    resolved = _resolve_one_entry(shot_entry, batch_dir)
+                    if resolved:
+                        per_shot_resolved[shot_id] = resolved
+            if per_shot_resolved:
+                out[asset_id] = {"per_shot": per_shot_resolved}
         else:
-            continue
-
-        out[asset_id] = {
-            "media_type": entry.get("media_type") or entry.get("type", "image"),
-            "abs_path":   abs_path,
-            "url":        url,
-            "score":      entry.get("score"),
-        }
+            # Old format (single entry per background)
+            resolved = _resolve_one_entry(entry, batch_dir)
+            if resolved:
+                out[asset_id] = resolved
     return out
 
 
@@ -324,18 +360,56 @@ def resolve_all(
 
         # 0. User selection from VC editor (highest priority)
         if selections and aid in selections:
-            sel      = selections[aid]
-            abs_path = sel["abs_path"]
-            if abs_path.is_file():
-                items.append(_resolved_stock(
-                    aid, abs_path,
-                    sel.get("media_type", "image"),
-                    sel.get("url", ""),
-                ))
-                n_found += 1
+            sel = selections[aid]
+            if "per_shot" in sel:
+                # Per-shot format (version 2/3): emit one item per (asset_id, shot_id[, segment_index])
+                for shot_id, shot_sel in sel["per_shot"].items():
+                    if "segments" in shot_sel:
+                        # v3: emit one item per segment
+                        for seg_idx, seg in enumerate(shot_sel["segments"]):
+                            abs_path = seg["abs_path"]
+                            if abs_path.is_file():
+                                item = _resolved_stock(
+                                    aid, abs_path,
+                                    seg.get("media_type", "image"),
+                                    seg.get("url", ""),
+                                )
+                                item["shot_id"]       = shot_id
+                                item["segment_index"] = seg_idx
+                                item["duration_sec"]  = seg.get("duration_sec")
+                                item["hold_sec"]      = seg.get("hold_sec")
+                                items.append(item)
+                                n_found += 1
+                            else:
+                                print(f"  [WARN] Segment {aid!r}/{shot_id}[{seg_idx}] not found: {abs_path}")
+                    else:
+                        # v2: single item per shot
+                        abs_path = shot_sel["abs_path"]
+                        if abs_path.is_file():
+                            item = _resolved_stock(
+                                aid, abs_path,
+                                shot_sel.get("media_type", "image"),
+                                shot_sel.get("url", ""),
+                            )
+                            item["shot_id"] = shot_id
+                            items.append(item)
+                            n_found += 1
+                        else:
+                            print(f"  [WARN] Per-shot selection {aid!r}/{shot_id} not found: {abs_path}")
                 continue
-            print(f"  [WARN] Selection for {aid!r} not found on disk: {abs_path}")
-            # fall through to filesystem scan
+            else:
+                # Old format: single selection per background
+                abs_path = sel["abs_path"]
+                if abs_path.is_file():
+                    items.append(_resolved_stock(
+                        aid, abs_path,
+                        sel.get("media_type", "image"),
+                        sel.get("url", ""),
+                    ))
+                    n_found += 1
+                    continue
+                print(f"  [WARN] Selection for {aid!r} not found on disk: {abs_path}")
+                # fall through to filesystem scan
 
         # 1-3. Filesystem scan (images, videos, audio)
         f = search_dirs(bg_search, aid, IMAGE_EXTS + VIDEO_EXTS + AUDIO_EXTS)

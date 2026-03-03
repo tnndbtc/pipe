@@ -32,6 +32,13 @@ import urllib.request as _urllib_req
 PORT     = 8000
 PIPE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (pipe/)
 
+# ── VC editor config (config.json) ────────────────────────────────────────────
+_vc_config = {}
+_vc_config_path = os.path.join(os.path.dirname(__file__), "config.json")
+if os.path.isfile(_vc_config_path):
+    with open(_vc_config_path, encoding="utf-8") as f:
+        _vc_config = json.load(f)
+
 # ── Running-process registry (so Stop button can kill it) ──────────────────────
 _lock  = threading.Lock()
 _procs = {}   # client_addr → subprocess.Popen
@@ -731,7 +738,7 @@ HTML = r"""<!DOCTYPE html>
   .media-thumb img,
   .media-thumb video {
     width: 160px; height: 90px; object-fit: cover; display: block;
-    background: #0a0a10;
+    background: #181822;
   }
   .media-score-badge {
     position: absolute; bottom: 4px; left: 4px;
@@ -772,6 +779,73 @@ HTML = r"""<!DOCTYPE html>
   #media-btn-apply-seq:hover { background: #364a70; color: #a8d0ff; }
   #media-confirm-msg { font-size: 0.80em; }
   .media-empty { color: var(--dim); font-style: italic; font-size: 0.83em; }
+  /* ── Per-shot assignment rows ── */
+  .media-shot-section {
+    margin-top: 10px; border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  .media-shot-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 3px 0; font-size: 0.78em; font-family: var(--mono);
+  }
+  .media-shot-label {
+    color: var(--blue, #5b9cf6); font-weight: 600; min-width: 120px;
+  }
+  .media-shot-preview {
+    color: var(--dim); flex: 1; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .media-shot-clear {
+    background: none; border: none; color: var(--dim);
+    cursor: pointer; font-size: 1.0em; padding: 2px 4px;
+    transition: color .15s;
+  }
+  .media-shot-clear:hover { color: #e06c75; }
+  .media-btn-auto-assign {
+    background: #2a3a5c; color: #7eb8f7;
+    border: 1px solid #3d5a8a; border-radius: 5px;
+    font-size: 0.76em; padding: 4px 12px; cursor: pointer;
+    margin-bottom: 6px; transition: background .15s, color .15s;
+  }
+  .media-btn-auto-assign:hover { background: #364a70; color: #a8d0ff; }
+  /* ── Duration badge (top-left on video thumbnails) ── */
+  .media-dur-badge {
+    position: absolute; top: 4px; left: 4px;
+    background: #000000cc; color: #7eb8f7; font-size: 0.64em;
+    border-radius: 3px; padding: 2px 5px; font-family: var(--mono);
+    pointer-events: none;
+  }
+  /* ── Multi-segment shot rows ── */
+  .media-shot-bar {
+    height: 6px; flex: 0 0 120px; border-radius: 3px;
+    background: #ffffff12; overflow: hidden;
+  }
+  .media-shot-bar-fill {
+    height: 100%; background: var(--green, #98c379);
+    border-radius: 3px; transition: width .2s;
+  }
+  .media-shot-segments {
+    display: flex; flex-direction: column; gap: 2px; flex: 1;
+    min-width: 0;
+  }
+  .media-seg-entry {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 0.74em; font-family: var(--mono); color: var(--text);
+  }
+  .media-seg-entry .seg-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .media-seg-entry .seg-dur { color: #7eb8f7; flex-shrink: 0; }
+  .media-seg-remove {
+    background: none; border: none; color: var(--dim);
+    cursor: pointer; font-size: 0.9em; padding: 0 2px; transition: color .15s;
+  }
+  .media-seg-remove:hover { color: #e06c75; }
+  .media-shot-gap { font-size: 0.72em; color: var(--dim); flex-shrink: 0; }
+  .media-shot-filled .media-shot-gap { color: var(--green, #98c379); }
+  .media-shot-filled .media-shot-bar-fill { background: var(--green, #98c379); }
+  .media-shot-row { cursor: pointer; border-left: 3px solid transparent;
+    padding-left: 5px; transition: border-color .15s, background .15s; }
+  .media-shot-row:hover { background: #ffffff08; }
+  .media-shot-active { border-left-color: var(--blue, #5b9cf6); background: #5b9cf612; }
 
   /* ── Browse panel ── */
   #panel-browse {
@@ -1862,12 +1936,57 @@ Direction    : …"></textarea>
   let _mediaItemIds        = [];     // ordered item IDs for confirm iteration
   let _mediaRecommendedSeq = null;   // recommended_sequence from batch response
   // selections: { item_id: { type:'image'|'video', url, path, score } }
+  //   Per-shot:  { item_id: { per_shot: { shot_id: { media_type, url, path, score } } } }
   let _mediaSelections = {};
+  let _mediaShotMap = null;  // { bg_id: [shot_id, ...] } or null if ShotList unavailable
+  let _mediaShotDur = null;  // { shot_id: duration_sec } — flat lookup for shot durations
+  let _mediaActiveShot = {}; // { itemId: shot_id } — which shot row is active (target) per card
+
+  // Lazy-load observer: loads video src + metadata when thumbnail scrolls into view.
+  // Throttled to max 4 concurrent loads so we don't overwhelm the serve_media_file proxy
+  // (which reads entire video files into memory per request).
+  var _mediaLazyLoading = 0;
+  var _mediaLazyQueue = [];
+  function _mediaLazyLoad(vid) {
+    if (_mediaLazyLoading >= 4) {
+      _mediaLazyQueue.push(vid);
+      return;
+    }
+    _mediaLazyLoading++;
+    vid.src     = vid.dataset.lazySrc;
+    vid.preload = 'metadata';
+    vid.addEventListener('loadedmetadata', _mediaLazyDone);
+    vid.addEventListener('error', _mediaLazyDone);
+    // Safety: if neither event fires within 8s (e.g. 404 with no media error),
+    // release the slot so the queue doesn't stall and block other requests.
+    vid._lazyTimer = setTimeout(function() { _mediaLazyDone.call(vid); }, 8000);
+  }
+  function _mediaLazyDone() {
+    if (this._lazyTimer) { clearTimeout(this._lazyTimer); this._lazyTimer = null; }
+    this.removeEventListener('loadedmetadata', _mediaLazyDone);
+    this.removeEventListener('error', _mediaLazyDone);
+    _mediaLazyLoading--;
+    if (_mediaLazyLoading < 0) _mediaLazyLoading = 0;  // guard against double-fire
+    if (_mediaLazyQueue.length > 0) _mediaLazyLoad(_mediaLazyQueue.shift());
+  }
+  var _mediaLazyObserver = new IntersectionObserver(function(entries) {
+    entries.forEach(function(ent) {
+      if (!ent.isIntersecting) return;
+      var vid = ent.target;
+      _mediaLazyObserver.unobserve(vid);
+      if (vid.dataset.lazySrc && !vid.src) _mediaLazyLoad(vid);
+    });
+  }, { rootMargin: '200px' });
 
   // ── called once when tab is first activated ──
   function initMediaTab() {
     // Populate episode selector from list_projects (same as Pipeline tab)
-    if (document.getElementById('media-ep-select').options.length > 1) return;
+    var needsSync = document.getElementById('media-ep-select').options.length <= 1;
+    if (!needsSync) {
+      // Already populated — but still sync from Run tab if media has no selection
+      _mediaSyncFromRunTab();
+      return;
+    }
     fetch('/list_projects').then(r => r.json()).then(data => {
       const sel = document.getElementById('media-ep-select');
       (data.projects || []).forEach(proj => {
@@ -1878,7 +1997,24 @@ Direction    : …"></textarea>
           sel.appendChild(opt);
         });
       });
+      // After populating, sync from Run tab's current project/episode
+      _mediaSyncFromRunTab();
     }).catch(() => {});
+  }
+
+  function _mediaSyncFromRunTab() {
+    // If Run tab has a project/episode selected and Media tab doesn't, propagate it
+    if (_mediaSlug && _mediaEpId) return;  // already selected
+    if (!currentSlug || !currentEpId) return;  // nothing in Run tab
+    var target = currentSlug + '|' + currentEpId;
+    var sel = document.getElementById('media-ep-select');
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === target) {
+        sel.value = target;
+        onMediaEpChange();
+        return;
+      }
+    }
   }
 
   function onMediaEpChange() {
@@ -1897,6 +2033,30 @@ Direction    : …"></textarea>
   function _mediaSetStatus(msg, spinning) {
     document.getElementById('media-status-text').textContent = msg;
     document.getElementById('media-spinner').style.display = spinning ? 'inline-block' : 'none';
+  }
+
+  // ── Load ShotList.json to build bg_id → [shot_id, ...] map + durations ──
+  async function _mediaLoadShotMap() {
+    if (!_mediaSlug || !_mediaEpId) { _mediaShotMap = null; _mediaShotDur = null; return; }
+    try {
+      const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
+          + '&ep_id=' + encodeURIComponent(_mediaEpId)
+          + '&file=ShotList.json');
+      if (!r.ok) { _mediaShotMap = null; _mediaShotDur = null; return; }
+      const d = await r.json();
+      const shots = d.shots || [];
+      const map = {};
+      const durMap = {};
+      shots.forEach(s => {
+        const bg = s.background_id;
+        if (!bg) return;
+        if (!map[bg]) map[bg] = [];
+        map[bg].push(s.shot_id);
+        durMap[s.shot_id] = s.duration_sec || 0;
+      });
+      _mediaShotMap = map;
+      _mediaShotDur = durMap;
+    } catch (_) { _mediaShotMap = null; _mediaShotDur = null; }
   }
 
   // ── Start a new search batch ──
@@ -1952,6 +2112,7 @@ Direction    : …"></textarea>
         document.getElementById('media-btn-search').disabled = false;
         _mediaResults        = d.items || {};
         _mediaRecommendedSeq = d.recommended_sequence || null;
+        await _mediaLoadShotMap();
         _mediaRenderResults(_mediaResults);
       } else if (d.status === 'failed') {
         clearInterval(_mediaPollTimer); _mediaPollTimer = null;
@@ -1978,9 +2139,16 @@ Direction    : …"></textarea>
       card.className = 'media-item-card';
       card.id = 'media-card-' + itemId;
 
+      // Card header: show shot info when _mediaShotMap is available
       const hdr = document.createElement('div');
       hdr.className = 'media-item-header';
-      hdr.textContent = itemId;
+      const shotIds = _mediaShotMap ? (_mediaShotMap[itemId] || []) : [];
+      if (shotIds.length > 0) {
+        hdr.textContent = itemId + ' \u2014 ' + shotIds.length + ' shot' + (shotIds.length > 1 ? 's' : '')
+            + ': ' + shotIds.join(', ');
+      } else {
+        hdr.textContent = itemId;
+      }
       card.appendChild(hdr);
 
       const prompt = document.createElement('div');
@@ -2025,6 +2193,46 @@ Direction    : …"></textarea>
         card.appendChild(empty);
       }
 
+      // Per-shot assignment rows (only when ShotList is available and this bg has shots)
+      if (_mediaShotMap && shotIds.length > 0) {
+        const shotSection = document.createElement('div');
+        shotSection.className = 'media-shot-section';
+        shotSection.id = 'media-shots-' + itemId;
+
+        // Auto-assign button (only when >1 shot for variety)
+        if (shotIds.length > 1) {
+          const autoBtn = document.createElement('button');
+          autoBtn.className = 'media-btn-auto-assign';
+          autoBtn.textContent = '\u26A1 Auto-assign';
+          autoBtn.onclick = function() { mediaAutoAssign(itemId); };
+          shotSection.appendChild(autoBtn);
+        }
+
+        shotIds.forEach(function(sid, idx) {
+          const row = document.createElement('div');
+          row.className = 'media-shot-row' + (idx === 0 ? ' media-shot-active' : '');
+          row.id = 'media-shot-row-' + itemId + '-' + sid;
+          const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
+          const durLabel = shotDur > 0 ? ' (' + shotDur.toFixed(1) + 's)' : '';
+          row.innerHTML = '<span class="media-shot-label">' + sid + durLabel + ':</span>'
+              + '<div class="media-shot-bar"><div class="media-shot-bar-fill" style="width:0%"></div></div>'
+              + '<div class="media-shot-segments"></div>'
+              + '<span class="media-shot-gap">\u2014 not assigned \u2014</span>';
+          // Click row to make it the active target for thumbnail selections
+          (function(iid, s) {
+            row.addEventListener('click', function(e) {
+              // Don't activate if clicking the remove button inside a segment
+              if (e.target.closest('.media-seg-remove')) return;
+              mediaSetActiveShot(iid, s);
+            });
+          })(itemId, sid);
+          shotSection.appendChild(row);
+        });
+        // First shot is active by default
+        if (shotIds.length > 0) _mediaActiveShot[itemId] = shotIds[0];
+        card.appendChild(shotSection);
+      }
+
       body.appendChild(card);
     });
 
@@ -2050,6 +2258,14 @@ Direction    : …"></textarea>
     badge.textContent = score;
     wrap.appendChild(badge);
 
+    // Duration badge for videos (top-left)
+    if (typeof entry.duration_sec === 'number') {
+      const durBadge = document.createElement('span');
+      durBadge.className = 'media-dur-badge';
+      durBadge.textContent = entry.duration_sec.toFixed(1) + 's';
+      wrap.appendChild(durBadge);
+    }
+
     // Browsers cannot load file:// URLs from an http:// page.
     // Route them through the VC editor's /api/serve_media_file proxy instead.
     const rawUrl    = entry.url || '';
@@ -2065,44 +2281,322 @@ Direction    : …"></textarea>
       wrap.appendChild(img);
     } else {
       const vid    = document.createElement('video');
-      vid.src      = displayUrl;
       vid.muted    = true;
       vid.loop     = true;
-      vid.preload  = 'metadata';
-      vid.addEventListener('mouseenter', () => vid.play());
+      vid.preload  = 'none';
+      vid.dataset.lazySrc = displayUrl;
+      vid.addEventListener('mouseenter', () => vid.play().catch(function(){}));
       vid.addEventListener('mouseleave', () => { vid.pause(); vid.currentTime = 0; });
       wrap.appendChild(vid);
+      // Lazy-load: IntersectionObserver sets src + preload when visible
+      _mediaLazyObserver.observe(vid);
     }
 
-    // Store original URL as data attribute so mediaApplyRecommended() can match
+    // Store original URL and duration as data attributes
     wrap.dataset.url = entry.url || '';
+    if (typeof entry.duration_sec === 'number') {
+      wrap.dataset.durationSec = entry.duration_sec;
+    }
     wrap.addEventListener('click', () => mediaSelect(itemId, type, entry, wrap));
     return wrap;
   }
 
+  // ── Segment total duration helper ──
+  function _mediaSegmentTotal(shotEntry) {
+    if (!shotEntry || !shotEntry.segments) return 0;
+    return shotEntry.segments.reduce(function(sum, seg) {
+      return sum + (seg.hold_sec || seg.duration_sec || 0);
+    }, 0);
+  }
+
+  // ── Rebalance flexible segments to share the remaining gap equally ──
+  // "Fixed" = video with a duration_sec value.
+  // "Flexible" = image (or video without duration).
+  function _mediaRebalanceImages(shotId, segs) {
+    var shotDur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
+    if (shotDur <= 0 || segs.length === 0) return;
+    var fixedTotal = 0;
+    var flexIdxs = [];
+    segs.forEach(function(seg, i) {
+      if (seg.media_type === 'video' && seg.duration_sec) {
+        fixedTotal += seg.duration_sec;
+      } else {
+        flexIdxs.push(i);
+      }
+    });
+    var gap = Math.max(0, shotDur - fixedTotal);
+    if (flexIdxs.length === 0) return;
+    var per = gap / flexIdxs.length;
+    flexIdxs.forEach(function(i) {
+      if (segs[i].media_type === 'image') {
+        segs[i].hold_sec = per;
+      } else {
+        segs[i].duration_sec = per;
+      }
+    });
+  }
+
+  // ── Active shot: which shot row is the current target for thumbnail clicks ──
+  function mediaSetActiveShot(itemId, shotId) {
+    _mediaActiveShot[itemId] = shotId;
+    // Update visual highlight: remove from siblings, add to target
+    const section = document.getElementById('media-shots-' + itemId);
+    if (section) {
+      section.querySelectorAll('.media-shot-row').forEach(function(r) {
+        r.classList.remove('media-shot-active');
+      });
+      var row = document.getElementById('media-shot-row-' + itemId + '-' + shotId);
+      if (row) row.classList.add('media-shot-active');
+    }
+  }
+
   // ── Select / deselect a thumb ──
   function mediaSelect(itemId, type, entry, wrapEl) {
-    // Remove previous selection badge for this item
-    const card = document.getElementById('media-card-' + itemId);
-    if (card) {
-      card.querySelectorAll('.media-thumb').forEach(t => t.classList.remove('selected'));
-      card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
-    }
+    const shotIds = _mediaShotMap ? (_mediaShotMap[itemId] || []) : [];
 
-    // Check if clicking the already-selected item → deselect
-    if (_mediaSelections[itemId] && _mediaSelections[itemId].url === entry.url) {
-      delete _mediaSelections[itemId];
+    if (_mediaShotMap && shotIds.length > 0) {
+      // ── Multi-segment stacking mode ──
+      if (!_mediaSelections[itemId]) _mediaSelections[itemId] = { per_shot: {} };
+      const ps = _mediaSelections[itemId].per_shot;
+      const clickUrl = entry.url || '';
+
+      // ── Toggle-off: if this URL is already in any shot, remove it ──
+      let removed = false;
+      for (const sid of shotIds) {
+        if (!ps[sid] || !ps[sid].segments) continue;
+        const idx = ps[sid].segments.findIndex(function(s) { return s.url === clickUrl; });
+        if (idx !== -1) {
+          ps[sid].segments.splice(idx, 1);
+          if (ps[sid].segments.length === 0) {
+            delete ps[sid];
+          } else {
+            _mediaRebalanceImages(sid, ps[sid].segments);
+          }
+          _mediaRenderShotRow(itemId, sid);
+          removed = true;
+          break;
+        }
+      }
+      if (removed) {
+        wrapEl.classList.remove('selected');
+        return;
+      }
+
+      // ── Target: the user-selected active shot row ──
+      var targetShot = _mediaActiveShot[itemId] || shotIds[0];
+
+      // Initialize segments array
+      if (!ps[targetShot]) ps[targetShot] = { segments: [] };
+      if (!ps[targetShot].segments) {
+        // Upgrade v2 single-entry to v3 segments if needed
+        const old = ps[targetShot];
+        ps[targetShot] = { segments: old.url ? [old] : [] };
+      }
+
+      const segs = ps[targetShot].segments;
+      const shotDur = (_mediaShotDur && _mediaShotDur[targetShot]) || 0;
+      const filled = _mediaSegmentTotal({ segments: segs });
+      const remaining = Math.max(0, shotDur - filled);
+
+      // Video: use probed duration (capped to remaining gap)
+      // Image: hold for remaining gap
+      const segDur = type === 'video'
+          ? Math.min(entry.duration_sec || remaining, remaining)
+          : remaining;
+
+      segs.push({
+        media_type: type,
+        url: entry.url || '',
+        path: entry.path || '',
+        score: entry.score,
+        duration_sec: type === 'video' ? segDur : null,
+        hold_sec: type === 'image' ? segDur : null,
+      });
+
+      // Rebalance images to share the remaining gap equally
+      _mediaRebalanceImages(targetShot, segs);
+
+      wrapEl.classList.add('selected');
+      _mediaRenderShotRow(itemId, targetShot);
+    } else {
+      // ── Single-selection mode (no ShotList) ──
+      const card = document.getElementById('media-card-' + itemId);
+      if (card) {
+        card.querySelectorAll('.media-thumb').forEach(t => t.classList.remove('selected'));
+        card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
+      }
+
+      // Check if clicking the already-selected item → deselect
+      if (_mediaSelections[itemId] && _mediaSelections[itemId].url === (entry.url || '')) {
+        delete _mediaSelections[itemId];
+        return;
+      }
+
+      _mediaSelections[itemId] = { media_type: type, url: entry.url || '',
+                                    path: entry.path || '', score: entry.score };
+      wrapEl.classList.add('selected');
+
+      const selBadge = document.createElement('span');
+      selBadge.className = 'media-sel-badge';
+      selBadge.textContent = '\u2714 ' + type;
+      wrapEl.appendChild(selBadge);
+    }
+  }
+
+  // ── Render a per-shot row with segment list and fill bar ──
+  function _mediaRenderShotRow(itemId, shotId) {
+    const row = document.getElementById('media-shot-row-' + itemId + '-' + shotId);
+    if (!row) return;
+    const barFill = row.querySelector('.media-shot-bar-fill');
+    const segContainer = row.querySelector('.media-shot-segments');
+    const gapSpan = row.querySelector('.media-shot-gap');
+
+    const ps = (_mediaSelections[itemId] && _mediaSelections[itemId].per_shot) || {};
+    const shotEntry = ps[shotId];
+    const shotDur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
+
+    if (!shotEntry || !shotEntry.segments || shotEntry.segments.length === 0) {
+      if (barFill) barFill.style.width = '0%';
+      if (segContainer) segContainer.innerHTML = '';
+      if (gapSpan) gapSpan.textContent = '\u2014 not assigned \u2014';
+      row.classList.remove('media-shot-filled');
       return;
     }
 
-    _mediaSelections[itemId] = { media_type: type, url: entry.url || '',
-                                  path: entry.path || '', score: entry.score };
-    wrapEl.classList.add('selected');
+    const segs = shotEntry.segments;
+    const filled = _mediaSegmentTotal(shotEntry);
+    const pct = shotDur > 0 ? Math.min(100, (filled / shotDur) * 100) : 100;
+    if (barFill) barFill.style.width = pct.toFixed(1) + '%';
 
-    const selBadge = document.createElement('span');
-    selBadge.className = 'media-sel-badge';
-    selBadge.textContent = '✔ ' + type;
-    wrapEl.appendChild(selBadge);
+    // Render segment entries
+    if (segContainer) {
+      segContainer.innerHTML = '';
+      segs.forEach(function(seg, idx) {
+        const se = document.createElement('div');
+        se.className = 'media-seg-entry';
+        const fname = (seg.path || seg.url || '').split('/').pop() || 'media';
+        const dur = seg.hold_sec || seg.duration_sec || 0;
+        se.innerHTML = '<span class="seg-name">' + fname + '</span>'
+            + '<span class="seg-dur">' + dur.toFixed(1) + 's</span>'
+            + '<button class="media-seg-remove" onclick="mediaRemoveSegment(\''
+            + itemId + '\',\'' + shotId + '\',' + idx + ')">\u2715</button>';
+        segContainer.appendChild(se);
+      });
+    }
+
+    // Gap indicator
+    const gap = Math.max(0, shotDur - filled);
+    if (gapSpan) {
+      if (gap > 0.1) {
+        gapSpan.textContent = 'needs ' + gap.toFixed(1) + 's more';
+        row.classList.remove('media-shot-filled');
+      } else {
+        gapSpan.textContent = '\u2713 filled';
+        row.classList.add('media-shot-filled');
+      }
+    }
+  }
+
+  // ── Remove a segment from a shot ──
+  function mediaRemoveSegment(itemId, shotId, segIdx) {
+    if (!_mediaSelections[itemId] || !_mediaSelections[itemId].per_shot) return;
+    const shotEntry = _mediaSelections[itemId].per_shot[shotId];
+    if (!shotEntry || !shotEntry.segments) return;
+    shotEntry.segments.splice(segIdx, 1);
+    if (shotEntry.segments.length === 0) {
+      delete _mediaSelections[itemId].per_shot[shotId];
+    } else {
+      // Rebalance surviving images to absorb freed time
+      _mediaRebalanceImages(shotId, shotEntry.segments);
+    }
+    _mediaRenderShotRow(itemId, shotId);
+  }
+
+  // ── Clear a single per-shot assignment (legacy + segments) ──
+  function mediaClearShot(itemId, shotId) {
+    if (!_mediaSelections[itemId] || !_mediaSelections[itemId].per_shot) return;
+    delete _mediaSelections[itemId].per_shot[shotId];
+    _mediaRenderShotRow(itemId, shotId);
+  }
+
+  // ── Auto-assign: stack segments to fill each shot's duration ──
+  function mediaAutoAssign(itemId) {
+    const shotIds = _mediaShotMap ? (_mediaShotMap[itemId] || []) : [];
+    if (shotIds.length === 0) return;
+    const item = _mediaResults[itemId];
+    if (!item) return;
+
+    // Build ranked candidate list: videos first (by score desc), then images
+    const candidates = [];
+    const vids = (item.videos || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+    const imgs = (item.images || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+    vids.forEach(v => candidates.push({ type: 'video', entry: v }));
+    imgs.forEach(v => candidates.push({ type: 'image', entry: v }));
+    if (candidates.length === 0) return;
+
+    if (!_mediaSelections[itemId]) _mediaSelections[itemId] = { per_shot: {} };
+    const ps = _mediaSelections[itemId].per_shot;
+    const usedUrls = new Set();
+    let candIdx = 0;
+
+    shotIds.forEach(function(sid) {
+      const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
+      ps[sid] = { segments: [] };
+      let filled = 0;
+
+      // Stack candidates until shot duration is filled
+      while (filled < shotDur && candIdx < candidates.length * 2) {
+        const idx = candIdx % candidates.length;
+        const cand = candidates[idx];
+        candIdx++;
+
+        // Skip duplicates within the same shot
+        if (ps[sid].segments.some(function(s) { return s.url === cand.entry.url; })) continue;
+
+        const remaining = Math.max(0, shotDur - filled);
+        if (cand.type === 'video') {
+          const dur = cand.entry.duration_sec || remaining;
+          ps[sid].segments.push({
+            media_type: 'video', url: cand.entry.url || '',
+            path: cand.entry.path || '', score: cand.entry.score,
+            duration_sec: dur, hold_sec: null,
+          });
+          filled += dur;
+          usedUrls.add(cand.entry.url);
+        } else {
+          // Image: fill remaining gap
+          ps[sid].segments.push({
+            media_type: 'image', url: cand.entry.url || '',
+            path: cand.entry.path || '', score: cand.entry.score,
+            duration_sec: null, hold_sec: remaining,
+          });
+          filled += remaining;
+          usedUrls.add(cand.entry.url);
+        }
+      }
+
+      // If no candidates were added (edge case), add best image for full duration
+      if (ps[sid].segments.length === 0 && imgs.length > 0) {
+        ps[sid].segments.push({
+          media_type: 'image', url: imgs[0].url || '',
+          path: imgs[0].path || '', score: imgs[0].score,
+          duration_sec: null, hold_sec: shotDur,
+        });
+        usedUrls.add(imgs[0].url);
+      }
+
+      _mediaRenderShotRow(itemId, sid);
+    });
+
+    // Visual: mark used thumbs as selected in the grid
+    const card = document.getElementById('media-card-' + itemId);
+    if (card) {
+      card.querySelectorAll('.media-thumb').forEach(t => {
+        const url = t.dataset.url;
+        if (usedUrls.has(url)) t.classList.add('selected');
+        else t.classList.remove('selected');
+      });
+    }
   }
 
   // ── Reset all selections ──
@@ -2110,6 +2604,23 @@ Direction    : …"></textarea>
     _mediaSelections = {};
     document.querySelectorAll('.media-thumb.selected').forEach(t => t.classList.remove('selected'));
     document.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
+    // Reset per-shot rows (segments mode)
+    document.querySelectorAll('.media-shot-bar-fill').forEach(b => { b.style.width = '0%'; });
+    document.querySelectorAll('.media-shot-segments').forEach(c => { c.innerHTML = ''; });
+    document.querySelectorAll('.media-shot-gap').forEach(g => {
+      g.textContent = '\u2014 not assigned \u2014';
+    });
+    document.querySelectorAll('.media-shot-row').forEach(r => r.classList.remove('media-shot-filled'));
+    // Reset active shot to first shot per card
+    document.querySelectorAll('.media-shot-row').forEach(r => r.classList.remove('media-shot-active'));
+    for (var iid in _mediaActiveShot) {
+      var sids = _mediaShotMap ? (_mediaShotMap[iid] || []) : [];
+      if (sids.length > 0) {
+        _mediaActiveShot[iid] = sids[0];
+        var firstRow = document.getElementById('media-shot-row-' + iid + '-' + sids[0]);
+        if (firstRow) firstRow.classList.add('media-shot-active');
+      }
+    }
     document.getElementById('media-confirm-msg').textContent = '';
   }
 
@@ -2121,50 +2632,106 @@ Direction    : …"></textarea>
     let applied = 0;
     for (const [itemId, cand] of Object.entries(_mediaRecommendedSeq)) {
       if (!cand || !cand.url) continue;
-      // Determine type from path extension
-      const ext = (cand.path || cand.url || '').split('.').pop().toLowerCase();
-      const type = ['mp4', 'mov', 'webm', 'mkv'].includes(ext) ? 'video' : 'image';
-      // Store selection
-      _mediaSelections[itemId] = {
-        media_type: type,
-        url:   cand.url  || '',
-        path:  cand.path || '',
-        score: cand.score || 0,
-      };
-      // Visually mark the matching thumb in the grid
-      const card = document.getElementById('media-card-' + itemId);
-      if (card) {
-        // Remove existing badge
-        card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
-        // Try to find the thumb that matches this URL and mark it selected
-        let matched = false;
-        card.querySelectorAll('.media-thumb').forEach(thumb => {
-          thumb.classList.remove('selected');
-          if (!matched && thumb.dataset.url === cand.url) {
-            thumb.classList.add('selected');
-            const badge = document.createElement('div');
-            badge.className = 'media-sel-badge';
-            badge.textContent = '✔';
-            thumb.appendChild(badge);
-            matched = true;
+      const shotIds = _mediaShotMap ? (_mediaShotMap[itemId] || []) : [];
+
+      if (_mediaShotMap && shotIds.length > 0) {
+        // Per-shot mode: distribute ranked candidates across shots
+        const item = _mediaResults[itemId];
+        if (!item) continue;
+        // Build ranked candidate list from full results
+        const candidates = [];
+        const vids = (item.videos || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+        const imgs = (item.images || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+        vids.forEach(v => candidates.push({ type: 'video', entry: v }));
+        imgs.forEach(v => candidates.push({ type: 'image', entry: v }));
+        if (candidates.length === 0) continue;
+
+        if (!_mediaSelections[itemId]) _mediaSelections[itemId] = { per_shot: {} };
+        const ps = _mediaSelections[itemId].per_shot;
+        const usedUrls = new Set();
+        let ci = 0;
+
+        shotIds.forEach(function(sid) {
+          const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
+          ps[sid] = { segments: [] };
+          let filled = 0;
+          // Stack candidates until shot duration is filled
+          while (filled < shotDur && ci < candidates.length * 2) {
+            const pick = candidates[ci % candidates.length];
+            ci++;
+            if (ps[sid].segments.some(function(s) { return s.url === pick.entry.url; })) continue;
+            const remaining = Math.max(0, shotDur - filled);
+            if (pick.type === 'video') {
+              const dur = pick.entry.duration_sec || remaining;
+              ps[sid].segments.push({
+                media_type: 'video', url: pick.entry.url || '',
+                path: pick.entry.path || '', score: pick.entry.score,
+                duration_sec: dur, hold_sec: null,
+              });
+              filled += dur;
+            } else {
+              ps[sid].segments.push({
+                media_type: 'image', url: pick.entry.url || '',
+                path: pick.entry.path || '', score: pick.entry.score,
+                duration_sec: null, hold_sec: remaining,
+              });
+              filled += remaining;
+            }
+            usedUrls.add(pick.entry.url);
           }
+          _mediaRenderShotRow(itemId, sid);
         });
-        // If URL didn't match (e.g., first thumb is the recommendation), mark first
-        if (!matched) {
-          const first = card.querySelector('.media-thumb');
-          if (first) {
-            first.classList.add('selected');
-            const badge = document.createElement('div');
-            badge.className = 'media-sel-badge';
-            badge.textContent = '✔';
-            first.appendChild(badge);
+
+        // Mark used thumbs
+        const card = document.getElementById('media-card-' + itemId);
+        if (card) {
+          card.querySelectorAll('.media-thumb').forEach(t => {
+            if (usedUrls.has(t.dataset.url)) t.classList.add('selected');
+          });
+        }
+        applied++;
+      } else {
+        // Single-selection mode (no ShotList)
+        const ext = (cand.path || cand.url || '').split('.').pop().toLowerCase();
+        const type = ['mp4', 'mov', 'webm', 'mkv'].includes(ext) ? 'video' : 'image';
+        _mediaSelections[itemId] = {
+          media_type: type,
+          url:   cand.url  || '',
+          path:  cand.path || '',
+          score: cand.score || 0,
+        };
+        // Visually mark the matching thumb in the grid
+        const card = document.getElementById('media-card-' + itemId);
+        if (card) {
+          card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
+          let matched = false;
+          card.querySelectorAll('.media-thumb').forEach(thumb => {
+            thumb.classList.remove('selected');
+            if (!matched && thumb.dataset.url === cand.url) {
+              thumb.classList.add('selected');
+              const badge = document.createElement('div');
+              badge.className = 'media-sel-badge';
+              badge.textContent = '\u2714';
+              thumb.appendChild(badge);
+              matched = true;
+            }
+          });
+          if (!matched) {
+            const first = card.querySelector('.media-thumb');
+            if (first) {
+              first.classList.add('selected');
+              const badge = document.createElement('div');
+              badge.className = 'media-sel-badge';
+              badge.textContent = '\u2714';
+              first.appendChild(badge);
+            }
           }
         }
+        applied++;
       }
-      applied++;
     }
     document.getElementById('media-confirm-msg').textContent =
-      '⚡ Applied recommended sequence for ' + applied + ' item(s).';
+      '\u26A1 Applied recommended sequence for ' + applied + ' item(s).';
   }
 
   // ── Confirm and write selections.json ──
@@ -2177,11 +2744,17 @@ Direction    : …"></textarea>
     document.getElementById('media-btn-confirm').disabled = true;
     document.getElementById('media-confirm-msg').textContent = 'Saving …';
     try {
+      // Detect if any selection uses segments format → version 3
+      const hasSegments = Object.values(_mediaSelections).some(function(sel) {
+        return sel.per_shot && Object.values(sel.per_shot).some(function(ps) { return ps.segments; });
+      });
+      const selVersion = !_mediaShotMap ? 1 : hasSegments ? 3 : 2;
       const r = await fetch('/api/media_confirm', {
         method:  'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ slug: _mediaSlug, ep_id: _mediaEpId,
                                batch_id: _mediaBatchId,
+                               version: selVersion,
                                selections: _mediaSelections }),
       });
       const d = await r.json();
@@ -2217,6 +2790,7 @@ Direction    : …"></textarea>
       if (!r2.ok || d2.error || d2.status !== 'done') return;
       _mediaResults        = d2.items || {};
       _mediaRecommendedSeq = d2.recommended_sequence || null;
+      await _mediaLoadShotMap();
       _mediaSetStatus('Loaded existing batch ' + _mediaBatchId + '.', false);
       _mediaRenderResults(_mediaResults);
     } catch (_) {}
@@ -5037,7 +5611,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # Serve UI
         if parsed.path == "/":
-            media_server_url = os.environ.get("MEDIA_SERVER_URL", "")
+            media_server_url = os.environ.get("MEDIA_SERVER_URL",
+                                   _vc_config.get("media", {}).get("default_server_url", ""))
             body = HTML.replace("{{MEDIA_SERVER_URL}}", media_server_url).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -6057,6 +6632,45 @@ Reply with JSON only — no text outside the object:
             self.end_headers()
             self.wfile.write(body)
 
+        # ── Episode file: return raw JSON for whitelisted episode files ───────
+        # GET /api/episode_file?slug=X&ep_id=Y&file=ShotList.json
+        # Returns raw file contents as application/json.
+        # Whitelisted files only to limit exposure.
+        elif parsed.path == "/api/episode_file":
+            _EPISODE_FILE_WHITELIST = {"ShotList.json", "selections.json"}
+            params   = parse_qs(parsed.query)
+            slug     = params.get("slug", [""])[0].strip()
+            ep_id    = params.get("ep_id", [""])[0].strip()
+            filename = params.get("file", [""])[0].strip()
+
+            if not slug or not ep_id or not filename:
+                body = json.dumps({"error": "slug, ep_id, and file are required"}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif filename not in _EPISODE_FILE_WHITELIST:
+                body = json.dumps({"error": f"file {filename!r} not in whitelist"}).encode()
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                file_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id, filename)
+                if not os.path.isfile(file_path):
+                    self.send_response(404)
+                    self.end_headers()
+                else:
+                    with open(file_path, "rb") as _ef:
+                        data = _ef.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
         # ── NFS proxy: serve a file:// media file to the browser ─────────────
         # Browsers cannot load file:// URLs from an http:// page.  When the
         # media server is running in file transport mode (NFS), thumbnail URLs
@@ -6081,14 +6695,25 @@ Reply with JSON only — no text outside the object:
             else:
                 mime, _ = _mimetypes.guess_type(abs_path)
                 mime    = mime or "application/octet-stream"
-                with open(abs_path, "rb") as _mf:
-                    data = _mf.read()
+                fsize   = os.path.getsize(abs_path)
                 self.send_response(200)
                 self.send_header("Content-Type", mime)
-                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Length", str(fsize))
                 self.send_header("Cache-Control", "max-age=3600")
                 self.end_headers()
-                self.wfile.write(data)
+                # Stream in 256 KB chunks instead of reading entire file into RAM.
+                # Videos can be 50+ MB; reading N of them at once would exhaust memory.
+                # Browsers with preload='metadata' close the connection after getting
+                # enough data — the resulting BrokenPipe/ConnectionReset is expected.
+                try:
+                    with open(abs_path, "rb") as _mf:
+                        while True:
+                            chunk = _mf.read(262144)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
         else:
             self.send_response(404)
@@ -6579,7 +7204,8 @@ Reply with JSON only — no text outside the object:
                     "project":    slug,
                     "episode_id": ep_id,
                     "manifest":   manifest,
-                    "top_n":      5,
+                    "top_n":      int(os.environ.get("MEDIA_TOP_N",
+                                      _vc_config.get("media", {}).get("top_n", 5))),
                 }).encode()
 
                 url = server_url + "/batches"
@@ -6632,6 +7258,7 @@ Reply with JSON only — no text outside the object:
                     "batch_id":   batch_id,
                     "slug":       slug,
                     "episode_id": ep_id,
+                    "version":    payload.get("version", 1),
                     "selections": selections,
                 }
                 with open(sel_path, "w", encoding="utf-8") as _sf:

@@ -275,13 +275,54 @@ def render_shot(
         return idx
 
     # ── 1. Background ──────────────────────────────────────────────────────
+    bg_segments = shot.get("background_segments")
     bg_id   = shot.get("background_asset_id")
     bg_info = asset_map.get(bg_id, {}) if bg_id else {}
     bg_uri  = bg_info.get("uri", "")
     bg_path = uri_to_path(bg_uri)
     bg_is_video = bg_path and bg_path.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov", ".avi")
 
-    if bg_path and bg_path.exists() and not bg_info.get("is_placeholder", True):
+    if bg_segments and len(bg_segments) > 1:
+        # ── Multi-segment background (v3): concat filter, no looping ──
+        seg_labels: list[str] = []
+        for si, seg in enumerate(bg_segments):
+            seg_uri  = seg.get("uri", "")
+            seg_path = uri_to_path(seg_uri)
+            seg_type = seg.get("media_type", "image")
+
+            if seg_type == "video" and seg_path and seg_path.exists():
+                seg_dur = seg.get("duration_sec") or dur_sec
+                # Don't loop — use natural duration, trim if needed
+                seg_idx = add_input([], str(seg_path))
+                filter_parts.append(
+                    f"[{seg_idx}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                    f"crop={W}:{H},setsar=1,trim=duration={seg_dur:.3f},"
+                    f"setpts=PTS-STARTPTS[seg{si}]"
+                )
+            elif seg_path and seg_path.exists():
+                seg_dur = seg.get("hold_sec") or dur_sec
+                seg_idx = add_input(["-loop", "1", "-t", f"{seg_dur:.3f}"], str(seg_path))
+                filter_parts.append(
+                    f"[{seg_idx}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                    f"crop={W}:{H},setsar=1[seg{si}]"
+                )
+            else:
+                # Placeholder segment
+                seg_dur = seg.get("hold_sec") or seg.get("duration_sec") or 2.0
+                seg_idx = add_input(
+                    ["-f", "lavfi"],
+                    f"color=c=606060:size={W}x{H}:rate={fps}:duration={seg_dur:.3f}",
+                )
+                filter_parts.append(f"[{seg_idx}:v]copy[seg{si}]")
+            seg_labels.append(f"[seg{si}]")
+
+        # Concat all segments into [bg]
+        n_segs = len(seg_labels)
+        concat_in = "".join(seg_labels)
+        filter_parts.append(f"{concat_in}concat=n={n_segs}:v=1:a=0[bg]")
+
+    elif bg_path and bg_path.exists() and not bg_info.get("is_placeholder", True):
+        # ── Single background (existing code, unchanged) ──
         if bg_is_video:
             # Video background: loop if short, trim to dur_sec
             bg_idx = add_input(["-stream_loop", "-1"], str(bg_path))
