@@ -112,6 +112,12 @@ def poll_loop(
             time.sleep(5)
             continue
 
+        if resp.status_code == 410:
+            # Server doesn't recognise us (likely restarted) — re-register
+            log.info("Server lost our registration — re-registering")
+            register(server_url, name, nfs_root)
+            continue
+
         if resp.status_code == 204:
             # No batch active — back off
             time.sleep(5)

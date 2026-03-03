@@ -418,10 +418,13 @@ async def next_job(worker: str = Query(...)):
     if job_queue is None:
         return Response(status_code=204)  # workers not enabled — no work
 
+    # Reject unregistered workers — they need to POST /register first
+    if worker not in job_queue._workers:
+        return Response(status_code=410)  # Gone — worker must re-register
+
     # Update last-seen even if no job available
-    if worker in job_queue._workers:
-        import time
-        job_queue._workers[worker].last_seen = time.monotonic()
+    import time
+    job_queue._workers[worker].last_seen = time.monotonic()
 
     task = job_queue.next_job(worker)
     if task is not None:

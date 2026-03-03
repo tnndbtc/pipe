@@ -620,6 +620,20 @@ def _extract_frames(video_path: Path, frames_dir: Path) -> list[Path]:
     return sorted(frames_dir.glob("frame_*.jpg"))
 
 
+def _probe_duration(video_path: Path) -> float | None:
+    """Return video duration in seconds via ffprobe, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_format", str(video_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        info = json.loads(result.stdout)
+        return float(info["format"]["duration"])
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Build scoring_hints with lighting injection
 # ---------------------------------------------------------------------------
@@ -867,6 +881,7 @@ def score_single_video(
     calm_w  = float(w.get("calmness", 0.25))
 
     vp = video_path
+    vid_duration = _probe_duration(vp)
 
     try:
         frames = _extract_frames(vp, frames_dir)
@@ -874,6 +889,7 @@ def score_single_video(
             return {
                 "path": str(vp), "score": 0.0,
                 "clip_score": 0.0, "calmness": 0.0,
+                "duration_sec": vid_duration,
                 "error": "no_frames",
             }
 
@@ -888,6 +904,7 @@ def score_single_video(
             return {
                 "path": str(vp), "score": 0.0,
                 "clip_score": 0.0, "calmness": float(calm),
+                "duration_sec": vid_duration,
                 "error": "calmness_rejected",
             }
 
@@ -941,10 +958,11 @@ def score_single_video(
                 log.debug("Meta sidecar write skipped for %s: %s", vp.name, exc)
 
         return {
-            "path":       str(vp),
-            "score":      float(score),
-            "clip_score": float(clip_best),
-            "calmness":   float(calm),
+            "path":         str(vp),
+            "score":        float(score),
+            "clip_score":   float(clip_best),
+            "calmness":     float(calm),
+            "duration_sec": vid_duration,
             "score_detail": {
                 "clip_total":   float(clip_best),
                 "clip_dims":    {d: best_dims.get(d, 0.0) for d in DIMS},
@@ -962,6 +980,7 @@ def score_single_video(
         return {
             "path": str(vp), "score": 0.0,
             "clip_score": 0.0, "calmness": 0.0,
+            "duration_sec": vid_duration,
             "error": "ffmpeg_failed",
         }
     except Exception as exc:  # noqa: BLE001
@@ -969,6 +988,7 @@ def score_single_video(
         return {
             "path": str(vp), "score": 0.0,
             "clip_score": 0.0, "calmness": 0.0,
+            "duration_sec": vid_duration,
             "error": str(exc),
         }
 
