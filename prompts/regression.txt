@@ -820,7 +820,10 @@ API endpoints: `GET /list_projects`, `GET /pipeline_status`
 
 **Step 4 — Results rendered**
 - JS: `_mediaRenderResults()` builds thumbnail grid per background item
-- Images: `<img>` with lazy loading; Videos: `<video>` with mouseenter play
+- Images: `<img>` with `loading='lazy'`; Videos: `<video preload='none'>` with `dataset.lazySrc`
+- Videos loaded via `IntersectionObserver` → `_mediaLazyLoad()`, throttled to max 2 concurrent
+- Hover: `mouseenter` restores `src` from `dataset.lazySrc` and calls `play()`; `mouseleave` calls `_mediaStopVid()` which removes `src` and calls `load()` to release the HTTP connection
+- Only 1 video can stream at a time (`_mediaPlayingVid` guard)
 - `file://` URLs rewritten to `/api/serve_media_file?url=...` proxy
 - If `recommended_sequence` is present, ⚡ Apply Recommended Sequence button shown
 
@@ -832,7 +835,8 @@ API endpoints: `GET /list_projects`, `GET /pipeline_status`
   - User can override individual items after applying
 
 **Step 6 — ✔ Confirm Selections**
-- JS: `mediaConfirm()` → `POST /api/media_confirm` with `{slug, ep_id, batch_id, selections}`
+- JS: `mediaConfirm()` calls `_mediaReleaseAllConnections()` first (drains lazy queue, aborts all actively-downloading videos) to guarantee a free HTTP connection slot
+- Then `POST /api/media_confirm` with `{slug, ep_id, batch_id, version, selections}`
 - Server writes `{ep_dir}/assets/media/selections.json`
 - This file is read by run.sh (Stage 5 hard stop check) and `resolve_assets.py` (Stage 10[5])
 
@@ -850,6 +854,8 @@ API endpoints: `GET /list_projects`, `GET /pipeline_status`
 4. `{{MEDIA_SERVER_URL}}` replacement happens at HTML serve time in `do_GET` — must match the placeholder in the `<input>` value attribute
 5. Media tab JS polling (`setInterval`) continues running when user switches to other tabs (tabs are CSS visibility, not page navigation)
 6. `selections.json` must be written before Stage 10 `resolve_assets.py` runs — enforced by the Stage 5 hard stop
+7. **HTTP/1.1 6-connection-per-host limit**: video thumbnails, SSE streams, pollers, and fetch requests all share the same 6-slot budget. `_mediaLazyLoad` throttle MUST stay ≤ 2 concurrent. `_mediaStopVid()` MUST NOT re-set `vid.src` after clearing it (per HTML spec, setting `.src` triggers the load algorithm and opens a new HTTP connection even with `preload='none'`). `_mediaReleaseAllConnections()` MUST be called before `mediaConfirm()` POST.
+8. **`/api/serve_media_file` streams in 256 KB chunks** — does NOT read entire files into RAM. `BrokenPipeError`/`ConnectionResetError` are caught and silently ignored (browser closes connection after getting metadata).
 
 ---
 
@@ -1142,6 +1148,13 @@ Run through the relevant items after any modification:
 - [ ] `log_message(fmt, *args)` converts `args[0]` with `str()` before calling `.split()`. `send_error()` passes an `HTTPStatus` enum as the `code` argument — enums have no `.split()` method and crash without the explicit `str()` conversion.
 - [ ] **Purge Cache flow**: JS global `purgeAssets` defaults to `true`; `chk-purge-assets` checkbox defaults to `checked` (with `accent-color:#e06c75` red accent); both `/run_locale` and `/run_stage10` URL builders append `&purge=1` or `&purge=0`; server-side handlers parse `purge` and call `_purge_episode_assets()` before the step loop when `purge=1`, then set `force_run = True`.
 - [ ] **[R-001] Stages uncheck instantly on re-run**: When user clicks Run N→10 (e.g. Run 8→10), stages N–10 must uncheck INSTANTLY in the Pipeline tab — must NOT wait for the next server poll and must NOT leave stale ✓ from the previous run. Implemented via `_stagesDoneInCurrentRun` Set that is cleared at run-start and gates the checkmark rendering. Applies to all entry points: Run button, Pipeline tab re-run, alignment-warning re-run link. **Test**: click Run 8→10 on a fully-completed episode → stages 8, 9, 10 uncheck before the first output line appears.
+- [ ] **`beforeunload` handler** cleans up ALL connections: closes `es` and `pipeStepEs` EventSources, clears `_pipePoller` and `_mediaPollTimer` intervals, calls `_mediaReleaseAllConnections()`, stops `_vcPlayingAudio`. Without this, reloading the tab after a server restart hangs because the browser's connection pool has stale dead sockets.
+- [ ] **`switchTab()` connection cleanup**: clears stale EventSource refs (readyState === 2), stops playing video when leaving Media tab, stops voice-preview audio when leaving Run tab
+- [ ] **`Handler.end_headers()` override** sends `Connection: close` on every response — prevents browser from pooling TCP connections that become stale after server restart
+- [ ] **`ReusableServer.daemon_threads = True`** — SSE handler threads and video-streaming threads MUST be daemon threads so the server process exits cleanly on Ctrl-C (without this, zombie threads from long-lived SSE connections keep the old process alive, and the browser tab's reload hangs on the dead process)
+- [ ] **`_mediaStopVid(vid)`** removes `src` and calls `load()` to abort the download, stores URL in `dataset.lazySrc` for later restore on hover. Does NOT re-set `vid.src` (that would open a new HTTP connection per HTML spec)
+- [ ] **`_mediaReleaseAllConnections()`** called before `mediaConfirm()` — stops playing vid, drains lazy queue, aborts all actively-downloading video elements (readyState < 2 or not paused)
+- [ ] **Video lazy-load concurrency** `_mediaLazyLoad` limit is 2 (NOT 4) — leaves headroom for SSE + pollers within the 6-connection HTTP/1.1 budget
 
 ### After modifying any Stage 10 Python script
 - [ ] CLI arg names unchanged (`--manifest`, `--shared`, `--locale`, `--media`, `--plan`, `--out`, etc.)
@@ -1191,6 +1204,8 @@ Run through the relevant items after any modification:
 - [ ] Multi-segment stacking: `_mediaLoadShotMap()` also stores `_mediaShotDur` (shot_id → duration_sec) for fill progress calculation
 - [ ] `mediaConfirm()` detects segments format via `hasSegments` check → sends `version: 3` when any per_shot entry has `segments` array
 - [ ] `render_video.py` multi-segment: uses FFmpeg `concat` filter (NOT `-stream_loop`) for `background_segments[]` with >1 entry — falls back to single-bg when null/single
+- [ ] `_mediaSyncFromRunTab()` propagates `currentSlug`/`currentEpId` from Run tab to Media tab on `switchTab('media')` — only if Media tab has no selection yet
+- [ ] Clickable active shot: `_mediaActiveShot[itemId]` tracks which shot row receives new segments — `mediaSelect()` uses this instead of "find first with gap"; shot rows have `media-shot-active` CSS class; clicking a row calls `mediaSetActiveShot()`
 
 ### After modifying contracts/schemas/*.v1.json
 - [ ] All LLM-written artifacts still validate against updated schema
@@ -1285,3 +1300,32 @@ Run through the relevant items after any modification:
     `pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`
     then `pip install -r code/media/http/requirements.txt`.
     `requirements_linux.txt` does NOT include media server deps — they are separate deployments.
+
+19. **VC editor HTTP connection management (daemon_threads + beforeunload + Connection: close)**
+    Three mechanisms work together to prevent "reload hangs after server restart":
+    (a) `ReusableServer.daemon_threads = True` — SSE handler threads and video-streaming threads
+        are daemon threads, so Ctrl-C kills them immediately. Without this, the old server process
+        stays alive as a zombie (non-daemon threads block exit), and the browser tab's existing TCP
+        connections are routed to the zombie instead of the new server.
+    (b) `Handler.end_headers()` override injects `Connection: close` on every HTTP response. This
+        tells the browser not to pool/reuse TCP connections, so after a server restart the browser
+        opens fresh connections instead of sending requests on stale dead sockets.
+    (c) `window.addEventListener('beforeunload', ...)` closes all EventSource connections, clears
+        all polling timers, releases all video connections, and stops audio playback. This ensures
+        the browser's per-host connection pool is clean before the reload request fires.
+    Do NOT remove any of these three — they address different failure modes and all three are needed.
+
+20. **Video thumbnail connection lifecycle**
+    Media tab video thumbnails use a careful connection lifecycle to stay within the browser's
+    6-connection-per-host HTTP/1.1 limit:
+    (a) Created with `preload='none'` and URL in `dataset.lazySrc` — no connection on creation
+    (b) `IntersectionObserver` triggers `_mediaLazyLoad()` when scrolled into view — sets `src`,
+        `preload='metadata'`, throttled to max 2 concurrent
+    (c) After `loadedmetadata` fires, browser shows first frame; connection idles naturally
+    (d) On hover (`mouseenter`): restores `src` from `dataset.lazySrc` if cleared, calls `play()`
+    (e) On leave (`mouseleave`): `_mediaStopVid()` removes `src`, calls `load()` to abort download,
+        stores URL back in `dataset.lazySrc`. Does NOT re-set `vid.src` (that opens a new connection)
+    (f) Before confirm: `_mediaReleaseAllConnections()` aborts ALL actively-downloading videos
+    Key invariant: `_mediaStopVid()` must NEVER set `vid.src` after clearing it. The HTML spec says
+    setting `.src` always triggers the media element load algorithm, opening an HTTP connection even
+    with `preload='none'`.
