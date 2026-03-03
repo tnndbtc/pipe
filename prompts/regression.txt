@@ -14,25 +14,30 @@
 ## PART 1 — SYSTEM ARCHITECTURE
 
 The pipeline converts a plain-text story into a multi-locale rendered video episode.
-It has three layers:
+It has four layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Web UI  (test_server.py — single-file Python HTTP server)  │
-│  • Runs on localhost:8080                                   │
+│  • Runs on localhost:8080 (or 192.168.86.40:8080)           │
 │  • Serves HTML+JS UI as a large inline string               │
 │  • Orchestrates all workflows via HTTP endpoints            │
-└────────────────────────┬────────────────────────────────────┘
-                         │  spawns subprocess
-┌────────────────────────▼────────────────────────────────────┐
-│  run.sh  (pipeline orchestrator)                            │
-│  • Stages 0–9: calls `claude -p <filled_prompt>`            │
-│  • Stage 10: calls Python scripts directly                  │
-│  • Sources pipeline_vars.sh between stages                  │
-│  • Streams stdout back to browser via SSE                   │
-└────────────────────────┬────────────────────────────────────┘
-                         │  writes/reads
-┌────────────────────────▼────────────────────────────────────┐
+│  • Media tab proxies requests to Media Search Server        │
+│  • Env: MEDIA_SERVER_URL, MEDIA_API_KEY                     │
+└────────────┬─────────────────────────────┬──────────────────┘
+             │  spawns subprocess          │  HTTP proxy
+┌────────────▼──────────────────┐  ┌───────▼──────────────────────┐
+│  run.sh  (pipeline orch.)     │  │  Media Search Server         │
+│  • Stages 0–9: claude -p      │  │  (code/media/http/server.py) │
+│  • Stage 10: Python scripts   │  │  • FastAPI on port 8200      │
+│  • Hard stop after Stage 5    │  │  • NFS server 192.168.86.33  │
+│  •   (media selection gate)   │  │  • Pexels/Pixabay download   │
+│  • Hard stop after Stage 9    │  │  • CLIP scoring + ranking    │
+│  •   (pre-render checkpoint)  │  │  • Env: MEDIA_API_KEY,       │
+│  • Streams stdout via SSE     │  │    PEXELS_API_KEY,           │
+└────────────┬──────────────────┘  │    PIXABAY_API_KEY           │
+             │  writes/reads       └───────┬──────────────────────┘
+┌────────────▼─────────────────────────────▼──────────────────┐
 │  projects/{PROJECT_SLUG}/                                   │
 │  ├── VoiceCast.json            (Stage 0, shared across eps) │
 │  ├── canon.json                (Stage 7, grows per ep)      │
@@ -46,6 +51,9 @@ It has three layers:
 │      ├── AssetManifest_draft.shared.json  (Stage 5)         │
 │      ├── AssetManifest_draft.{locale}.json (Stage 5 / 8)   │
 │      ├── canon_diff.json       (Stage 6)                    │
+│      ├── assets/media/selections.json  (VC editor Confirm)  │
+│      ├── assets/media/{batch_id}/      (media server state) │
+│      │   └── batch_state.json                                │
 │      ├── AssetManifest_merged.{locale}.json  (Stage 10[2]) │
 │      ├── AssetManifest.media.{locale}.json   (Stage 10[5]) │
 │      ├── RenderPlan.{locale}.json            (Stage 10[6]) │
@@ -192,11 +200,40 @@ Working directory: `PIPE_DIR` (repo root)
 
 **After Stage 0 specifically:** run.sh re-sources `pipeline_vars.sh` to pick up `VOICE_CAST_FILE` and `EPISODE_DIR` exports that Stage 0 added.
 
+### Hard stops (pipeline checkpoints)
+
+**After Stage 5 — media selection gate:**
+- Checks `${EP_DIR}/assets/media/selections.json`
+- If missing AND `TO_STAGE > 5`: prints instructions and `exit 0`
+- If present: prints `✓ Media selections found` and continues
+- User resumes with: `./run.sh <ep_dir> 6`
+- Purpose: Stage 10 `resolve_assets.py` needs `selections.json` to map stock media
+
+**After Stage 9 — pre-render checkpoint:**
+- Always fires when `TO_STAGE > 9` (regardless of selections.json)
+- Shows checklist: media selections (✓ or ⚠), manifest, render plan
+- `exit 0` — user verifies artefacts, then resumes: `./run.sh <ep_dir> 10`
+- Purpose: prevent accidentally running a long Stage 10 render before review
+
+**Both use `exit 0` (clean pause), not `exit 1` (error).**
+
+**Normal new-project flow:**
+```bash
+./run.sh <ep_dir>           # runs 0→5, pauses (no selections.json)
+# → UI Media tab → search → select → Confirm
+./run.sh <ep_dir> 6         # runs 6→9, pauses (pre-render)
+# → verify artefacts
+./run.sh <ep_dir> 10        # runs 10 only (render)
+```
+
 ### Regression risks for run.sh
 1. Every `{{PLACEHOLDER}}` used in any `prompts/p_N.txt` MUST have a matching `-e "s|{{...}}|...|g"` line in `fill_and_run`'s `sed` block. Adding a new placeholder to any prompt REQUIRES adding the corresponding sed rule.
 2. The `inline_files_into_prompt` function detects file paths using regex `^[[:space:]]+[0-9]+\.[[:space:]]+([^[:space:]]+\.(json|txt|sh))[[:space:]]*`. Only `.json`, `.txt`, `.sh` are inlined. If a prompt references other file types with the numbered-list format, they won't be inlined.
 3. `set -euo pipefail` means any stage failure exits the whole script immediately.
 4. Stage 0 MUST write `pipeline_vars.sh` — run.sh checks for its existence after Stage 0 and exits with error if missing.
+5. Hard stop after Stage 5 checks `${EP_DIR}/assets/media/selections.json` — exits 0 if missing, continues if present
+6. Hard stop after Stage 9 always exits 0 when `TO_STAGE > 9` — unconditional pre-render pause
+7. `resolve_assets.py` call passes `--selections <path>` when `selections.json` exists on disk
 5. `NO_MUSIC=1` env var: Stage 10 passes `--no-music` to `render_video.py` only if this is set. The web UI `/stream` handler reads `no_music` from `meta.json` if not overridden by checkbox.
 
 ---
@@ -371,6 +408,24 @@ backgrounds: []            ← always empty (lives in shared)
 background_overrides: []   ← always empty at draft time (post_tts_analysis fills this)
 vo_items: [...]            ← one per VO line, with full tts_prompt
 ```
+
+**New background fields (for media search multi-dim CLIP scoring):**
+Each `backgrounds[]` entry now includes (all optional, generated by p_5.txt):
+```
+scoring_hints:      {subjects, environment, style, motion, technical}  ← drives multi_dim CLIP mode
+search_queries:     ["search string 1", "search string 2", ...]
+cinematic_role:     "establishing" | "transitional" | "reaction" | "climax" | "ambient"
+motion_level:       "none" | "low" | "medium" | "high"
+lighting:           free text (e.g. "warm golden hour")
+include_keywords:   ["keyword1", ...]
+exclude_keywords:   ["keyword2", ...]
+continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, allowed_shift}
+```
+- `scoring_hints` triggers `mode: multi_dim` in the media server scorer (5-dimensional CLIP scoring)
+- Without `scoring_hints`, scorer falls back to `mode: fallback` (single ai_prompt CLIP score)
+- `continuity_hints.group_id` groups items for the DP sequence ranker
+- These fields are defined in `contracts/schemas/AssetManifest.v1.json` (9 new properties on backgrounds)
+- `batch_store.create()` MUST use `**item_data` spread to preserve all these fields — do NOT cherry-pick
 
 **Critical bindings:**
 - `character_packs[].gender` comes from `Script.json cast[].gender` — NOT guessed
@@ -557,8 +612,11 @@ Output: AssetManifest_draft.{locale}.json  (adds start_sec, end_sec to vo_items[
 **Sub-step [5/8] — resolve_assets.py** (per locale)
 ```
 Input:  AssetManifest_merged.{locale}.json
+        assets/media/selections.json  (optional — from VC editor Media tab)
 Output: AssetManifest.media.{locale}.json
 ```
+- run.sh auto-detects `selections.json` and passes `--selections <path>` if it exists
+- When selections are present, maps stock media URLs/paths to background asset_ids
 - Probes local filesystem for each asset — no network calls
 - Emits `file://` URIs for found files, `placeholder://` for missing
 - Asset path conventions:
@@ -709,6 +767,90 @@ API endpoints: `GET /list_projects`, `GET /pipeline_status`
 
 ---
 
+## PART 7b — WORKFLOW E: MEDIA SEARCH & SELECTION
+
+### Files involved
+
+**Media search server** (runs on NFS server 192.168.86.33:8200):
+- `code/media/http/server.py` — FastAPI server, `POST /batches`, `GET /batches`, `GET /batches/{id}`
+- `code/media/http/downloader.py` — Pexels/Pixabay image+video fetchers, populates `_thumbnails` dict
+- `code/media/http/scorer.py` — CLIP scoring: `mode: fallback` (single prompt) or `mode: multi_dim` (5 dimensions)
+- `code/media/http/batch_store.py` — Persistent batch state to `batch_state.json` on disk
+- `code/media/http/sequence_ranker.py` — DP-based continuity ranker using pairwise discontinuity
+- `code/media/http/config.json` — Scoring profiles, thresholds (NO API keys — keys come from env vars)
+- `code/media/http/requirements.txt` — Self-contained deps (install torch CPU first, then this file)
+
+**VC editor proxy** (runs on 192.168.86.40:8080):
+- `code/http/test_server.py` — Media tab JS + three proxy routes + selections.json writer
+
+### Environment variables
+
+| Variable | Where | Purpose |
+|----------|-------|---------|
+| `MEDIA_API_KEY` | Both servers | Internal auth key (user-defined, e.g. `internal-test-key`). **Server-side only on VC editor — NEVER exposed to browser** |
+| `PEXELS_API_KEY` | Media server | Pexels stock photo/video API key |
+| `PIXABAY_API_KEY` | Media server | Pixabay stock photo/video API key |
+| `MEDIA_SERVER_URL` | VC editor | Pre-fills the media server URL input in the UI via `{{MEDIA_SERVER_URL}}` placeholder |
+
+### Step-by-step flow
+
+**Step 1 — User opens Media tab, selects episode**
+- JS: `initMediaTab()` populates episode dropdown from `GET /list_projects`
+- `onMediaEpChange()` sets `_mediaSlug`, `_mediaEpId`
+- Calls `mediaLoadExisting()` to check for a previously completed batch
+
+**Step 2 — User clicks 🔍 Search Media**
+- JS: `mediaStartSearch()` → `POST /api/media_batch` with `{slug, ep_id, server_url}`
+- VC editor proxy:
+  1. Reads `AssetManifest_draft.shared.json` for the selected episode
+  2. Injects `MEDIA_API_KEY` from `os.environ` into `X-Api-Key` header
+  3. Forwards full manifest as `POST /batches` to the media server
+- Media server:
+  1. Extracts `backgrounds` from manifest (auto-converts list→dict by `asset_id` if needed)
+  2. `batch_store.create()` stores batch state with `**item_data` spread (preserves ALL fields)
+  3. Background task: downloads images/videos, CLIP scores, ranks
+
+**Step 3 — Polling**
+- JS: `_mediaPoll()` fires every 3 s via `setInterval`
+- Route: `GET /api/media_batch_status?batch_id=...&server_url=...`
+- VC editor proxy injects `MEDIA_API_KEY` server-side, forwards to `GET /batches/{id}`
+- Continues until `status == "done"` or `status == "failed"`
+
+**Step 4 — Results rendered**
+- JS: `_mediaRenderResults()` builds thumbnail grid per background item
+- Images: `<img>` with lazy loading; Videos: `<video>` with mouseenter play
+- `file://` URLs rewritten to `/api/serve_media_file?url=...` proxy
+- If `recommended_sequence` is present, ⚡ Apply Recommended Sequence button shown
+
+**Step 5 — User selects media (two options)**
+- **Manual**: click thumbnails to select per-item → stored in `_mediaSelections`
+- **⚡ Apply Recommended Sequence**: `mediaApplyRecommended()` auto-selects from `sequence_ranker.py` output
+  - Only available when `continuity_hints` present in manifest (new format)
+  - Uses DP ranker considering color/light/motion/semantic discontinuity across shots
+  - User can override individual items after applying
+
+**Step 6 — ✔ Confirm Selections**
+- JS: `mediaConfirm()` → `POST /api/media_confirm` with `{slug, ep_id, batch_id, selections}`
+- Server writes `{ep_dir}/assets/media/selections.json`
+- This file is read by run.sh (Stage 5 hard stop check) and `resolve_assets.py` (Stage 10[5])
+
+### CLIP scoring modes
+
+| Mode | Triggered by | How it works |
+|------|-------------|--------------|
+| `fallback` | No `scoring_hints` in item (old manifest) | Single `ai_prompt` → one CLIP cosine score |
+| `multi_dim` | `scoring_hints` dict present (new manifest) | 5 dimensions: subjects, environment, style, motion, technical — weighted average |
+
+### Regression risks for media workflow
+1. `batch_store.create()` MUST use `**item_data` spread — cherry-picking 3 fields was the root cause of `mode: fallback` despite `scoring_hints` being present in the manifest
+2. `_mediaServerUrl()` JS regex must be `/\/+$/` (one backslash) — NOT `/\\/+$/` (two backslashes) — raw string escaping issue causes `SyntaxError: Unexpected token ','` which cascades to `switchTab is not defined`
+3. `MEDIA_API_KEY` must only be read from `os.environ` in the three proxy routes — do NOT add it to HTML, JS, or query params
+4. `{{MEDIA_SERVER_URL}}` replacement happens at HTML serve time in `do_GET` — must match the placeholder in the `<input>` value attribute
+5. Media tab JS polling (`setInterval`) continues running when user switches to other tabs (tabs are CSS visibility, not page navigation)
+6. `selections.json` must be written before Stage 10 `resolve_assets.py` runs — enforced by the Stage 5 hard stop
+
+---
+
 ## PART 8 — WEB SERVER API ENDPOINTS REFERENCE
 
 All endpoints implemented in `code/http/test_server.py`. Server runs on `localhost:8080`.
@@ -730,6 +872,9 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/api/azure_voices` | — | Parsed `prompts/azure_tts_styles.txt` catalog; each entry includes `has_styles: bool` and `is_multitalker: bool` for client-side filtering |
 | `/api/status_report` | `slug`, `ep_id` | `{text}` — full contents of `status_report.txt` for that episode (empty string if file doesn't exist) |
 | `/serve_media` | `path` | Binary file content (for audio preview) |
+| `/api/media_batches` | `slug`, `ep_id`, `server_url` | Proxied list of batches from media server |
+| `/api/media_batch_status` | `batch_id`, `server_url` | Proxied batch status/results from media server |
+| `/api/serve_media_file` | `url` | Binary file content — proxies `file://` URIs for NFS media (browsers block file:// from http:// pages) |
 
 ### POST endpoints
 | Path | Body | Returns |
@@ -741,6 +886,8 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/api/create_episode` | `{slug, ep_id, story, title, genre, story_format, locales, no_music}` | `{ok, ep_dir, slug, ep_id}` |
 | `/save_voice_cast` | `{slug, voice_cast_json}` | `{ok}` |
 | `/api/append_status_report` | `{slug, ep_id, text}` | `{ok}` — appends timestamped entry to `status_report.txt` |
+| `/api/media_batch` | `{slug, ep_id, server_url}` | `{batch_id, poll_url}` — reads AssetManifest_draft.shared.json, forwards to media server |
+| `/api/media_confirm` | `{slug, ep_id, batch_id, selections}` | `{ok, path, n}` — writes selections.json |
 
 ### Key invariants for API endpoints
 - `/api/next_episode_id` returns key `"next_ep_id"` — JS client reads `nd.next_ep_id`
@@ -851,11 +998,33 @@ Must NOT be reordered:
 [3]  gen_tts_cloud              → writes assets/{locale}/audio/vo/*.wav
 [3b] polish_locale_vo (non-en) → rewrites zh lines outside [0.90,1.10]; re-synthesizes; updates manifests
 [4]  post_tts_analysis          → mutates locale manifest: adds start_sec/end_sec; writes background_overrides
-[5]  resolve_assets             → reads merged manifest, probes filesystem → AssetManifest.media.{locale}.json
+[5]  resolve_assets             → reads merged manifest + selections.json → AssetManifest.media.{locale}.json
 [6]  gen_render_plan            → reads merged + media → AssetManifest_final + RenderPlan
 [7]  render_video               → reads RenderPlan → output.mp4
 [8]  export_youtube_dubbed      → reads output.mp4 → youtube_dubbed.aac (skipped for en)
 ```
+
+### 9. Media API key security
+- `MEDIA_API_KEY` is NEVER exposed to the browser — no `<input>`, no JS variable, no query param
+- All three media proxy routes (`/api/media_batch`, `/api/media_batches`, `/api/media_batch_status`) inject the key server-side via `os.environ.get("MEDIA_API_KEY", "")`
+- The key is sent to the media server in the `X-Api-Key` HTTP header
+- Do NOT re-add a `media-api-key` input element to the HTML
+
+### 10. Media selections.json path
+- Canonical path: `{ep_dir}/assets/media/selections.json`
+- Written by: VC editor `POST /api/media_confirm`
+- Read by: run.sh (hard stop check), resolve_assets.py (`--selections` flag)
+- Format: `{batch_id, slug, episode_id, selections: {item_id: {media_type, url, path, score}}}`
+
+### 11. Media server backgrounds format compatibility
+- Media server `POST /batches` accepts `manifest.backgrounds` as both list (old) and dict (new)
+- List format: auto-converted to dict using `asset_id` as key (server.py line 233–234)
+- `batch_store.create()` must use `**item_data` spread — do NOT cherry-pick individual fields
+
+### 12. file:// URI proxy for NFS media
+- Media server writes images/videos to NFS-shared storage using `file://` URIs
+- Browsers block `file://` from `http://` pages — VC editor provides `/api/serve_media_file?url=<encoded>` proxy
+- JS `_mediaThumb()` rewrites `file://` URLs to proxy URLs before setting `img.src` / `vid.src`
 
 ---
 
@@ -868,7 +1037,7 @@ All schemas in `contracts/schemas/`. Claude validates artifacts using `python -c
 | `StoryPrompt.v1.json` | Stage 2 | schema_id, schema_version, prompt_id, episode_goal, generation_seed, series.{title,genre,tone}, setting.primary_location, characters[≥2], constraints.max_scenes |
 | `Script.v1.json` | Stage 3 | schema_id, schema_version, script_id, title, cast[], scenes[] |
 | `ShotList.v1.json` | Stage 4 | schema_id, schema_version, shotlist_id, script_ref, timing_lock_hash, shots[] |
-| `AssetManifest.v1.json` | Stage 5, 8 | schema_id, schema_version, manifest_id, project_id, episode_id, locale_scope |
+| `AssetManifest.v1.json` | Stage 5, 8 | schema_id, schema_version, manifest_id, project_id, episode_id, locale_scope; backgrounds[]: 9 new optional properties (scoring_hints, search_queries, cinematic_role, motion_level, lighting, include_keywords, exclude_keywords, continuity_hints, source_filters) |
 | `CanonDiff.v1.json` | Stage 6 | episode, added_characters[], updated_states[], new_world_facts[], new_unresolved_threads[], resolved_threads[] |
 | `Canon.v1.json` | Stage 7 | project_id, characters{}, world_facts[], unresolved_threads[], episode_summaries[] |
 | `AssetManifest_final.v1.json` | gen_render_plan | schema_id, schema_version, manifest_id, project_id, shotlist_ref, items[] |
@@ -912,6 +1081,9 @@ Run through the relevant items after any modification:
 - [ ] Stage 0 re-source of `pipeline_vars.sh` still happens after Stage 0 completes
 - [ ] `run.sh` still accepts `<ep_dir> [from] [to]` signature (not story_file)
 - [ ] `fill_and_run` still passes `--dangerously-skip-permissions --no-session-persistence` to claude
+- [ ] Hard stop after Stage 5 checks `${EP_DIR}/assets/media/selections.json` — exits 0 if missing, continues if present
+- [ ] Hard stop after Stage 9 always exits 0 when `TO_STAGE > 9` — unconditional pre-render pause
+- [ ] `resolve_assets.py` call passes `--selections <path>` when `selections.json` exists on disk
 
 ### After modifying test_server.py
 - [ ] `/stream` passes `ep_dir=` (not `story_file=`) to `run.sh`
@@ -949,10 +1121,27 @@ Run through the relevant items after any modification:
 - [ ] Section headers (e.g. `====== EN-CAPABLE ======`) do not use `[STANDARD]` or `[DRAGON]` — those brackets are reserved for voice tier lines matched by `VOICE_RE`
 - [ ] ⚠ Token budget: 275 entries already adds ~17–22K tokens to Stage 0 (haiku). Monitor for quality degradation.
 
+### After modifying media server (code/media/http/)
+- [ ] `batch_store.create()` uses `**item_data` spread — does NOT cherry-pick fields from manifest items
+- [ ] `server.py` reads API keys from env vars only (`MEDIA_API_KEY`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`) — no keys in `config.json`
+- [ ] `server.py POST /batches` handles both list and dict format for `manifest.backgrounds`
+- [ ] `scorer.py` backward compat: bare string `item` → `{"ai_prompt": item}` (fallback mode)
+- [ ] `scorer.py` multi_dim mode: reads `scoring_hints` dict from item, scores 5 dimensions independently
+- [ ] `downloader.py` populates `item["_thumbnails"]` dict for scorer thumbnail pass-1.5
+- [ ] `sequence_ranker.py` reads `.meta.json` sidecars for pairwise discontinuity (hue_hist, mean_luma, clip_embedding)
+
+### After modifying media tab in test_server.py
+- [ ] JS regex in `_mediaServerUrl()` uses `/\/+$/` — NOT `/\\/+$/` (Python raw string escaping: `\\/` = two chars in HTML, breaks JS regex parsing)
+- [ ] All three media proxy routes (`/api/media_batch`, `/api/media_batches`, `/api/media_batch_status`) inject `MEDIA_API_KEY` from `os.environ`, NOT from request body/query
+- [ ] No `<input>`, JS variable, or query param exposes `MEDIA_API_KEY` to the browser
+- [ ] `{{MEDIA_SERVER_URL}}` placeholder replaced at HTML serve time in `do_GET`
+- [ ] `POST /api/media_confirm` writes to `{ep_dir}/assets/media/selections.json`
+
 ### After modifying contracts/schemas/*.v1.json
 - [ ] All LLM-written artifacts still validate against updated schema
 - [ ] Fields added as "required" must be generated by the relevant stage
 - [ ] Fields removed from schema must not be depended on by downstream Python scripts
+- [ ] `AssetManifest.v1.json` backgrounds: 9 optional properties (scoring_hints, search_queries, cinematic_role, motion_level, lighting, include_keywords, exclude_keywords, continuity_hints, source_filters) must remain optional — old manifests without them must still validate
 
 ---
 
@@ -1011,3 +1200,33 @@ Run through the relevant items after any modification:
     caches are still valid (e.g. only re-running render_video after a render-plan tweak) can
     uncheck it to reuse existing WAVs and images. Re-running Stage 10 without purging after
     Stage 3 changed is the most common source of "wrong audio" or "stale image" bugs.
+
+14. **Media API keys are server-side only**
+    `MEDIA_API_KEY` is injected by the three proxy routes in `test_server.py` via `os.environ`.
+    The old `<input id="media-api-key">` was removed along with `_mediaApiKey()` JS function.
+    Do NOT re-add client-side API key fields — the key must never appear in HTML or JS.
+
+15. **file:// URI transport for NFS media**
+    Media server writes images/videos to NFS-shared storage (`/data/shared` on server = `/mnt/shared`
+    on client). URIs are `file:///mnt/shared/...`. Browsers block `file://` from `http://` pages,
+    so the VC editor provides `/api/serve_media_file?url=<encoded>` as a binary proxy.
+    JS rewrites `file://` URLs to this proxy before setting `img.src` / `vid.src`.
+
+16. **Media server is a separate deployment**
+    Runs on NFS server (`192.168.86.33:8200`), separate from VC editor (`192.168.86.40:8080`).
+    They communicate via HTTP. `MEDIA_SERVER_URL` env var on the VC editor configures the
+    connection. The media server has its own `requirements.txt` (`code/media/http/requirements.txt`)
+    and is self-contained — does NOT depend on `requirements_linux.txt`.
+
+17. **Pipeline hard stops use exit 0, not exit 1**
+    The Stage 5 and Stage 9 checkpoints are clean pauses, not errors. `exit 0` ensures the pipeline
+    reports success to the caller. The user manually resumes with `./run.sh <ep_dir> 6` or
+    `./run.sh <ep_dir> 10`. Do NOT change to `exit 1` — that would cause the SSE stream to report
+    a failure to the web UI.
+
+18. **Media server requirements are self-contained**
+    `code/media/http/requirements.txt` lists all deps (fastapi, uvicorn, open_clip_torch,
+    opencv-python-headless, imagehash, etc.). Install torch CPU first:
+    `pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`
+    then `pip install -r code/media/http/requirements.txt`.
+    `requirements_linux.txt` does NOT include media server deps — they are separate deployments.

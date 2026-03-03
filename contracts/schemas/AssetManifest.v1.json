@@ -100,6 +100,92 @@
             "type": "string",
             "description": "Detailed text-to-image generation prompt"
           },
+          "search_queries": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "maxItems": 4,
+            "description": "2–4 diverse query variant strings for multi-query rotation in the media search service. Each query is issued independently; results are deduplicated before trimming to n."
+          },
+          "source_filters": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Per-source native API filter parameters. Keys are source names ('pexels', 'pixabay'). Values are dicts of API params that override the media server's always-on defaults.",
+            "properties": {
+              "pexels":  { "type": "object", "additionalProperties": true,
+                           "description": "Pexels API params: color, orientation, size, locale" },
+              "pixabay": { "type": "object", "additionalProperties": true,
+                           "description": "Pixabay API params: category, editors_choice, colors, order" }
+            }
+          },
+          "scoring_hints": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Per-dimension CLIP scoring hints. Each dimension is a list of descriptive text phrases. The media scorer computes CLIP similarity for each phrase and takes the max per dimension.",
+            "properties": {
+              "subjects":    { "type": "array", "items": { "type": "string" } },
+              "environment": { "type": "array", "items": { "type": "string" } },
+              "style":       { "type": "array", "items": { "type": "string" } },
+              "motion":      { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "cinematic_role": {
+            "type": "string",
+            "enum": ["establish", "hold", "transition", "emotional_support", "atmosphere"],
+            "description": "How this background functions cinematically. Adjusts scorer weight profile: establish→boost environment; hold→boost subjects; transition→boost motion; emotional_support→boost style; atmosphere→boost environment+style."
+          },
+          "motion_level": {
+            "type": "string",
+            "enum": ["none", "very_low", "low", "medium", "high"],
+            "description": "Expected amount of visual motion in the background. Maps to a calmness pre-filter threshold: none/very_low=strict (static preferred), medium/high=relaxed (video with movement OK)."
+          },
+          "lighting": {
+            "type": "string",
+            "enum": ["soft_night", "low_key_soft", "warm_dawn", "diffused_daylight", "bright_open", "dramatic"],
+            "description": "Desired lighting quality. Injected as an extra style CLIP sub-prompt during scoring."
+          },
+          "include_keywords": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Terms that MUST appear in asset metadata/tags. Used as post-search filter. Keep short (2–5 terms)."
+          },
+          "exclude_keywords": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Terms that must NOT appear in asset metadata/tags. Used as hard-exclude post-search filter."
+          },
+          "continuity_hints": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Shot continuity / sequence ranking hints for the DP sequence ranker. All sub-fields optional. Items sharing the same group_id are ranked jointly to minimise inter-shot visual discontinuity.",
+            "properties": {
+              "group_id": {
+                "type": "string",
+                "description": "Shared identifier for a sequence of shots that should look visually consistent. Items without group_id are treated as singletons."
+              },
+              "palette_target": {
+                "type": "string",
+                "enum": ["warm_amber", "cool_blue", "earthy_brown", "desaturated_grey", "deep_green", "none"],
+                "description": "Dominant hue hint for colour-continuity scoring."
+              },
+              "motion_budget": {
+                "type": "string",
+                "enum": ["none", "very_low", "low", "medium", "high"],
+                "description": "How much motion is acceptable in the sequence."
+              },
+              "camera_energy": {
+                "type": "string",
+                "enum": ["locked", "gentle_drift", "active", "handheld"],
+                "description": "Expected camera movement for the sequence."
+              },
+              "allowed_shift": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Maximum allowed hue-histogram L1 distance between consecutive shots in the group (0.0–1.0, default 0.4)."
+              }
+            }
+          },
           "motion": {
             "$ref": "#/$defs/MotionIntent"
           }

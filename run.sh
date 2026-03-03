@@ -169,9 +169,18 @@ run_stage_10() {
       --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
 
     echo "  [5/8] Resolving asset file paths…"
+    # Pass --selections when the VC editor has saved stock media choices.
+    # resolve_assets.py also auto-detects this file, but being explicit here
+    # makes the intent clear in the log output.
+    _sel_arg=""
+    if [[ -f "${EP_DIR}/assets/media/selections.json" ]]; then
+      _sel_arg="--selections ${EP_DIR}/assets/media/selections.json"
+      echo "         (using stock media selections from VC editor)"
+    fi
     python3 "${code_dir}/resolve_assets.py" \
       --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
-      --out      "${EP_DIR}/AssetManifest.media.${locale}.json"
+      --out      "${EP_DIR}/AssetManifest.media.${locale}.json" \
+      ${_sel_arg}
 
     echo "  [6/8] Building per-shot render plan…"
     # Phase 2 — Timeline Lock: floor locale shot durations to EN reference
@@ -393,6 +402,58 @@ for N in 1 2 3 4 5 6 7 8 9; do
     fi
 
     fill_and_run "$N"
+
+    # ── Hard stop after Stage 5: media selection checkpoint ────────────
+    # Stage 5 produces AssetManifest_draft.  Stage 10 needs
+    # assets/media/selections.json (written by the VC editor Media tab).
+    # If the user asked to continue past stage 5 but hasn't selected
+    # media yet, pause here so they can do that first.
+    if [[ "$N" -eq 5 && "$TO_STAGE" -gt 5 ]]; then
+      _sel_file="${EP_DIR}/assets/media/selections.json"
+      if [[ ! -f "$_sel_file" ]]; then
+        echo ""
+        echo "══════════════════════════════════════════════════════════════"
+        echo "  ⏸  PAUSED after Stage 5 — media selections required"
+        echo ""
+        echo "  AssetManifest_draft is ready.  Open the VC editor:"
+        echo "    1. Go to the 🖼 Media tab"
+        echo "    2. Select this episode and click Search Media"
+        echo "    3. Choose images/videos for each background"
+        echo "    4. Click ✔ Confirm Selections"
+        echo ""
+        echo "  Then resume the pipeline:"
+        echo "    ./run.sh ${EP_DIR} 6"
+        echo "══════════════════════════════════════════════════════════════"
+        exit 0
+      else
+        echo "  ✓ Media selections found: $_sel_file"
+      fi
+    fi
+
+    # ── Hard stop after Stage 9: pre-render checkpoint ─────────────────
+    # All LLM stages are done.  Pause before the (potentially long)
+    # Stage 10 render so the user can review artefacts first.
+    if [[ "$N" -eq 9 && "$TO_STAGE" -gt 9 ]]; then
+      _sel_file="${EP_DIR}/assets/media/selections.json"
+      echo ""
+      echo "══════════════════════════════════════════════════════════════"
+      echo "  ⏸  PAUSED after Stage 9 — ready to render"
+      echo ""
+      echo "  All LLM stages complete.  Before rendering, verify:"
+      if [[ ! -f "$_sel_file" ]]; then
+        echo "    ⚠  No media selections found — Stage 10 will lack stock media"
+      else
+        echo "    ✓  Media selections: $_sel_file"
+      fi
+      echo "    •  AssetManifest_final.*   — asset manifest"
+      echo "    •  RenderPlan.*            — render plan"
+      echo ""
+      echo "  To render:"
+      echo "    ./run.sh ${EP_DIR} 10"
+      echo "══════════════════════════════════════════════════════════════"
+      exit 0
+    fi
+
   fi
 done
 

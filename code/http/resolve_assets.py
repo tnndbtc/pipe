@@ -47,6 +47,7 @@ PIPE_DIR = Path(__file__).resolve().parent.parent.parent
 PRODUCER = "resolve_assets.py"
 DETERMINISTIC_TS = "1970-01-01T00:00:00Z"
 IMAGE_EXTS = ["png", "jpg", "webp", "gif"]
+VIDEO_EXTS = ["mp4", "mov", "webm"]
 AUDIO_EXTS = ["wav", "mp3", "ogg"]
 
 # Map manifest license_type → SPDX identifier
@@ -136,6 +137,57 @@ def _resolved(
     }
 
 
+def _resolved_stock(
+    asset_id:   str,
+    file_path:  Path,
+    media_type: str,
+    source_url: str,
+) -> dict:
+    """
+    Item builder for stock media selected via the VC editor (Pexels / Pixabay).
+
+    Infers the provider from the filename prefix (pexels_* / pixabay_*) and
+    sets the appropriate license type:
+      pexels_*  → commercial_licensed  (Pexels license, free for commercial use)
+      pixabay_* → CC0                  (Pixabay Content License)
+    """
+    name = file_path.name.lower()
+    if name.startswith("pexels"):
+        provider     = "pexels"
+        license_type = "commercial_licensed"
+    elif name.startswith("pixabay"):
+        provider     = "pixabay"
+        license_type = "CC0"
+    else:
+        provider     = "stock"
+        license_type = "commercial_licensed"
+    spdx_id = SPDX_MAP.get(license_type, "NOASSERTION")
+    return {
+        "asset_id":       asset_id,
+        "asset_type":     "background",
+        "uri":            file_path.as_uri(),
+        "is_placeholder": False,
+        "metadata": {
+            "license_type":       license_type,
+            "attribution":        source_url,
+            "purchase_record":    "",
+            "provider_or_model":  provider,
+            "retrieval_date":     DETERMINISTIC_TS,
+        },
+        "rights_warning": "",
+        "source":  {"type": "stock", "provider": provider, "url": source_url},
+        "license": {
+            "spdx_id":             spdx_id,
+            # Pixabay requires attribution in some commercial contexts
+            "attribution_required": provider == "pixabay",
+            "text":                "",
+        },
+        "schema_id":      "urn:media:resolved-asset",
+        "schema_version": "1.0.0",
+        "producer":       PRODUCER,
+    }
+
+
 def _placeholder(asset_id: str, asset_type: str) -> dict:
     return {
         "asset_id":       asset_id,
@@ -162,11 +214,66 @@ def _placeholder(asset_id: str, asset_type: str) -> dict:
     }
 
 
+# ── Selections loader ─────────────────────────────────────────────────────────
+
+def _load_selections(selections_path: Path) -> dict[str, dict]:
+    """
+    Parse selections.json written by the VC editor.
+
+    Returns a flat dict:
+        { asset_id → { media_type, abs_path, url, score } }
+
+    The path in selections.json is relative to the batch directory
+    (assets/media/<batch_id>/), so we reconstruct the absolute path
+    as  selections_path.parent / batch_id / rel_path.
+    """
+    try:
+        with open(selections_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"  [WARN] Could not load {selections_path}: {exc}", file=sys.stderr)
+        return {}
+
+    batch_id  = data.get("batch_id", "")
+    batch_dir = selections_path.parent / batch_id if batch_id else None
+
+    out: dict[str, dict] = {}
+    for asset_id, entry in data.get("selections", {}).items():
+        url      = entry.get("url", "")
+        rel_path = entry.get("path", "")
+
+        if url.startswith("file://"):
+            # file transport: URL IS the authoritative path on this machine.
+            # file:///mnt/shared/…/img.jpg  →  Path("/mnt/shared/…/img.jpg")
+            abs_path = Path(url[len("file://"):]).resolve()
+        elif rel_path and batch_dir:
+            # http transport: reconstruct path from batch_dir + rel_path
+            abs_path = (batch_dir / rel_path).resolve()
+        else:
+            continue
+
+        out[asset_id] = {
+            "media_type": entry.get("media_type") or entry.get("type", "image"),
+            "abs_path":   abs_path,
+            "url":        url,
+            "score":      entry.get("score"),
+        }
+    return out
+
+
 # ── Main resolver ─────────────────────────────────────────────────────────────
 
-def resolve_all(merged: dict, assets_root: Path) -> list[dict]:
+def resolve_all(
+    merged:     dict,
+    assets_root: Path,
+    selections: dict | None = None,
+) -> list[dict]:
     """
     Walk all asset types in the merged manifest and probe the filesystem.
+
+    selections — optional dict loaded from selections.json by _load_selections().
+                 When present, stock media chosen via the VC editor takes priority
+                 over the regular filesystem scan for background assets.
 
     Returns a list of ResolvedAsset dicts (file:// or placeholder://).
     """
@@ -201,16 +308,37 @@ def resolve_all(merged: dict, assets_root: Path) -> list[dict]:
             n_missing += 1
 
     # ── 2. Backgrounds ───────────────────────────────────────────────────────
-    # Search order (project-level wins so all episodes share the same backgrounds):
-    #   1. projects/{project_id}/backgrounds/  (project-level, shared — FIRST)
-    #   2. assets/{asset_id}.ext              (episode-level root)
-    #   3. assets/backgrounds/{asset_id}.ext  (episode-level backgrounds subdir)
+    # Resolution priority:
+    #   0. User-selected stock media (selections.json)  — highest, skips fs scan
+    #   1. projects/{project_id}/backgrounds/           (project-level, shared — FIRST)
+    #   2. assets/{asset_id}.ext                        (episode-level root)
+    #   3. assets/backgrounds/{asset_id}.ext            (episode-level backgrounds subdir)
+    #
+    # Filesystem scan now includes VIDEO_EXTS so downloaded stock clips that
+    # were placed manually in the assets tree are also discovered.
     proj_bg_dir = PIPE_DIR / "projects" / project_id / "backgrounds"
-    bg_search = [proj_bg_dir, assets_root, assets_root / "backgrounds"]
+    bg_search   = [proj_bg_dir, assets_root, assets_root / "backgrounds"]
     for bg in merged.get("backgrounds", []):
         aid = bg.get("asset_id") or bg["item_id"]
         lt  = bg.get("license_type", "proprietary_cleared")
-        f   = search_dirs(bg_search, aid, IMAGE_EXTS + AUDIO_EXTS)
+
+        # 0. User selection from VC editor (highest priority)
+        if selections and aid in selections:
+            sel      = selections[aid]
+            abs_path = sel["abs_path"]
+            if abs_path.is_file():
+                items.append(_resolved_stock(
+                    aid, abs_path,
+                    sel.get("media_type", "image"),
+                    sel.get("url", ""),
+                ))
+                n_found += 1
+                continue
+            print(f"  [WARN] Selection for {aid!r} not found on disk: {abs_path}")
+            # fall through to filesystem scan
+
+        # 1-3. Filesystem scan (images, videos, audio)
+        f = search_dirs(bg_search, aid, IMAGE_EXTS + VIDEO_EXTS + AUDIO_EXTS)
         if f:
             items.append(_resolved(aid, "background", f, lt))
             n_found += 1
@@ -309,6 +437,12 @@ File path conventions (relative to --assets-root):
              "next to the input manifest.",
     )
     p.add_argument(
+        "--selections", default=None, metavar="PATH",
+        help="Path to selections.json written by the VC editor Media tab. "
+             "When present, user-chosen stock media (Pexels / Pixabay) takes "
+             "priority over the regular filesystem scan for background assets.",
+    )
+    p.add_argument(
         "--strict", action="store_true",
         help="Exit 1 if any asset is a placeholder (useful in CI).",
     )
@@ -353,16 +487,31 @@ def main() -> None:
     if not assets_root.is_dir():
         print(f"[WARN] assets-root does not exist: {assets_root} — all assets will be placeholders")
 
+    # Load optional user-selections (stock media chosen via VC editor)
+    selections: dict | None = None
+    if args.selections:
+        sel_path   = Path(args.selections).resolve()
+        selections = _load_selections(sel_path)
+    else:
+        # Auto-detect: look for selections.json in episode_dir/assets/media/
+        auto_sel = episode_dir / "assets" / "media" / "selections.json"
+        if auto_sel.exists():
+            selections = _load_selections(auto_sel)
+
+    n_selections = len(selections) if selections else 0
+
     print("=" * 60)
     print("  resolve_assets")
     print(f"  Manifest    : {manifest_path.name}")
     print(f"  Locale      : {locale}")
     print(f"  Assets root : {assets_root}")
+    print(f"  Selections  : {n_selections} item(s) from VC editor"
+          if n_selections else "  Selections  : none")
     print(f"  Output      : {out_path}")
     print("=" * 60)
 
     # Resolve
-    items = resolve_all(merged, assets_root)
+    items = resolve_all(merged, assets_root, selections)
 
     # Build output document
     output = {

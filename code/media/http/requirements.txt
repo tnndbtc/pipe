@@ -1,0 +1,37 @@
+# =============================================================================
+# Media Search & Rating Service — code/media/http/
+# =============================================================================
+#
+# Self-contained: install only this file to run the media server.
+# Does NOT depend on ../../requirements_linux.txt.
+#
+# INSTALL (run in this order):
+#
+#   Step 1 — PyTorch CPU-only build (much smaller than the default CUDA wheel)
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#
+#   Step 2 — everything else
+#     pip install -r code/media/http/requirements.txt
+#
+# =============================================================================
+
+
+# --- HTTP server -------------------------------------------------------------
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
+# --- HTTP client + image I/O -------------------------------------------------
+requests>=2.31.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# --- CLIP scoring ------------------------------------------------------------
+# torch must be installed first via Step 1 above (CPU-only wheel)
+open_clip_torch>=2.24.0
+
+# --- Image processing + HOG person detection ---------------------------------
+# Use headless variant — no display deps needed on a server
+opencv-python-headless>=4.8.0
+
+# --- Perceptual hashing (deduplication + diversity pass) ---------------------
+imagehash

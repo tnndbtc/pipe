@@ -97,10 +97,136 @@ license_type for all entries: "proprietary_cleared"
   "female"  — character is female
   "neutral" — non-human, disembodied voice, or deliberately ambiguous
 
-**search_prompt** (5–10 keywords for free library image search):
+#### ID alignment rule (CRITICAL)
+
+The `asset_id` of each background entry MUST be identical to the `background_id`
+from the ShotList. These IDs are used as lookup keys throughout the pipeline.
+Never rename, abbreviate, or reformat them.
+
+**search_prompt** (single string, 5–10 keywords — kept as fallback):
   Derive from character role / scene location and period.
 
-**search_filters** (metadata criteria):
+**search_queries** (backgrounds ONLY — array of 2–4 query variant strings):
+  Diverse phrasings that approach the same visual concept from different angles.
+  Vary vocabulary, level of detail, and descriptive focus so that hitting
+  different search indices is likely. Example:
+  ```json
+  "search_queries": [
+    "ancient Egyptian temple interior golden light",
+    "pharaoh throne room ornate columns",
+    "hieroglyphic stone walls torchlight",
+    "Egyptian palace interior dramatic"
+  ]
+  ```
+
+**source_filters** (backgrounds ONLY — per-source API native filter dict):
+  Keyed by source name. Include only the sources whose parameters are relevant.
+  Allowed sources: "pexels", "pixabay".
+
+  Pexels fields:
+    color       : one of "red"|"orange"|"yellow"|"green"|"turquoise"|"blue"|
+                  "violet"|"pink"|"brown"|"black"|"gray"|"white"
+    orientation : "landscape" (always landscape for backgrounds)
+
+  Pixabay fields:
+    category        : one of "backgrounds"|"fashion"|"nature"|"science"|
+                      "education"|"feelings"|"health"|"people"|"religion"|
+                      "places"|"animals"|"industry"|"computer"|"food"|
+                      "sports"|"transportation"|"travel"|"buildings"|
+                      "business"|"music"
+    editors_choice  : true = restrict to higher-quality curated results;
+                      false = include all results
+
+  Example:
+  ```json
+  "source_filters": {
+    "pexels":  {"color": "orange", "orientation": "landscape"},
+    "pixabay": {"category": "places", "editors_choice": false}
+  }
+  ```
+
+**scoring_hints** (backgrounds ONLY — per-dimension CLIP scoring hints):
+  Dict with four string-list dimensions used during multi-dimensional CLIP
+  similarity scoring to surface the best-matching assets.
+    subjects    : concrete objects / subjects that should be visible
+    environment : surrounding space, walls, surfaces, atmosphere descriptors
+    style       : photographic style, lighting quality, cinematography keywords
+    motion      : movement descriptor for preferred clip motion level
+
+  Example:
+  ```json
+  "scoring_hints": {
+    "subjects":    ["ancient Egyptian sarcophagus", "ornate golden death mask", "pharaoh statue"],
+    "environment": ["dark chamber stone walls", "underground burial vault", "flickering torch shadows"],
+    "style":       ["cinematic photography", "moody dramatic lighting", "high contrast"],
+    "motion":      ["completely still", "no movement", "static scene"]
+  }
+  ```
+
+**cinematic_role** (backgrounds ONLY):
+  One of: "establish" | "hold" | "transition" | "emotional_support" | "atmosphere"
+    "establish"        — introduces a location (wide establishing shot)
+    "hold"             — stays on a character or object for extended time
+    "transition"       — brief shot between two scenes
+    "emotional_support"— reinforces the emotional tone of the scene
+    "atmosphere"       — pure ambiance, no specific subject
+
+**motion_level** (backgrounds ONLY):
+  One of: "none" | "very_low" | "low" | "medium" | "high"
+  Indicates how much movement is desired in the background asset.
+    "none" / "very_low" — prefer static images
+    "low"               — subtle parallax or very gentle camera drift acceptable
+    "medium" / "high"   — video with visible movement preferred
+
+**lighting** (backgrounds ONLY):
+  One of: "soft_night" | "low_key_soft" | "warm_dawn" | "diffused_daylight" |
+          "bright_open" | "dramatic"
+  Describes the desired lighting quality for the background.
+
+**include_keywords** (backgrounds ONLY — hard-include post-filter terms):
+  Array of strings that MUST appear in asset metadata / tags for the result
+  to be accepted. Keep the list short (2–5 terms maximum).
+  Example: ["interior", "stone"]
+
+**exclude_keywords** (backgrounds ONLY — hard-exclude post-filter terms):
+  Array of strings that must NOT appear in asset metadata / tags.
+  Always include terms that would pollute results (modern items, people, etc.)
+  when they are inappropriate for the scene.
+  Example: ["modern", "people", "person", "car"]
+
+**continuity_hints** (backgrounds ONLY — shot continuity / sequence ranking hints):
+  Optional dict that lets the sequence ranker group related shots and optimise
+  the visual flow across them. All sub-fields are optional; omit the whole object
+  when a shot stands alone with no continuity requirement.
+
+  Sub-fields:
+    group_id        : string — Shared identifier for a sequence of shots that
+                      should look visually consistent (e.g. all shots inside the
+                      tomb form one group). The sequence ranker uses DP to pick
+                      one candidate per item that minimises inter-shot discontinuity.
+                      Items without a group_id are treated as singletons.
+    palette_target  : string — Dominant hue hint for colour-continuity scoring.
+                      Values: "warm_amber" | "cool_blue" | "earthy_brown" |
+                              "desaturated_grey" | "deep_green" | "none"
+    motion_budget   : string — How much motion is acceptable in the sequence.
+                      Values: "none" | "very_low" | "low" | "medium" | "high"
+    camera_energy   : string — Expected camera movement for the sequence.
+                      Values: "locked" | "gentle_drift" | "active" | "handheld"
+    allowed_shift   : number — Maximum allowed hue-histogram L1 distance between
+                      consecutive shots in the group (0.0–1.0, default 0.4).
+
+  Example:
+  ```json
+  "continuity_hints": {
+    "group_id":      "tomb-interior",
+    "palette_target": "warm_amber",
+    "motion_budget":  "none",
+    "camera_energy":  "locked",
+    "allowed_shift":  0.3
+  }
+  ```
+
+**search_filters** (metadata criteria — still required; used for min_width etc.):
 
   Backgrounds (static):
     orientation : "landscape"
@@ -134,6 +260,55 @@ license_type for all entries: "proprietary_cleared"
 **ai_prompt** (detailed text-to-image prompt):
   Include: period, appearance, lighting, mood, style.
   Use the full story context from episode_direction.txt.
+
+#### Example — fully-populated background entry
+
+```json
+{
+  "asset_id"         : "bg-throne-room",
+  "description"      : "Pharaoh's opulent throne room, torchlight, ornate columns",
+  "search_prompt"    : "ancient Egyptian throne room torchlight columns ornate",
+  "search_queries"   : [
+    "ancient Egyptian throne room golden torchlight",
+    "pharaoh palace interior ornate stone columns",
+    "hieroglyphic carved walls flickering fire",
+    "Egyptian palace chamber dramatic cinematic"
+  ],
+  "source_filters"   : {
+    "pexels":  {"color": "orange", "orientation": "landscape"},
+    "pixabay": {"category": "buildings", "editors_choice": true}
+  },
+  "scoring_hints"    : {
+    "subjects":    ["throne", "ornate stone columns", "golden statues"],
+    "environment": ["large stone chamber", "warm torchlight", "painted hieroglyphic walls"],
+    "style":       ["cinematic photography", "warm dramatic lighting", "high contrast"],
+    "motion":      ["completely still", "no movement", "static scene"]
+  },
+  "cinematic_role"   : "establish",
+  "motion_level"     : "none",
+  "lighting"         : "dramatic",
+  "include_keywords" : ["interior", "stone", "ancient"],
+  "exclude_keywords" : ["modern", "people", "person", "car", "neon"],
+  "continuity_hints" : {
+    "group_id":       "throne-room-sequence",
+    "palette_target": "warm_amber",
+    "motion_budget":  "none",
+    "camera_energy":  "locked",
+    "allowed_shift":  0.3
+  },
+  "ai_prompt"        : "Wide shot of an ancient Egyptian pharaoh's throne room. Massive stone columns carved with golden hieroglyphics flank a central aisle leading to an elevated throne. Warm orange torchlight casts dramatic shadows. Cinematic photography, moody atmosphere, 4K ultra-detailed.",
+  "search_filters"   : {
+    "orientation" : "landscape",
+    "media_type"  : "photo",
+    "min_width"   : 1920,
+    "min_height"  : 1080,
+    "color_mood"  : "warm",
+    "category"    : "buildings"
+  },
+  "license_type"     : "proprietary_cleared",
+  "motion"           : null
+}
+```
 
 **motion** (null for static; object for animated):
   Backgrounds: { "type": "camera", "description": "...", "participants": [],

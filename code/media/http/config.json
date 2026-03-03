@@ -1,0 +1,93 @@
+{
+  "_comment": "Media Search & Rating Service — code/media/http/server.py",
+
+  "_comment_keys": [
+    "API KEYS — never stored here. Set as environment variables before starting:",
+    "  export MEDIA_API_KEY=<server auth key>   # required — used in X-Api-Key header",
+    "  export PEXELS_API_KEY=<pexels key>       # required when 'pexels' is in sources",
+    "  export PIXABAY_API_KEY=<pixabay key>     # required when 'pixabay' is in sources",
+    "The server will print ERROR and exit at startup if any required key is missing."
+  ],
+
+  "host":          "0.0.0.0",
+  "port":          8200,
+
+  "_comment_transport": [
+    "TRANSPORT MODES",
+    "",
+    "http (default) — media server streams files via GET /files/{path}.",
+    "  base_url: public URL of this server, e.g. http://192.168.1.10:8200",
+    "            leave empty to return relative /files/… paths.",
+    "  file_mount_root: unused in http mode.",
+    "",
+    "file (NFS/shared mount) — files are on a shared filesystem visible to",
+    "  both the media server and the VC editor / pipeline runner machine.",
+    "  No HTTP file serving is needed; all tools read directly via file://.",
+    "",
+    "  projects_root  : path to the shared directory AS SEEN FROM THIS SERVER.",
+    "                   e.g. /mnt/nfs/projects  or  /srv/shared/projects",
+    "  file_mount_root: same shared directory AS SEEN FROM THE VC EDITOR machine.",
+    "                   e.g. /mnt/nfs/projects  (identical if same mount point)",
+    "                        /Volumes/nfs/projects  (macOS example)",
+    "  The server saves downloads to projects_root; the returned file:// URLs",
+    "  use file_mount_root so the VC editor and resolve_assets.py can open",
+    "  the files directly without any HTTP round-trip.",
+    "",
+    "  This deployment:",
+    "    NFS server (media server) : 192.168.86.33  — data lives at /data/shared",
+    "    NFS client (VC editor)    : 192.168.86.40  — mounted at /mnt/shared",
+    "    projects_root  : /data/shared      (server-side path, files are written here)",
+    "    file_mount_root: /mnt/shared       (client-side path, file:// URLs use this)",
+    "    transport      : file",
+    "    base_url       : (empty)"
+  ],
+
+  "base_url":      "",
+  "projects_root": "/data/shared",
+  "cache_ttl_days": 7,
+
+  "candidates_per_source_image": 15,
+  "candidates_per_source_video": 5,
+  "max_candidates_per_item":     40,
+
+  "sources":          ["pexels", "pixabay"],
+
+  "clip_model":      "ViT-B-32",
+  "clip_pretrained": "laion2b_s34b_b79k",
+
+  "transport":       "file",
+  "file_mount_root": "/mnt/shared",
+
+  "rate_limits": {
+    "pexels":  { "max_concurrent": 2, "delay_ms_min": 200, "delay_ms_max": 600 },
+    "pixabay": { "max_concurrent": 2, "delay_ms_min": 300, "delay_ms_max": 600 }
+  },
+  "retry_on_429":    true,
+  "backoff_seconds": [5, 15, 45],
+
+  "score_weights": {
+    "clip":     0.75,
+    "calmness": 0.25
+  },
+
+  "content_profile": "default",
+
+  "scoring_profiles": {
+    "default":     {"subjects": 0.40, "environment": 0.25, "style": 0.20, "motion": 0.10, "technical": 0.05},
+    "sleep_story": {"subjects": 0.20, "environment": 0.40, "style": 0.25, "motion": 0.05, "technical": 0.10},
+    "documentary": {"subjects": 0.45, "environment": 0.20, "style": 0.15, "motion": 0.15, "technical": 0.05},
+    "action":      {"subjects": 0.35, "environment": 0.15, "style": 0.20, "motion": 0.25, "technical": 0.05}
+  },
+
+  "thumbnail_filters": {
+    "min_luma":              0.05,
+    "max_luma":              0.85,
+    "min_contrast":          0.05,
+    "max_edge_density":      0.15,
+    "max_person_score":      0.05,
+    "person_flag_threshold": 0.015
+  },
+
+  "phash_dedup_threshold":     8,
+  "diversity_phash_threshold": 12
+}

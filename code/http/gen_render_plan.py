@@ -182,10 +182,23 @@ def build_shot(
     dur_sec  = override_map.get(shot_id, base_dur)
     duration_ms = round(dur_sec * 1000)
 
-    # background_asset_id — direct match (ShotList.background_id == media asset_id)
+    # background_asset_id + background_media_type
+    # background_media_type tells the renderer whether to loop a still image
+    # or play (and optionally loop) a video clip.
     bg_id = shot.get("background_id")
     bg_media = media_map.get(bg_id) if bg_id else None
     background_asset_id = bg_media["asset_id"] if bg_media else None
+
+    background_media_type: str | None = None
+    if bg_media:
+        uri = bg_media.get("uri", "")
+        # Strip scheme (file://, placeholder://, http://) to get the path
+        path_part = uri.split("://", 1)[-1] if "://" in uri else uri
+        ext = Path(path_part).suffix.lower()
+        if ext in {".mp4", ".mov", ".webm", ".mkv"}:
+            background_media_type = "video"
+        elif ext in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            background_media_type = "image"
 
     # character_asset_ids — ShotList character_id matches character_packs asset_id
     character_asset_ids: list[str] = []
@@ -340,14 +353,15 @@ def build_shot(
     # ── end EN reference floor ────────────────────────────────────────────────
 
     rendered: dict = {
-        "shot_id":              shot_id,
-        "scene_id":             scene_id,
-        "duration_ms":          duration_ms,
-        "background_asset_id":  background_asset_id,
-        "character_asset_ids":  character_asset_ids,
-        "vo_lines":             vo_lines,
-        "sfx_asset_ids":        sfx_asset_ids,
-        "music_asset_id":       music_asset_id,
+        "shot_id":                shot_id,
+        "scene_id":               scene_id,
+        "duration_ms":            duration_ms,
+        "background_asset_id":    background_asset_id,
+        "background_media_type":  background_media_type,   # "image" | "video" | None
+        "character_asset_ids":    character_asset_ids,
+        "vo_lines":               vo_lines,
+        "sfx_asset_ids":          sfx_asset_ids,
+        "music_asset_id":         music_asset_id,
     }
     rendered.update(music_extra)
     return rendered
@@ -618,7 +632,11 @@ def main() -> None:
            s["duration_ms"] > shotlist_dur_map.get(s["shot_id"], 0)
     ) if ref_dur_map else 0
 
+    n_bg_video = sum(1 for s in plan["shots"] if s.get("background_media_type") == "video")
+    n_bg_image = sum(1 for s in plan["shots"] if s.get("background_media_type") == "image")
+
     print(f"  RenderPlan shots     : {n_shots}")
+    print(f"  BG type — video      : {n_bg_video}  image: {n_bg_image}")
     print(f"  VO lines             : {n_vo_lines}")
     print(f"  Overflow shots       : {n_overflow}")
     print(f"  Ceiling applied      : {n_ceiling} shots  "

@@ -19,6 +19,16 @@
 
 
 # ---------------------------------------------------------------------------
+# Core / shared
+# ---------------------------------------------------------------------------
+requests>=2.31.0
+Pillow>=10.0.0
+numpy>=1.24.0
+# open_clip_torch and opencv are NOT listed here — they are only needed by the
+# media search service and live in code/media/http/requirements.txt instead.
+
+
+# ---------------------------------------------------------------------------
 # PyTorch CPU build
 # Listed here for reference; install via --index-url as shown above.
 # Plain `pip install torch` pulls a CUDA-bundled wheel (~2 GB) from PyPI;

@@ -27,6 +27,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote_plus
+import urllib.request as _urllib_req
 
 PORT     = 8000
 PIPE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (pipe/)
@@ -652,6 +653,126 @@ HTML = r"""<!DOCTYPE html>
   .toggle-wrap.render-hd .toggle-left  { color: var(--dim);  }
   .toggle-wrap.render-hd .toggle-right { color: #5b9bff; }
 
+  /* ── Media panel ── */
+  #panel-media {
+    flex: 1; overflow: hidden;
+    padding: 16px 24px 20px;
+    display: none; flex-direction: column; gap: 10px;
+  }
+  .media-toolbar {
+    flex-shrink: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  #media-ep-select {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text);
+    font-family: var(--mono); font-size: 0.80em;
+    padding: 5px 10px; cursor: pointer; flex: 1; max-width: 280px;
+  }
+  .media-cfg-input {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text);
+    font-family: var(--mono); font-size: 0.78em;
+    padding: 5px 10px; outline: none;
+  }
+  .media-cfg-input:focus { border-color: var(--gold); }
+  #media-btn-search {
+    background: var(--gold); color: #0d0d10; border: none;
+    border-radius: 6px; font-size: 0.82em; font-weight: 700;
+    padding: 6px 16px; cursor: pointer; transition: opacity .15s;
+    flex-shrink: 0;
+  }
+  #media-btn-search:hover  { opacity: 0.85; }
+  #media-btn-search:disabled { opacity: 0.4; cursor: not-allowed; }
+  .media-status-bar {
+    flex-shrink: 0; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 14px;
+    font-size: 0.82em; color: var(--dim);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .media-spinner {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: var(--gold);
+    animation: spin .7s linear infinite; flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .media-body {
+    flex: 1; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 14px;
+    padding-right: 2px;
+  }
+  .media-body::-webkit-scrollbar { width: 6px; }
+  .media-body::-webkit-scrollbar-track { background: transparent; }
+  .media-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .media-item-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px; flex-shrink: 0;
+  }
+  .media-item-header {
+    font-size: 0.87em; font-weight: 700; color: var(--gold); margin-bottom: 4px;
+  }
+  .media-item-prompt {
+    font-size: 0.76em; color: var(--dim); font-family: var(--mono);
+    margin-bottom: 10px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .media-section-label {
+    font-size: 0.72em; color: var(--dim); font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 8px;
+  }
+  .media-thumb-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .media-thumb {
+    position: relative; width: 160px; cursor: pointer;
+    border-radius: 6px; overflow: hidden;
+    border: 2px solid var(--border); transition: border-color .15s;
+    flex-shrink: 0;
+  }
+  .media-thumb:hover   { border-color: #5b9cf6; }
+  .media-thumb.selected { border-color: var(--gold); }
+  .media-thumb img,
+  .media-thumb video {
+    width: 160px; height: 90px; object-fit: cover; display: block;
+    background: #0a0a10;
+  }
+  .media-score-badge {
+    position: absolute; bottom: 4px; left: 4px;
+    background: #000000cc; color: #eee; font-size: 0.68em;
+    border-radius: 4px; padding: 2px 5px; font-family: var(--mono);
+    pointer-events: none;
+  }
+  .media-sel-badge {
+    position: absolute; top: 4px; right: 4px;
+    background: var(--gold); color: #0d0d10; font-size: 0.66em; font-weight: 700;
+    border-radius: 3px; padding: 2px 5px;
+    pointer-events: none; display: none;
+  }
+  .media-thumb.selected .media-sel-badge { display: block; }
+  .media-footer {
+    flex-shrink: 0; display: flex; align-items: center; gap: 12px; padding-top: 2px;
+  }
+  #media-btn-confirm {
+    background: var(--green); color: #0d0d10; border: none;
+    border-radius: 6px; font-size: 0.85em; font-weight: 700;
+    padding: 8px 20px; cursor: pointer; transition: opacity .15s;
+  }
+  #media-btn-confirm:hover    { opacity: 0.85; }
+  #media-btn-confirm:disabled { opacity: 0.4; cursor: not-allowed; }
+  #media-btn-reset {
+    background: #ffffff10; color: var(--dim);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 0.82em; padding: 7px 14px; cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  #media-btn-reset:hover { background: #ffffff1c; color: var(--text); }
+  #media-btn-apply-seq {
+    background: #2a3a5c; color: #7eb8f7;
+    border: 1px solid #3d5a8a; border-radius: 6px;
+    font-size: 0.82em; padding: 7px 16px; cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  #media-btn-apply-seq:hover { background: #364a70; color: #a8d0ff; }
+  #media-confirm-msg { font-size: 0.80em; }
+  .media-empty { color: var(--dim); font-style: italic; font-size: 0.83em; }
+
   /* ── Browse panel ── */
   #panel-browse {
     flex: 1; overflow: hidden;
@@ -1032,6 +1153,7 @@ HTML = r"""<!DOCTYPE html>
     <button class="tab active" data-tab="run"      onclick="switchTab('run')"     >▶ Run</button>
     <button class="tab"        data-tab="pipeline" onclick="switchTab('pipeline')">🎬 Pipeline</button>
     <button class="tab"        data-tab="browse"   onclick="switchTab('browse')"  >📁 Browse</button>
+    <button class="tab"        data-tab="media"    onclick="switchTab('media')"   >🖼 Media</button>
   </nav>
 
   <div class="toggle-wrap" id="toggle-render"
@@ -1242,6 +1364,38 @@ Direction    : …"></textarea>
     <button id="btn-refresh" onclick="loadProjects()">↺ Refresh</button>
   </div>
   <div id="browse-tree"><span class="browse-empty">Switch to this tab to load projects.</span></div>
+</div>
+
+<!-- ── Media panel ── -->
+<div id="panel-media">
+  <!-- toolbar row -->
+  <div class="media-toolbar">
+    <div class="section-label" style="margin-bottom:0">Media Search</div>
+    <select id="media-ep-select" onchange="onMediaEpChange()">
+      <option value="">— select episode —</option>
+    </select>
+    <input  id="media-server-url" class="media-cfg-input" type="text"
+            placeholder="Media server URL  e.g. http://localhost:8200"
+            value="{{MEDIA_SERVER_URL}}" />
+    <button id="media-btn-search" onclick="mediaStartSearch()" disabled>🔍 Search Media</button>
+  </div>
+
+  <!-- status / spinner -->
+  <div class="media-status-bar" id="media-status-bar">
+    <span id="media-status-text">Select an episode to begin.</span>
+    <span class="media-spinner" id="media-spinner"></span>
+  </div>
+
+  <!-- results body — item cards rendered here by JS -->
+  <div class="media-body" id="media-body"></div>
+
+  <!-- footer actions -->
+  <div class="media-footer" id="media-footer" style="display:none">
+    <span id="media-confirm-msg"></span>
+    <button id="media-btn-reset"     onclick="mediaReset()">↺ Reset</button>
+    <button id="media-btn-apply-seq" onclick="mediaApplyRecommended()" style="display:none">⚡ Apply Recommended Sequence</button>
+    <button id="media-btn-confirm"   onclick="mediaConfirm()">✔ Confirm Selections</button>
+  </div>
 </div>
 
 <!-- ── Pipeline panel ── -->
@@ -1677,7 +1831,9 @@ Direction    : …"></textarea>
     document.getElementById('panel-run').style.display      = name === 'run'      ? 'flex' : 'none';
     document.getElementById('panel-browse').style.display   = name === 'browse'   ? 'flex' : 'none';
     document.getElementById('panel-pipeline').style.display = name === 'pipeline' ? 'flex' : 'none';
+    document.getElementById('panel-media').style.display    = name === 'media'    ? 'flex' : 'none';
     if (name === 'browse')   loadProjects();
+    if (name === 'media')    initMediaTab();
     if (name === 'pipeline') {
       initPipelineTab();
       // Auto-refresh every 5 s while Pipeline tab is open
@@ -1694,6 +1850,376 @@ Direction    : …"></textarea>
       // Leaving Pipeline tab — stop auto-refresh
       if (_pipePoller) { clearInterval(_pipePoller); _pipePoller = null; }
     }
+  }
+
+  // ── Media tab ────────────────────────────────────────────────────────────────
+
+  let _mediaSlug           = null;
+  let _mediaEpId           = null;
+  let _mediaBatchId        = null;
+  let _mediaPollTimer      = null;
+  let _mediaResults        = null;   // full items dict from last completed batch
+  let _mediaItemIds        = [];     // ordered item IDs for confirm iteration
+  let _mediaRecommendedSeq = null;   // recommended_sequence from batch response
+  // selections: { item_id: { type:'image'|'video', url, path, score } }
+  let _mediaSelections = {};
+
+  // ── called once when tab is first activated ──
+  function initMediaTab() {
+    // Populate episode selector from list_projects (same as Pipeline tab)
+    if (document.getElementById('media-ep-select').options.length > 1) return;
+    fetch('/list_projects').then(r => r.json()).then(data => {
+      const sel = document.getElementById('media-ep-select');
+      (data.projects || []).forEach(proj => {
+        (proj.episodes || []).forEach(ep => {
+          const opt = document.createElement('option');
+          opt.value       = proj.slug + '|' + ep.id;
+          opt.textContent = proj.slug + ' / ' + ep.id;
+          sel.appendChild(opt);
+        });
+      });
+    }).catch(() => {});
+  }
+
+  function onMediaEpChange() {
+    const v = document.getElementById('media-ep-select').value;
+    if (!v) { _mediaSlug = null; _mediaEpId = null; return; }
+    [_mediaSlug, _mediaEpId] = v.split('|');
+    document.getElementById('media-btn-search').disabled = false;
+    _mediaSetStatus('Episode selected. Click Search Media to begin.');
+    // Try to load an existing completed batch
+    mediaLoadExisting();
+  }
+
+  function _mediaServerUrl() {
+    return (document.getElementById('media-server-url').value || 'http://localhost:8200').replace(/\/+$/, '');
+  }
+  function _mediaSetStatus(msg, spinning) {
+    document.getElementById('media-status-text').textContent = msg;
+    document.getElementById('media-spinner').style.display = spinning ? 'inline-block' : 'none';
+  }
+
+  // ── Start a new search batch ──
+  async function mediaStartSearch() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    const serverUrl = _mediaServerUrl();
+    _mediaSetStatus('Submitting batch …', true);
+    document.getElementById('media-btn-search').disabled = true;
+    document.getElementById('media-footer').style.display = 'none';
+    document.getElementById('media-body').innerHTML = '';
+    _mediaSelections = {};
+    _mediaBatchId    = null;
+    _mediaResults    = null;
+
+    try {
+      const r = await fetch('/api/media_batch', {
+        method:  'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ slug: _mediaSlug, ep_id: _mediaEpId,
+                               server_url: serverUrl }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || 'batch creation failed');
+      _mediaBatchId = d.batch_id;
+      _mediaSetStatus('Batch queued — polling for results …', true);
+      _mediaStartPolling();
+    } catch (err) {
+      _mediaSetStatus('Error: ' + err.message, false);
+      document.getElementById('media-btn-search').disabled = false;
+    }
+  }
+
+  // ── Poll loop ──
+  function _mediaStartPolling() {
+    if (_mediaPollTimer) clearInterval(_mediaPollTimer);
+    _mediaPollTimer = setInterval(_mediaPoll, 3000);
+    _mediaPoll();   // immediate first check
+  }
+
+  async function _mediaPoll() {
+    if (!_mediaBatchId) return;
+    const serverUrl = _mediaServerUrl();
+    try {
+      const r = await fetch(
+        '/api/media_batch_status?batch_id=' + encodeURIComponent(_mediaBatchId)
+        + '&server_url=' + encodeURIComponent(serverUrl));
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || 'poll failed');
+
+      if (d.status === 'done') {
+        clearInterval(_mediaPollTimer); _mediaPollTimer = null;
+        _mediaSetStatus('Done — ' + Object.keys(d.items || {}).length + ' items ranked.', false);
+        document.getElementById('media-btn-search').disabled = false;
+        _mediaResults        = d.items || {};
+        _mediaRecommendedSeq = d.recommended_sequence || null;
+        _mediaRenderResults(_mediaResults);
+      } else if (d.status === 'failed') {
+        clearInterval(_mediaPollTimer); _mediaPollTimer = null;
+        _mediaSetStatus('Batch failed: ' + (d.error || 'unknown'), false);
+        document.getElementById('media-btn-search').disabled = false;
+      } else {
+        _mediaSetStatus((d.progress || d.status) + ' …', true);
+      }
+    } catch (err) {
+      _mediaSetStatus('Poll error: ' + err.message, true);
+    }
+  }
+
+  // ── Render results grid ──
+  function _mediaRenderResults(items) {
+    const body = document.getElementById('media-body');
+    body.innerHTML = '';
+    _mediaItemIds = Object.keys(items);
+    _mediaSelections = {};
+
+    _mediaItemIds.forEach(itemId => {
+      const item   = items[itemId];
+      const card   = document.createElement('div');
+      card.className = 'media-item-card';
+      card.id = 'media-card-' + itemId;
+
+      const hdr = document.createElement('div');
+      hdr.className = 'media-item-header';
+      hdr.textContent = itemId;
+      card.appendChild(hdr);
+
+      const prompt = document.createElement('div');
+      prompt.className = 'media-item-prompt';
+      prompt.textContent = item.search_prompt || '';
+      card.appendChild(prompt);
+
+      // Images section
+      const imgs = item.images || [];
+      if (imgs.length) {
+        const lbl = document.createElement('div');
+        lbl.className = 'media-section-label';
+        lbl.textContent = 'Images';
+        card.appendChild(lbl);
+        const row = document.createElement('div');
+        row.className = 'media-thumb-row';
+        imgs.forEach((img, idx) => {
+          row.appendChild(_mediaThumb(itemId, 'image', img, idx));
+        });
+        card.appendChild(row);
+      }
+
+      // Videos section
+      const vids = item.videos || [];
+      if (vids.length) {
+        const lbl = document.createElement('div');
+        lbl.className = 'media-section-label';
+        lbl.textContent = 'Videos';
+        card.appendChild(lbl);
+        const row = document.createElement('div');
+        row.className = 'media-thumb-row';
+        vids.forEach((vid, idx) => {
+          row.appendChild(_mediaThumb(itemId, 'video', vid, idx));
+        });
+        card.appendChild(row);
+      }
+
+      if (!imgs.length && !vids.length) {
+        const empty = document.createElement('div');
+        empty.className = 'media-empty';
+        empty.textContent = item.error || 'No results found.';
+        card.appendChild(empty);
+      }
+
+      body.appendChild(card);
+    });
+
+    document.getElementById('media-footer').style.display = 'flex';
+    document.getElementById('media-confirm-msg').textContent = '';
+    // Show "Apply Recommended Sequence" button only if server computed one
+    const applyBtn = document.getElementById('media-btn-apply-seq');
+    applyBtn.style.display = _mediaRecommendedSeq ? 'inline-block' : 'none';
+  }
+
+  // ── Build a single thumbnail cell ──
+  function _mediaThumb(itemId, type, entry, idx) {
+    const wrap = document.createElement('div');
+    wrap.className = 'media-thumb';
+    wrap.dataset.itemId = itemId;
+    wrap.dataset.type   = type;
+    wrap.dataset.idx    = idx;
+
+    const score = typeof entry.score === 'number'
+                  ? entry.score.toFixed(3) : (entry.score || '');
+    const badge = document.createElement('span');
+    badge.className = 'media-score-badge';
+    badge.textContent = score;
+    wrap.appendChild(badge);
+
+    // Browsers cannot load file:// URLs from an http:// page.
+    // Route them through the VC editor's /api/serve_media_file proxy instead.
+    const rawUrl    = entry.url || '';
+    const displayUrl = rawUrl.startsWith('file://')
+        ? '/api/serve_media_file?url=' + encodeURIComponent(rawUrl)
+        : rawUrl;
+
+    if (type === 'image') {
+      const img    = document.createElement('img');
+      img.src      = displayUrl;
+      img.loading  = 'lazy';
+      img.alt      = 'rank ' + (idx + 1);
+      wrap.appendChild(img);
+    } else {
+      const vid    = document.createElement('video');
+      vid.src      = displayUrl;
+      vid.muted    = true;
+      vid.loop     = true;
+      vid.preload  = 'metadata';
+      vid.addEventListener('mouseenter', () => vid.play());
+      vid.addEventListener('mouseleave', () => { vid.pause(); vid.currentTime = 0; });
+      wrap.appendChild(vid);
+    }
+
+    // Store original URL as data attribute so mediaApplyRecommended() can match
+    wrap.dataset.url = entry.url || '';
+    wrap.addEventListener('click', () => mediaSelect(itemId, type, entry, wrap));
+    return wrap;
+  }
+
+  // ── Select / deselect a thumb ──
+  function mediaSelect(itemId, type, entry, wrapEl) {
+    // Remove previous selection badge for this item
+    const card = document.getElementById('media-card-' + itemId);
+    if (card) {
+      card.querySelectorAll('.media-thumb').forEach(t => t.classList.remove('selected'));
+      card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
+    }
+
+    // Check if clicking the already-selected item → deselect
+    if (_mediaSelections[itemId] && _mediaSelections[itemId].url === entry.url) {
+      delete _mediaSelections[itemId];
+      return;
+    }
+
+    _mediaSelections[itemId] = { media_type: type, url: entry.url || '',
+                                  path: entry.path || '', score: entry.score };
+    wrapEl.classList.add('selected');
+
+    const selBadge = document.createElement('span');
+    selBadge.className = 'media-sel-badge';
+    selBadge.textContent = '✔ ' + type;
+    wrapEl.appendChild(selBadge);
+  }
+
+  // ── Reset all selections ──
+  function mediaReset() {
+    _mediaSelections = {};
+    document.querySelectorAll('.media-thumb.selected').forEach(t => t.classList.remove('selected'));
+    document.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
+    document.getElementById('media-confirm-msg').textContent = '';
+  }
+
+  // ── Apply recommended sequence from server ──
+  function mediaApplyRecommended() {
+    if (!_mediaRecommendedSeq) return;
+    // Reset current selections first
+    mediaReset();
+    let applied = 0;
+    for (const [itemId, cand] of Object.entries(_mediaRecommendedSeq)) {
+      if (!cand || !cand.url) continue;
+      // Determine type from path extension
+      const ext = (cand.path || cand.url || '').split('.').pop().toLowerCase();
+      const type = ['mp4', 'mov', 'webm', 'mkv'].includes(ext) ? 'video' : 'image';
+      // Store selection
+      _mediaSelections[itemId] = {
+        media_type: type,
+        url:   cand.url  || '',
+        path:  cand.path || '',
+        score: cand.score || 0,
+      };
+      // Visually mark the matching thumb in the grid
+      const card = document.getElementById('media-card-' + itemId);
+      if (card) {
+        // Remove existing badge
+        card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
+        // Try to find the thumb that matches this URL and mark it selected
+        let matched = false;
+        card.querySelectorAll('.media-thumb').forEach(thumb => {
+          thumb.classList.remove('selected');
+          if (!matched && thumb.dataset.url === cand.url) {
+            thumb.classList.add('selected');
+            const badge = document.createElement('div');
+            badge.className = 'media-sel-badge';
+            badge.textContent = '✔';
+            thumb.appendChild(badge);
+            matched = true;
+          }
+        });
+        // If URL didn't match (e.g., first thumb is the recommendation), mark first
+        if (!matched) {
+          const first = card.querySelector('.media-thumb');
+          if (first) {
+            first.classList.add('selected');
+            const badge = document.createElement('div');
+            badge.className = 'media-sel-badge';
+            badge.textContent = '✔';
+            first.appendChild(badge);
+          }
+        }
+      }
+      applied++;
+    }
+    document.getElementById('media-confirm-msg').textContent =
+      '⚡ Applied recommended sequence for ' + applied + ' item(s).';
+  }
+
+  // ── Confirm and write selections.json ──
+  async function mediaConfirm() {
+    const nSelected = Object.keys(_mediaSelections).length;
+    if (nSelected === 0) {
+      document.getElementById('media-confirm-msg').textContent = 'Select at least one item first.';
+      return;
+    }
+    document.getElementById('media-btn-confirm').disabled = true;
+    document.getElementById('media-confirm-msg').textContent = 'Saving …';
+    try {
+      const r = await fetch('/api/media_confirm', {
+        method:  'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ slug: _mediaSlug, ep_id: _mediaEpId,
+                               batch_id: _mediaBatchId,
+                               selections: _mediaSelections }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || 'save failed');
+      document.getElementById('media-confirm-msg').textContent =
+        '✔ Saved ' + nSelected + ' selection(s) → ' + (d.path || 'selections.json');
+    } catch (err) {
+      document.getElementById('media-confirm-msg').textContent = 'Error: ' + err.message;
+    } finally {
+      document.getElementById('media-btn-confirm').disabled = false;
+    }
+  }
+
+  // ── Try to load the latest completed batch for the current episode ──
+  async function mediaLoadExisting() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    const serverUrl = _mediaServerUrl();
+    try {
+      const r = await fetch(
+        '/api/media_batches?slug=' + encodeURIComponent(_mediaSlug)
+        + '&ep_id='      + encodeURIComponent(_mediaEpId)
+        + '&server_url=' + encodeURIComponent(serverUrl));
+      const d = await r.json();
+      if (!r.ok || d.error) return;
+      const done = (d.batches || []).find(b => b.status === 'done');
+      if (!done) return;
+      // Load full results for this batch
+      _mediaBatchId = done.batch_id;
+      const r2 = await fetch(
+        '/api/media_batch_status?batch_id=' + encodeURIComponent(_mediaBatchId)
+        + '&server_url=' + encodeURIComponent(serverUrl));
+      const d2 = await r2.json();
+      if (!r2.ok || d2.error || d2.status !== 'done') return;
+      _mediaResults        = d2.items || {};
+      _mediaRecommendedSeq = d2.recommended_sequence || null;
+      _mediaSetStatus('Loaded existing batch ' + _mediaBatchId + '.', false);
+      _mediaRenderResults(_mediaResults);
+    } catch (_) {}
   }
 
   // ── Voice Cast editor ────────────────────────────────────────────────────────
@@ -4511,7 +5037,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # Serve UI
         if parsed.path == "/":
-            body = HTML.encode()
+            media_server_url = os.environ.get("MEDIA_SERVER_URL", "")
+            body = HTML.replace("{{MEDIA_SERVER_URL}}", media_server_url).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -5477,6 +6004,92 @@ Reply with JSON only — no text outside the object:
             self.end_headers()
             self.wfile.write(body)
 
+        # ── Media proxy: list batches for episode (GET /api/media_batches) ──────
+        elif parsed.path == "/api/media_batches":
+            params     = parse_qs(parsed.query)
+            slug       = params.get("slug",       [""])[0].strip()
+            ep_id      = params.get("ep_id",      [""])[0].strip()
+            server_url = params.get("server_url", ["http://localhost:8200"])[0].strip()
+            api_key    = os.environ.get("MEDIA_API_KEY", "")
+            if not slug or not ep_id:
+                body = json.dumps({"error": "slug and ep_id required"}).encode()
+                self.send_response(400)
+            else:
+                url = (server_url.rstrip("/") + "/batches"
+                       + f"?project={slug}&episode_id={ep_id}")
+                try:
+                    req  = _urllib_req.Request(url,
+                               headers={"X-Api-Key": api_key})
+                    with _urllib_req.urlopen(req, timeout=10) as resp:
+                        raw  = resp.read()
+                    body = json.dumps({"batches": json.loads(raw)}).encode()
+                    self.send_response(200)
+                except Exception as exc:
+                    body = json.dumps({"error": str(exc)}).encode()
+                    self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── Media proxy: poll batch status (GET /api/media_batch_status) ────────
+        elif parsed.path == "/api/media_batch_status":
+            params     = parse_qs(parsed.query)
+            batch_id   = params.get("batch_id",   [""])[0].strip()
+            server_url = params.get("server_url", ["http://localhost:8200"])[0].strip()
+            api_key    = os.environ.get("MEDIA_API_KEY", "")
+            if not batch_id:
+                body = json.dumps({"error": "batch_id required"}).encode()
+                self.send_response(400)
+            else:
+                url = server_url.rstrip("/") + "/batches/" + batch_id
+                try:
+                    req  = _urllib_req.Request(url,
+                               headers={"X-Api-Key": api_key})
+                    with _urllib_req.urlopen(req, timeout=10) as resp:
+                        body = resp.read()
+                    self.send_response(200)
+                except Exception as exc:
+                    body = json.dumps({"error": str(exc)}).encode()
+                    self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── NFS proxy: serve a file:// media file to the browser ─────────────
+        # Browsers cannot load file:// URLs from an http:// page.  When the
+        # media server is running in file transport mode (NFS), thumbnail URLs
+        # are file:///mnt/... URIs.  The JS routes them through this endpoint
+        # so the browser can display them without CORS / mixed-content errors.
+        #
+        # Safety: the file must exist and be a regular file.  No path-traversal
+        # is possible because we resolve and stat the path before opening it.
+        elif parsed.path == "/api/serve_media_file":
+            import mimetypes as _mimetypes
+            params   = parse_qs(parsed.query)
+            file_url = unquote_plus(params.get("url", [""])[0])
+            # Accept both file:///path and bare /path
+            if file_url.startswith("file://"):
+                file_path = file_url[len("file://"):]
+            else:
+                file_path = file_url
+            abs_path = os.path.realpath(file_path)
+            if not os.path.isfile(abs_path):
+                self.send_response(404)
+                self.end_headers()
+            else:
+                mime, _ = _mimetypes.guess_type(abs_path)
+                mime    = mime or "application/octet-stream"
+                with open(abs_path, "rb") as _mf:
+                    data = _mf.read()
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "max-age=3600")
+                self.end_headers()
+                self.wfile.write(data)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -5938,6 +6551,112 @@ Reply with JSON only — no text outside the object:
                 self.end_headers()
                 self.wfile.write(resp)
 
+        # ── Media proxy: start a new batch (POST /api/media_batch) ─────────────
+        elif self.path == "/api/media_batch":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+
+                slug       = payload.get("slug", "").strip()
+                ep_id      = payload.get("ep_id", "").strip()
+                server_url = (payload.get("server_url") or "http://localhost:8200").rstrip("/")
+                api_key    = os.environ.get("MEDIA_API_KEY", "")
+
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+
+                # Load AssetManifest_draft to pass backgrounds to media server
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                manifest_path = os.path.join(ep_dir, "AssetManifest_draft.shared.json")
+                if not os.path.isfile(manifest_path):
+                    raise FileNotFoundError(
+                        f"AssetManifest_draft.shared.json not found at {manifest_path}")
+                with open(manifest_path, encoding="utf-8") as _mf:
+                    manifest = json.load(_mf)
+
+                req_body = json.dumps({
+                    "project":    slug,
+                    "episode_id": ep_id,
+                    "manifest":   manifest,
+                    "top_n":      5,
+                }).encode()
+
+                url = server_url + "/batches"
+                req = _urllib_req.Request(
+                    url, data=req_body,
+                    headers={"X-Api-Key": api_key,
+                             "Content-Type": "application/json",
+                             "Content-Length": str(len(req_body))},
+                    method="POST",
+                )
+                with _urllib_req.urlopen(req, timeout=15) as resp:
+                    body = resp.read()
+                self.send_response(202)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── Media: write selections.json (POST /api/media_confirm) ───────────
+        elif self.path == "/api/media_confirm":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+
+                slug       = payload.get("slug", "").strip()
+                ep_id      = payload.get("ep_id", "").strip()
+                batch_id   = payload.get("batch_id", "").strip()
+                selections = payload.get("selections", {})
+
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                if not isinstance(selections, dict):
+                    raise ValueError("selections must be a dict")
+
+                ep_dir    = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                media_dir = os.path.join(ep_dir, "assets", "media")
+                os.makedirs(media_dir, exist_ok=True)
+
+                sel_path = os.path.join(media_dir, "selections.json")
+                out = {
+                    "batch_id":   batch_id,
+                    "slug":       slug,
+                    "episode_id": ep_id,
+                    "selections": selections,
+                }
+                with open(sel_path, "w", encoding="utf-8") as _sf:
+                    json.dump(out, _sf, indent=2, ensure_ascii=False)
+
+                rel_path = os.path.relpath(sel_path, PIPE_DIR)
+                print(f"  Saved media selections  slug={slug}  ep={ep_id}  "
+                      f"n={len(selections)}")
+                body = json.dumps({"ok": True,
+                                   "path": rel_path,
+                                   "n": len(selections)}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # Save episode metadata (title, genre, format, locales) → merge into meta.json
         elif self.path == "/api/save_episode_meta":
             try:
@@ -6000,7 +6719,10 @@ Reply with JSON only — no text outside the object:
                   "/api/vo_alignment",
                   "/api/check_slug", "/api/next_episode_id",
                   "/api/create_episode", "/api/save_episode_meta",
-                  "/api/diagnose_pipeline"}
+                  "/api/diagnose_pipeline",
+                  "/api/media_batches", "/api/media_batch_status",
+                  "/api/media_batch", "/api/media_confirm",
+                  "/api/serve_media_file"}
         if not any(path == s or path.startswith(s + "?") for s in silent):
             print(f"  {self.address_string()}  {fmt % args}")
 
