@@ -1725,6 +1725,23 @@ Direction    : …"></textarea>
     return { from: Math.max(0, from), to: Math.min(10, to) };
   }
 
+  // ── Cleanup on page unload (reload / navigate away) ──────────────────────
+  // Release all HTTP connections so the browser's per-host connection pool is
+  // clean.  Without this, reloading after a server restart hangs because the
+  // browser tries to reuse dead TCP sockets from the old server process.
+  window.addEventListener('beforeunload', function() {
+    // Close SSE streams (each holds a persistent HTTP connection)
+    if (es)         { try { es.close(); }         catch(_){} es = null; }
+    if (pipeStepEs) { try { pipeStepEs.close(); } catch(_){} pipeStepEs = null; }
+    // Stop polling timers (their in-flight fetches occupy connection slots)
+    if (_pipePoller)    { clearInterval(_pipePoller);    _pipePoller = null; }
+    if (_mediaPollTimer){ clearInterval(_mediaPollTimer); _mediaPollTimer = null; }
+    // Release video connections
+    if (typeof _mediaReleaseAllConnections === 'function') _mediaReleaseAllConnections();
+    // Stop voice-preview audio
+    if (_vcPlayingAudio) { _vcPlayingAudio.pause(); _vcPlayingAudio = null; }
+  });
+
   // ── Init ────────────────────────────────────────────────────────────────────
   window.addEventListener('DOMContentLoaded', async () => {
     await refreshNextNum();
@@ -1906,6 +1923,28 @@ Direction    : …"></textarea>
     document.getElementById('panel-browse').style.display   = name === 'browse'   ? 'flex' : 'none';
     document.getElementById('panel-pipeline').style.display = name === 'pipeline' ? 'flex' : 'none';
     document.getElementById('panel-media').style.display    = name === 'media'    ? 'flex' : 'none';
+
+    // ── Connection cleanup on tab switch ──
+    // HTTP/1.1 allows only 6 concurrent connections per host.  Free up slots
+    // by cleaning stale/unnecessary connections when switching tabs.
+
+    // Clear stale EventSource refs (already closed but not nulled)
+    if (es && es.readyState === 2) { es = null; }
+    if (pipeStepEs && pipeStepEs.readyState === 2) { pipeStepEs = null; }
+
+    // Leaving Media tab: stop any playing video to release its HTTP connection
+    if (name !== 'media' && _mediaPlayingVid) {
+      _mediaStopVid(_mediaPlayingVid);
+      _mediaPlayingVid = null;
+    }
+
+    // Stop voice-preview audio when leaving Run tab (releases audio HTTP connection)
+    if (name !== 'run' && _vcPlayingAudio) {
+      _vcPlayingAudio.pause();
+      _vcPlayingAudio.src = '';   // abort download
+      _vcPlayingAudio = null;
+    }
+
     if (name === 'browse')   loadProjects();
     if (name === 'media')    initMediaTab();
     if (name === 'pipeline') {
@@ -1941,14 +1980,34 @@ Direction    : …"></textarea>
   let _mediaShotMap = null;  // { bg_id: [shot_id, ...] } or null if ShotList unavailable
   let _mediaShotDur = null;  // { shot_id: duration_sec } — flat lookup for shot durations
   let _mediaActiveShot = {}; // { itemId: shot_id } — which shot row is active (target) per card
+  var _mediaPlayingVid = null; // currently playing video element (limit 1 active stream)
+
+  // Stop a video and release its HTTP connection (pause alone doesn't close it).
+  function _mediaStopVid(vid) {
+    vid.pause();
+    vid.currentTime = 0;
+    // Save the current src so we can restore the thumbnail poster later
+    var s = vid.src;
+    // Fully abort the download: remove src and call load() to release the connection.
+    // IMPORTANT: do NOT re-set vid.src here — per HTML spec, setting .src always
+    // triggers the media element load algorithm, opening a new HTTP connection
+    // even when preload='none'. Instead, store the URL in dataset for lazy re-load.
+    vid.removeAttribute('src');
+    vid.load();
+    vid.preload = 'none';
+    if (s) vid.dataset.lazySrc = s;
+    // Show the poster frame (if any) so the thumbnail doesn't go blank
+    if (vid.poster) vid.setAttribute('poster', vid.poster);
+  }
 
   // Lazy-load observer: loads video src + metadata when thumbnail scrolls into view.
-  // Throttled to max 4 concurrent loads so we don't overwhelm the serve_media_file proxy
-  // (which reads entire video files into memory per request).
+  // Throttled to max 2 concurrent loads.  HTTP/1.1 allows only 6 connections per host;
+  // SSE streams + pollers may already consume 2-3, so we keep the lazy-load budget low
+  // to avoid starving other requests (especially the Confirm POST).
   var _mediaLazyLoading = 0;
   var _mediaLazyQueue = [];
   function _mediaLazyLoad(vid) {
-    if (_mediaLazyLoading >= 4) {
+    if (_mediaLazyLoading >= 2) {
       _mediaLazyQueue.push(vid);
       return;
     }
@@ -1965,6 +2024,9 @@ Direction    : …"></textarea>
     if (this._lazyTimer) { clearTimeout(this._lazyTimer); this._lazyTimer = null; }
     this.removeEventListener('loadedmetadata', _mediaLazyDone);
     this.removeEventListener('error', _mediaLazyDone);
+    // After metadata loads, the browser shows the first frame as thumbnail.
+    // preload='metadata' ensures the browser stops downloading further data.
+    // The connection naturally idles and gets reused from the pool.
     _mediaLazyLoading--;
     if (_mediaLazyLoading < 0) _mediaLazyLoading = 0;  // guard against double-fire
     if (_mediaLazyQueue.length > 0) _mediaLazyLoad(_mediaLazyQueue.shift());
@@ -2285,8 +2347,22 @@ Direction    : …"></textarea>
       vid.loop     = true;
       vid.preload  = 'none';
       vid.dataset.lazySrc = displayUrl;
-      vid.addEventListener('mouseenter', () => vid.play().catch(function(){}));
-      vid.addEventListener('mouseleave', () => { vid.pause(); vid.currentTime = 0; });
+      vid.addEventListener('mouseenter', function() {
+        // Pause any other playing video first (limit to 1 active stream)
+        if (_mediaPlayingVid && _mediaPlayingVid !== this) {
+          _mediaStopVid(_mediaPlayingVid);
+        }
+        _mediaPlayingVid = this;
+        // Restore src from dataset if _mediaStopVid() cleared it
+        if (!this.src && this.dataset.lazySrc) {
+          this.src = this.dataset.lazySrc;
+        }
+        this.play().catch(function(){});
+      });
+      vid.addEventListener('mouseleave', function() {
+        _mediaStopVid(this);
+        if (_mediaPlayingVid === this) _mediaPlayingVid = null;
+      });
       wrap.appendChild(vid);
       // Lazy-load: IntersectionObserver sets src + preload when visible
       _mediaLazyObserver.observe(vid);
@@ -2735,6 +2811,33 @@ Direction    : …"></textarea>
   }
 
   // ── Confirm and write selections.json ──
+  // Release ALL video HTTP connections on the Media tab.
+  // Call this before any critical fetch (like Confirm) to guarantee a free slot.
+  function _mediaReleaseAllConnections() {
+    // 1. Stop the currently playing video (if any)
+    if (_mediaPlayingVid) {
+      _mediaStopVid(_mediaPlayingVid);
+      _mediaPlayingVid = null;
+    }
+    // 2. Drain the lazy-load queue so no new video loads start
+    _mediaLazyQueue.length = 0;
+    // 3. Abort videos that are actively downloading (readyState < 2 = still fetching
+    //    metadata or data).  Videos that already have metadata (readyState >= 2) are
+    //    idle — their preload='metadata' connection already closed naturally — so we
+    //    leave those alone to preserve their thumbnail first-frame.
+    document.querySelectorAll('#panel-media video[src]').forEach(function(v) {
+      // HAVE_CURRENT_DATA = 2; anything less means the browser is still fetching
+      if (v.readyState < 2 || (!v.paused && v !== _mediaPlayingVid)) {
+        var oldSrc = v.src;
+        v.removeAttribute('src');
+        v.load();   // forces browser to abort any in-flight request
+        v.preload = 'none';
+        if (oldSrc) v.dataset.lazySrc = oldSrc;
+      }
+    });
+    _mediaLazyLoading = 0;
+  }
+
   async function mediaConfirm() {
     const nSelected = Object.keys(_mediaSelections).length;
     if (nSelected === 0) {
@@ -2743,6 +2846,10 @@ Direction    : …"></textarea>
     }
     document.getElementById('media-btn-confirm').disabled = true;
     document.getElementById('media-confirm-msg').textContent = 'Saving …';
+
+    // Free all video HTTP connections before the POST to guarantee a slot
+    _mediaReleaseAllConnections();
+
     try {
       // Detect if any selection uses segments format → version 3
       const hasSegments = Object.values(_mediaSelections).some(function(sel) {
@@ -5605,6 +5712,13 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
 # ── Request handler ────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
 
+    def end_headers(self):
+        # Force Connection: close on every response.  This prevents the browser
+        # from trying to reuse TCP connections after a server restart — stale
+        # pooled connections cause page-reload hangs in the existing tab.
+        self.send_header("Connection", "close")
+        super().end_headers()
+
     # ── GET ───────────────────────────────────────────────────────────────────
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -5759,8 +5873,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(sse("done", str(proc.returncode)))
                 self.wfile.flush()
 
-            except BrokenPipeError:
-                pass   # client disconnected
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # client disconnected or server shutting down
             except Exception as exc:
                 try:
                     self.wfile.write(sse("error_line", f"Server error: {exc}"))
@@ -6207,8 +6321,8 @@ Reply with JSON only — no text outside the object:
                 self.wfile.write(sse("done", str(proc.returncode)))
                 self.wfile.flush()
 
-            except BrokenPipeError:
-                pass
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # client disconnected or server shutting down
             except Exception as exc:
                 try:
                     self.wfile.write(sse("error_line", f"Server error: {exc}"))
@@ -6324,8 +6438,8 @@ Reply with JSON only — no text outside the object:
                 self.wfile.write(sse("done", "0"))
                 self.wfile.flush()
 
-            except BrokenPipeError:
-                pass
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # client disconnected or server shutting down
             except Exception as exc:
                 try:
                     self.wfile.write(sse("error_line", f"Server error: {exc}"))
@@ -6467,8 +6581,8 @@ Reply with JSON only — no text outside the object:
                 self.wfile.write(sse("done", "0"))
                 self.wfile.flush()
 
-            except BrokenPipeError:
-                pass
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # client disconnected or server shutting down
             except Exception as exc:
                 try:
                     self.wfile.write(sse("error_line", f"Server error: {exc}"))
@@ -7368,6 +7482,12 @@ def local_ip() -> str:
 
 class ReusableServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    # Daemon threads die immediately when the main thread exits (Ctrl-C).
+    # Without this, SSE handler threads and video-streaming threads keep
+    # the old process alive after Ctrl-C, preventing a clean restart.
+    # The browser's existing tab still has TCP connections to the zombie
+    # process, so reloading that tab hangs (the zombie can't serve pages).
+    daemon_threads = True
 
 
 if __name__ == "__main__":
@@ -7381,4 +7501,12 @@ if __name__ == "__main__":
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("\nShutting down…")
+        server.shutdown()       # stop accepting, join handler threads
+        server.server_close()   # close the listening socket
+        # Kill any child processes (pipeline runs) still alive
+        with _lock:
+            for proc in _procs.values():
+                if proc.poll() is None:
+                    proc.terminate()
+        print("Stopped.")
