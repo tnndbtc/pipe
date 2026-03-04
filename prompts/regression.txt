@@ -263,6 +263,11 @@ Working directory: `PIPE_DIR` (repo root)
 - NEVER cast a `[MULTITALKER]` voice as a character voice — these are Azure pair-synthesis voices, not usable as individual character voices; they produce broken TTS output
 - Before selecting a voice for a locale, verify its `supports()` list includes that locale. Multilingual voices may list both en-* and zh-* in `supports()` and may be assigned to either locale. Never assign a voice to a locale not in its `supports()` list.
 
+**ssml_narration alternative:** When `STORY_FORMAT=ssml_narration`, Stage 0 runs `ssml_preprocess.py` instead of `fill_and_run 0`. This script:
+- Parses authored SSML from `story.txt` to extract voice params, sentence structure, and inner content
+- Writes: `Script.json`, `VoiceCast.json` (append-only), `ssml_inner.xml`, `pipeline_vars.sh` (full), `NarrationText.txt`
+- Replaces stages 0, 1, 2, 3 in one shot (those stages are skipped via run.sh guards)
+
 **What breaks if Stage 0 fails or writes wrong values:**
 - All downstream stages source `pipeline_vars.sh` — wrong values propagate everywhere
 - VoiceCast character_ids must match what Stage 3 uses as `cast[].character_id`
@@ -698,7 +703,7 @@ This is intentional — re-running from step [2] after step [4] produces accurat
 
 ### Files involved
 `code/http/test_server.py` — JS functions: `vcOpen()`, `vcSave()`, `vcContinue()`, `buildVcCard()`, presetSel change handler
-API endpoints: `GET /api/voice_index`, `GET /api/voice_presets`, `GET /api/azure_voices`, `POST /save_voice_cast`
+API endpoints: `GET /api/voice_index`, `GET /api/voice_presets`, `GET /api/azure_voices`, `POST /api/save_voice_cast`, `POST /api/delete_preset`, `POST /api/preview_voice`
 
 ### Flow
 1. After Stage 0 completes (or existing episode loaded), user opens Voice Cast editor
@@ -737,11 +742,68 @@ New content added by `build_voice_catalog.py` is silently safe:
 - `is_multitalker` set to `True` if "ultitalker" in voice name (case-insensitive) ✓
 Do NOT change `VOICE_RE` to match section headers — the tier bracket anchor is intentional.
 
+### VO Editor State Machine
+
+#### Triggers & Parameter Reset Rules
+
+| # | Trigger | Params Action | Preset Dropdown | Source |
+|---|---------|--------------|-----------------|--------|
+| 1 | Voice name changed → same as saved VoiceCast voice | Restore saved VoiceCast.json params | Auto-select matching preset (if any) | `charLoc.*` |
+| 2 | Voice name changed → different voice | Reset to index defaults → universal fallback | Reset to "— no preset —" | `_vcGetDefaults(voice, "")` |
+| 3 | Style changed (any style, including "— no style —") | Always reset to defaults | Reset to "— no preset —" | `_vcGetDefaults(voice, style)` |
+| 4 | Custom preset selected from dropdown | Load preset's saved params | Shows selected preset | `preset.*` |
+| 5 | "— no preset —" selected from dropdown | Reset to defaults for current style | Stays on "— no preset —" | `_vcGetDefaults(voice, style)` |
+
+Key rule: **Style changes NEVER auto-load custom presets.** Custom preset params only load when the user explicitly selects one from the Custom dropdown.
+
+#### Preview & Persistence Rules
+
+| # | Scenario | Index Action | Preset Action |
+|---|----------|-------------|---------------|
+| 6 | Preview with canonical default params, voice+style NOT in index | Create index entry | — |
+| 7 | Preview with canonical default params, voice+style already in index | — (hash matches) | — |
+| 8 | Preview with custom params, voice+style NOT in index | Do NOT create index entry | Save as custom preset |
+| 9 | Preview with custom params, voice+style already in index | — (index untouched) | Save as custom preset (if hash is new) |
+| 10 | Preview with params matching an existing preset | — | — (hash dedup, no duplicate) |
+
+Key rule: **Index.json only accepts canonical default params.** Non-default params are always saved as presets, never pollute the index.
+
+#### Canonical Default Values
+
+| Context | degree | rate | pitch | break_ms |
+|---------|--------|------|-------|----------|
+| Styled clip (any named style) | 1.0 | 0% | "" | 0 |
+| No-style clip ("— no style —") | 1.0 | 0% | -5% | 600 |
+
+#### Default Lookup Priority (`_vcGetDefaults`)
+
+1. Look up `_voiceIndex[voice].clips[style]` → return stored params
+2. If not found → return universal fallback (table above)
+
+#### Hash Key Formula (must be identical in ALL tools)
+
+```
+sha256(json.dumps({"v":voice, "l":azure_locale, "s":style||"",
+                   "d":degree, "r":rate, "p":pitch||"", "b":break_ms,
+                   "t":sample_text}, sort_keys=True))[:16]
+```
+
+Used in: `test_server.py /api/preview_voice`, `pre_cache_voices.py cache_key()`, `index.json hash`, `presets.json hash`.
+8-field key — the `"l"` (azure_locale) field is REQUIRED. Never omit it or the hashes will silently diverge.
+
+#### Delete Custom Preset
+
+Select a custom preset → click **Delete** button → removes entry from `presets.json` + deletes cached `.mp3/.wav` file via `POST /api/delete_preset`.
+
 ### Regression risks for Voice Cast
-1. When user selects "— no preset —", the Emotion/Speak Speed/Pitch/Break fields MUST reset to the voice index defaults for that voice+style combination. The old bug was `if (!preset) return;` skipping this reset — FIXED. The correct code looks up `_voiceIndex?.[voiceSel.value]?.clips?.[styleSel.value]?.params` and restores those values before returning.
-2. `_voiceIndex` is loaded from `GET /api/voice_index` — must be loaded before presetSel change handler fires
-3. `vcContinue()` builds `ep_dir` from `currentSlug`/`currentEpId` — both must be set before voice cast can be opened for a running episode
-4. Both Stage 0 AND `/api/azure_voices` read from the SAME `prompts/azure_tts_styles.txt` — do NOT introduce a separate `_full.txt` unless Stage 0 haiku token budget becomes a problem after expansion to 275 entries (~17–22K tokens)
+1. When user selects "— no preset —", the Emotion/Speak Speed/Pitch/Break fields MUST reset to defaults via `_vcGetDefaults()`. The old bug was `if (!preset) return;` skipping this reset — FIXED.
+2. When style changes, params MUST reset to defaults. The old bug was auto-loading the most recent custom preset for that style — FIXED. Presets only load via explicit dropdown selection.
+3. Voice change handler MUST restore saved VoiceCast.json params when switching back to the saved voice. The old bug was unconditionally resetting to role-based defaults — FIXED.
+4. Hash key_dict MUST use 8 fields (including `"l": azure_locale`) in ALL tools. The old bug was `pre_cache_voices.py` using 7 fields (no locale) while `test_server.py` used 8 → hashes never matched → spurious custom presets on every Preview — FIXED.
+5. Index.json MUST only store entries with canonical default params. The old bug was blindly saving the first preview's params as the "default" regardless of values — FIXED.
+6. `_voiceIndex` is loaded from `GET /api/voice_index` — must be loaded before presetSel change handler fires.
+7. `vcContinue()` builds `ep_dir` from `currentSlug`/`currentEpId` — both must be set before voice cast can be opened for a running episode.
+8. Both Stage 0 AND `/api/azure_voices` read from the SAME `prompts/azure_tts_styles.txt` — do NOT introduce a separate `_full.txt` unless Stage 0 haiku token budget becomes a problem after expansion to 275 entries (~17–22K tokens).
 
 ---
 
@@ -945,6 +1007,7 @@ Every `{{PLACEHOLDER}}` token used in any `prompts/p_N.txt` MUST have a correspo
 {{STORY_FORMAT}}
 ```
 **If you add a placeholder to any prompt, you MUST add its sed rule to run.sh.**
+**Note:** `ssml_narration` does not introduce any new placeholders — it reuses existing `{{STORY_FORMAT}}` and skips LLM stages 1, 2, 3, 8 entirely.
 
 ### 2. character_id binding chain
 The character identifier flows through 5 stages and must be identical at each step:
@@ -1099,14 +1162,23 @@ When `STORY_FORMAT` is changed or a new format is added, these are ALL the place
 | Stage/Script | What changes for non-episodic formats |
 |---|---|
 | `p_0.txt` (Stage 0) | `continuous_narration`/`illustrated_narration`/`documentary`: narrator ONLY; `monologue`: protagonist only, NO narrator entry |
+| `run.sh` (Stage 0) | `ssml_narration`: runs `ssml_preprocess.py` instead of `fill_and_run 0` — produces Script.json, VoiceCast.json, ssml_inner.xml, pipeline_vars.sh, NarrationText.txt |
 | `p_3.txt` (Stage 3) | `continuous_narration`/`illustrated_narration`/`documentary`: ALL `speaker_id: "narrator"`; `monologue`: protagonist's id only |
-| `p_4.txt` (Stage 4) | `continuous_narration`/`documentary`: `characters: []` on all shots; `monologue`: protagonist always center; **all narrative formats**: `duration_sec` VO-anchored (word_count ÷ effective_wpm + breaks + 2 s buffer) — NOT creative guess |
-| `p_5.txt` (Stage 5) | `continuous_narration`/`documentary`: `character_packs: []` — no character images |
+| `run.sh` (Stages 1,2,3,8) | `ssml_narration`: stages 1, 2, 3, 8 are SKIPPED entirely (Script.json produced by ssml_preprocess.py, no translation needed) |
+| `p_4.txt` (Stage 4) | `continuous_narration`/`documentary`/`ssml_narration`: `characters: []` on all shots; `monologue`: protagonist always center; **all narrative formats**: `duration_sec` VO-anchored (word_count ÷ effective_wpm + breaks + 2 s buffer) — NOT creative guess; `ssml_narration`: 60-120s total constraint does NOT apply, use `pause_after_ms` from Script.json |
+| `p_5.txt` (Stage 5) | `continuous_narration`/`documentary`/`ssml_narration`: `character_packs: []` — no character images |
 | `p_8.txt` (Stage 8) | `continuous_narration`/`documentary`: skip character_packs translation, translate narrator VO only |
+| `run.sh` (Stage 10[3]) | `ssml_narration`: passes `--ssml-narration --ssml-inner --voice-cast` to `gen_tts_cloud.py` for wrapper-rebuild + inner passthrough |
+| `run.sh` (Stage 10[3b]) | `ssml_narration`: polish_locale_vo SKIPPED (authored SSML timing is immutable) |
+| `run.sh` (Stage 10[8]) | `ssml_narration`: export_youtube_dubbed SKIPPED |
+| `test_server.py` | `ssml_narration`: `/api/infer_story_meta` detects SSML tags via regex, returns `story_format: "ssml_narration"` without haiku call |
 | `render_video.py` (Stage 10[7]) | `n_chars == 0` case (no character compositing) — handled at line ~401 |
 
 **STORY_FORMAT flows via:**
 `meta.json.story_format` → `pipeline_vars.sh export STORY_FORMAT=...` → `run.sh sed {{STORY_FORMAT}}` → prompt content → LLM behavior
+
+**ssml_narration special flow:**
+`meta.json.story_format=ssml_narration` → `pipeline_vars.sh` stub (written by createEpisode) → `run.sh` sources stub → Stage 0 dispatches to `ssml_preprocess.py` → stages 1,2,3,8 skipped → stages 4,5,6,7,9 run with LLM → Stage 10 uses `--ssml-narration` mode for TTS
 
 ---
 
@@ -1119,7 +1191,7 @@ Run through the relevant items after any modification:
 - [ ] The file referenced in "Read these files" section still exists at that path
 - [ ] The output file path still matches what downstream stages expect to read
 - [ ] Schema validation call references the correct schema file
-- [ ] Format-specific branches cover all 5 formats: episodic, continuous_narration, illustrated_narration, documentary, monologue
+- [ ] Format-specific branches cover all 6 formats: episodic, continuous_narration, illustrated_narration, documentary, monologue, ssml_narration
 - [ ] No new `start_sec`/`end_sec`/`duration_sec` fields added to vo_items (those belong to post_tts_analysis)
 
 ### After modifying run.sh
@@ -1131,6 +1203,11 @@ Run through the relevant items after any modification:
 - [ ] Hard stop after Stage 5 checks `${EP_DIR}/assets/media/selections.json` — exits 0 if missing, continues if present
 - [ ] Hard stop after Stage 9 always exits 0 when `TO_STAGE > 9` — unconditional pre-render pause
 - [ ] `resolve_assets.py` call passes `--selections <path>` when `selections.json` exists on disk
+- [ ] `ssml_narration` stage skip guard: stages 1, 2, 3, 8 print `⏭ skipped` and `continue` when `STORY_FORMAT=ssml_narration`
+- [ ] `ssml_narration` Stage 0 branch: calls `ssml_preprocess.py "$EP_DIR"` instead of `fill_and_run 0`
+- [ ] `ssml_narration` Stage 10[3]: passes `--ssml-narration --ssml-inner --voice-cast` to `gen_tts_cloud.py`
+- [ ] `ssml_narration` Stage 10[3b]: polish_locale_vo skipped (guard: `STORY_FORMAT != ssml_narration`)
+- [ ] `ssml_narration` Stage 10[8]: export_youtube_dubbed skipped (guard: `STORY_FORMAT != ssml_narration`)
 
 ### After modifying test_server.py
 - [ ] `/stream` passes `ep_dir=` (not `story_file=`) to `run.sh`
@@ -1155,6 +1232,7 @@ Run through the relevant items after any modification:
 - [ ] **`_mediaStopVid(vid)`** removes `src` and calls `load()` to abort the download, stores URL in `dataset.lazySrc` for later restore on hover. Does NOT re-set `vid.src` (that would open a new HTTP connection per HTML spec)
 - [ ] **`_mediaReleaseAllConnections()`** called before `mediaConfirm()` — stops playing vid, drains lazy queue, aborts all actively-downloading video elements (readyState < 2 or not paused)
 - [ ] **Video lazy-load concurrency** `_mediaLazyLoad` limit is 2 (NOT 4) — leaves headroom for SSE + pollers within the 6-connection HTTP/1.1 budget
+- [ ] `/api/infer_story_meta` SSML pre-check: regex `<(?:speak|voice|prosody|mstts:)\b` on first 2000 chars → returns `story_format: "ssml_narration"` without haiku call; `else:` branch runs normal haiku extraction
 
 ### After modifying any Stage 10 Python script
 - [ ] CLI arg names unchanged (`--manifest`, `--shared`, `--locale`, `--media`, `--plan`, `--out`, etc.)
@@ -1164,6 +1242,8 @@ Run through the relevant items after any modification:
 - [ ] `gen_tts_cloud.py` SSML: `<bookmark>` is inside `<voice>` block — do NOT move it outside
 - [ ] `gen_tts_cloud.py` EventSignal: uses `.disconnect_all()` not `.disconnect(cb)` in finally block
 - [ ] `gen_tts_cloud.py` stale WAV cleanup: uses `all_manifest_ids` (built from **full** `manifest.get("vo_items", [])`, NOT from the `--asset-id`-filtered `items` list) so that single-item re-synthesis calls do not delete WAVs belonging to other items
+- [ ] `gen_tts_cloud.py` `--ssml-narration` mode: requires `--ssml-inner` and `--voice-cast`; calls `run_ssml_narration()` which rebuilds SSML wrappers from VoiceCast.json + passes through ssml_inner.xml content; injects `auto_sent_NNN` bookmarks; remaps to vo_item_ids; archives `_full_narration.wav`
+- [ ] `gen_tts_cloud.py` `build_ssml_narration()`: bookmark placement inside `<voice>` block (same rule as `build_episode_ssml()`); prosody/style wrappers rebuilt from VoiceCast.json narrator entry
 - [ ] `gen_render_plan.py` VO completeness guard: loop over `merged.get("vo_items")` injecting missing IDs still present before `build_shot()` calls
 - [ ] `gen_render_plan.py` VO_TAIL_MS = 2000 still applied as floor: `duration_ms = max(duration_ms, vo_end_ms + VO_TAIL_MS)`
 - [ ] `gen_render_plan.py` `build_media_map()` composite key: per-shot items keyed as `"bg_id:shot_id"`, background-level items keyed as `"bg_id"`, multi-segment items (with `segment_index`) grouped in `"_segments"` dict
@@ -1329,3 +1409,25 @@ Run through the relevant items after any modification:
     Key invariant: `_mediaStopVid()` must NEVER set `vid.src` after clearing it. The HTML spec says
     setting `.src` always triggers the media element load algorithm, opening an HTTP connection even
     with `preload='none'`.
+
+21. **ssml_narration two-layer SSML architecture**
+    `ssml_narration` separates authored SSML into two immutable layers:
+    - **Layer 1 (wrapper):** `<speak>` → `<voice>` → `<mstts:express-as>` → `<prosody>` — extracted
+      into VoiceCast.json by `ssml_preprocess.py`, rebuilt by `gen_tts_cloud.py build_ssml_narration()`
+    - **Layer 2 (inner):** raw text + `<break time="Nms"/>` tags — stored as `ssml_inner.xml`,
+      immutable after creation, passed through verbatim during TTS synthesis
+    This separation lets the pipeline:
+    (a) Use VoiceCast.json for consistent voice params across the pipeline (Stage 4 reads azure_rate)
+    (b) Preserve exact authored timing (breaks, pauses) without LLM interference
+    (c) Inject `auto_sent_NNN` bookmarks at sentence boundaries for per-item WAV splitting
+    Do NOT merge the layers or modify `ssml_inner.xml` after creation — it represents the user's
+    authored voice timing exactly as pasted.
+
+22. **ssml_narration skips stages 1, 2, 3, 8 — by design**
+    These stages are unnecessary because:
+    - Stage 1 (canon check): SSML content is self-contained, no world continuity needed
+    - Stage 2 (StoryPrompt): no episode direction needed — SSML defines the content
+    - Stage 3 (Script): `ssml_preprocess.py` already produces a valid Script.json
+    - Stage 8 (locale variants): authored SSML is single-locale by nature
+    Stages 4, 5, 6, 7, 9 still run — they handle visual asset generation, which is the core
+    value-add of `ssml_narration` (cinematic visuals for pre-authored narration).

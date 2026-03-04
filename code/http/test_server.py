@@ -287,6 +287,10 @@ def parse_azure_tts_styles() -> dict:
                 e2["azure_locale"] = loc
                 catalog.setdefault("zh-Hans", []).append(e2)
 
+    # Sort each locale group by display name (local_name) for consistent UI order
+    for loc_key in catalog:
+        catalog[loc_key].sort(key=lambda e: e.get("local_name", e.get("voice", "")).lower())
+
     _voice_catalog_cache = catalog
     return catalog
 
@@ -808,6 +812,21 @@ HTML = r"""<!DOCTYPE html>
     margin-bottom: 6px; transition: background .15s, color .15s;
   }
   .media-btn-auto-assign:hover { background: #364a70; color: #a8d0ff; }
+  /* ── Extended thumbnails (beyond top_n — dimmed until hovered/selected) ── */
+  .media-thumb-extended {
+    opacity: 0.45; filter: grayscale(30%);
+    transition: opacity .15s, filter .15s;
+  }
+  .media-thumb-extended:hover {
+    opacity: 1.0; filter: none;
+  }
+  .media-thumb-extended.selected {
+    opacity: 1.0; filter: none;
+  }
+  /* ── Lazy-scroll sentinel (triggers IntersectionObserver to load next page) ── */
+  .media-lazy-sentinel {
+    width: 40px; height: 90px; flex-shrink: 0;
+  }
   /* ── Duration badge (top-left on video thumbnails) ── */
   .media-dur-badge {
     position: absolute; top: 4px; left: 4px;
@@ -1186,6 +1205,14 @@ HTML = r"""<!DOCTYPE html>
   }
   .btn-vc-preview:hover    { background: #5b9cf628; }
   .btn-vc-preview:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-vc-preset-del {
+    background: #f5424214; color: #f54242; border: 1px solid #f5424250;
+    border-radius: 4px; font-size: 0.68em; padding: 2px 8px; cursor: pointer;
+    font-family: var(--mono); font-weight: 600; white-space: nowrap;
+    transition: background .15s;
+  }
+  .btn-vc-preset-del:hover    { background: #f5424228; }
+  .btn-vc-preset-del:disabled { opacity: 0.35; cursor: not-allowed; }
   .vc-footer {
     display: flex; gap: 8px; justify-content: flex-end; padding: 4px 0 2px; flex-shrink: 0;
   }
@@ -1330,7 +1357,7 @@ Direction    : …"></textarea>
   <div id="info-bar">
     <div class="info-row">
       <span class="info-label">📖 Title</span>
-      <span class="info-value"><input id="info-title" type="text" placeholder="Story title"></span>
+      <span class="info-value"><input id="info-title" type="text" placeholder="Story title" oninput="onTitleInput()"></span>
       <span id="badge-title" class="info-badge" style="display:none"></span>
     </div>
     <div class="info-row">
@@ -1340,7 +1367,7 @@ Direction    : …"></textarea>
     </div>
     <div class="info-row">
       <span class="info-label">📁 Slug</span>
-      <span class="info-value"><input id="info-slug" type="text" placeholder="project-slug" oninput="onSlugInput()"></span>
+      <span class="info-value"><input id="info-slug" type="text" placeholder="project-slug" oninput="this.dataset.autoDerived='0'; onSlugInput()"></span>
       <span id="badge-slug" class="info-badge"></span>
     </div>
     <div class="info-row">
@@ -1357,6 +1384,7 @@ Direction    : …"></textarea>
           <option value="illustrated_narration">Illustrated Narration</option>
           <option value="documentary">Documentary / Explainer</option>
           <option value="monologue">Monologue / First-Person</option>
+          <option value="ssml_narration">SSML Narration (authored)</option>
         </select>
         <span id="badge-format" class="info-badge" style="display:none"></span>
       </div>
@@ -1393,6 +1421,7 @@ Direction    : …"></textarea>
         <option value="illustrated_narration">Illustrated Narration</option>
         <option value="documentary">Documentary / Explainer</option>
         <option value="monologue">Monologue / First-Person</option>
+        <option value="ssml_narration">SSML Narration (authored)</option>
       </select>
     </div>
     <div class="locale-row">
@@ -2170,9 +2199,19 @@ Direction    : …"></textarea>
 
       if (d.status === 'done') {
         clearInterval(_mediaPollTimer); _mediaPollTimer = null;
-        _mediaSetStatus('Done — ' + Object.keys(d.items || {}).length + ' items ranked.', false);
+        let totalImg = 0, totalVid = 0;
+        Object.values(d.items || {}).forEach(it => {
+          totalImg += it.total_images || 0;
+          totalVid += it.total_videos || 0;
+        });
+        const elapsed = d.elapsed_sec != null ? ' in ' + d.elapsed_sec + 's' : '';
+        const nItems = Object.keys(d.items || {}).length;
+        _mediaSetStatus('Done — ' + nItems + ' backgrounds, '
+          + totalImg + ' images + ' + totalVid + ' videos found'
+          + elapsed + '.', false);
         document.getElementById('media-btn-search').disabled = false;
         _mediaResults        = d.items || {};
+        _mediaResults._topN  = d.top_n || 5;
         _mediaRecommendedSeq = d.recommended_sequence || null;
         await _mediaLoadShotMap();
         _mediaRenderResults(_mediaResults);
@@ -2188,10 +2227,42 @@ Direction    : …"></textarea>
     }
   }
 
+  // ── Lazy-scroll helpers for media thumbnails ──
+  const _MEDIA_PAGE = 20;  // thumbnails per lazy-scroll page
+
+  // Append a page of thumbnails to a row, dimming items beyond topN
+  function _mediaAppendPage(row, entries, itemId, type, from, count, topN) {
+    const page = entries.slice(from, from + count);
+    page.forEach((entry, i) => {
+      const idx = from + i;
+      const th = _mediaThumb(itemId, type, entry, idx);
+      if (idx >= topN) th.classList.add('media-thumb-extended');
+      row.appendChild(th);
+    });
+    return from + page.length;
+  }
+
+  // Observe a sentinel div to lazy-load more thumbnails on scroll
+  function _mediaObserveSentinel(row, entries, itemId, type, topN) {
+    let loaded = _MEDIA_PAGE;
+    const sentinel = document.createElement('div');
+    sentinel.className = 'media-lazy-sentinel';
+    row.appendChild(sentinel);
+    const obs = new IntersectionObserver(ents => {
+      if (!ents[0].isIntersecting) return;
+      loaded = _mediaAppendPage(row, entries, itemId, type, loaded, _MEDIA_PAGE, topN);
+      // Re-position sentinel after newly appended thumbnails
+      row.appendChild(sentinel);
+      if (loaded >= entries.length) { obs.disconnect(); sentinel.remove(); }
+    }, { root: document.getElementById('media-body'), threshold: 0 });
+    obs.observe(sentinel);
+  }
+
   // ── Render results grid ──
   function _mediaRenderResults(items) {
     const body = document.getElementById('media-body');
     body.innerHTML = '';
+    const d_topN = _mediaResults?._topN || 5;
     _mediaItemIds = Object.keys(items);
     _mediaSelections = {};
 
@@ -2218,34 +2289,32 @@ Direction    : …"></textarea>
       prompt.textContent = item.search_prompt || '';
       card.appendChild(prompt);
 
-      // Images section
+      // Images section — lazy-scroll with pagination
       const imgs = item.images || [];
       if (imgs.length) {
         const lbl = document.createElement('div');
         lbl.className = 'media-section-label';
-        lbl.textContent = 'Images';
+        lbl.textContent = 'Images (' + (item.total_images || imgs.length) + ' found)';
         card.appendChild(lbl);
         const row = document.createElement('div');
         row.className = 'media-thumb-row';
-        imgs.forEach((img, idx) => {
-          row.appendChild(_mediaThumb(itemId, 'image', img, idx));
-        });
+        _mediaAppendPage(row, imgs, itemId, 'image', 0, _MEDIA_PAGE, d_topN);
         card.appendChild(row);
+        if (imgs.length > _MEDIA_PAGE) _mediaObserveSentinel(row, imgs, itemId, 'image', d_topN);
       }
 
-      // Videos section
+      // Videos section — lazy-scroll with pagination
       const vids = item.videos || [];
       if (vids.length) {
         const lbl = document.createElement('div');
         lbl.className = 'media-section-label';
-        lbl.textContent = 'Videos';
+        lbl.textContent = 'Videos (' + (item.total_videos || vids.length) + ' found)';
         card.appendChild(lbl);
         const row = document.createElement('div');
         row.className = 'media-thumb-row';
-        vids.forEach((vid, idx) => {
-          row.appendChild(_mediaThumb(itemId, 'video', vid, idx));
-        });
+        _mediaAppendPage(row, vids, itemId, 'video', 0, _MEDIA_PAGE, d_topN);
         card.appendChild(row);
+        if (vids.length > _MEDIA_PAGE) _mediaObserveSentinel(row, vids, itemId, 'video', d_topN);
       }
 
       if (!imgs.length && !vids.length) {
@@ -2844,6 +2913,30 @@ Direction    : …"></textarea>
       document.getElementById('media-confirm-msg').textContent = 'Select at least one item first.';
       return;
     }
+
+    // ── Guard: every shot must have media selected ──
+    if (_mediaShotMap) {
+      const missing = [];
+      for (const bgId in _mediaShotMap) {
+        const shotIds = _mediaShotMap[bgId];
+        const sel = _mediaSelections[bgId];
+        const ps = (sel && sel.per_shot) || {};
+        for (const sid of shotIds) {
+          const shotSel = ps[sid];
+          const hasMedia = shotSel && (
+            (shotSel.segments && shotSel.segments.length > 0) ||
+            shotSel.url || shotSel.abs_path
+          );
+          if (!hasMedia) missing.push(sid + ' (' + bgId + ')');
+        }
+      }
+      if (missing.length > 0) {
+        document.getElementById('media-confirm-msg').textContent =
+          '❌ Cannot save selections — missing media for: ' + missing.join(', ');
+        return;
+      }
+    }
+
     document.getElementById('media-btn-confirm').disabled = true;
     document.getElementById('media-confirm-msg').textContent = 'Saving …';
 
@@ -2896,9 +2989,20 @@ Direction    : …"></textarea>
       const d2 = await r2.json();
       if (!r2.ok || d2.error || d2.status !== 'done') return;
       _mediaResults        = d2.items || {};
+      _mediaResults._topN  = d2.top_n || 5;
       _mediaRecommendedSeq = d2.recommended_sequence || null;
       await _mediaLoadShotMap();
-      _mediaSetStatus('Loaded existing batch ' + _mediaBatchId + '.', false);
+      let totalImg2 = 0, totalVid2 = 0;
+      Object.values(d2.items || {}).forEach(it => {
+        totalImg2 += it.total_images || 0;
+        totalVid2 += it.total_videos || 0;
+      });
+      const elapsed2 = d2.elapsed_sec != null ? ' in ' + d2.elapsed_sec + 's' : '';
+      const nItems2 = Object.keys(d2.items || {}).length;
+      _mediaSetStatus('Loaded batch ' + _mediaBatchId + ' — '
+        + nItems2 + ' backgrounds, '
+        + totalImg2 + ' images + ' + totalVid2 + ' videos'
+        + elapsed2 + '.', false);
       _mediaRenderResults(_mediaResults);
     } catch (_) {}
   }
@@ -3321,6 +3425,16 @@ Direction    : …"></textarea>
     }
   }
 
+  // ── _vcGetDefaults(voice, style) ─────────────────────────────────────────────
+  // Returns { style_degree, rate, pitch, break_ms } for the given voice+style.
+  // Priority: index.json clip → hardcoded universal fallback.
+  const _VC_FALLBACK = { style_degree: 1.0, rate: '0%', pitch: '-5%', break_ms: 600 };
+  function _vcGetDefaults(voice, style) {
+    const clip = _voiceIndex?.[voice]?.clips?.[style ?? ''];
+    if (clip?.params) return clip.params;
+    return _VC_FALLBACK;
+  }
+
   // ── rebuildPresetSelect(card, voice) ─────────────────────────────────────────
   // Rebuilds .vc-preset-select options from _vcPresets[voice].
   // Preserves the current selection if the hash still exists after rebuild.
@@ -3590,7 +3704,43 @@ Direction    : …"></textarea>
       const presetSel = document.createElement('select');
       presetSel.className = 'vc-preset-select';
       presetSel.add(new Option('\u2014 no preset \u2014', ''));
+      const presetDelBtn = document.createElement('button');
+      presetDelBtn.className = 'btn-vc-preset-del';
+      presetDelBtn.textContent = 'Delete';
+      presetDelBtn.disabled = true;
+      presetDelBtn.addEventListener('click', async () => {
+        const voice = voiceSel.value;
+        const hash  = presetSel.value;
+        if (!hash) return;
+        const name  = presetSel.selectedOptions[0]?.textContent || hash;
+        if (!confirm('Delete custom preset "' + name + '"?\nThis removes it from presets.json and deletes the cached audio file.')) return;
+        presetDelBtn.disabled = true;
+        presetDelBtn.textContent = '\u2026';
+        try {
+          const r = await fetch('/api/delete_preset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ voice, hash }),
+          });
+          const d = await r.json();
+          if (d.error) { alert('Delete failed: ' + d.error); return; }
+          // Remove from in-memory presets
+          if (_vcPresets[voice]) {
+            _vcPresets[voice] = _vcPresets[voice].filter(p => p.hash !== hash);
+          }
+          rebuildPresetSelect(card, voice);
+          presetSel.selectedIndex = 0;
+          presetDelBtn.disabled = true;
+        } finally {
+          presetDelBtn.textContent = 'Delete';
+        }
+      });
+      // Enable/disable delete button based on preset selection
+      presetSel.addEventListener('change', () => {
+        presetDelBtn.disabled = !presetSel.value;
+      });
       presetRow.appendChild(presetLbl);
+      presetRow.appendChild(presetDelBtn);
       presetRow.appendChild(presetSel);
       body.appendChild(presetRow);
 
@@ -3682,9 +3832,12 @@ Direction    : …"></textarea>
         (p.pitch        || '') === (charLoc.azure_pitch        || '') &&
         parseInt(p.break_ms)   === parseInt(charLoc.azure_break_ms)
       );
-      if (_matchedPreset) presetSel.value = _matchedPreset.hash;
+      if (_matchedPreset) {
+        presetSel.value = _matchedPreset.hash;
+        presetDelBtn.disabled = false;
+      }
 
-      // ── Voice select onChange → rebuild style + preset dropdowns, reset params to role defaults ──
+      // ── Voice select onChange → rebuild style + preset dropdowns; restore saved params if possible ──
       voiceSel.addEventListener('change', () => {
         const newV = voiceList.find(v => v.voice === voiceSel.value);
         // Rebuild style dropdown (clear selection — new voice may not have the old style)
@@ -3697,43 +3850,50 @@ Direction    : …"></textarea>
           opt.value = s; opt.textContent = s;
           styleSel.appendChild(opt);
         });
-        styleSel.value = ''; // always reset style to "— no style —"
-        // Reset all param sliders to role-based defaults (Option A: clean slate)
-        card.querySelector('[data-field=degree]').value = 1.0;
-        card.querySelector('[data-field=rate]').value   = rd.rate;
-        card.querySelector('[data-field=pitch]').value  = rd.pitch;
-        card.querySelector('[data-field=break]').value  = rd.break_ms;
+        rebuildPresetSelect(card, voiceSel.value);
+
+        // Restore saved VoiceCast params when switching (back) to the saved voice
+        if (voiceSel.value === charLoc.azure_voice) {
+          styleSel.value = charLoc.azure_style || '';
+          card.querySelector('[data-field=degree]').value = charLoc.azure_style_degree ?? 1.0;
+          card.querySelector('[data-field=rate]').value   = String(charLoc.azure_rate  ?? '0').replace('%', '');
+          card.querySelector('[data-field=pitch]').value  = String(charLoc.azure_pitch ?? '').replace('%', '');
+          card.querySelector('[data-field=break]').value  = charLoc.azure_break_ms ?? 0;
+          // Auto-select matching preset
+          const _ps = _vcPresets[voiceSel.value] ?? [];
+          const _pm = _ps.find(p =>
+            (p.style || '') === (charLoc.azure_style || '') &&
+            parseFloat(p.style_degree) === parseFloat(charLoc.azure_style_degree) &&
+            (p.rate || '') === (charLoc.azure_rate || '') &&
+            (p.pitch || '') === (charLoc.azure_pitch || '') &&
+            parseInt(p.break_ms) === parseInt(charLoc.azure_break_ms)
+          );
+          if (_pm) card.querySelector('.vc-preset-select').value = _pm.hash;
+          else card.querySelector('.vc-preset-select').selectedIndex = 0;
+        } else {
+          styleSel.value = '';
+          const _d = _vcGetDefaults(voiceSel.value, '');
+          card.querySelector('[data-field=degree]').value = _d.style_degree ?? 1.0;
+          card.querySelector('[data-field=rate]').value   = String(_d.rate  ?? '0%').replace('%', '');
+          card.querySelector('[data-field=pitch]').value  = String(_d.pitch ?? '-5%').replace('%', '');
+          card.querySelector('[data-field=break]').value  = _d.break_ms ?? 600;
+          card.querySelector('.vc-preset-select').selectedIndex = 0;
+        }
         ['degree','rate','pitch','break'].forEach(f =>
           card.querySelector(`[data-field=${f}]`).dispatchEvent(new Event('input')));
-        rebuildPresetSelect(card, voiceSel.value);
-        card.querySelector('.vc-preset-select').selectedIndex = 0;
       });
 
-      // ── Style select onChange → auto-apply preset or index params; refresh interp ──
+      // ── Style select onChange → always reset to defaults; custom presets load only via preset dropdown ──
       styleSel.addEventListener('change', () => {
-        const voice   = voiceSel.value;
-        const style   = styleSel.value;
-        const presets = _vcPresets[voice] ?? [];
-        // 1st priority: most-recent saved preset for this voice+style
-        const match = style ? [...presets].reverse().find(p => p.style === style) : null;
-        if (match) {
-          card.querySelector('[data-field=degree]').value = match.style_degree;
-          card.querySelector('[data-field=rate]').value   = String(match.rate  ?? '').replace('%', '');
-          card.querySelector('[data-field=pitch]').value  = String(match.pitch ?? '').replace('%', '');
-          card.querySelector('[data-field=break]').value  = match.break_ms;
-          presetSel.value = match.hash;
-        } else {
-          // 2nd priority: params from the pre-cached index.json clip for this voice+style
-          const clip = style ? (_voiceIndex?.[voice]?.clips?.[style]) : null;
-          if (clip?.params) {
-            const p = clip.params;
-            card.querySelector('[data-field=degree]').value = p.style_degree ?? 1.0;
-            card.querySelector('[data-field=rate]').value   = String(p.rate  ?? '0').replace('%', '');
-            card.querySelector('[data-field=pitch]').value  = String(p.pitch ?? '' ).replace('%', '');
-            card.querySelector('[data-field=break]').value  = p.break_ms ?? 0;
-          }
-          presetSel.selectedIndex = 0;
-        }
+        const voice = voiceSel.value;
+        const style = styleSel.value;
+        const _d = _vcGetDefaults(voice, style || '');
+        card.querySelector('[data-field=degree]').value = _d.style_degree ?? 1.0;
+        card.querySelector('[data-field=rate]').value   = String(_d.rate  ?? '0%').replace('%', '');
+        card.querySelector('[data-field=pitch]').value  = String(_d.pitch ?? '-5%').replace('%', '');
+        card.querySelector('[data-field=break]').value  = _d.break_ms ?? 600;
+        presetSel.selectedIndex = 0;
+        presetDelBtn.disabled = true;
         // Always fire input events so interpretation text reflects current values
         ['degree','rate','pitch','break'].forEach(f =>
           card.querySelector(`[data-field=${f}]`).dispatchEvent(new Event('input')));
@@ -3744,12 +3904,12 @@ Direction    : …"></textarea>
         const presets = _vcPresets[voiceSel.value] ?? [];
         const preset  = presets.find(p => p.hash === presetSel.value);
         if (!preset) {
-          // "— no preset —" selected: restore index defaults for the current style
-          const defaults = _voiceIndex?.[voiceSel.value]?.clips?.[styleSel.value]?.params;
-          card.querySelector('[data-field=degree]').value = defaults?.style_degree ?? 1.0;
-          card.querySelector('[data-field=rate]').value   = String(defaults?.rate   ?? '0%').replace('%', '');
-          card.querySelector('[data-field=pitch]').value  = String(defaults?.pitch  ?? '').replace('%', '');
-          card.querySelector('[data-field=break]').value  = defaults?.break_ms ?? 0;
+          // "— no preset —" selected: restore index defaults → universal fallback
+          const _d = _vcGetDefaults(voiceSel.value, styleSel.value || '');
+          card.querySelector('[data-field=degree]').value = _d.style_degree ?? 1.0;
+          card.querySelector('[data-field=rate]').value   = String(_d.rate  ?? '0%').replace('%', '');
+          card.querySelector('[data-field=pitch]').value  = String(_d.pitch ?? '-5%').replace('%', '');
+          card.querySelector('[data-field=break]').value  = _d.break_ms ?? 600;
           ['degree','rate','pitch','break'].forEach(f => {
             card.querySelector(`[data-field=${f}]`).dispatchEvent(new Event('input'));
           });
@@ -4684,13 +4844,21 @@ Direction    : …"></textarea>
     epSel.innerHTML = '';
 
     if (!slug) {
-      // ── New Project ──────────────────────────────────────────────────────────
+      // ── New Project — clear all state from previous selection ───────────────
       epSel.disabled = true;
       epSel.innerHTML = '<option value="">—</option>';
       _usingExistingEp = false;
+      currentSlug = null;
+      currentEpId = null;
+      _preparedMeta = null;
+      _preparedEpId = null;
+      _episodeCreated = false;
       document.getElementById('info-bar').classList.remove('visible');
       document.getElementById('existing-ep-bar').style.display = 'none';
       document.getElementById('btn-prepare').style.display = '';
+      storyEl.value = '';
+      outputEl.innerHTML = '<span class="sys">Ready. Paste a story above and press Run.</span>\n';
+      document.getElementById('save-new-ep-row').style.display = 'none';
       setRunBtnEnabled(false);
       return;
     }
@@ -4757,6 +4925,13 @@ Direction    : …"></textarea>
         const epEl = document.getElementById('info-ep-id');
         if (epEl) epEl.textContent = _preparedEpId;
         setRunBtnEnabled(true);
+      } else if (!_slug) {
+        // Empty slug (e.g. SSML with no extractable title) — show info bar,
+        // let user fill in Title (which auto-derives slug via onTitleInput)
+        _preparedEpId = null;
+        const epEl = document.getElementById('info-ep-id');
+        if (epEl) epEl.textContent = '(fill in Title ↑)';
+        // Run stays disabled until onSlugInput computes episode ID
       } else {
         // Existing project/slug — Run directly
         _preparedEpId = null;
@@ -4892,8 +5067,33 @@ Direction    : …"></textarea>
       if (!slug) return;
       const r = await fetch('/api/check_slug?slug=' + encodeURIComponent(slug));
       const d = await r.json();
-      updateSlugBadge(d.exists, d.suggested);
+      const finalSlug = d.suggested || slug;
+      updateSlugBadge(d.exists, finalSlug);
+      // Auto-compute episode ID when slug changes (for SSML / manual flows)
+      if (_preparedMeta && !d.exists) {
+        try {
+          const nr = await fetch('/api/next_episode_id?slug=' + encodeURIComponent(finalSlug));
+          const nd = await nr.json();
+          _preparedEpId = nd.next_ep_id || 's01e01';
+        } catch(_) { _preparedEpId = 's01e01'; }
+        const epEl = document.getElementById('info-ep-id');
+        if (epEl) epEl.textContent = _preparedEpId;
+        setRunBtnEnabled(true);
+      }
     }, 400);
+  }
+
+  // Auto-derive slug from title input (for SSML / manual flows where slug is empty)
+  function onTitleInput() {
+    const title = document.getElementById('info-title').value.trim();
+    const slugEl = document.getElementById('info-slug');
+    // Only auto-derive if slug is currently empty or was auto-derived
+    if (title && (!slugEl.value.trim() || slugEl.dataset.autoDerived === '1')) {
+      const derived = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+      slugEl.value = derived;
+      slugEl.dataset.autoDerived = '1';
+      onSlugInput();  // trigger slug check + episode ID fetch
+    }
   }
 
   function onFormatChange() {
@@ -4911,6 +5111,7 @@ Direction    : …"></textarea>
       illustrated_narration: 'Characters shown as silent visuals. Narrator reads the story.',
       documentary:           'No characters. Narrator explains over b-roll backgrounds.',
       monologue:             'Single character speaks to camera. No scene changes.',
+      ssml_narration:        'Pre-authored SSML. Pipeline generates cinematic visuals. Stages 1–3 & 8 skipped.',
     };
     document.getElementById(hintId).textContent = hints[fmt] || '';
   }
@@ -6974,14 +7175,21 @@ Reply with JSON only — no text outside the object:
                 url = "/serve_media?path=" + str(cache_path.relative_to(_pipe_path))
 
                 # ── Update index.json ──────────────────────────────────────
-                # The FIRST preview of any voice+style combination becomes its
-                # "default" entry in index.json.  Subsequent previews with the
-                # same params match the default (same hash) → no preset.
-                # Subsequent previews with DIFFERENT params → saved as preset.
+                # Only save to index when params match canonical defaults.
+                # Styled clips: degree=1.0 rate="0%" pitch="" break_ms=0
+                # No-style:     degree=1.0 rate="0%" pitch="-5%" break_ms=600
                 idx       = _load_index_cache()
                 style_key = style or ""   # "" key for no-style voices
                 is_new_to_index = style_key not in idx.get(azure_voice, {}).get("clips", {})
-                if is_new_to_index:
+
+                if style_key:
+                    _canon = (1.0, "0%", "",   0)
+                else:
+                    _canon = (1.0, "0%", "-5%", 600)
+                _actual = (style_degree, rate, pitch or "", break_ms)
+                _is_canonical = (_actual == _canon)
+
+                if is_new_to_index and _is_canonical:
                     ve = idx.setdefault(azure_voice, {
                         "locale":       azure_locale,
                         "locale_group": azure_locale.split("-")[0],
@@ -7002,15 +7210,18 @@ Reply with JSON only — no text outside the object:
                     save_index(idx)
 
                 # ── Auto-save preset ────────────────────────────────────────
-                # Only when this is NOT the first preview (already in index)
-                # AND params differ from the stored default.
+                # Save as custom preset when:
+                #   - index entry exists but hash differs (user tweaked params)
+                #   - index entry doesn't exist yet AND params are non-canonical
+                #     (first preview with custom params — don't pollute index)
                 new_preset = None
-                if not is_new_to_index and not _is_default_clip(azure_voice, style, h):
+                if (not is_new_to_index and not _is_default_clip(azure_voice, style, h)) \
+                   or (is_new_to_index and not _is_canonical):
                     pdata = load_presets()
                     vp    = pdata["presets"].setdefault(azure_voice, [])
                     if not any(p["hash"] == h for p in vp):
                         new_preset = {
-                            "name":         f"custom{len(vp) + 1}",
+                            "name":         f"custom{max((int(p['name'].removeprefix('custom')) for p in vp if p['name'].startswith('custom') and p['name'].removeprefix('custom').isdigit()), default=0) + 1}",
                             "style":        style or "",
                             "style_degree": style_degree,
                             "rate":         rate,
@@ -7096,6 +7307,58 @@ Reply with JSON only — no text outside the object:
                 self.end_headers()
                 self.wfile.write(resp)
 
+        # Delete a custom voice preset  (POST /api/delete_preset)
+        elif self.path == "/api/delete_preset":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                req      = json.loads(raw_body)
+
+                voice = req.get("voice", "").strip()
+                h     = req.get("hash", "").strip()
+                if not voice or not h:
+                    raise ValueError("voice and hash are required")
+
+                # Remove from presets.json
+                pdata   = load_presets()
+                vp      = pdata.get("presets", {}).get(voice, [])
+                before  = len(vp)
+                vp[:]   = [p for p in vp if p.get("hash") != h]
+                removed = before - len(vp)
+                if removed:
+                    pdata["presets"][voice] = vp
+                    save_presets(pdata)
+
+                # Delete cached audio file(s)
+                voice_dir  = voice.replace(":", "_")
+                _pipe_path = Path(PIPE_DIR)
+                deleted_files = []
+                for ext in ("mp3", "wav"):
+                    fp = _pipe_path / "projects" / "resources" / "azure_tts" / voice_dir / f"{h}.{ext}"
+                    if fp.exists():
+                        fp.unlink()
+                        deleted_files.append(str(fp.relative_to(_pipe_path)))
+
+                resp = json.dumps({
+                    "ok": True,
+                    "presets_removed": removed,
+                    "files_deleted": deleted_files,
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+                print(f"  Deleted preset {h} for {voice} ({removed} entry, {len(deleted_files)} file(s))")
+
+            except Exception as exc:
+                resp = json.dumps({"error": str(exc)}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp)))
+                self.end_headers()
+                self.wfile.write(resp)
+
         elif self.path == "/api/append_status_report":
             try:
                 from datetime import datetime as _dt
@@ -7137,47 +7400,72 @@ Reply with JSON only — no text outside the object:
 
             import tempfile, re as _re
 
-            prompt_text = (
-                "Read the following story and reply with ONLY a valid JSON object — no explanation, no markdown, just the JSON.\n\n"
-                "JSON fields required:\n"
-                "  title        : the story title (string)\n"
-                "  slug         : URL-safe project slug — lowercase, hyphens only, no spaces (string)\n"
-                "  genre        : inferred genre e.g. dark-fantasy, sci-fi, romance, sleep-story (string)\n"
-                "  story_format : one of: episodic, continuous_narration, illustrated_narration, documentary, monologue\n"
-                "                 Rules: sleep/meditation/mindfulness → continuous_narration\n"
-                "                        children's story/fable/fairy tale → illustrated_narration\n"
-                "                        documentary/explainer/educational → documentary\n"
-                "                        diary/confession/first-person speech → monologue\n"
-                "                        all others → episodic\n"
-                "  metadata_found : array of field names explicitly present in the story text\n"
-                "                   (e.g. [\"title\", \"slug\"] if the story has 'Title:' and 'Project slug:' lines)\n\n"
-                "Story:\n\n" + story[:6000]
+            # ── SSML pre-check: detect authored SSML before calling haiku ──
+            _ssml_pattern = _re.compile(
+                r'<(?:speak|voice|prosody|mstts:)\b', _re.IGNORECASE
             )
-
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tf:
-                tf.write(prompt_text)
-                tmp_path = tf.name
-
-            try:
-                result = subprocess.run(
-                    ["claude", "-p",
-                     "--model", "haiku",
-                     "--dangerously-skip-permissions",
-                     "--no-session-persistence",
-                     tmp_path],
-                    capture_output=True, text=True, cwd=PIPE_DIR, timeout=30
+            if _ssml_pattern.search(story[:2000]):
+                # SSML detected — skip haiku call, return ssml_narration directly
+                _ssml_title = ""
+                # Try to extract title from SSML comment
+                _title_m = _re.search(r'<!--\s*[Tt]itle:\s*(.+?)\s*-->', story[:2000])
+                if _title_m:
+                    _ssml_title = _title_m.group(1).strip()
+                # Fallback: first meaningful text content
+                if not _ssml_title:
+                    _text_m = _re.search(r'>([^<]{10,60})<', story[:3000])
+                    if _text_m:
+                        _ssml_title = _text_m.group(1).strip()[:50]
+                _ssml_slug = _re.sub(r'[^a-z0-9]+', '-', _ssml_title.lower()).strip('-')[:60] if _ssml_title else ""
+                data = {
+                    "title": _ssml_title,
+                    "slug": _ssml_slug,
+                    "genre": "narration",
+                    "story_format": "ssml_narration",
+                    "metadata_found": ["ssml_tags"],
+                }
+            else:
+                prompt_text = (
+                    "Read the following story and reply with ONLY a valid JSON object — no explanation, no markdown, just the JSON.\n\n"
+                    "JSON fields required:\n"
+                    "  title        : the story title (string)\n"
+                    "  slug         : URL-safe project slug — lowercase, hyphens only, no spaces (string)\n"
+                    "  genre        : inferred genre e.g. dark-fantasy, sci-fi, romance, sleep-story (string)\n"
+                    "  story_format : one of: episodic, continuous_narration, illustrated_narration, documentary, monologue\n"
+                    "                 Rules: sleep/meditation/mindfulness → continuous_narration\n"
+                    "                        children's story/fable/fairy tale → illustrated_narration\n"
+                    "                        documentary/explainer/educational → documentary\n"
+                    "                        diary/confession/first-person speech → monologue\n"
+                    "                        all others → episodic\n"
+                    "  metadata_found : array of field names explicitly present in the story text\n"
+                    "                   (e.g. [\"title\", \"slug\"] if the story has 'Title:' and 'Project slug:' lines)\n\n"
+                    "Story:\n\n" + story[:6000]
                 )
-                raw = result.stdout.strip()
-                # Strip markdown code fences if present
-                raw = _re.sub(r"^```[a-z]*\n?", "", raw, flags=_re.MULTILINE)
-                raw = _re.sub(r"\n?```$", "", raw, flags=_re.MULTILINE)
-                raw = raw.strip()
-                data = json.loads(raw)
-            except Exception as exc:
-                data = {"error": str(exc), "title": "", "slug": "", "genre": "", "story_format": "episodic", "metadata_found": []}
-            finally:
-                import os as _os
-                _os.unlink(tmp_path)
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tf:
+                    tf.write(prompt_text)
+                    tmp_path = tf.name
+
+                try:
+                    result = subprocess.run(
+                        ["claude", "-p",
+                         "--model", "haiku",
+                         "--dangerously-skip-permissions",
+                         "--no-session-persistence",
+                         tmp_path],
+                        capture_output=True, text=True, cwd=PIPE_DIR, timeout=30
+                    )
+                    raw = result.stdout.strip()
+                    # Strip markdown code fences if present
+                    raw = _re.sub(r"^```[a-z]*\n?", "", raw, flags=_re.MULTILINE)
+                    raw = _re.sub(r"\n?```$", "", raw, flags=_re.MULTILINE)
+                    raw = raw.strip()
+                    data = json.loads(raw)
+                except Exception as exc:
+                    data = {"error": str(exc), "title": "", "slug": "", "genre": "", "story_format": "episodic", "metadata_found": []}
+                finally:
+                    import os as _os
+                    _os.unlink(tmp_path)
 
             # Check slug uniqueness
             slug = data.get("slug", "")
@@ -7455,7 +7743,7 @@ Reply with JSON only — no text outside the object:
                   "/list_projects", "/view_artifact", "/list_stories",
                   "/pipeline_status", "/serve_media", "/run_locale", "/run_stage10",
                   "/api/azure_voices", "/api/voice_presets", "/api/voice_index",
-                  "/api/preview_voice", "/api/save_voice_cast",
+                  "/api/preview_voice", "/api/save_voice_cast", "/api/delete_preset",
                   "/api/status_report", "/api/append_status_report",
                   "/api/vo_alignment",
                   "/api/check_slug", "/api/next_episode_id",

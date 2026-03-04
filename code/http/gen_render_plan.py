@@ -50,7 +50,7 @@ VO_TAIL_MS          = 2000  # minimum silence after last spoken line before shot
 # Formats where VO IS the shot — duration is capped to VO_end + VO_TAIL_MS.
 # For these formats any silence gap beyond 2 s is jarring (no characters on
 # screen, no lip-sync or acting to fill the gap — only narration + background).
-NARRATIVE_FORMATS = {"continuous_narration", "documentary", "illustrated_narration"}
+NARRATIVE_FORMATS = {"continuous_narration", "documentary", "illustrated_narration", "ssml_narration"}
 
 
 # ── I/O helpers ───────────────────────────────────────────────────────────────
@@ -237,6 +237,12 @@ def build_shot(
             bg_media = media_map.get(f"{bg_id}:{shot_id}") or media_map.get(bg_id)
     background_asset_id = bg_media["asset_id"] if bg_media else None
 
+    # Warn when a shot expects a background but no media was resolved
+    if bg_id and not bg_media:
+        print(f"  ⚠ Shot {shot_id} has background_id={bg_id!r} but NO media resolved — will render BLACK")
+    elif bg_id and bg_media and bg_media.get("is_placeholder", False):
+        print(f"  ⚠ Shot {shot_id} has background_id={bg_id!r} but media is placeholder — will render BLACK")
+
     background_media_type: str | None = None
     if bg_media:
         uri = bg_media.get("uri", "")
@@ -303,7 +309,8 @@ def build_shot(
 
         timeline_in_ms  = cursor_ms
         timeline_out_ms = cursor_ms + wav_dur_ms
-        cursor_ms = timeline_out_ms + INTER_LINE_PAUSE_MS
+        item_pause_ms = vo_item.get("pause_after_ms", INTER_LINE_PAUSE_MS)
+        cursor_ms = timeline_out_ms + item_pause_ms
 
         vo_lines.append({
             "line_id":         vid,
@@ -480,6 +487,15 @@ def build_plan(
         for shot in shotlist.get("shots", [])
     ]
 
+    # ── Background coverage summary ──────────────────────────────────────
+    black_shots = [s for s in shots if s.get("background_asset_id") is None]
+    if black_shots:
+        print(f"\n  ⚠ WARNING: {len(black_shots)} shot(s) have NO background media — will render BLACK:")
+        for bs in black_shots:
+            print(f"    • {bs['shot_id']} (duration {bs['duration_ms']}ms)")
+        print()
+    # ── end background coverage summary ──────────────────────────────────
+
     # plan_id includes locale so per-locale plans don't collide
     plan_id = f"plan-{project_id}-{episode_id}"
     if locale:
@@ -551,7 +567,7 @@ def parse_args() -> argparse.Namespace:
                         "Default: RenderPlan.{locale}.json in episode dir.")
     p.add_argument("--story-format", default="episodic",
                    choices=["episodic", "continuous_narration", "illustrated_narration",
-                            "documentary", "monologue"],
+                            "documentary", "monologue", "ssml_narration"],
                    help="Story format from pipeline_vars.sh (default: episodic). "
                         "Narrative formats apply a shot duration ceiling = "
                         "last_vo_out_ms + 2000 ms to prevent silence gaps.")

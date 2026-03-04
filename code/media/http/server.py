@@ -307,7 +307,7 @@ async def get_batch(
             "error":    state.get("error"),
         }
 
-    # Build result with sliced top_n and resolved URLs
+    # Build result with resolved URLs (all candidates returned; top_n used for sequence ranker)
     effective_n = top_n if top_n is not None else state.get("top_n", 5)
     items_out   = {}
 
@@ -318,8 +318,10 @@ async def get_batch(
             "search_prompt": item.get("search_prompt", ""),
             "status":        item.get("status", ""),
             "error":         item.get("error"),
-            "images":        imgs[:effective_n],
-            "videos":        vids[:effective_n],
+            "total_images":  len(imgs),
+            "total_videos":  len(vids),
+            "images":        imgs,
+            "videos":        vids,
         }
 
     # Compute recommended sequence from .meta.json sidecars (best-effort)
@@ -338,6 +340,16 @@ async def get_batch(
     except Exception as _exc:  # noqa: BLE001
         log.warning("recommended_sequence computation failed: %s", _exc)
 
+    elapsed_sec = None
+    if state.get("created_at") and state.get("completed_at"):
+        from datetime import datetime
+        try:
+            t0 = datetime.fromisoformat(state["created_at"])
+            t1 = datetime.fromisoformat(state["completed_at"])
+            elapsed_sec = round((t1 - t0).total_seconds(), 1)
+        except Exception:  # noqa: BLE001
+            pass
+
     return {
         "batch_id":             state["batch_id"],
         "status":               "done",
@@ -346,6 +358,7 @@ async def get_batch(
         "top_n":                effective_n,
         "created_at":           state.get("created_at"),
         "completed_at":         state.get("completed_at"),
+        "elapsed_sec":          elapsed_sec,
         "items":                items_out,
         "recommended_sequence": recommended_sequence,
     }

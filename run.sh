@@ -128,8 +128,25 @@ run_stage_10() {
     --manifest "${EP_DIR}/AssetManifest_draft.shared.json"
 
   # ── Per-locale steps ──────────────────────────────────────────────────
-  # Parse comma-separated locales (e.g. "en, zh-Hans")
-  IFS=',' read -ra _locale_arr <<< "${LOCALES:-en}"
+  # Parse comma-separated locales (e.g. "en, zh-Hans").
+  # Reorder so PRIMARY_LOCALE is processed first — its RenderPlan becomes
+  # the timing reference for all other locales.
+  local _primary="${PRIMARY_LOCALE:-en}"
+  IFS=',' read -ra _locale_raw <<< "${LOCALES:-en}"
+  _locale_arr=()
+  # First pass: add primary locale
+  for _raw in "${_locale_raw[@]}"; do
+    local _l; _l="$(echo "$_raw" | tr -d ' ')"
+    [[ "$_l" == "$_primary" ]] && _locale_arr+=("$_l")
+  done
+  # Second pass: add remaining locales
+  for _raw in "${_locale_raw[@]}"; do
+    local _l; _l="$(echo "$_raw" | tr -d ' ')"
+    [[ "$_l" != "$_primary" ]] && _locale_arr+=("$_l")
+  done
+  # Fallback: if primary wasn't in LOCALES, prepend it
+  [[ ${#_locale_arr[@]} -eq 0 ]] && _locale_arr=("$_primary")
+
   for _raw in "${_locale_arr[@]}"; do
     local locale
     locale="$(echo "$_raw" | tr -d ' ')"
@@ -145,23 +162,35 @@ run_stage_10() {
       --out    "${EP_DIR}/AssetManifest_merged.${locale}.json"
 
     echo "  [3/8] Generating voice-over audio…"
-    python3 "${code_dir}/gen_tts_cloud.py" \
-      --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+    if [[ "${STORY_FORMAT:-}" == "ssml_narration" && "$locale" == "$_primary" ]]; then
+      # PRIMARY_LOCALE uses ssml_narration: wrapper-rebuild + inner passthrough
+      python3 "${code_dir}/gen_tts_cloud.py" \
+        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+        --ssml-narration \
+        --ssml-inner "${EP_DIR}/ssml_inner.xml" \
+        --voice-cast "projects/${PROJECT_SLUG}/VoiceCast.json"
+    else
+      # Other locales (or non-ssml_narration): regular per-item TTS
+      python3 "${code_dir}/gen_tts_cloud.py" \
+        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+    fi
 
     # ── [3b/8] Phase 1 — convergence loop (non-EN locales only) ─────────
     # Read alignment thresholds from their single source of truth.
     local vo_thresh vo_thresh_high
     vo_thresh=$(python3 -c "import sys; sys.path.insert(0,'${code_dir}'); from polish_locale_vo import THRESHOLD; print(f'{THRESHOLD:.2f}')" 2>/dev/null || echo "0.90")
     vo_thresh_high=$(python3 -c "import sys; sys.path.insert(0,'${code_dir}'); from polish_locale_vo import THRESHOLD_HIGH; print(f'{THRESHOLD_HIGH:.2f}')" 2>/dev/null || echo "1.10")
-    # Measures ZH/EN WAV duration ratios; rewrites lines outside [${vo_thresh}, ${vo_thresh_high}]
-    # via Claude sonnet; re-synthesizes; repeats up to 3 times.
+    # Measures locale/primary WAV duration ratios; rewrites lines outside
+    # [${vo_thresh}, ${vo_thresh_high}] via Claude sonnet; re-synthesizes;
+    # repeats up to 3 times.
     # Writes calibration data to prompts/tts_calibration.{locale}.json.
-    if [[ "$locale" != "en" ]]; then
+    if [[ "$locale" != "$_primary" ]]; then
       echo "  [3b/8] Polishing locale VO duration alignment…"
       python3 "${code_dir}/polish_locale_vo.py" \
-        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
-        --locale   "${locale}" \
-        --ep-dir   "${EP_DIR}" || true
+        --manifest        "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+        --locale          "${locale}" \
+        --ep-dir          "${EP_DIR}" \
+        --primary-locale  "${_primary}" || true
     fi
 
     echo "  [4/8] Analysing voice timing…"
@@ -183,14 +212,16 @@ run_stage_10() {
       ${_sel_arg}
 
     echo "  [6/8] Building per-shot render plan…"
-    # Phase 2 — Timeline Lock: floor locale shot durations to EN reference
-    # when RenderPlan.en.json exists (i.e. after the EN locale pass).
-    if [[ "$locale" != "en" && -f "${EP_DIR}/RenderPlan.en.json" ]]; then
+    # Phase 2 — Timeline Lock: floor locale shot durations to the primary
+    # locale's reference plan.  The primary locale is rendered first (loop
+    # reorder above), so its RenderPlan.{primary}.json is the authority.
+    local _ref_plan="${EP_DIR}/RenderPlan.${_primary}.json"
+    if [[ "$locale" != "$_primary" && -f "$_ref_plan" ]]; then
       python3 "${code_dir}/gen_render_plan.py" \
         --manifest       "${EP_DIR}/AssetManifest_merged.${locale}.json" \
         --media          "${EP_DIR}/AssetManifest.media.${locale}.json" \
         --story-format   "${STORY_FORMAT:-episodic}" \
-        --reference-plan "${EP_DIR}/RenderPlan.en.json"
+        --reference-plan "$_ref_plan"
     else
       python3 "${code_dir}/gen_render_plan.py" \
         --manifest      "${EP_DIR}/AssetManifest_merged.${locale}.json" \
@@ -209,13 +240,13 @@ run_stage_10() {
     echo "  ✓ ${locale}  →  ${EP_DIR}/renders/${locale}/output.mp4"
 
     echo "  [8/8] Exporting YouTube dubbed audio…"
-    if [[ "$locale" != "en" ]]; then
+    if [[ "$locale" != "$_primary" ]]; then
       python3 "${code_dir}/export_youtube_dubbed.py" \
         "${EP_DIR}" \
         "${locale}"
       echo "  ✓ ${locale}  →  ${EP_DIR}/renders/${locale}/youtube_dubbed.m4a"
     else
-      echo "  ↷ ${locale}  English is the primary upload — dubbed audio export skipped"
+      echo "  ↷ ${locale}  ${_primary} is the primary upload — dubbed audio export skipped"
     fi
   done
 
@@ -310,6 +341,7 @@ fill_and_run() {
     -e "s|{{RENDER_PROFILE}}|${RENDER_PROFILE:-preview_local}|g" \
     -e "s|{{LOCALES}}|${LOCALES:-en}|g" \
     -e "s|{{STORY_FORMAT}}|${STORY_FORMAT:-episodic}|g" \
+    -e "s|{{PRIMARY_LOCALE}}|${PRIMARY_LOCALE:-en}|g" \
     "$prompt_src" > "$tmp"
 
   # 2. Pre-embed referenced input files → eliminate Read tool calls
@@ -368,7 +400,18 @@ echo "  PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
 
 # ── Stage 0: read story, write pipeline_vars.sh ────────────────────────
 if [[ "$FROM_STAGE" -le 0 && "$TO_STAGE" -ge 0 ]]; then
-  fill_and_run 0
+  if [[ "${STORY_FORMAT:-}" == "ssml_narration" ]]; then
+    echo ""
+    echo "══════════════════════════════════════════════════════════════"
+    echo "  STAGE 0/10  —  Extract story variables & set up project"
+    echo "  mode: ssml_preprocess.py (ssml_narration format)"
+    echo "══════════════════════════════════════════════════════════════"
+    python3 "$(cd "$(dirname "$0")" && pwd)/code/http/ssml_preprocess.py" "$EP_DIR"
+    echo ""
+    echo "✓ Stage 0 complete (ssml_preprocess.py)"
+  else
+    fill_and_run 0
+  fi
 
   if [[ ! -f "$VARS_FILE" ]]; then
     echo "✗ ERROR: Stage 0 did not produce ${VARS_FILE}" >&2
@@ -384,20 +427,29 @@ fi
 for N in 1 2 3 4 5 6 7 8 9; do
   if [[ "$N" -ge "$FROM_STAGE" && "$N" -le "$TO_STAGE" ]]; then
 
+    # Skip stages 1,2,3,8,9 for ssml_narration
+    if [[ "${STORY_FORMAT:-}" == "ssml_narration" && ( "$N" -eq 1 || "$N" -eq 2 || "$N" -eq 3 || "$N" -eq 8 || "$N" -eq 9 ) ]]; then
+      echo ""
+      echo "  ⏭  Stage $N skipped (ssml_narration)"
+      continue
+    fi
+
     # ── Pre-Stage 8 hook: compute locale character-count hints ──────────
     # Uses EN WAV durations from the previous Stage 10 run to give Stage 8
     # (the translation LLM) calibrated target_chars per VO line.
     # Skips gracefully on the first run when no EN WAVs exist yet.
-    if [[ "$N" -eq 8 ]]; then
+    if [[ "$N" -eq 8 && "${STORY_FORMAT:-}" != "ssml_narration" ]]; then
       _hint_code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
+      _hint_primary="${PRIMARY_LOCALE:-en}"
       IFS=',' read -ra _hint_locales <<< "${LOCALES:-en}"
       for _raw in "${_hint_locales[@]}"; do
         _loc="$(echo "$_raw" | tr -d ' ')"
-        [[ -z "$_loc" || "$_loc" == "en" ]] && continue
+        [[ -z "$_loc" || "$_loc" == "$_hint_primary" ]] && continue
         echo "  [pre-8] Computing locale hints for ${_loc}…"
         python3 "${_hint_code_dir}/prep_locale_hints.py" \
-          --manifest "${EP_DIR}/AssetManifest_draft.en.json" \
-          --locale   "${_loc}" || true
+          --manifest       "${EP_DIR}/AssetManifest_draft.${_hint_primary}.json" \
+          --locale         "${_loc}" \
+          --primary-locale "${_hint_primary}" || true
       done
     fi
 

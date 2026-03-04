@@ -15,8 +15,8 @@
 #   AZURE_ENDPOINT       Custom endpoint URL      (optional)
 #
 # Cache key formula (must match Voice Cast Editor exactly):
-#   sha256(json.dumps({"v":voice,"s":style or "","d":style_degree,"r":rate,
-#                      "p":pitch or "","b":break_ms,"t":text}, sort_keys=True))
+#   sha256(json.dumps({"v":voice,"l":azure_locale,"s":style or "","d":style_degree,
+#                      "r":rate,"p":pitch or "","b":break_ms,"t":text}, sort_keys=True))
 #   Defaults: style_degree=1.0  rate="0%"  pitch=""  break_ms=0
 #   Only styled clips are cached — no-style clips are generated on first
 #   [▶ Sample] click in the editor and cached there.
@@ -64,7 +64,8 @@ def cache_key(voice: str, style: str) -> str:
     """style is always a non-empty string here — build_work_queue() only
     enqueues styled clips (Option A, no baselines pre-cached)."""
     text = sentence_for(style, VOICES[voice]["locale_group"])
-    key  = {"v": voice, "s": style, "d": DEFAULT_STYLE_DEGREE,
+    key  = {"v": voice, "l": VOICES[voice]["azure_locale"], "s": style,
+            "d": DEFAULT_STYLE_DEGREE,
             "r": DEFAULT_RATE, "p": DEFAULT_PITCH or "", "b": DEFAULT_BREAK_MS, "t": text}
     return hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
 

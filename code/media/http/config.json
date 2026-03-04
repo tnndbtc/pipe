@@ -47,7 +47,7 @@
   "cache_ttl_days": 7,
 
   "candidates_per_source_image": 30,
-  "candidates_per_source_video": 15,
+  "candidates_per_source_video": 30,
   "max_candidates_per_item":     60,
 
   "sources":          ["pexels", "pixabay"],
@@ -80,12 +80,12 @@
   },
 
   "thumbnail_filters": {
-    "min_luma":              0.05,
-    "max_luma":              0.85,
-    "min_contrast":          0.05,
-    "max_edge_density":      0.15,
-    "max_person_score":      0.05,
-    "person_flag_threshold": 0.015
+    "min_luma":              0.0,
+    "max_luma":              1.0,
+    "min_contrast":          0.0,
+    "max_edge_density":      1.0,
+    "max_person_score":      1.0,
+    "person_flag_threshold": 1.0
   },
 
   "phash_dedup_threshold":     8,

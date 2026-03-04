@@ -6,8 +6,8 @@
 #
 # Algorithm:
 #   1. Measure actual ZH and EN WAV durations directly from files.
-#   2. Flag lines with ratio = zh_dur / en_dur outside [THRESHOLD, THRESHOLD_HIGH].
-#   3. Call Claude (sonnet) to rewrite flagged Chinese text to target_chars.
+#   2. Flag lines with ratio = locale_dur / primary_dur outside [THRESHOLD, THRESHOLD_HIGH].
+#   3. Call Claude (sonnet) to rewrite flagged text to target_chars (locale-aware).
 #   4. Patch AssetManifest_merged.{locale}.json + AssetManifest_draft.{locale}.json
 #      with the revised text (so re-runs from Stage 10 also use corrected text).
 #   5. Re-synthesize flagged items only via gen_tts_cloud.py --asset-id.
@@ -90,21 +90,21 @@ def append_calibration_entry(
     en_rate: str,
     converged_items: list[dict],
 ) -> None:
-    """Compute observed ZH-chars/EN-sec rate and append to history.
+    """Compute observed locale-chars/primary-sec rate and append to history.
 
-    The cps value = total_zh_chars / total_en_duration_sec, so it encodes
-    the relationship between a SPECIFIC ZH voice setting and a SPECIFIC EN
-    voice setting.  Both are stored in the entry so the lookup ladder can
-    match on the exact pair rather than the ZH voice alone.
+    The cps value = total_locale_chars / total_primary_duration_sec, so it
+    encodes the relationship between a SPECIFIC locale voice setting and a
+    SPECIFIC primary voice setting.  Both are stored in the entry so the
+    lookup ladder can match on the exact pair.
     """
-    normal = [it for it in converged_items if it["en_dur"] > SHORT_THRESHOLD]
-    short  = [it for it in converged_items if it["en_dur"] <= SHORT_THRESHOLD]
+    normal = [it for it in converged_items if it["primary_dur"] > SHORT_THRESHOLD]
+    short  = [it for it in converged_items if it["primary_dur"] <= SHORT_THRESHOLD]
 
     def _cps(items: list) -> tuple[float | None, int]:
         if not items:
             return None, 0
         total_chars = sum(char_count(it["final_text"]) for it in items)
-        total_dur   = sum(it["en_dur"] for it in items)
+        total_dur   = sum(it["primary_dur"] for it in items)
         return (round(total_chars / total_dur, 3) if total_dur else None), len(items)
 
     nc, nn = _cps(normal)
@@ -154,24 +154,40 @@ def _call_claude_batch(batch: list[dict], locale: str) -> dict[str, str]:
         f'    current_text: {json.dumps(it["text"], ensure_ascii=False)}\n'
         f'    current_chars: {it["current_chars"]}\n'
         f'    target_chars: {it["target_chars"]}\n'
-        f'    en_duration_sec: {it["en_dur"]:.2f}\n'
-        f'    zh_duration_sec: {it["zh_dur"]:.2f}\n'
-        f'    ratio_zh_en: {it["ratio"]:.2f}'
+        f'    primary_duration_sec: {it["primary_dur"]:.2f}\n'
+        f'    locale_duration_sec: {it["locale_dur"]:.2f}\n'
+        f'    ratio_locale_primary: {it["ratio"]:.2f}'
         for it in batch
     )
-    prompt = f"""You are a literary Chinese translator and voice-over adapter.
+    # Locale-aware prompt — the rewriter must write in the TARGET locale
+    if locale.startswith("zh"):
+        lang_instruction = (
+            "You are a literary Chinese translator and voice-over adapter.\n\n"
+            "The following Chinese narration lines need adjustment so that the spoken duration matches\n"
+            "the reference source line within a ±10% window (target ratio 0.90–1.10).\n\n"
+            "Rules:\n"
+            "- Write natural, literary Chinese (classical or refined literary register suits narration)\n"
+            "- Expansions: add detail already implied by the scene — no meaningless filler\n"
+            "- Shortenings: cut redundant phrases, consolidate, do NOT lose the core image"
+        )
+    else:
+        lang_instruction = (
+            "You are a literary English voice-over adapter.\n\n"
+            "The following English narration lines need adjustment so that the spoken duration matches\n"
+            "the reference source line within a ±10% window (target ratio 0.90–1.10).\n\n"
+            "Rules:\n"
+            "- Write natural, literary English suited for narration voice-over\n"
+            "- Expansions: add sensory detail, atmosphere, or emotional texture already implied by the scene\n"
+            "- Shortenings: trim or simplify while keeping the meaning and tone"
+        )
 
-The following Chinese narration lines need adjustment so that the spoken duration matches
-the English source line within a ±10% window (target ratio 0.90–1.10).
+    prompt = f"""{lang_instruction}
 
 Each line has a direction field:
   "expand"  — line is too short; add sensory detail, atmosphere, or emotional texture
   "shorten" — line is too long;  trim or simplify while keeping the meaning and tone
 
-Rules:
-- Write natural, literary Chinese (classical or refined literary register suits narration)
-- Expansions: add detail already implied by the scene — no meaningless filler
-- Shortenings: cut redundant phrases, consolidate, do NOT lose the core image
+Additional rules:
 - Target is approximate: ±2 characters from target_chars is acceptable
 - Preserve the original meaning and emotional tone
 - Reply with a JSON array only — no text outside the array
@@ -257,22 +273,25 @@ def main() -> None:
                     help="Target locale, e.g. zh-Hans")
     ap.add_argument("--ep-dir",   required=True,
                     help="Episode directory path")
+    ap.add_argument("--primary-locale", default="en",
+                    help="Primary locale (source of truth for timing)")
     args = ap.parse_args()
 
     manifest_path     = Path(args.manifest)
     ep_dir            = Path(args.ep_dir)
     locale            = args.locale
+    primary_locale    = args.primary_locale
     draft_locale_path = ep_dir / f"AssetManifest_draft.{locale}.json"
 
     if not manifest_path.exists():
         print(f"  ✗ polish_locale_vo: {manifest_path} not found")
         sys.exit(1)
 
-    wav_zh = ep_dir / "assets" / locale / "audio" / "vo"
-    wav_en = ep_dir / "assets" / "en"   / "audio" / "vo"
+    wav_locale  = ep_dir / "assets" / locale         / "audio" / "vo"
+    wav_primary = ep_dir / "assets" / primary_locale / "audio" / "vo"
 
-    if not wav_en.exists():
-        print(f"  ⚠  polish_locale_vo: EN WAV dir not found ({wav_en}) — skipping")
+    if not wav_primary.exists():
+        print(f"  ⚠  polish_locale_vo: primary WAV dir not found ({wav_primary}) — skipping")
         sys.exit(0)
 
     # Load manifests
@@ -313,15 +332,15 @@ def main() -> None:
     print(f"\n  ── polish_locale_vo: locale={locale}  "
           f"threshold={THRESHOLD}  max_iters={MAX_ITERS}")
 
-    # ── Snapshot initial ZH/EN ratios before any rewriting ───────────────────
+    # ── Snapshot initial locale/primary ratios before any rewriting ──────────
     initial_snapshot: dict[str, dict] = {}
     for item in manifest.get("vo_items", []):
-        iid    = item.get("item_id", "")
-        zh_dur = wav_duration_sec(wav_zh / f"{iid}.wav")
-        en_dur = wav_duration_sec(wav_en / f"{iid}.wav")
-        if zh_dur and en_dur and en_dur > 0:
+        iid         = item.get("item_id", "")
+        locale_dur  = wav_duration_sec(wav_locale  / f"{iid}.wav")
+        primary_dur = wav_duration_sec(wav_primary / f"{iid}.wav")
+        if locale_dur and primary_dur and primary_dur > 0:
             initial_snapshot[iid] = {
-                "ratio": round(zh_dur / en_dur, 3),
+                "ratio": round(locale_dur / primary_dur, 3),
                 "chars": char_count(item.get("text", "")),
                 "text":  item.get("text", ""),
             }
@@ -330,28 +349,28 @@ def main() -> None:
     original_text: dict[str, str] = {}
 
     for iteration in range(1, MAX_ITERS + 1):
-        # ── Measure all ZH and EN durations ──────────────────────────────────
+        # ── Measure locale vs primary durations ──────────────────────────────
         flagged: list[dict] = []
         for item in manifest.get("vo_items", []):
-            iid    = item.get("item_id", "")
-            text   = item.get("text", "")
-            zh_dur = wav_duration_sec(wav_zh / f"{iid}.wav")
-            en_dur = wav_duration_sec(wav_en / f"{iid}.wav")
-            if not zh_dur or not en_dur or en_dur <= 0:
+            iid         = item.get("item_id", "")
+            text        = item.get("text", "")
+            locale_dur  = wav_duration_sec(wav_locale  / f"{iid}.wav")
+            primary_dur = wav_duration_sec(wav_primary / f"{iid}.wav")
+            if not locale_dur or not primary_dur or primary_dur <= 0:
                 continue
-            ratio = zh_dur / en_dur
+            ratio = locale_dur / primary_dur
             if ratio < THRESHOLD or ratio > THRESHOLD_HIGH:
                 direction    = "expand" if ratio < THRESHOLD else "shorten"
                 target_chars = max(MIN_CHARS,
-                                   round(char_count(text) * (en_dur / zh_dur)))
+                                   round(char_count(text) * (primary_dur / locale_dur)))
                 flagged.append({
                     "item_id":       iid,
                     "text":          text,
                     "direction":     direction,
                     "current_chars": char_count(text),
                     "target_chars":  target_chars,
-                    "zh_dur":        zh_dur,
-                    "en_dur":        en_dur,
+                    "locale_dur":    locale_dur,
+                    "primary_dur":   primary_dur,
                     "ratio":         ratio,
                     "speaker_id":    item.get("speaker_id", "narrator"),
                 })
@@ -411,11 +430,11 @@ def main() -> None:
     # ── Collect converged items for calibration ───────────────────────────────
     final_snapshot: dict[str, dict] = {}
     for item in manifest.get("vo_items", []):
-        iid    = item.get("item_id", "")
-        zh_dur = wav_duration_sec(wav_zh / f"{iid}.wav")
-        en_dur = wav_duration_sec(wav_en / f"{iid}.wav")
-        if zh_dur and en_dur and en_dur > 0:
-            ratio = zh_dur / en_dur
+        iid         = item.get("item_id", "")
+        locale_dur  = wav_duration_sec(wav_locale  / f"{iid}.wav")
+        primary_dur = wav_duration_sec(wav_primary / f"{iid}.wav")
+        if locale_dur and primary_dur and primary_dur > 0:
+            ratio = locale_dur / primary_dur
             final_snapshot[iid] = {
                 "ratio": round(ratio, 3),
                 "chars": char_count(item.get("text", "")),
@@ -425,8 +444,8 @@ def main() -> None:
                 all_converged.append({
                     "item_id":    iid,
                     "final_text": item.get("text", ""),
-                    "zh_dur":     zh_dur,
-                    "en_dur":     en_dur,
+                    "locale_dur":  locale_dur,
+                    "primary_dur": primary_dur,
                 })
                 representative_speaker = item.get("speaker_id", "narrator")
 
@@ -477,7 +496,7 @@ def main() -> None:
     # ── Update calibration history ────────────────────────────────────────────
     if all_converged:
         zh_voice, zh_style, zh_rate, ph = _voice_info(representative_speaker)
-        en_voice, en_style, en_rate, _  = _voice_info(representative_speaker, "en")
+        en_voice, en_style, en_rate, _  = _voice_info(representative_speaker, primary_locale)
         append_calibration_entry(
             locale, run_id, zh_voice, zh_style, zh_rate, ph,
             en_voice, en_style, en_rate, all_converged)

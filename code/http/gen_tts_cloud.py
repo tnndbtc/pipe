@@ -66,6 +66,22 @@ PROJECTS_ROOT = PIPE_DIR / "projects"
 SCRIPT_NAME   = "gen_tts_cloud"
 
 # =============================================================================
+# Batch synthesis config — loaded from prompts/azure_tts_batch.json
+# Only voices listed in batch_voices support bookmark events required for batch.
+# DragonHD / DragonHDFlash / DragonHDOmni do NOT support bookmarks.
+# =============================================================================
+_BATCH_CONFIG_PATH = PIPE_DIR / "prompts" / "azure_tts_batch.json"
+_BATCH_CONFIG: dict = {}
+if _BATCH_CONFIG_PATH.exists():
+    try:
+        _BATCH_CONFIG = json.loads(_BATCH_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception as _exc:
+        print(f"[WARN] Could not load {_BATCH_CONFIG_PATH}: {_exc}")
+
+BATCH_VOICES: set[str] = set(_BATCH_CONFIG.get("batch_voices", []))
+BATCH_MAX_VOICE_ELEMENTS: int = _BATCH_CONFIG.get("max_voice_elements", 50)
+
+# =============================================================================
 # Output format — Riff24Khz16BitMonoPcm matches Kokoro/XTTS for easy A/B
 # =============================================================================
 AZURE_SAMPLE_RATE = 24000   # Hz
@@ -918,7 +934,367 @@ def _synthesise_per_item(synthesizer, items: list[dict], out_dir: Path) -> list[
     return results
 
 
-def run(items: list[dict], out_dir: Path, asset_id: str | None = None) -> list[dict]:
+# ---------------------------------------------------------------------------
+# ssml_narration mode — wrapper-rebuild + inner passthrough
+# ---------------------------------------------------------------------------
+
+def _detect_sentence_boundaries(inner_xml: str, locale_hint: str = "en") -> list[tuple[int, int]]:
+    """Find (start, end) char positions of each sentence in ssml_inner.xml content.
+
+    Sentences are delimited by:
+      - For zh: 。！？…
+      - For en: . ! ? … followed by whitespace or end-of-string
+    Returns a list of (start_pos, end_pos) tuples covering all text.
+    """
+    import re as _re
+    # Strip XML tags to get pure text positions mapping
+    # We need to identify sentence boundaries in the raw inner XML
+    # Strategy: walk through the content, tracking text vs tags
+    text_runs: list[tuple[int, int, str]] = []  # (start_in_xml, end_in_xml, text)
+    i = 0
+    while i < len(inner_xml):
+        if inner_xml[i] == '<':
+            # Skip over entire tag
+            end = inner_xml.find('>', i)
+            if end == -1:
+                break
+            i = end + 1
+        else:
+            # Text content
+            start = i
+            while i < len(inner_xml) and inner_xml[i] != '<':
+                i += 1
+            text_runs.append((start, i, inner_xml[start:i]))
+
+    # Concatenate all text
+    full_text = "".join(t for _, _, t in text_runs)
+
+    # Find sentence boundaries in full text
+    if locale_hint.startswith("zh"):
+        pat = _re.compile(r'[。！？…]+')
+    else:
+        pat = _re.compile(r'[.!?…]+(?:\s|$)')
+
+    boundaries: list[int] = [0]
+    for m in pat.finditer(full_text):
+        boundaries.append(m.end())
+    if boundaries[-1] < len(full_text):
+        boundaries.append(len(full_text))
+
+    # Map text-position boundaries back to XML positions
+    result: list[tuple[int, int]] = []
+    text_pos = 0
+    xml_boundary_positions: list[int] = [0]
+
+    for xml_start, xml_end, text in text_runs:
+        for b in boundaries:
+            if text_pos < b <= text_pos + len(text):
+                offset_in_run = b - text_pos
+                xml_boundary_positions.append(xml_start + offset_in_run)
+        text_pos += len(text)
+
+    xml_boundary_positions.append(len(inner_xml))
+    # Deduplicate and sort
+    xml_boundary_positions = sorted(set(xml_boundary_positions))
+
+    for i in range(len(xml_boundary_positions) - 1):
+        s, e = xml_boundary_positions[i], xml_boundary_positions[i + 1]
+        chunk = inner_xml[s:e].strip()
+        # Keep chunks that contain actual text (not purely <break> tags).
+        # Previous bug: startswith('<break') filtered out chunks like
+        # "<break time='800ms'/>\n岁月拓宽了长河。" which DO have text.
+        text_only = _re.sub(r'<[^>]+>', '', chunk).strip()
+        if text_only:
+            result.append((s, e))
+
+    return result if result else [(0, len(inner_xml))]
+
+
+def build_ssml_narration(
+    ssml_inner: str,
+    voice_cast: dict,
+    locale: str,
+    sentence_ids: list[str],
+) -> tuple[str, list[str]]:
+    """Build SSML for ssml_narration: wrapper-rebuild + inner passthrough.
+
+    Reads VoiceCast.json for Layer 1 (voice/style/rate/pitch).
+    Reads ssml_inner.xml for Layer 2 (text + breaks, immutable).
+    Injects auto_sent_NNN bookmarks at sentence boundaries.
+
+    Returns:
+        ssml     : str       — the reconstructed SSML document
+        bk_ids   : list[str] — bookmark IDs in order (auto_sent_001, ...)
+    """
+    azure_lang = LOCALE_TO_AZURE_LANG.get(locale.lower(), "en-US")
+
+    # Find narrator in VoiceCast
+    narrator = None
+    for ch in voice_cast.get("characters", []):
+        if ch.get("character_id") == "narrator":
+            narrator = ch
+            break
+    if narrator is None:
+        raise ValueError("VoiceCast.json has no narrator entry")
+
+    # Get locale-specific voice params
+    vc_locale = narrator.get(locale) or narrator.get("en") or {}
+    voice     = vc_locale.get("azure_voice", "en-US-GuyNeural")
+    style     = vc_locale.get("azure_style")
+    style_deg = vc_locale.get("azure_style_degree", 1.5)
+    rate      = vc_locale.get("azure_rate", "0%")
+    pitch     = vc_locale.get("azure_pitch")
+
+    # Detect sentence boundaries in inner XML
+    locale_hint = "zh" if "zh" in locale.lower() else "en"
+    boundaries = _detect_sentence_boundaries(ssml_inner, locale_hint)
+
+    # Build inner content with bookmarks injected at sentence boundaries.
+    # A tiny leading silence ensures Azure fires the first bookmark event —
+    # without it, a bookmark at audio offset 0 may be silently dropped.
+    bk_ids: list[str] = []
+    parts: list[str] = ["<break time='100ms'/>"]
+    prev_end = 0
+
+    for idx, (s, e) in enumerate(boundaries):
+        # Content between previous sentence end and this sentence start
+        if s > prev_end:
+            parts.append(ssml_inner[prev_end:s])
+
+        bk_id = f"auto_sent_{idx+1:03d}"
+        bk_ids.append(bk_id)
+        parts.append(f"<bookmark mark='{bk_id}'/>")
+        parts.append(ssml_inner[s:e])
+        prev_end = e
+
+    # Any trailing content
+    if prev_end < len(ssml_inner):
+        parts.append(ssml_inner[prev_end:])
+
+    inner_with_bookmarks = "".join(parts)
+
+    # Build prosody wrapper
+    prosody_attrs: list[str] = []
+    if rate and rate != "0%":
+        prosody_attrs.append(f'rate="{rate}"')
+    if pitch:
+        prosody_attrs.append(f'pitch="{pitch}"')
+
+    spoken = inner_with_bookmarks
+    if prosody_attrs:
+        spoken = f"<prosody {' '.join(prosody_attrs)}>{spoken}</prosody>"
+
+    # Style wrapper
+    if style:
+        spoken = (
+            f'<mstts:express-as style="{style}" styledegree="{style_deg}">'
+            f"{spoken}</mstts:express-as>"
+        )
+
+    # Voice + speak wrappers
+    ssml = (
+        f"<speak version='1.0' xml:lang='{azure_lang}' "
+        f"xmlns='http://www.w3.org/2001/10/synthesis' "
+        f"xmlns:mstts='http://www.w3.org/2001/mstts'>\n"
+        f"  <voice name='{voice}'>{spoken}</voice>\n"
+        f"</speak>"
+    )
+
+    return ssml, bk_ids
+
+
+def _parse_ssml_inner_fragments(ssml_inner: str) -> list[dict]:
+    """Parse ssml_inner.xml into per-sentence fragments with pause_ms.
+
+    Returns list of {"text": str, "pause_ms": int} dicts, one per sentence.
+    Splitting logic mirrors ssml_preprocess.build_script() so the count
+    matches the Script.json / manifest vo_items count.
+    """
+    import re as _re
+
+    # Walk XML content extracting text runs and <break> tags
+    fragments: list[tuple] = []     # ("text", str) | ("break", int)
+    i = 0
+    while i < len(ssml_inner):
+        if ssml_inner[i] == '<':
+            end = ssml_inner.find('>', i)
+            if end == -1:
+                break
+            tag = ssml_inner[i:end + 1]
+            m = _re.match(r'<break\s+time=["\'](\d+)\s*ms["\']\s*/>', tag, _re.IGNORECASE)
+            if m:
+                fragments.append(("break", int(m.group(1))))
+            i = end + 1
+        else:
+            start = i
+            while i < len(ssml_inner) and ssml_inner[i] != '<':
+                i += 1
+            text = ssml_inner[start:i].strip()
+            if text:
+                fragments.append(("text", text))
+
+    # Group into sentences: accumulate text, breaks attach as trailing pause.
+    # Mirrors ssml_preprocess.build_script() Phase 1 logic.
+    raw_chunks: list[dict] = []
+    current_text = ""
+    for kind, value in fragments:
+        if kind == "text":
+            current_text += (" " if current_text else "") + value
+        elif kind == "break":
+            if current_text.strip():
+                raw_chunks.append({"text": current_text.strip(), "pause_ms": value})
+                current_text = ""
+            elif raw_chunks:
+                raw_chunks[-1]["pause_ms"] += value
+    if current_text.strip():
+        raw_chunks.append({"text": current_text.strip(), "pause_ms": 800})
+
+    # Phase 2: split by sentence-ending punctuation within each chunk.
+    # Mirrors ssml_preprocess._split_sentences() for zh locale.
+    _ZH_RE = _re.compile(r"(?<=[。！？…])")
+    result: list[dict] = []
+    for chunk in raw_chunks:
+        parts = _ZH_RE.split(chunk["text"])
+        sents = [s.strip() for s in parts if s.strip()]
+        for idx, sent in enumerate(sents):
+            if idx < len(sents) - 1:
+                result.append({"text": sent, "pause_ms": 800})
+            else:
+                result.append({"text": sent, "pause_ms": chunk["pause_ms"]})
+
+    return result
+
+
+def run_ssml_narration(
+    ssml_inner_path: str,
+    voice_cast_path: str,
+    manifest: dict,
+    items: list[dict],
+    out_dir: Path,
+) -> list[dict]:
+    """Synthesise ssml_narration content via per-sentence synthesis.
+
+    DragonHD voices do not support bookmark events, so the batch+bookmark
+    approach is not viable.  Instead:
+
+    1. Parse ssml_inner.xml into per-sentence fragments (text + pause_ms).
+    2. Read VoiceCast.json for voice/style/rate/pitch (Layer 1).
+    3. For each sentence, build a mini SSML and synthesise individually.
+    4. Voice comes from VoiceCast (NOT from manifest — manifest may have
+       wrong voice if it was copied from another locale).
+    """
+    synthesizer = load_azure_synthesizer()
+
+    ssml_inner = Path(ssml_inner_path).read_text(encoding="utf-8")
+    voice_cast = json.loads(Path(voice_cast_path).read_text(encoding="utf-8"))
+
+    locale = items[0]["locale"] if items else "en"
+    azure_lang = LOCALE_TO_AZURE_LANG.get(locale.lower(), "en-US")
+
+    # Get narrator voice params from VoiceCast (Layer 1)
+    narrator = None
+    for ch in voice_cast.get("characters", []):
+        if ch.get("character_id") == "narrator":
+            narrator = ch
+            break
+    if narrator is None:
+        raise ValueError("VoiceCast.json has no narrator entry")
+
+    vc_locale = narrator.get(locale) or narrator.get("en") or {}
+    voice     = vc_locale.get("azure_voice", "en-US-GuyNeural")
+    style     = vc_locale.get("azure_style")
+    style_deg = vc_locale.get("azure_style_degree", 1.5)
+    rate      = vc_locale.get("azure_rate", "0%")
+    pitch     = vc_locale.get("azure_pitch")
+    break_ms_default = vc_locale.get("azure_break_ms", 0)
+
+    # Parse ssml_inner.xml into sentences (mirrors Script.json structure)
+    sentence_frags = _parse_ssml_inner_fragments(ssml_inner)
+
+    print(f"\n[SSML-NARRATION] Per-sentence synthesis: {len(items)} items, "
+          f"{len(sentence_frags)} sentences from ssml_inner.xml")
+    print(f"[SSML-NARRATION] Voice: {voice}  style: {style}  rate: {rate}")
+
+    if len(sentence_frags) != len(items):
+        log.warning("ssml_inner sentence count (%d) != manifest item count (%d); "
+                     "using min()", len(sentence_frags), len(items))
+
+    results: list[dict] = []
+    total = min(len(items), len(sentence_frags))
+
+    for idx in range(total):
+        vo = items[idx]
+        frag = sentence_frags[idx]
+        out_path = out_dir / f"{vo['item_id']}.wav"
+
+        # Use text from ssml_inner.xml, NOT from manifest
+        text = frag["text"]
+
+        print(f"\n[{idx+1}/{total}] {vo['item_id']}")
+        print(f"  Voice : {voice} (from VoiceCast)")
+        print(f"  Text  : \"{text[:60]}{'...' if len(text) > 60 else ''}\"")
+
+        ssml = build_ssml(
+            text=text,
+            voice=voice,
+            azure_lang=azure_lang,
+            rate=rate,
+            style=style,
+            style_degree=style_deg,
+            pitch=pitch,
+            break_ms=break_ms_default,
+        )
+
+        try:
+            wav_bytes = synthesise(synthesizer, ssml)
+
+            if out_path.exists():
+                out_path.unlink()
+            out_path.write_bytes(wav_bytes)
+
+            size = out_path.stat().st_size
+            with open(str(out_path), "rb") as fh:
+                raw = fh.read()
+            data_tag_pos = raw.index(b"data")
+            pcm_len = max(0, len(raw) - (data_tag_pos + 8))
+            duration_s = pcm_len / (AZURE_SAMPLE_RATE * 2)
+
+            write_license_sidecar(out_path, voice, style)
+            print(f"  [OK] {out_path.name}  ({duration_s:.2f}s, {size:,} bytes)")
+
+            results.append({
+                "item_id":      vo["item_id"],
+                "speaker":      vo["speaker"],
+                "voice":        voice,
+                "azure_lang":   azure_lang,
+                "style":        style or "",
+                "style_degree": style_deg,
+                "rate":         rate,
+                "output":       str(out_path),
+                "size_bytes":   size,
+                "duration_sec": round(duration_s, 3),
+                "status":       "success",
+            })
+        except Exception as exc:
+            print(f"  [ERROR] {vo['item_id']}: {exc}")
+            results.append({
+                "item_id":    vo["item_id"],
+                "speaker":    vo["speaker"],
+                "voice":      voice,
+                "output":     str(out_path),
+                "size_bytes": 0,
+                "status":     "failed",
+                "error":      str(exc),
+            })
+
+    ok = len([r for r in results if r["status"] == "success"])
+    print(f"\n[SSML-NARRATION] Complete: {ok}/{total} items")
+    return results
+
+
+def run(items: list[dict], out_dir: Path, asset_id: str | None = None,
+        ssml_narration: bool = False, ssml_inner_path: str | None = None,
+        voice_cast_path: str | None = None, manifest: dict | None = None) -> list[dict]:
     """Synthesise all items with Azure TTS. Returns a list of result dicts.
 
     When *asset_id* is None (full episode synthesis), attempts a single batched
@@ -930,6 +1306,12 @@ def run(items: list[dict], out_dir: Path, asset_id: str | None = None) -> list[d
     directly — batch synthesis for a single item would be wasteful and the
     caller already filtered ``items`` to the one matching item.
     """
+    # ssml_narration dispatch — wrapper-rebuild + inner passthrough
+    if ssml_narration:
+        if not ssml_inner_path or not voice_cast_path:
+            raise ValueError("ssml_narration requires ssml_inner_path and voice_cast_path")
+        return run_ssml_narration(ssml_inner_path, voice_cast_path, manifest or {}, items, out_dir)
+
     synthesizer = load_azure_synthesizer()
 
     # ------------------------------------------------------------------
@@ -941,8 +1323,27 @@ def run(items: list[dict], out_dir: Path, asset_id: str | None = None) -> list[d
     # ------------------------------------------------------------------
     # Full-episode batch path: one API call for the entire locale.
     # Falls back to per-item on any exception.
+    #
+    # Gate: only attempt batch if ALL voices support bookmark events
+    # (listed in prompts/azure_tts_batch.json) AND item count ≤ max.
+    # DragonHD / DragonHDFlash / DragonHDOmni do NOT support bookmarks.
     # ------------------------------------------------------------------
     locale = items[0]["locale"] if items else "en"
+
+    # Check batch eligibility
+    voices_used = {it["voice"] for it in items}
+    unsupported = voices_used - BATCH_VOICES
+    can_batch = (not unsupported) and len(items) <= BATCH_MAX_VOICE_ELEMENTS
+
+    if unsupported:
+        print(f"\n[BATCH] Skipped — voice(s) not in batch_voices list: {', '.join(sorted(unsupported))}")
+        print(f"[BATCH] Using per-item synthesis for {len(items)} items")
+        return _synthesise_per_item(synthesizer, items, out_dir)
+
+    if len(items) > BATCH_MAX_VOICE_ELEMENTS:
+        print(f"\n[BATCH] Skipped — {len(items)} items exceeds max {BATCH_MAX_VOICE_ELEMENTS} voice elements")
+        print(f"[BATCH] Using per-item synthesis for {len(items)} items")
+        return _synthesise_per_item(synthesizer, items, out_dir)
 
     try:
         log.info("Batch synthesis: building episode SSML...")
@@ -1034,6 +1435,19 @@ def parse_args() -> argparse.Namespace:
         "--asset-id", type=str, default=None, dest="asset_id",
         help="Process only the item with this item_id (default: all vo_items).",
     )
+    parser.add_argument(
+        "--ssml-narration", action="store_true", default=False,
+        dest="ssml_narration",
+        help="ssml_narration mode: wrapper-rebuild + inner passthrough.",
+    )
+    parser.add_argument(
+        "--ssml-inner", type=str, default=None, dest="ssml_inner",
+        help="Path to ssml_inner.xml (required when --ssml-narration).",
+    )
+    parser.add_argument(
+        "--voice-cast", type=str, default=None, dest="voice_cast",
+        help="Path to VoiceCast.json (required when --ssml-narration).",
+    )
     return parser.parse_args()
 
 
@@ -1042,6 +1456,11 @@ def main() -> None:
 
     with open(args.manifest, encoding="utf-8") as f:
         manifest = json.load(f)
+
+    # Validate ssml_narration args
+    if args.ssml_narration:
+        if not args.ssml_inner or not args.voice_cast:
+            raise SystemExit("--ssml-narration requires --ssml-inner and --voice-cast")
 
     # Guard: reject shared manifests early
     if manifest.get("locale_scope") == "shared":
@@ -1089,7 +1508,33 @@ def main() -> None:
     print(f"Output   : {out_dir}")
     print(f"{'='*60}")
 
-    results = run(items, out_dir, asset_id=args.asset_id)
+    results = run(items, out_dir, asset_id=args.asset_id,
+                  ssml_narration=args.ssml_narration,
+                  ssml_inner_path=args.ssml_inner,
+                  voice_cast_path=args.voice_cast,
+                  manifest=manifest)
+
+    # ── ssml_narration: patch manifest vo_items text with source-locale text ──
+    # The zh-Hans manifest may have been copied from en with English text.
+    # After TTS, patch vo_items.text with the Chinese text from ssml_inner.xml
+    # so downstream consumers (gen_render_plan → write_srt) use the correct text.
+    if args.ssml_narration and args.ssml_inner:
+        ssml_inner_text = Path(args.ssml_inner).read_text(encoding="utf-8")
+        frags = _parse_ssml_inner_fragments(ssml_inner_text)
+        vo_items = manifest.get("vo_items", [])
+        patched = 0
+        for idx, frag in enumerate(frags):
+            if idx < len(vo_items):
+                vo_items[idx]["text"] = frag["text"]
+                vo_items[idx]["pause_after_ms"] = frag["pause_ms"]
+                patched += 1
+        manifest_path = Path(args.manifest)
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"\n[SSML-NARRATION] Patched {patched} manifest vo_items with "
+              f"source-locale text → {manifest_path.name}")
 
     results_path = meta_dir / f"{SCRIPT_NAME}_results.json"
     if results_path.exists():

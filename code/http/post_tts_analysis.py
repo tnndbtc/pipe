@@ -141,7 +141,8 @@ def analyse(
             duration = wav_duration(wav_path)
             item["start_sec"] = round(cursor, 3)
             item["end_sec"]   = round(cursor + duration, 3)
-            cursor = cursor + duration + pause_sec
+            item_pause = item.get("pause_after_ms", pause_sec * 1000) / 1000
+            cursor = cursor + duration + item_pause
 
         # Total VO span for this shot (cursor is now past the last pause)
         total_vo_sec = cursor - pause_sec if items else 0.0
@@ -320,7 +321,8 @@ def main():
             item["end_sec"]   = round(cursor + duration, 3)
             print(f"  [OK] {item_id}  {item['start_sec']}s – {item['end_sec']}s  "
                   f"(dur {duration:.3f}s)")
-            cursor += duration + args.pause
+            item_pause = item.get("pause_after_ms", args.pause * 1000) / 1000
+            cursor += duration + item_pause
             total_processed += 1
 
         total_vo_sec = cursor - args.pause if items else 0.0

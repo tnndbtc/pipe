@@ -727,21 +727,46 @@ def score_images(
         # ------------------------------------------------------------------
         thumb_detail: dict = {}
         thumb_url = thumbnails.get(str(p)) or thumbnails.get(p.name)
+        prefilter_rejected = False
         if thumb_url:
             passes, thumb_detail = _thumbnail_filter(thumb_url, tf_cfg)
             if not passes:
-                log.debug("Thumbnail filter rejected %s", p.name)
-                continue
+                log.debug("Thumbnail filter rejected %s (kept with score 0)", p.name)
+                prefilter_rejected = True
 
         # ------------------------------------------------------------------
         # Calmness (single-image Laplacian proxy)
         # ------------------------------------------------------------------
         calm = _calmness_single(p)
+        calmness_rejected = False
         if calm_thresh is not None and calm < calm_thresh:
             log.debug(
-                "Calmness pre-filter rejected %s (calm=%.3f < %.3f)",
+                "Calmness pre-filter rejected %s (calm=%.3f < %.3f, kept with score 0)",
                 p.name, calm, calm_thresh,
             )
+            calmness_rejected = True
+
+        # If either pre-filter rejected, record with score 0 and skip CLIP
+        if prefilter_rejected or calmness_rejected:
+            reject_reason = "thumbnail_rejected" if prefilter_rejected else "calmness_rejected"
+            mean_luma    = thumb_detail.get("mean_luma",    0.0)
+            rms_contrast = thumb_detail.get("rms_contrast", 0.0)
+            person_score = thumb_detail.get("person_score") if thumb_detail else None
+            results.append({
+                "path":         str(p),
+                "score":        0.0,
+                "score_detail": {
+                    "clip_total":   0.0,
+                    "clip_dims":    {d: 0.0 for d in DIMS},
+                    "calmness":     calm,
+                    "mode":         "prefilter_rejected",
+                    "mean_luma":    mean_luma,
+                    "rms_contrast": rms_contrast,
+                    "person_score": person_score,
+                    "phash_flagged": False,
+                    "error":        reject_reason,
+                },
+            })
             continue
 
         # ------------------------------------------------------------------

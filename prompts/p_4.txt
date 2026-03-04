@@ -56,6 +56,11 @@ Story format: **{{STORY_FORMAT}}**
 
 **monologue**: One or very few shots. The single protagonist is always centred (`position: "center"`). Background is minimal — a single consistent setting. No scene changes.
 
+**ssml_narration**: Same as continuous_narration — every shot must have `"characters": []` (empty array). Backgrounds are atmospheric/cinematic. Additionally:
+  - The total episode duration constraint (60-120s) does NOT apply. Total duration is dictated by the authored SSML content length.
+  - Read `pause_after_ms` from Script.json actions (extension field). Pauses > 1200ms are strong natural cut points — strongly bias shot boundaries at these sentences.
+  - Compute total narration time: sum of (word_count(line) / effective_wpm) + (pause_after_ms / 1000) for all actions.
+
 ---
 
 ## Shot Duration Rules
@@ -89,6 +94,13 @@ not assigned as a cinematic guess. Follow this formula for every shot:
 Keep the current creative duration logic.
 Add one soft constraint: `duration_sec` must not exceed the estimated VO
 speaking time for that shot plus 8 seconds.
+
+### For `ssml_narration`
+
+Same VO-anchored formula as continuous_narration, but the 60-120s total constraint does NOT apply.
+Total episode duration = sum of all VO durations. Use `pause_after_ms` from Script.json actions
+as `break_secs` instead of the default 0.6s per line:
+  break_secs = sum(pause_after_ms for each VO line in shot) / 1000
 
 ---
 
@@ -148,7 +160,7 @@ shot_ids = sorted([s["shot_id"] for s in shots])
 timing_lock_hash = hashlib.sha256(json.dumps(shot_ids).encode()).hexdigest()
 ```
 
-Total episode duration must be 60–120 seconds.
+Total episode duration must be 60–120 seconds (except `ssml_narration` — see duration rules above).
 
 Validate the artifact against contracts/schemas/ShotList.v1.json using
 Python + jsonschema.  If validation fails, fix and retry.

@@ -54,13 +54,14 @@ Story format: **{{STORY_FORMAT}}**
 
 **character_packs**:
 - `episodic`, `illustrated_narration`, `monologue`: Generate character_packs as normal.
-- `continuous_narration`, `documentary`: Do NOT generate character_packs (empty array `[]`). No character images are needed.
+- `continuous_narration`, `documentary`, `ssml_narration`: Do NOT generate character_packs (empty array `[]`). No character images are needed.
 
 **backgrounds**:
 - All formats: Generate backgrounds as normal — one per distinct setting/segment.
 - `continuous_narration`: Backgrounds should emphasise atmosphere and mood (soft, ambient, dreamlike).
 - `documentary`: Backgrounds should be informational b-roll (relevant locations, objects, environments).
 - `monologue`: Only one or two backgrounds needed (the single location where the character speaks).
+- `ssml_narration`: Same as continuous_narration — backgrounds should emphasise atmosphere and mood.
 
 ---
 

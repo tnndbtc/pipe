@@ -129,6 +129,8 @@ def main() -> None:
                     help="Path to AssetManifest_draft.en.json")
     ap.add_argument("--locale",   required=True,
                     help="Target locale, e.g. zh-Hans")
+    ap.add_argument("--primary-locale", default="en",
+                    help="Primary locale (source of truth for timing)")
     args = ap.parse_args()
 
     mpath = Path(args.manifest)
@@ -136,11 +138,12 @@ def main() -> None:
         print(f"  ⚠  prep_locale_hints: {mpath.name} not found — skipping hints")
         sys.exit(0)
 
-    manifest = json.loads(mpath.read_text(encoding="utf-8"))
-    locale   = args.locale
-    ep_dir   = mpath.parent
-    proj_dir = ep_dir.parent.parent
-    wav_dir  = ep_dir / "assets" / "en" / "audio" / "vo"
+    manifest       = json.loads(mpath.read_text(encoding="utf-8"))
+    locale         = args.locale
+    primary_locale = args.primary_locale
+    ep_dir         = mpath.parent
+    proj_dir       = ep_dir.parent.parent
+    wav_dir        = ep_dir / "assets" / primary_locale / "audio" / "vo"
 
     # Load VoiceCast.json for calibration lookup (voice/style/rate per character)
     vc_map: dict[str, dict] = {}
@@ -170,9 +173,9 @@ def main() -> None:
         rate     = loc_data.get("azure_rate", "0%")
         ph       = loc_data.get("preset_hash")      # set if user assigned a preset
 
-        # Look up EN reference voice params — cps is ZH_chars/EN_sec so it is
-        # pair-specific: changing EN voice speed changes the measured ratio.
-        en_data  = ch.get("en", {})
+        # Look up primary-locale reference voice params — cps is locale_chars/primary_sec
+        # so it is pair-specific: changing primary voice speed changes the measured ratio.
+        en_data  = ch.get(primary_locale, {})
         en_voice = en_data.get("azure_voice", "")
         en_style = en_data.get("azure_style", "")
         en_rate  = en_data.get("azure_rate", "0%")

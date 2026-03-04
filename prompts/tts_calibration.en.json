@@ -1,0 +1,94 @@
+{
+  "version": 2,
+  "locale": "en",
+  "history": [
+    {
+      "run_id": "tennis/s01e01",
+      "date": "2026-03-03",
+      "voice": "en-US-Andrew:DragonHDLatestNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
+      "en_style": "gamenarrator",
+      "en_rate": "-5%",
+      "normal_cps": 10.946,
+      "normal_n": 26,
+      "short_cps": 12.47,
+      "short_n": 5
+    },
+    {
+      "run_id": "tennis/s01e01",
+      "date": "2026-03-03",
+      "voice": "en-US-Andrew:DragonHDLatestNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
+      "en_style": "gamenarrator",
+      "en_rate": "-5%",
+      "normal_cps": 7.693,
+      "normal_n": 18,
+      "short_cps": 6.79,
+      "short_n": 5
+    },
+    {
+      "run_id": "tennis/s01e01",
+      "date": "2026-03-04",
+      "voice": "en-US-Andrew:DragonHDLatestNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
+      "en_style": "gamenarrator",
+      "en_rate": "-5%",
+      "normal_cps": 11.66,
+      "normal_n": 32,
+      "short_cps": 11.92,
+      "short_n": 11
+    },
+    {
+      "run_id": "tennis/s01e01",
+      "date": "2026-03-04",
+      "voice": "en-US-Andrew:DragonHDLatestNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
+      "en_style": "gamenarrator",
+      "en_rate": "-5%",
+      "normal_cps": 9.547,
+      "normal_n": 38,
+      "short_cps": 11.065,
+      "short_n": 11
+    },
+    {
+      "run_id": "tennis/s01e01",
+      "date": "2026-03-04",
+      "voice": "en-US-Andrew:DragonHDLatestNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
+      "en_style": "gamenarrator",
+      "en_rate": "-5%",
+      "normal_cps": 9.556,
+      "normal_n": 39,
+      "short_cps": 10.755,
+      "short_n": 10
+    },
+    {
+      "run_id": "tennis/s01e01",
+      "date": "2026-03-04",
+      "voice": "en-US-Andrew:DragonHDLatestNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
+      "en_style": "gamenarrator",
+      "en_rate": "-5%",
+      "normal_cps": 8.974,
+      "normal_n": 28,
+      "short_cps": 9.926,
+      "short_n": 8
+    }
+  ],
+  "defaults": {
+    "normal_cps": 3.2,
+    "short_cps": 2.3
+  }
+}

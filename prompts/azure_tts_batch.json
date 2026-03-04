@@ -1,0 +1,56 @@
+{
+  "_comment": "Azure TTS batch synthesis configuration. Only voices listed here support bookmark events required for batch synthesis. DragonHD / DragonHDFlash / DragonHDOmni voices do NOT support bookmarks — they must use per-item synthesis.",
+  "max_voice_elements": 50,
+  "batch_voices": [
+    "de-DE-ConradNeural",
+    "de-DE-KatjaNeural",
+
+    "en-US-AndrewNeural",
+    "en-US-AriaNeural",
+    "en-US-AvaNeural",
+    "en-US-BrianNeural",
+    "en-US-DavisNeural",
+    "en-US-EmmaNeural",
+    "en-US-GuyNeural",
+    "en-US-JaneNeural",
+    "en-US-JasonNeural",
+    "en-US-JennyNeural",
+    "en-US-NancyNeural",
+    "en-US-SaraNeural",
+    "en-US-SteffanNeural",
+    "en-US-TonyNeural",
+
+    "es-ES-AlvaroNeural",
+    "es-ES-ElviraNeural",
+
+    "fr-FR-DeniseNeural",
+    "fr-FR-HenriNeural",
+
+    "it-IT-DiegoNeural",
+    "it-IT-ElsaNeural",
+
+    "ja-JP-KeitaNeural",
+    "ja-JP-NanamiNeural",
+
+    "ko-KR-InJoonNeural",
+    "ko-KR-SunHiNeural",
+
+    "pt-BR-AntonioNeural",
+    "pt-BR-FranciscaNeural",
+
+    "zh-CN-XiaochenNeural",
+    "zh-CN-XiaohanNeural",
+    "zh-CN-XiaomengNeural",
+    "zh-CN-XiaoruiNeural",
+    "zh-CN-XiaoxiaoNeural",
+    "zh-CN-XiaoyiNeural",
+    "zh-CN-XiaozhenNeural",
+    "zh-CN-YunfengNeural",
+    "zh-CN-YunhaoNeural",
+    "zh-CN-YunjianNeural",
+    "zh-CN-YunxiNeural",
+    "zh-CN-YunxiaNeural",
+    "zh-CN-YunyiNeural",
+    "zh-CN-YunzeNeural"
+  ]
+}

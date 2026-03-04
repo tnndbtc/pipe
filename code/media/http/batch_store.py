@@ -165,7 +165,20 @@ class BatchStore:
 
     def get(self, batch_id: str) -> dict | None:
         data = self._batches.get(batch_id)
-        return dict(data) if data is not None else None
+        if data is None:
+            return None
+        # For completed batches, re-read from disk so external edits
+        # (e.g. recovered candidates patched into batch_state.json) are
+        # picked up without requiring a server restart.
+        if data.get("status") in ("done", "failed"):
+            try:
+                state_file = self._state_path(batch_id)
+                fresh = json.loads(state_file.read_text(encoding="utf-8"))
+                self._batches[batch_id] = fresh
+                return dict(fresh)
+            except Exception:  # noqa: BLE001
+                pass
+        return dict(data)
 
     def list_for_episode(self, project: str, episode_id: str) -> list[dict]:
         """
