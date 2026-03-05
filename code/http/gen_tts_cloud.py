@@ -54,6 +54,7 @@ import re
 import struct
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -837,17 +838,71 @@ def load_azure_synthesizer():
     return speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
 
 
+def _synthesise_rest(ssml: str, retries: int = 8) -> bytes:
+    """Fallback: synthesise via HTTPS REST (avoids WebSocket 429 throttling).
+
+    Uses exponential backoff on 429 / 5xx responses.
+    Output format: riff-48khz-16bit-mono-pcm to match AZURE_SAMPLE_RATE.
+    """
+    import urllib.request
+    import urllib.error
+
+    key    = os.environ.get("AZURE_SPEECH_KEY", "")
+    region = os.environ.get("AZURE_SPEECH_REGION", "")
+    if not key or not region:
+        raise RuntimeError("AZURE_SPEECH_KEY / AZURE_SPEECH_REGION not set for REST fallback")
+
+    url     = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+    headers = {
+        "Ocp-Apim-Subscription-Key": key,
+        "Content-Type":              "application/ssml+xml",
+        "X-Microsoft-OutputFormat":  "riff-48khz-16bit-mono-pcm",
+        "User-Agent":                "gen-tts-cloud-rest",
+    }
+    body = ssml.encode("utf-8")
+
+    for attempt in range(retries):
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 500, 502, 503, 504):
+                wait = min(2 ** attempt, 60)
+                print(f"  [REST] HTTP {exc.code} — backoff {wait}s (attempt {attempt+1}/{retries})")
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"REST TTS HTTP {exc.code}: {exc.read()[:200]}")
+
+    raise RuntimeError("REST TTS exhausted retries (still throttled or unreachable)")
+
+
+_REST_TRIGGER = ("429", "too many requests", "websocket upgrade failed",
+                 "websocket", "throttl")
+
+
 def synthesise(synthesizer, ssml: str) -> bytes:
     """Submit SSML to Azure and return raw WAV bytes.
 
-    Raises RuntimeError on API failure with the cancellation error details.
+    Primary path: Azure Speech SDK (WebSocket).
+    On 429 / throttle cancellation: automatic fallback to HTTPS REST with
+    exponential backoff (up to 8 retries).
     """
     import azure.cognitiveservices.speech as speechsdk
 
     result = synthesizer.speak_ssml_async(ssml).get()
     if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
         return result.audio_data
-    details = result.cancellation_details
+
+    details   = result.cancellation_details
+    err_lower = (details.error_details or "").lower()
+
+    # Detect 429 / WebSocket throttle → retry via REST
+    if any(t in err_lower for t in _REST_TRIGGER):
+        print(f"  [WARN] SDK throttled ({details.error_details[:120]}). "
+              f"Switching to REST with backoff…")
+        return _synthesise_rest(ssml)
+
     raise RuntimeError(
         f"Azure TTS cancelled: reason={details.reason}  detail={details.error_details}"
     )
@@ -869,6 +924,27 @@ def _synthesise_per_item(synthesizer, items: list[dict], out_dir: Path) -> list[
 
     for idx, vo in enumerate(items, start=1):
         out_path = out_dir / f"{vo['item_id']}.wav"
+
+        # Skip already-valid WAVs (size > 44 = more than just a WAV header)
+        if out_path.exists() and out_path.stat().st_size > 44:
+            size      = out_path.stat().st_size
+            pcm_bytes = max(0, size - 44)
+            duration_s = pcm_bytes / (AZURE_SAMPLE_RATE * 2)
+            print(f"\n[{idx}/{total}] {vo['item_id']}  [SKIP — already exists {duration_s:.2f}s]")
+            results.append({
+                "item_id":      vo["item_id"],
+                "speaker":      vo["speaker"],
+                "voice":        vo["voice"],
+                "azure_lang":   vo["azure_lang"],
+                "style":        vo["style"],
+                "style_degree": vo["style_degree"],
+                "rate":         vo["rate"],
+                "output":       str(out_path),
+                "size_bytes":   size,
+                "duration_sec": round(duration_s, 3),
+                "status":       "success",
+            })
+            continue
 
         print(f"\n[{idx}/{total}] {vo['item_id']}")
         print(f"  Speaker      : {vo['speaker']}")
@@ -921,6 +997,10 @@ def _synthesise_per_item(synthesizer, items: list[dict], out_dir: Path) -> list[
 
         except Exception as exc:
             print(f"  [ERROR] {vo['item_id']}: {exc}")
+            # Delete empty/partial output so post_tts_analysis.py doesn't choke on it
+            if out_path.exists() and out_path.stat().st_size <= 44:
+                out_path.unlink()
+                print(f"  [CLEANUP] Deleted empty/partial {out_path.name}")
             results.append({
                 "item_id":    vo["item_id"],
                 "speaker":    vo["speaker"],

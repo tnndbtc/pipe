@@ -24,6 +24,7 @@
 requests>=2.31.0
 Pillow>=10.0.0
 numpy>=1.24.0
+jsonschema>=4.17.0      # JSON Schema validation (apply_music_plan.py)
 # open_clip_torch and opencv are NOT listed here — they are only needed by the
 # media search service and live in code/media/http/requirements.txt instead.
 

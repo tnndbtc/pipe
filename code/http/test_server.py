@@ -866,6 +866,196 @@ HTML = r"""<!DOCTYPE html>
   .media-shot-row:hover { background: #ffffff08; }
   .media-shot-active { border-left-color: var(--blue, #5b9cf6); background: #5b9cf612; }
 
+  /* ── Music panel ── */
+  #panel-music {
+    flex: 1; overflow: hidden;
+    padding: 16px 24px 20px;
+    display: none; flex-direction: column; gap: 10px;
+  }
+  .music-toolbar {
+    flex-shrink: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  #music-ep-select {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text);
+    font-family: var(--mono); font-size: 0.80em;
+    padding: 5px 10px; cursor: pointer; flex: 1; max-width: 280px;
+  }
+  .music-status-bar {
+    flex-shrink: 0; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 14px;
+    font-size: 0.82em; color: var(--dim);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .music-body {
+    flex: 1; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 14px;
+    padding-right: 2px;
+  }
+  .music-body::-webkit-scrollbar { width: 6px; }
+  .music-body::-webkit-scrollbar-track { background: transparent; }
+  .music-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .music-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px; flex-shrink: 0;
+  }
+  .music-card-hdr {
+    font-size: 0.87em; font-weight: 700; color: var(--gold); margin-bottom: 4px;
+  }
+  .music-card-sub {
+    font-size: 0.76em; color: var(--dim); font-family: var(--mono);
+    margin-bottom: 10px;
+  }
+  .music-section-label {
+    font-size: 0.72em; color: var(--dim); font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase; margin: 10px 0 6px;
+  }
+  .music-timeline-row {
+    display: flex; align-items: center; gap: 8px; padding: 4px 0;
+    font-size: 0.80em; font-family: var(--mono);
+    border-bottom: 1px solid var(--border);
+  }
+  .music-timeline-shot { font-weight: 700; color: var(--gold); min-width: 100px; }
+  .music-timeline-dur  { color: var(--dim); min-width: 60px; }
+  .music-timeline-mood { color: var(--text); flex: 1; }
+  .music-timeline-duck { color: var(--dim); min-width: 80px; }
+  .music-cand-table { width: 100%; border-collapse: collapse; font-size: 0.80em; }
+  .music-cand-table th {
+    text-align: left; padding: 6px 8px; font-weight: 600;
+    color: var(--dim); border-bottom: 1px solid var(--border);
+    font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .music-cand-table td { padding: 5px 8px; border-bottom: 1px solid #ffffff08; }
+  .music-cand-table tr:hover { background: #ffffff08; }
+  .music-cand-selected { background: #5b9cf612 !important; }
+  .music-override-table { width: 100%; border-collapse: collapse; font-size: 0.80em; }
+  .music-override-table th {
+    text-align: left; padding: 6px 8px; font-weight: 600;
+    color: var(--dim); border-bottom: 1px solid var(--border);
+    font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .music-override-table td { padding: 4px 8px; border-bottom: 1px solid #ffffff08; }
+  .music-override-table input[type="number"],
+  .music-override-table input[type="range"] {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); font-family: var(--mono); font-size: 0.9em;
+    padding: 2px 4px; width: 70px;
+  }
+  .music-override-table input[type="range"] { width: 80px; }
+  .music-preview-wrap {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px;
+  }
+  .music-preview-wrap audio { width: 100%; margin-top: 8px; }
+  /* Source browser row */
+  .music-src-row { padding: 8px 0; border-bottom: 1px solid #ffffff08; }
+  .music-src-top { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .music-src-stem { font-family: var(--mono); font-size: 0.85em; font-weight: 700;
+    color: var(--gold); min-width: 160px; }
+  .music-src-meta { font-size: 0.78em; color: var(--dim); min-width: 100px; }
+  .music-src-player { flex: 1; }
+  .music-src-player audio { width: 100%; height: 32px; }
+  .music-src-controls { display: flex; align-items: center; gap: 6px;
+    margin-top: 4px; padding-left: 160px; }
+  .music-src-controls button {
+    font-size: 0.76em; padding: 3px 10px; cursor: pointer;
+    background: #ffffff10; color: var(--dim); border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .music-src-controls button:hover { background: #ffffff18; color: var(--text); }
+  .music-src-controls button.active { background: var(--gold); color: #0d0d10; }
+  .music-src-controls .mark-label {
+    font-size: 0.76em; color: var(--dim); font-family: var(--mono);
+  }
+  /* Visual shot timeline bar */
+  .music-vtl-bar {
+    display: flex; width: 100%; height: 38px; border-radius: 6px;
+    overflow: hidden; border: 1px solid var(--border); margin-bottom: 2px;
+  }
+  .music-vtl-shot {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.68em; font-family: var(--mono); font-weight: 600;
+    color: #fff; cursor: default; position: relative;
+    border-right: 1px solid #00000040; box-sizing: border-box;
+    overflow: hidden; white-space: nowrap;
+  }
+  .music-vtl-shot:last-child { border-right: none; }
+  .music-vtl-sel-row {
+    display: flex; width: 100%; margin-bottom: 6px;
+  }
+  .music-vtl-sel-cell {
+    display: flex; flex-direction: column; gap: 2px;
+    box-sizing: border-box; padding: 0 1px;
+  }
+  .music-vtl-sel-cell select {
+    font-family: var(--mono); font-size: 0.72em; width: 100%;
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 3px; padding: 1px 2px;
+  }
+  .music-vtl-param-row {
+    display: flex; width: 100%; margin-bottom: 4px;
+  }
+  .music-vtl-param-cell {
+    display: flex; align-items: center; gap: 3px; box-sizing: border-box;
+    padding: 0 2px; font-size: 0.72em; font-family: var(--mono); color: var(--dim);
+  }
+  .music-vtl-param-cell input[type="number"] {
+    width: 42px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 3px;
+    font-family: var(--mono); font-size: 0.95em; padding: 1px 3px;
+  }
+  .music-vtl-param-cell input[type="range"] { width: 50px; height: 14px; }
+  /* Per-shot stacked blocks */
+  .music-shot-block {
+    border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 8px; overflow: hidden;
+  }
+  .music-shot-hdr {
+    display: flex; align-items: center; gap: 12px;
+    padding: 5px 10px; background: #ffffff08;
+  }
+  .music-shot-hdr-id {
+    font-family: var(--mono); font-weight: 700; font-size: 0.88em; color: var(--text);
+    min-width: 40px;
+  }
+  .music-shot-hdr-ep {
+    font-family: var(--mono); font-size: 0.78em; color: var(--gold); letter-spacing: 0.02em;
+  }
+  .music-shot-clip {
+    padding: 4px 10px;
+  }
+  .music-shot-clip select {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    font-family: var(--mono); font-size: 0.82em; padding: 3px 6px;
+  }
+  .music-shot-params {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 4px 10px 7px; font-size: 0.78em; font-family: var(--mono); color: var(--dim);
+  }
+  .music-shot-params label { color: var(--dim); white-space: nowrap; }
+  .music-shot-params input[type="number"] {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 3px;
+    font-family: var(--mono); font-size: 0.95em; padding: 2px 4px;
+  }
+  .music-footer {
+    flex-shrink: 0; display: flex; align-items: center; gap: 10px;
+    padding-top: 8px; border-top: 1px solid var(--border);
+  }
+  .music-footer button {
+    background: var(--gold); color: #0d0d10; border: none;
+    border-radius: 6px; font-size: 0.82em; font-weight: 700;
+    padding: 6px 16px; cursor: pointer; transition: opacity .15s;
+  }
+  .music-footer button:hover { opacity: 0.85; }
+  .music-footer button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #music-confirm-msg { font-size: 0.80em; color: var(--dim); flex: 1; }
+  .music-btn-secondary {
+    background: #ffffff10 !important; color: var(--dim) !important;
+    border: 1px solid var(--border) !important;
+  }
+
   /* ── Browse panel ── */
   #panel-browse {
     flex: 1; overflow: hidden;
@@ -1255,6 +1445,7 @@ HTML = r"""<!DOCTYPE html>
     <button class="tab"        data-tab="pipeline" onclick="switchTab('pipeline')">🎬 Pipeline</button>
     <button class="tab"        data-tab="browse"   onclick="switchTab('browse')"  >📁 Browse</button>
     <button class="tab"        data-tab="media"    onclick="switchTab('media')"   >🖼 Media</button>
+    <button class="tab"        data-tab="music"    onclick="switchTab('music')"   >🎵 Music</button>
   </nav>
 
   <div class="toggle-wrap" id="toggle-render"
@@ -1498,6 +1689,34 @@ Direction    : …"></textarea>
     <button id="media-btn-reset"     onclick="mediaReset()">↺ Reset</button>
     <button id="media-btn-apply-seq" onclick="mediaApplyRecommended()" style="display:none">⚡ Apply Recommended Sequence</button>
     <button id="media-btn-confirm"   onclick="mediaConfirm()">✔ Confirm Selections</button>
+  </div>
+</div>
+
+<!-- ── Music panel ── -->
+<div id="panel-music">
+  <!-- toolbar row -->
+  <div class="music-toolbar">
+    <div class="section-label" style="margin-bottom:0">Music Review</div>
+    <select id="music-ep-select" onchange="onMusicEpChange()">
+      <option value="">— select episode —</option>
+    </select>
+    <button id="music-btn-review"  onclick="musicGenerateReview()" disabled
+            style="background:#ffffff10;color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.80em;padding:5px 14px;cursor:pointer">🎵 Generate Music Review</button>
+  </div>
+
+  <!-- status / spinner -->
+  <div class="music-status-bar" id="music-status-bar">
+    <span id="music-status-text">Select an episode to begin.</span>
+    <span class="media-spinner" id="music-spinner" style="display:none"></span>
+  </div>
+
+  <!-- scrollable body: timeline + candidates + overrides + preview -->
+  <div class="music-body" id="music-body"></div>
+
+  <!-- footer actions -->
+  <div class="music-footer" id="music-footer" style="display:none">
+    <span id="music-confirm-msg"></span>
+    <button id="music-btn-confirm" onclick="musicConfirm()">✔ Confirm MusicPlan</button>
   </div>
 </div>
 
@@ -1952,6 +2171,7 @@ Direction    : …"></textarea>
     document.getElementById('panel-browse').style.display   = name === 'browse'   ? 'flex' : 'none';
     document.getElementById('panel-pipeline').style.display = name === 'pipeline' ? 'flex' : 'none';
     document.getElementById('panel-media').style.display    = name === 'media'    ? 'flex' : 'none';
+    document.getElementById('panel-music').style.display    = name === 'music'    ? 'flex' : 'none';
 
     // ── Connection cleanup on tab switch ──
     // HTTP/1.1 allows only 6 concurrent connections per host.  Free up slots
@@ -1976,6 +2196,7 @@ Direction    : …"></textarea>
 
     if (name === 'browse')   loadProjects();
     if (name === 'media')    initMediaTab();
+    if (name === 'music')    initMusicTab();
     if (name === 'pipeline') {
       initPipelineTab();
       // Auto-refresh every 5 s while Pipeline tab is open
@@ -4065,6 +4286,566 @@ Direction    : …"></textarea>
                     ep_dir: _ep_dir });
     _vcPendingTo = null;
     document.getElementById('btn-vc-continue').style.display = 'none';
+  }
+
+  // ── Music tab ──────────────────────────────────────────────────────────────────
+
+  let _musicSlug      = null;
+  let _musicEpId      = null;
+  let _musicTimeline  = null;   // timeline.json data
+  let _musicCandidates = null;  // music_loop_candidates.json data
+  let _musicClipResults = [];   // gen_music_clip_results.json — all available clips
+  let _musicSources     = [];   // source music tracks from /api/music_sources
+  let _musicCutClips  = [];     // user-cut clips: [{clip_id, stem, start_sec, end_sec, path}]
+  let _musicClipLookup = {};   // clip_id → { wavStem, path, item_id } — built by _musicRenderBody
+  let _musicMarks     = {};     // per-stem marks: { stem: {start: N, end: N} }
+  let _musicOverrides = {};     // { item_id: {duck_db, fade_sec, ...} }
+  let _musicLoopSel   = {};     // { track_stem: {start_sec, duration_sec, mode, crossfade_ms} }
+  let _musicBusy      = false;
+
+  function _musicSetStatus(msg, spinning) {
+    document.getElementById('music-status-text').textContent = msg;
+    document.getElementById('music-spinner').style.display = spinning ? 'inline-block' : 'none';
+  }
+
+  function initMusicTab() {
+    const sel = document.getElementById('music-ep-select');
+    if (sel.options.length > 1) { _musicSyncFromRunTab(); return; }
+    fetch('/list_projects').then(r => r.json()).then(data => {
+      (data.projects || []).forEach(proj => {
+        (proj.episodes || []).forEach(ep => {
+          const opt = document.createElement('option');
+          opt.value       = proj.slug + '|' + ep.id;
+          opt.textContent = proj.slug + ' / ' + ep.id;
+          sel.appendChild(opt);
+        });
+      });
+      _musicSyncFromRunTab();
+    }).catch(() => {});
+  }
+
+  function _musicSyncFromRunTab() {
+    if (_musicSlug && _musicEpId) return;
+    if (!currentSlug || !currentEpId) return;
+    const target = currentSlug + '|' + currentEpId;
+    const sel = document.getElementById('music-ep-select');
+    for (let i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === target) {
+        sel.value = target;
+        onMusicEpChange();
+        return;
+      }
+    }
+  }
+
+  function onMusicEpChange() {
+    const v = document.getElementById('music-ep-select').value;
+    if (!v) { _musicSlug = null; _musicEpId = null; return; }
+    [_musicSlug, _musicEpId] = v.split('|');
+    document.getElementById('music-btn-review').disabled  = false;
+    _musicSetStatus('Episode selected. Click Generate Music Review to begin.');
+    // Try to load existing data
+    _musicLoadExisting();
+  }
+
+  async function _musicLoadExisting() {
+    if (!_musicSlug || !_musicEpId) return;
+    // Try loading existing candidates + timeline + clip results
+    try {
+      const cr = await fetch('/api/music_loop_candidates?slug=' + encodeURIComponent(_musicSlug)
+        + '&ep_id=' + encodeURIComponent(_musicEpId));
+      if (cr.ok) {
+        _musicCandidates = await cr.json();
+      }
+    } catch (_) {}
+    try {
+      const tr = await fetch('/api/music_timeline?slug=' + encodeURIComponent(_musicSlug)
+        + '&ep_id=' + encodeURIComponent(_musicEpId));
+      if (tr.ok) {
+        _musicTimeline = await tr.json();
+      }
+    } catch (_) {}
+    // Load gen_music_clip_results.json — all available music clips for this episode
+    try {
+      const mr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_musicSlug)
+        + '&ep_id=' + encodeURIComponent(_musicEpId)
+        + '&file=assets/meta/gen_music_clip_results.json');
+      if (mr.ok) {
+        _musicClipResults = await mr.json();
+      }
+    } catch (_) {}
+    // Load source music tracks
+    try {
+      const sr = await fetch('/api/music_sources?slug=' + encodeURIComponent(_musicSlug)
+        + '&ep_id=' + encodeURIComponent(_musicEpId));
+      if (sr.ok) {
+        _musicSources = await sr.json();
+      }
+    } catch (_) {}
+    // Load user-cut clips
+    try {
+      const uc = await fetch('/api/episode_file?slug=' + encodeURIComponent(_musicSlug)
+        + '&ep_id=' + encodeURIComponent(_musicEpId)
+        + '&file=assets/music/user_cut_clips.json');
+      if (uc.ok) {
+        _musicCutClips = await uc.json();
+      }
+    } catch (_) {}
+    // Try loading existing MusicPlan.json
+    try {
+      const pr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_musicSlug)
+        + '&ep_id=' + encodeURIComponent(_musicEpId) + '&file=assets/music/MusicPlan.json');
+      if (pr.ok) {
+        const plan = await pr.json();
+        _musicLoopSel  = plan.loop_selections || {};
+        _musicOverrides = {};
+        (plan.shot_overrides || []).forEach(o => { _musicOverrides[o.item_id] = o; });
+      }
+    } catch (_) {}
+    _musicRenderBody();
+  }
+
+  // Auto-save overrides to MusicPlan.json (silently, no UI feedback)
+  async function _musicAutoSave() {
+    if (!_musicSlug || !_musicEpId) return;
+    try {
+      const plan = {
+        schema_id: 'MusicPlan',
+        schema_version: '1.0',
+        loop_selections: _musicLoopSel,
+        shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id),
+      };
+      await fetch('/api/music_plan_save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ slug: _musicSlug, ep_id: _musicEpId, plan: plan }),
+      });
+    } catch (_) {}
+  }
+
+  async function musicGenerateReview() {
+    if (!_musicSlug || !_musicEpId || _musicBusy) return;
+    _musicBusy = true;
+    document.getElementById('music-btn-review').disabled = true;
+
+    try {
+      // Step 1: Prepare loop candidates
+      _musicSetStatus('Step 1/2 — Analysing loop candidates …', true);
+      const r1 = await fetch('/api/music_prepare_loops', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ slug: _musicSlug, ep_id: _musicEpId }),
+      });
+      const d1 = await r1.json();
+      if (!r1.ok || d1.error) throw new Error(d1.error || 'loop analysis failed');
+      _musicCandidates = d1.candidates || d1;
+
+      // Step 2: Generate review pack (timeline + preview audio) with current overrides
+      _musicSetStatus('Step 2/2 — Generating review pack (VO + music preview) …', true);
+      const currentOverrides = Object.values(_musicOverrides).filter(o => o.item_id);
+      const r2 = await fetch('/api/music_review_pack', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          slug: _musicSlug, ep_id: _musicEpId,
+          shot_overrides: currentOverrides.length > 0 ? currentOverrides : undefined,
+        }),
+      });
+      const d2 = await r2.json();
+      if (!r2.ok || d2.error) throw new Error(d2.error || 'review pack failed');
+      _musicTimeline = d2.timeline || null;
+
+      // Auto-save current overrides to MusicPlan.json so they survive page refresh
+      await _musicAutoSave();
+
+      const nTracks = Object.keys(_musicCandidates.tracks || {}).length;
+      _musicSetStatus('Review ready — ' + nTracks + ' tracks analysed. Listen to preview and adjust below.', false);
+      _musicRenderBody();
+      document.getElementById('music-footer').style.display = 'flex';
+    } catch (err) {
+      _musicSetStatus('Error: ' + err.message, false);
+    } finally {
+      _musicBusy = false;
+      document.getElementById('music-btn-review').disabled = false;
+    }
+  }
+
+  function _musicRenderBody() {
+    const body = document.getElementById('music-body');
+    body.innerHTML = '';
+
+    // ── Preview audio player ──
+    const previewPath = 'projects/' + _musicSlug + '/episodes/' + _musicEpId
+      + '/assets/music/MusicReviewPack/preview_audio.wav';
+    const previewWrap = document.createElement('div');
+    previewWrap.className = 'music-preview-wrap';
+    previewWrap.innerHTML = '<div class="music-section-label">Preview Audio (VO + Music)</div>'
+      + '<audio controls src="/serve_media?path=' + encodeURIComponent(previewPath)
+      + '&t=' + Date.now() + '" style="width:100%"></audio>'
+      + '<div style="font-size:0.72em;color:var(--dim);margin-top:4px">'
+      + 'If no audio loads, click Generate Review Pack first.</div>';
+    body.appendChild(previewWrap);
+
+    // ── Build unified clip list + global lookup (used by Shot Overrides + Generated Clips) ──
+    _musicClipLookup = {};
+    const allClips = [];
+    (_musicClipResults || []).forEach(c => {
+      if (c.status !== 'success') return;
+      const src = (c.source_file || '').replace(/\.[^.]+$/, '');
+      const endSec = (c.start_sec || 0) + (c.duration_sec || 0);
+      const cid = src + ':' + (c.start_sec || 0).toFixed(1) + 's-' + endSec.toFixed(1) + 's';
+      const wavPath = 'projects/' + _musicSlug + '/episodes/' + _musicEpId
+        + '/assets/music/' + c.item_id + '.wav';
+      allClips.push({
+        clip_id: cid, stem: src,
+        start_sec: c.start_sec || 0, end_sec: endSec,
+        duration_sec: c.duration_sec || 0,
+        score: c.match_score, item_id: c.item_id,
+        wavPath: wavPath, origin: 'auto',
+      });
+      _musicClipLookup[cid] = { wavStem: c.item_id, path: wavPath, item_id: c.item_id };
+    });
+    (_musicCutClips || []).forEach(c => {
+      const wavStem = (c.path || '').replace(/^.*\//, '').replace(/\.[^.]+$/, '');
+      allClips.push({
+        clip_id: c.clip_id, stem: c.stem,
+        start_sec: c.start_sec, end_sec: c.end_sec,
+        duration_sec: c.end_sec - c.start_sec,
+        score: null, item_id: null,
+        wavPath: c.path, origin: 'user',
+      });
+      _musicClipLookup[c.clip_id] = { wavStem: wavStem, path: c.path, item_id: null };
+    });
+
+    // ── Shot Overrides: visual timeline bar + clip dropdown + start/end/duck/fade ──
+    if (_musicTimeline && _musicTimeline.shots) {
+      const musicShots = _musicTimeline.shots.filter(s => s.music_item_id);
+      // Map item_ids to their current clip_id label
+      const itemToClipId = {};
+      (_musicClipResults || []).forEach(c => {
+        if (c.status !== 'success') return;
+        const src = (c.source_file || '').replace(/\.[^.]+$/, '');
+        const endSec = (c.start_sec || 0) + (c.duration_sec || 0);
+        itemToClipId[c.item_id] = src + ':' + (c.start_sec || 0).toFixed(1) + 's-' + endSec.toFixed(1) + 's';
+      });
+      if (musicShots.length > 0) {
+        const totalDur = _musicTimeline.total_duration_sec || 1;
+        const ovrCard = document.createElement('div');
+        ovrCard.className = 'music-card';
+
+        const shotColors = ['#3b6ea5','#8b5e3c','#5e8c5a','#8b3e6e','#6e6e3e','#3e6e8b','#8b6e3e'];
+
+        let ovrHtml = '<div class="music-card-hdr">Shot Overrides</div>'
+          + '<div class="music-card-sub">Clip, music window (start/end within shot), duck &amp; fade per shot.</div>';
+
+        // ── Visual timeline bar ──
+        ovrHtml += '<div class="music-vtl-bar">';
+        musicShots.forEach((s, i) => {
+          const pct = ((s.duration_sec || 0) / totalDur * 100);
+          const col = shotColors[i % shotColors.length];
+          const t0 = s.offset_sec || 0;
+          const t1 = t0 + (s.duration_sec || 0);
+          const fmtT = (t) => { const m = Math.floor(t/60); const sc = (t%60).toFixed(0); return m+':'+(sc<10?'0':'')+sc; };
+          ovrHtml += '<div class="music-vtl-shot" style="width:' + pct + '%;background:' + col
+            + '" title="' + s.shot_id + '  ' + fmtT(t0) + '–' + fmtT(t1) + '  (' + (s.duration_sec||0).toFixed(1) + 's)">'
+            + s.shot_id.replace(/^s\d+e\d+_/, '') + '</div>';
+        });
+        ovrHtml += '</div>';
+
+        // ── Per-shot blocks (full width, stacked) ──
+        const fmtEp = (t) => t.toFixed(1) + 's';
+        musicShots.forEach((s, i) => {
+          const origMid  = s.music_item_id;
+          const ovr      = _musicOverrides[origMid] || {};
+          const shotDur  = s.duration_sec || 0;
+          const epStart  = s.offset_sec || 0;
+          const epEnd    = epStart + shotDur;
+          // within-shot offsets (stored in overrides / backend)
+          const startWithin = ovr.start_sec    != null ? ovr.start_sec    : (s.start_sec != null ? s.start_sec : 0);
+          const durVal      = ovr.duration_sec != null ? ovr.duration_sec : shotDur;
+          const endWithin   = Math.min(startWithin + durVal, shotDur);
+          // episode-absolute values shown in the inputs
+          const dispStart = epStart + startWithin;
+          const dispEnd   = epStart + endWithin;
+          const duckVal  = ovr.duck_db  != null ? ovr.duck_db  : 0;
+          const fadeVal  = ovr.fade_sec != null ? ovr.fade_sec : (s.fade_sec != null ? s.fade_sec : 0.15);
+          const col      = shotColors[i % shotColors.length];
+          const currentClipId = ovr.music_clip_id || itemToClipId[origMid] || origMid;
+
+          ovrHtml += '<div class="music-shot-block">'
+            // header: shot id + episode time range
+            + '<div class="music-shot-hdr" style="border-left:4px solid ' + col + '">'
+            + '<span class="music-shot-hdr-id">' + s.shot_id.replace(/^s\d+e\d+_/, '') + '</span>'
+            + '<span class="music-shot-hdr-ep">episode&nbsp;' + fmtEp(epStart) + ' – ' + fmtEp(epEnd)
+            + '&nbsp;(' + shotDur.toFixed(1) + 's)</span>'
+            + '</div>'
+            // clip dropdown
+            + '<div class="music-shot-clip">'
+            + '<select style="width:100%" onchange="_musicSetClipOverride(\'' + origMid + '\',this.value)">';
+          allClips.forEach(c => {
+            ovrHtml += '<option value="' + c.clip_id + '"' + (c.clip_id === currentClipId ? ' selected' : '') + '>'
+              + c.clip_id + '</option>';
+          });
+          ovrHtml += '</select></div>'
+            // params: start / end / duck / fade
+            + '<div class="music-shot-params">'
+            + '<label title="Episode time when music begins (seconds)">▶ start</label>'
+            + '<input type="number" step="0.5" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispStart.toFixed(1) + '"'
+            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',parseFloat(this.value)-' + epStart + ',null,' + shotDur + ')"'
+            + ' style="width:64px">'
+            + '<label title="Episode time when music stops (seconds)">⏹ end</label>'
+            + '<input type="number" step="0.5" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispEnd.toFixed(1) + '"'
+            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',null,parseFloat(this.value)-' + epStart + ',' + shotDur + ')"'
+            + ' style="width:64px">'
+            + '<label title="Attenuation in dB (0 = full volume)">🔉 duck</label>'
+            + '<input type="number" step="1" min="-30" max="0" value="' + duckVal + '"'
+            + ' onchange="_musicSetOverride(\'' + origMid + '\',\'duck_db\',parseFloat(this.value))"'
+            + ' style="width:50px">'
+            + '<label title="Fade duration in seconds">⏱ fade</label>'
+            + '<input type="number" step="0.05" min="0" max="3" value="' + fadeVal.toFixed(2) + '"'
+            + ' onchange="_musicSetOverride(\'' + origMid + '\',\'fade_sec\',parseFloat(this.value))"'
+            + ' style="width:50px">'
+            + '</div>'
+            + '</div>';
+        });
+
+        ovrCard.innerHTML = ovrHtml;
+        body.appendChild(ovrCard);
+        document.getElementById('music-footer').style.display = 'flex';
+      }
+    }
+
+    // ── Source Music Browser (with mark start/end + cut) ──
+    if (_musicSources && _musicSources.length > 0) {
+      const srcCard = document.createElement('div');
+      srcCard.className = 'music-card';
+      let srcHtml = '<div class="music-card-hdr">Source Music Library</div>'
+        + '<div class="music-card-sub">Play a source track, mark Start &amp; End positions, '
+        + 'then Cut Clip to create a candidate for shot assignment.</div>';
+      _musicSources.forEach((s, si) => {
+        const dur = s.duration_sec != null
+          ? (s.duration_sec / 60 | 0) + ':' + String(Math.round(s.duration_sec % 60)).padStart(2, '0')
+          : '—';
+        const bpm = s.bpm != null ? Math.round(s.bpm) + ' BPM' : '';
+        const mark = _musicMarks[s.stem] || {};
+        const markStartTxt = mark.start != null ? mark.start.toFixed(1) + 's' : '—';
+        const markEndTxt   = mark.end   != null ? mark.end.toFixed(1)   + 's' : '—';
+        srcHtml += '<div class="music-src-row">'
+          + '<div class="music-src-top">'
+          + '<span class="music-src-stem">' + s.stem + '</span>'
+          + '<span class="music-src-meta">' + dur + (bpm ? ' · ' + bpm : '') + '</span>'
+          + '<div class="music-src-player">'
+          + '<audio id="music-src-audio-' + si + '" controls preload="none" style="width:100%;height:32px"'
+          + ' src="/serve_media?path=' + encodeURIComponent(s.path) + '"></audio>'
+          + '</div></div>'
+          + '<div class="music-src-controls">'
+          + '<button onclick="_musicMarkPos(\'' + s.stem + '\',' + si + ',\'start\')"'
+          + (mark.start != null ? ' class="active"' : '') + '>Mark Start</button>'
+          + '<span class="mark-label">In: ' + markStartTxt + '</span>'
+          + '<button onclick="_musicMarkPos(\'' + s.stem + '\',' + si + ',\'end\')"'
+          + (mark.end != null ? ' class="active"' : '') + '>Mark End</button>'
+          + '<span class="mark-label">Out: ' + markEndTxt + '</span>'
+          + '<button onclick="_musicCutClip(\'' + s.stem + '\')"'
+          + ' style="' + (mark.start != null && mark.end != null
+            ? 'background:var(--gold);color:#0d0d10;font-weight:700' : '')
+          + '">✂ Cut Clip</button>'
+          + '</div></div>';
+      });
+      srcCard.innerHTML = srcHtml;
+      body.appendChild(srcCard);
+    }
+
+    // ── Generated Clips (auto + user-cut) ──
+    if (allClips.length > 0) {
+      const clipCard = document.createElement('div');
+      clipCard.className = 'music-card';
+      let clipHtml = '<div class="music-card-hdr">Generated Clips</div>'
+        + '<div class="music-card-sub">Auto-extracted and user-cut clips available for shot assignment.</div>'
+        + '<table class="music-cand-table"><thead><tr>'
+        + '<th>Clip</th><th>Duration</th><th>Score</th><th style="width:220px">Preview</th>'
+        + '</tr></thead><tbody>';
+      allClips.forEach(c => {
+        const durTxt = c.duration_sec.toFixed(1) + 's';
+        const scoreTxt = c.score != null ? c.score.toFixed(3) : (c.origin === 'user' ? 'cut' : '—');
+        clipHtml += '<tr>'
+          + '<td style="font-family:var(--mono);font-size:0.82em;color:'
+          + (c.origin === 'user' ? 'var(--gold)' : 'var(--text)') + '">' + c.clip_id + '</td>'
+          + '<td>' + durTxt + '</td>'
+          + '<td>' + scoreTxt + '</td>'
+          + '<td><audio controls preload="none" style="height:28px;width:210px"'
+          + ' src="/serve_media?path=' + encodeURIComponent(c.wavPath) + '"></audio></td>'
+          + '</tr>';
+      });
+      clipHtml += '</tbody></table>';
+      clipCard.innerHTML = clipHtml;
+      body.appendChild(clipCard);
+    }
+
+    // ── Shot Timeline (read-only reference, bottom) ──
+    if (_musicTimeline && _musicTimeline.shots) {
+      const tlCard = document.createElement('div');
+      tlCard.className = 'music-card';
+      let tlHtml = '<div class="music-card-hdr">Shot Timeline</div>'
+        + '<div class="music-card-sub">Total: ' + (_musicTimeline.total_duration_sec || 0).toFixed(1) + 's'
+        + ' — ' + _musicTimeline.shots.length + ' shots</div>';
+      const fmtTime = (t) => {
+        const m = Math.floor(t / 60);
+        const sec = (t % 60).toFixed(1);
+        return m + ':' + (sec < 10 ? '0' : '') + sec;
+      };
+      _musicTimeline.shots.forEach(s => {
+        const mood = s.music_mood || '(no music)';
+        const ovrDuck = (_musicOverrides[s.music_item_id] || {}).duck_db;
+        const effectiveDuck = ovrDuck != null ? ovrDuck : (s.duck_db != null ? s.duck_db : 0);
+        const duck = effectiveDuck + 'dB' + (ovrDuck != null ? ' ✎' : '');
+        const t0 = s.offset_sec || 0;
+        const t1 = t0 + (s.duration_sec || 0);
+        tlHtml += '<div class="music-timeline-row">'
+          + '<span class="music-timeline-shot">' + s.shot_id + '</span>'
+          + '<span class="music-timeline-dur">' + fmtTime(t0) + ' – ' + fmtTime(t1) + '</span>'
+          + '<span class="music-timeline-mood">' + mood + '</span>'
+          + '<span class="music-timeline-duck">' + duck + '</span>'
+          + '</div>';
+      });
+      tlCard.innerHTML = tlHtml;
+      body.appendChild(tlCard);
+    }
+  }
+
+  // ── Mark start/end positions on source tracks ──
+  function _musicMarkPos(stem, audioIdx, which) {
+    const audio = document.getElementById('music-src-audio-' + audioIdx);
+    if (!audio) return;
+    if (!_musicMarks[stem]) _musicMarks[stem] = {};
+    _musicMarks[stem][which] = audio.currentTime;
+    // Update UI in-place (avoid full re-render which would kill audio playback)
+    const row = audio.closest('.music-src-row');
+    if (row) {
+      const controls = row.querySelector('.music-src-controls');
+      if (controls) {
+        const labels = controls.querySelectorAll('.mark-label');
+        const buttons = controls.querySelectorAll('button');
+        const mark = _musicMarks[stem];
+        if (labels[0]) labels[0].textContent = 'In: ' + (mark.start != null ? mark.start.toFixed(1) + 's' : '—');
+        if (labels[1]) labels[1].textContent = 'Out: ' + (mark.end != null ? mark.end.toFixed(1) + 's' : '—');
+        if (buttons[0]) buttons[0].className = mark.start != null ? 'active' : '';
+        if (buttons[1]) buttons[1].className = mark.end != null ? 'active' : '';
+        // Highlight cut button when both marks set
+        if (buttons[2] && mark.start != null && mark.end != null) {
+          buttons[2].style.background = 'var(--gold)';
+          buttons[2].style.color = '#0d0d10';
+          buttons[2].style.fontWeight = '700';
+        }
+      }
+    }
+  }
+
+  // ── Cut clip from source track ──
+  async function _musicCutClip(stem) {
+    const mark = _musicMarks[stem];
+    if (!mark || mark.start == null || mark.end == null) {
+      alert('Mark both Start and End positions first.');
+      return;
+    }
+    if (mark.end <= mark.start) {
+      alert('End must be after Start.');
+      return;
+    }
+    _musicSetStatus('Cutting clip from ' + stem + ' …', true);
+    try {
+      const r = await fetch('/api/music_cut_clip', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          slug: _musicSlug, ep_id: _musicEpId,
+          stem: stem, start_sec: mark.start, end_sec: mark.end,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || 'cut failed');
+      const clipId = d.clip_id || (stem + ':' + mark.start.toFixed(1) + 's-' + mark.end.toFixed(1) + 's');
+      // Remove existing entry with same clip_id (re-cut)
+      _musicCutClips = _musicCutClips.filter(c => c.clip_id !== clipId);
+      _musicCutClips.push({
+        clip_id: clipId, stem: stem,
+        start_sec: mark.start, end_sec: mark.end,
+        path: d.path,
+      });
+      _musicSetStatus('Clip cut: ' + clipId, false);
+      _musicRenderBody();
+    } catch (err) {
+      _musicSetStatus('Error: ' + err.message, false);
+    }
+  }
+
+  // ── Set clip override from visual timeline dropdown ──
+  function _musicSetClipOverride(itemId, clipId) {
+    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
+    // Store full clip_id for UI dropdown matching
+    _musicOverrides[itemId].music_clip_id = clipId;
+    // Resolve to WAV filename stem via lookup (for backend)
+    const info = _musicClipLookup[clipId];
+    if (info) {
+      _musicOverrides[itemId].music_asset_id = info.wavStem;
+    } else {
+      // Fallback: parse stem from clip_id
+      const m = clipId.match(/^(.+?):(\d+\.?\d*)s-(\d+\.?\d*)s$/);
+      _musicOverrides[itemId].music_asset_id = m ? m[1] : clipId;
+    }
+    // Also store clip timing for apply_music_plan
+    const m = clipId.match(/^(.+?):(\d+\.?\d*)s-(\d+\.?\d*)s$/);
+    if (m) {
+      _musicOverrides[itemId].clip_start_sec = parseFloat(m[2]);
+      _musicOverrides[itemId].clip_duration_sec = parseFloat(m[3]) - parseFloat(m[2]);
+    }
+  }
+
+  function _musicSetOverride(itemId, field, value) {
+    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
+    _musicOverrides[itemId][field] = value;
+  }
+
+  // start_sec / end_sec: either may be null (means "keep current value")
+  function _musicSetStartEnd(itemId, startSec, endSec, shotDur) {
+    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
+    const ovr = _musicOverrides[itemId];
+    // Resolve current values
+    const curStart = startSec  != null ? startSec  : (ovr.start_sec   != null ? ovr.start_sec   : 0);
+    const curDur   = ovr.duration_sec != null ? ovr.duration_sec : shotDur;
+    const curEnd   = endSec    != null ? endSec    : Math.min(curStart + curDur, shotDur);
+    // Clamp and store
+    const newStart = Math.max(0, Math.min(curStart, shotDur));
+    const newEnd   = Math.max(newStart, Math.min(curEnd, shotDur));
+    ovr.start_sec    = parseFloat(newStart.toFixed(2));
+    ovr.duration_sec = parseFloat((newEnd - newStart).toFixed(2));
+  }
+
+  async function musicConfirm() {
+    if (!_musicSlug || !_musicEpId) return;
+    document.getElementById('music-btn-confirm').disabled = true;
+    document.getElementById('music-confirm-msg').textContent = 'Saving MusicPlan.json …';
+    try {
+      const plan = {
+        schema_id: 'MusicPlan',
+        schema_version: '1.0',
+        loop_selections: _musicLoopSel,
+        shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id),
+      };
+      const r = await fetch('/api/music_plan_save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ slug: _musicSlug, ep_id: _musicEpId, plan: plan }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || 'save failed');
+      document.getElementById('music-confirm-msg').textContent =
+        '✔ MusicPlan.json saved → ' + (d.path || 'assets/music/MusicPlan.json')
+        + '. Resume pipeline with Stage 10 to apply.';
+    } catch (err) {
+      document.getElementById('music-confirm-msg').textContent = 'Error: ' + err.message;
+    } finally {
+      document.getElementById('music-btn-confirm').disabled = false;
+    }
   }
 
   // ── Browse panel ─────────────────────────────────────────────────────────────
@@ -6947,12 +7728,111 @@ Reply with JSON only — no text outside the object:
             self.end_headers()
             self.wfile.write(body)
 
+        # ── Music: return loop candidates JSON (GET /api/music_loop_candidates) ──
+        elif parsed.path == "/api/music_loop_candidates":
+            params = parse_qs(parsed.query)
+            slug   = params.get("slug", [""])[0].strip()
+            ep_id  = params.get("ep_id", [""])[0].strip()
+            if not slug or not ep_id:
+                body = json.dumps({"error": "slug and ep_id required"}).encode()
+                self.send_response(400)
+            else:
+                cand_path = os.path.join(PIPE_DIR, "projects", slug,
+                    "episodes", ep_id, "assets", "music", "music_loop_candidates.json")
+                if not os.path.isfile(cand_path):
+                    body = json.dumps({"error": "not found"}).encode()
+                    self.send_response(404)
+                else:
+                    with open(cand_path, "rb") as _cf:
+                        body = _cf.read()
+                    self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── Music: return timeline JSON (GET /api/music_timeline) ────────────
+        elif parsed.path == "/api/music_timeline":
+            params = parse_qs(parsed.query)
+            slug   = params.get("slug", [""])[0].strip()
+            ep_id  = params.get("ep_id", [""])[0].strip()
+            if not slug or not ep_id:
+                body = json.dumps({"error": "slug and ep_id required"}).encode()
+                self.send_response(400)
+            else:
+                tl_path = os.path.join(PIPE_DIR, "projects", slug,
+                    "episodes", ep_id, "assets", "music",
+                    "MusicReviewPack", "timeline.json")
+                if not os.path.isfile(tl_path):
+                    body = json.dumps({"error": "not found"}).encode()
+                    self.send_response(404)
+                else:
+                    with open(tl_path, "rb") as _tf:
+                        body = _tf.read()
+                    self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── Music: list source music files (GET /api/music_sources) ──────────
+        elif parsed.path == "/api/music_sources":
+            params = parse_qs(parsed.query)
+            slug   = params.get("slug", [""])[0].strip()
+            ep_id  = params.get("ep_id", [""])[0].strip()
+            if not slug or not ep_id:
+                body = json.dumps({"error": "slug and ep_id required"}).encode()
+                self.send_response(400)
+            else:
+                music_dir = os.path.join(PIPE_DIR, "projects", slug,
+                                         "resources", "music")
+                sources = []
+                _supported_exts = {".mp3", ".wav", ".flac", ".ogg"}
+                if os.path.isdir(music_dir):
+                    # Try to load loop candidates for duration/bpm info
+                    cand_data = {}
+                    cand_path = os.path.join(PIPE_DIR, "projects", slug,
+                        "episodes", ep_id, "assets", "music",
+                        "music_loop_candidates.json")
+                    if os.path.isfile(cand_path):
+                        try:
+                            with open(cand_path, encoding="utf-8") as _cf:
+                                cand_data = json.load(_cf).get("tracks", {})
+                        except Exception:
+                            pass
+
+                    for fname in sorted(os.listdir(music_dir)):
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext not in _supported_exts:
+                            continue
+                        stem = os.path.splitext(fname)[0]
+                        rel_path = os.path.join("projects", slug,
+                                                "resources", "music", fname)
+                        track_info = cand_data.get(stem, {})
+                        sources.append({
+                            "stem": stem,
+                            "filename": fname,
+                            "path": rel_path,
+                            "duration_sec": track_info.get("duration_total_sec"),
+                            "bpm": track_info.get("bpm"),
+                        })
+
+                body = json.dumps(sources).encode()
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # ── Episode file: return raw JSON for whitelisted episode files ───────
         # GET /api/episode_file?slug=X&ep_id=Y&file=ShotList.json
         # Returns raw file contents as application/json.
         # Whitelisted files only to limit exposure.
         elif parsed.path == "/api/episode_file":
-            _EPISODE_FILE_WHITELIST = {"ShotList.json", "selections.json"}
+            _EPISODE_FILE_WHITELIST = {"ShotList.json", "selections.json",
+                                       "assets/music/MusicPlan.json",
+                                       "assets/music/user_cut_clips.json",
+                                       "assets/meta/gen_music_clip_results.json"}
             params   = parse_qs(parsed.query)
             slug     = params.get("slug", [""])[0].strip()
             ep_id    = params.get("ep_id", [""])[0].strip()
@@ -7686,6 +8566,269 @@ Reply with JSON only — no text outside the object:
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── Music: prepare loop candidates (POST /api/music_prepare_loops) ──────
+        elif self.path == "/api/music_prepare_loops":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                manifest_path = os.path.join(ep_dir, "AssetManifest_draft.shared.json")
+                if not os.path.isfile(manifest_path):
+                    raise FileNotFoundError("AssetManifest_draft.shared.json not found")
+
+                code_dir = os.path.join(PIPE_DIR, "code", "http")
+                result = subprocess.run(
+                    ["python3", os.path.join(code_dir, "music_prepare_loops.py"),
+                     "--manifest", manifest_path],
+                    capture_output=True, text=True, timeout=120, cwd=PIPE_DIR,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr[-2000:] if result.stderr else "process failed")
+
+                # Read and return the candidates file
+                cand_path = os.path.join(ep_dir, "assets", "music", "music_loop_candidates.json")
+                if os.path.isfile(cand_path):
+                    with open(cand_path, encoding="utf-8") as _cf:
+                        candidates = json.load(_cf)
+                    body = json.dumps({"ok": True, "candidates": candidates}).encode()
+                else:
+                    body = json.dumps({"ok": True, "candidates": {},
+                                       "message": "No candidates generated (no music resources?)"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── Music: cut clip from source track (POST /api/music_cut_clip) ─────
+        elif self.path == "/api/music_cut_clip":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                stem     = payload.get("stem", "").strip()
+                start_sec = float(payload.get("start_sec", 0))
+                end_sec   = float(payload.get("end_sec", 0))
+                if not slug or not ep_id or not stem:
+                    raise ValueError("slug, ep_id, and stem are required")
+                if end_sec <= start_sec:
+                    raise ValueError("end_sec must be greater than start_sec")
+
+                resources_dir = os.path.join(PIPE_DIR, "projects", slug,
+                                             "resources", "music")
+                assets_dir = os.path.join(PIPE_DIR, "projects", slug,
+                                          "episodes", ep_id, "assets", "music")
+                os.makedirs(assets_dir, exist_ok=True)
+
+                # Find source file
+                source_path = None
+                for ext in (".mp3", ".wav", ".flac", ".ogg"):
+                    candidate = os.path.join(resources_dir, stem + ext)
+                    if os.path.isfile(candidate):
+                        source_path = candidate
+                        break
+                if not source_path:
+                    raise FileNotFoundError(
+                        f"Source track '{stem}' not found in {resources_dir}")
+
+                # Generate clip filename from stem + range
+                clip_fname = (f"{stem}_{start_sec:.1f}s-{end_sec:.1f}s.wav"
+                              .replace(".", "_", 2).replace("_wav", ".wav"))
+                out_path = os.path.join(assets_dir, clip_fname)
+
+                # Extract using librosa
+                import librosa
+                import soundfile as sf_mod
+                audio, _ = librosa.load(source_path, sr=48000, mono=True)
+                s0 = int(start_sec * 48000)
+                s1 = min(int(end_sec * 48000), len(audio))
+                segment = audio[s0:s1]
+                if len(segment) == 0:
+                    raise ValueError("Empty segment — check start/end times")
+                sf_mod.write(out_path, segment.astype("float32"), 48000,
+                             subtype="PCM_16")
+
+                rel_path = os.path.relpath(out_path, PIPE_DIR)
+                print(f"  Cut clip: {stem} [{start_sec:.1f}s-{end_sec:.1f}s]"
+                      f" → {rel_path}")
+
+                # Persist cut clip metadata to user_cut_clips.json
+                end_sec_actual = start_sec + len(segment) / 48000.0
+                clip_id = (f"{stem}:{start_sec:.1f}s-"
+                           f"{end_sec_actual:.1f}s")
+                meta_path = os.path.join(assets_dir, "user_cut_clips.json")
+                existing_cuts = []
+                if os.path.isfile(meta_path):
+                    try:
+                        with open(meta_path, encoding="utf-8") as _mf:
+                            existing_cuts = json.load(_mf)
+                    except Exception:
+                        pass
+                # Remove duplicate clip_id if re-cutting same range
+                existing_cuts = [c for c in existing_cuts
+                                 if c.get("clip_id") != clip_id]
+                existing_cuts.append({
+                    "clip_id": clip_id,
+                    "stem": stem,
+                    "start_sec": round(start_sec, 2),
+                    "end_sec": round(end_sec_actual, 2),
+                    "path": rel_path,
+                })
+                with open(meta_path, "w", encoding="utf-8") as _mf:
+                    json.dump(existing_cuts, _mf, indent=2)
+                    _mf.write("\n")
+
+                body = json.dumps({
+                    "ok": True, "path": rel_path,
+                    "clip_id": clip_id,
+                    "clip_fname": clip_fname,
+                    "size_bytes": os.path.getsize(out_path),
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── Music: generate review pack (POST /api/music_review_pack) ────────
+        elif self.path == "/api/music_review_pack":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                shot_overrides = payload.get("shot_overrides", [])
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+
+                # Find the merged manifest — try primary locale first, then any
+                import glob as _glob_mod
+                merged_manifests = _glob_mod.glob(
+                    os.path.join(ep_dir, "AssetManifest_merged.*.json"))
+                if not merged_manifests:
+                    raise FileNotFoundError(
+                        "No AssetManifest_merged.*.json found. "
+                        "Run stages 10[1]–10[4] first.")
+                manifest_path = merged_manifests[0]
+
+                code_dir = os.path.join(PIPE_DIR, "code", "http")
+                cmd = ["python3", os.path.join(code_dir, "music_review_pack.py"),
+                       "--manifest", manifest_path]
+
+                # Write overrides to temp file if present
+                import tempfile as _tempfile
+                ovr_path = None
+                if shot_overrides:
+                    ovr_fd, ovr_path = _tempfile.mkstemp(
+                        suffix=".json", prefix="music_ovr_")
+                    with os.fdopen(ovr_fd, "w", encoding="utf-8") as _of:
+                        json.dump(shot_overrides, _of)
+                    cmd.extend(["--overrides", ovr_path])
+
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True, text=True, timeout=120, cwd=PIPE_DIR,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(result.stderr[-2000:] if result.stderr else "process failed")
+                finally:
+                    if ovr_path and os.path.exists(ovr_path):
+                        os.unlink(ovr_path)
+
+                # Read and return the timeline
+                tl_path = os.path.join(ep_dir, "assets", "music",
+                                       "MusicReviewPack", "timeline.json")
+                timeline = None
+                if os.path.isfile(tl_path):
+                    with open(tl_path, encoding="utf-8") as _tf:
+                        timeline = json.load(_tf)
+
+                body = json.dumps({"ok": True, "timeline": timeline}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── Music: save MusicPlan.json (POST /api/music_plan_save) ───────────
+        elif self.path == "/api/music_plan_save":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                plan     = payload.get("plan")
+
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                if not plan or not isinstance(plan, dict):
+                    raise ValueError("plan must be a non-empty object")
+
+                ep_dir    = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                music_dir = os.path.join(ep_dir, "assets", "music")
+                os.makedirs(music_dir, exist_ok=True)
+
+                plan_path = os.path.join(music_dir, "MusicPlan.json")
+                with open(plan_path, "w", encoding="utf-8") as _pf:
+                    json.dump(plan, _pf, indent=2, ensure_ascii=False)
+                    _pf.write("\n")
+
+                rel_path = os.path.relpath(plan_path, PIPE_DIR)
+                print(f"  Saved MusicPlan  slug={slug}  ep={ep_id}  "
+                      f"loops={len(plan.get('loop_selections', {}))}  "
+                      f"overrides={len(plan.get('shot_overrides', []))}")
+                body = json.dumps({"ok": True, "path": rel_path}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # Save episode metadata (title, genre, format, locales) → merge into meta.json
         elif self.path == "/api/save_episode_meta":
             try:
@@ -7751,7 +8894,11 @@ Reply with JSON only — no text outside the object:
                   "/api/diagnose_pipeline",
                   "/api/media_batches", "/api/media_batch_status",
                   "/api/media_batch", "/api/media_confirm",
-                  "/api/serve_media_file"}
+                  "/api/serve_media_file",
+                  "/api/music_loop_candidates", "/api/music_timeline",
+                  "/api/music_prepare_loops", "/api/music_review_pack",
+                  "/api/music_plan_save", "/api/music_sources",
+                  "/api/music_cut_clip"}
         if not any(path == s or path.startswith(s + "?") for s in silent):
             print(f"  {self.address_string()}  {fmt % args}")
 

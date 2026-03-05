@@ -85,6 +85,32 @@
       "normal_n": 28,
       "short_cps": 9.926,
       "short_n": 8
+    },
+    {
+      "run_id": "tennis/s01e01",
+      "date": "2026-03-04",
+      "voice": "en-US-Andrew:DragonHDLatestNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
+      "en_style": "gamenarrator",
+      "en_rate": "-5%",
+      "normal_cps": 8.34,
+      "normal_n": 19,
+      "short_cps": 11.119,
+      "short_n": 7
+    },
+    {
+      "run_id": "tennis/s01e01",
+      "date": "2026-03-05",
+      "voice": "en-US-Andrew:DragonHDLatestNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-Yunyi:DragonHDFlashLatestNeural",
+      "en_style": "gamenarrator",
+      "en_rate": "-5%",
+      "normal_cps": 9.725,
+      "normal_n": 8
     }
   ],
   "defaults": {

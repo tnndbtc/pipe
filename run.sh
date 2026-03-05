@@ -127,6 +127,11 @@ run_stage_10() {
   python3 "${code_dir}/gen_music_clip.py" \
     --manifest "${EP_DIR}/AssetManifest_draft.shared.json"
 
+  # ── [1b/8] Music loop candidates — auto, no pause ─────────────────────
+  echo "  [1b/8] Analysing music loop candidates…"
+  python3 "${code_dir}/music_prepare_loops.py" \
+    --manifest "${EP_DIR}/AssetManifest_draft.shared.json" || true
+
   # ── Per-locale steps ──────────────────────────────────────────────────
   # Parse comma-separated locales (e.g. "en, zh-Hans").
   # Reorder so PRIMARY_LOCALE is processed first — its RenderPlan becomes
@@ -196,6 +201,33 @@ run_stage_10() {
     echo "  [4/8] Analysing voice timing…"
     python3 "${code_dir}/post_tts_analysis.py" \
       --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+
+    # ── [4b/8] Music review checkpoint ─────────────────────────────────────
+    _music_plan="${EP_DIR}/assets/music/MusicPlan.json"
+    if [[ ! -f "$_music_plan" ]]; then
+      echo "  [4b/8] Generating music review pack…"
+      python3 "${code_dir}/music_review_pack.py" \
+        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" || true
+      echo ""
+      echo "══════════════════════════════════════════════════════════════"
+      echo "  ⏸  PAUSED — Music review required"
+      echo ""
+      echo "  Music review pack is ready. Open the VC editor:"
+      echo "    1. Go to the 🎵 Music tab"
+      echo "    2. Review the timeline and preview audio"
+      echo "    3. Adjust loop selections and shot overrides"
+      echo "    4. Click ✔ Confirm to save MusicPlan.json"
+      echo ""
+      echo "  Then resume the pipeline:"
+      echo "    ./run.sh ${EP_DIR} 10"
+      echo "══════════════════════════════════════════════════════════════"
+      exit 0
+    else
+      echo "  [4b/8] Applying music plan overrides…"
+      python3 "${code_dir}/apply_music_plan.py" \
+        --plan "$_music_plan" \
+        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+    fi
 
     echo "  [5/8] Resolving asset file paths…"
     # Pass --selections when the VC editor has saved stock media choices.

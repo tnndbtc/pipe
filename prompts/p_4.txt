@@ -63,6 +63,31 @@ Story format: **{{STORY_FORMAT}}**
 
 ---
 
+## Shot Boundary Heuristics
+
+Apply these in order of priority when deciding where one shot ends and the next begins.
+These rules apply to ALL story formats unless noted.
+
+1. **Scene boundary** (hard) — always start a new shot at each Script.json `scene_id`
+   change. A scene change is a guaranteed cut.
+
+2. **Location change** (hard) — if dialogue or action text implies a move to a
+   different physical space (e.g. "she walked into the courtyard", "cut to the valley",
+   "they arrived at the palace gates"), start a new shot even within the same scene_id.
+
+3. **Time jump** (hard) — flashbacks, explicit time markers ("later that day",
+   "the next morning", "three years later"), or a narrative ellipsis spanning ≥ 2
+   paragraphs → always start a new shot.
+
+4. **Major emotion shift** (soft) — if the tone pivots sharply (calm → tense,
+   celebratory → grief, reflective → urgent), prefer a new shot over continuing the
+   current one. Use judgment; do not split on every minor tone variation.
+
+5. **ssml_narration only** — pauses > 1200 ms (`pause_after_ms` field in Script.json
+   actions) are strong natural cut points; bias shot boundaries at these sentences.
+
+---
+
 ## Shot Duration Rules
 
 ### For `continuous_narration` / `documentary` / `illustrated_narration`
@@ -85,7 +110,20 @@ not assigned as a cinematic guess. Follow this formula for every shot:
      duration_sec = base_secs + break_secs + 2.0
    Do NOT round up to a "cinematic" number (e.g. do not change 14.3 → 15).
 
-3. After assigning all shots, sanity-check:
+3. **Hard duration limits** (apply after computing duration_sec for every shot):
+   - **Minimum 5 s**: If `duration_sec < 5.0`, merge the short shot with its adjacent
+     shot (prefer merging forward; if last shot, merge backward). Recompute the merged
+     shot's duration using the combined VO lines.
+   - **Maximum 45 s**: If `duration_sec > 45.0`, split the shot at the nearest
+     sentence boundary (i.e. between two consecutive `vo_item_ids`). Distribute the
+     `vo_item_ids` proportionally between the two resulting shots and recompute each
+     duration. Inherit `background_id`, `camera_framing`, `camera_movement`, and
+     `audio_intent.music_mood` from the original shot; generate a new `shot_id`
+     for the second half (append `-b` to the original id, e.g. `sh03` → `sh03-b`).
+   - After any merge or split, re-run the VO completeness check to confirm no IDs
+     were lost or duplicated.
+
+4. After assigning all shots, sanity-check:
    If sum(all duration_sec) > total_estimated_VO_time + 15:
      Reduce each shot's buffer from 2.0 to 1.0 and recalculate.
 

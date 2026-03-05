@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MusicPlan",
+  "description": "Human-edited music review overrides: loop selections per source track and per-shot ducking/continuity adjustments. Written during the music_review checkpoint (after Stage 10[4]). Controls both loop playback and per-shot audio mix parameters.",
+  "type": "object",
+  "required": ["schema_id", "schema_version"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "MusicPlan"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "loop_selections": {
+      "type": "object",
+      "description": "Keyed by source track stem (e.g. 'djokovic_bg_climax'). Each entry defines which segment of the source track to use as the loop base.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["start_sec", "duration_sec"],
+        "additionalProperties": false,
+        "properties": {
+          "start_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Start position in the source track (seconds)"
+          },
+          "duration_sec": {
+            "type": "number",
+            "minimum": 5,
+            "maximum": 60,
+            "description": "Loop segment duration (seconds). Recommended: 20-35s for seamless looping."
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["loop", "one_shot"],
+            "default": "loop",
+            "description": "loop = concatenate N copies for seamless playback; one_shot = play once then silence"
+          },
+          "crossfade_ms": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 500,
+            "default": 100,
+            "description": "Crossfade duration at each loop join boundary (milliseconds)"
+          }
+        }
+      }
+    },
+    "shot_overrides": {
+      "type": "array",
+      "description": "Per-shot overrides for ducking, continuity, and track assignment. Only include shots that need changes — omitted shots keep their original values.",
+      "items": {
+        "type": "object",
+        "required": ["item_id"],
+        "additionalProperties": false,
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "pattern": "^music-",
+            "description": "Music item ID from AssetManifest (e.g. 'music-s01e01_sh01')"
+          },
+          "music_asset_id": {
+            "type": "string",
+            "description": "Override the music asset used for this shot. Can be an existing clip item_id (e.g. 'music-s01e01_sh01') OR a source track stem (e.g. 'djokovic_bg_climax') — when a source stem is used, apply_music_plan will extract a new clip from that source track."
+          },
+          "duration_sec": {
+            "type": "number",
+            "minimum": 0.1,
+            "description": "Override music clip duration (seconds)"
+          },
+          "start_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Override music start offset within the shot (seconds)"
+          },
+          "duck_db": {
+            "type": "number",
+            "maximum": 0,
+            "description": "Override ducking attenuation in dB during VO (e.g. -8 for moderate, -6 for light). Relative to base -6 dB."
+          },
+          "fade_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Override duck ramp duration (seconds). 0.15 = standard, 0.8-1.5 = cinematic."
+          },
+          "music_clip_id": {
+            "type": "string",
+            "description": "Display label for the selected clip (e.g. 'djokovic_bg_calm:19.4s-40.3s'). Used by the UI to restore dropdown selection."
+          },
+          "clip_start_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "When using a source stem as music_asset_id, start position within the source track to extract the clip from (seconds)"
+          },
+          "clip_duration_sec": {
+            "type": "number",
+            "minimum": 1,
+            "description": "When using a source stem as music_asset_id, duration of the clip to extract from the source track (seconds)"
+          },
+          "crossfade_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Crossfade duration at shot boundaries when music changes (seconds)"
+          }
+        }
+      }
+    }
+  }
+}
