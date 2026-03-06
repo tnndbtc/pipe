@@ -121,6 +121,10 @@ install_almalinux() {
         info "epel-release installed"
     fi
 
+    section "AlmaLinux: Enabling CRB repo (needed for ladspa → rubberband → ffmpeg-libs)"
+    sudo dnf config-manager --set-enabled crb
+    info "CRB repo enabled"
+
     section "AlmaLinux: Installing RPM Fusion (free) for ffmpeg"
     ALMA_MAJ="${OS_VERSION%%.*}"
     RPMFUSION_FREE="https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-${ALMA_MAJ}.noarch.rpm"
@@ -130,6 +134,10 @@ install_almalinux() {
         sudo dnf install -y "$RPMFUSION_FREE"
         info "rpmfusion-free-release installed"
     fi
+
+    section "AlmaLinux: Installing ladspa (rubberband dependency)"
+    sudo dnf install -y ladspa
+    info "ladspa installed"
 
     section "AlmaLinux: Installing ffmpeg (includes ffprobe)"
     # --allowerasing needed because AlmaLinux ships ffmpeg-free stub that conflicts
