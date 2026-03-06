@@ -478,6 +478,23 @@ def main():
             resources_dir=resources_dir,
             assets_music_dir=assets_music_dir,
         )
+
+    # ── Default duck_db to 0 (no ducking) for items without an explicit
+    #    override.  This matches the preview behaviour in music_review_pack.py
+    #    which defaults duck_db to 0.  The gen_music_clip.py values (-12, -15,
+    #    -18) are AI suggestions; the user's preview is the source of truth.
+    overridden_ids = {o["item_id"] for o in shot_overrides if "duck_db" in o}
+    duck_reset = 0
+    for mi in manifest.get("music_items", []):
+        if mi["item_id"] not in overridden_ids and mi.get("duck_db", 0) != 0:
+            old = mi.get("duck_db")
+            mi["duck_db"] = 0.0
+            duck_reset += 1
+            print(f"  [DEFAULT] {mi['item_id']}: duck_db {old} → 0.0 (preview default)")
+    if duck_reset:
+        print(f"  Reset duck_db to 0 for {duck_reset} item(s) without explicit override")
+
+    if shot_overrides or duck_reset:
         save_manifest(manifest, manifest_path)
         print(f"\n  Manifest updated: {manifest_path}")
 

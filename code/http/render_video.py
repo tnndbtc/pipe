@@ -508,10 +508,17 @@ def render_shot(
             m_extra = ["-ss", f"{music_start_sec:.3f}"]
         m_idx = add_input(m_extra, str(music_path))
 
+        # music_delay_sec: delay before music starts within the shot
+        # (set by MusicPlan override start_sec via gen_render_plan)
+        music_delay_sec = shot.get("music_delay_sec", 0.0)
+
         music_filter = (
             f"[{m_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
             f"volume=volume='{duck_expr}':eval=frame"
         )
+        if music_delay_sec > 0.001:
+            delay_ms = round(music_delay_sec * 1000)
+            music_filter += f",adelay={delay_ms}|{delay_ms}"
         if music_apply_fadeout:
             fade_start = max(0.0, dur_sec - music_fadeout_sec)
             music_filter += (

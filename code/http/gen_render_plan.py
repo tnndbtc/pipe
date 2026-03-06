@@ -358,6 +358,10 @@ def build_shot(
             music_extra["duck_intervals"] = duck_ivs
             music_extra["duck_db"]        = duck_db
             music_extra["music_fade_sec"] = fade_sec
+            # start_sec: delay before music begins within the shot (from MusicPlan override)
+            _music_start = music_item.get("start_sec", 0.0)
+            if _music_start:
+                music_extra["music_delay_sec"] = float(_music_start)
 
     # ── Dynamic ceiling for narrative formats (EXEC STEP 3 / Proposal 3) ────────
     #

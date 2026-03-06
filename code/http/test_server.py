@@ -47,7 +47,9 @@ _procs = {}   # client_addr → subprocess.Popen
 _tts_lock             = threading.Lock()
 _tts_last_call: float = 0.0               # monotonic timestamp
 TTS_MIN_INTERVAL      = 3.5               # seconds (F0: 20 req/60 s → safe rate)
-TTS_RETRY_BACKOFF     = [5, 10, 20]       # seconds; sleep before each 429 retry
+TTS_RETRY_BACKOFF     = [3, 6]            # seconds; shorter backoff for preview UI
+_TTS_REST_TRIGGERS    = ("429", "too many requests", "websocket upgrade failed",
+                         "websocket", "throttl")
 _voice_catalog_cache  = None              # set once by parse_azure_tts_styles()
 _tts_synth            = None              # lazy singleton; created on first preview request
 _diagnose_cache: dict = {}               # key: "{slug}|{ep_id}|{mtime_hash}" → Claude result
@@ -295,8 +297,40 @@ def parse_azure_tts_styles() -> dict:
     return catalog
 
 
+def _tts_rest_preview(ssml: str) -> bytes:
+    """HTTPS REST fallback for TTS preview — avoids WebSocket 429 issues."""
+    import urllib.request
+    region = os.environ.get("AZURE_SPEECH_REGION", "eastus")
+    key    = os.environ.get("AZURE_SPEECH_KEY", "")
+    url    = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+    headers = {
+        "Ocp-Apim-Subscription-Key": key,
+        "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "audio-24khz-96kbitrate-mono-mp3",
+        "User-Agent": "pipe-preview",
+    }
+    for attempt in range(4):
+        req = urllib.request.Request(url, data=ssml.encode("utf-8"),
+                                     headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
+                time.sleep(min(2 ** attempt, 8))
+                continue
+            raise RuntimeError(f"REST TTS HTTP {e.code}: {e.read().decode('utf-8','replace')[:200]}")
+        except Exception as e:
+            if attempt < 3:
+                time.sleep(2)
+                continue
+            raise
+    raise RuntimeError("REST TTS exhausted retries")
+
+
 def _tts_throttled_call(synth, ssml: str):
-    """Call Azure TTS with F0-safe throttling (3.5 s min gap) and 429 retry."""
+    """Call Azure TTS with F0-safe throttling (3.5 s min gap) and 429 retry.
+    Falls back to REST endpoint when SDK returns 429."""
     global _tts_last_call
     with _tts_lock:                                   # serialise all preview threads
         elapsed = time.monotonic() - _tts_last_call
@@ -314,6 +348,20 @@ def _tts_throttled_call(synth, ssml: str):
 
             details = result.cancellation_details
             err_str = getattr(details, "error_details", "") or ""
+
+            # On 429/throttle, try REST fallback instead of more SDK retries
+            if any(t in err_str.lower() for t in _TTS_REST_TRIGGERS):
+                try:
+                    audio_bytes = _tts_rest_preview(ssml)
+                    # Return a lightweight object with .audio_data like the SDK
+                    class _RestResult:
+                        def __init__(self, data): self.audio_data = data
+                    return _RestResult(audio_bytes)
+                except RuntimeError:
+                    if attempt < len(TTS_RETRY_BACKOFF):
+                        continue   # retry SDK on next backoff
+                    raise
+
             if "429" in err_str and attempt < len(TTS_RETRY_BACKOFF):
                 continue   # retry with next backoff
             raise RuntimeError(err_str or str(getattr(details, "reason", "Unknown")))
@@ -1523,16 +1571,16 @@ Direction    : …"></textarea>
            style="display:flex; align-items:center; gap:6px; cursor:pointer;
                   font-size:0.82em; font-family:var(--mono); color:var(--dim);
                   user-select:none;"
-           title="Skip background music — render VO + SFX only">
-      <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()" checked
+           title="Include background music in renders — uncheck to render VO + SFX only">
+      <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()"
              style="width:14px; height:14px; cursor:pointer; accent-color:var(--gold);">
-      🔇 No Music
+      🎵 Music
     </label>
     <label style="display:flex; align-items:center; gap:6px; cursor:pointer;
                   font-size:0.82em; font-family:var(--mono); color:var(--dim);
                   user-select:none;"
            title="Delete cached WAVs, images, renders and manifests before each Stage 10 run — ensures a clean rebuild from scratch">
-      <input type="checkbox" id="chk-purge-assets" onchange="togglePurgeMode()" checked
+      <input type="checkbox" id="chk-purge-assets" onchange="togglePurgeMode()"
              style="width:14px; height:14px; cursor:pointer; accent-color:#e06c75;">
       🗑 Purge Cache
     </label>
@@ -1774,7 +1822,7 @@ Direction    : …"></textarea>
 
   let renderProd = false;    // false = preview_local (CRF 28), true = high (CRF 18)
   let noMusic    = true;     // true = skip music by default (faster renders during development)
-  let purgeAssets = true;   // true = purge cached WAVs/images/renders before each run (default ON)
+  let purgeAssets = false;  // saved per-project in meta.json; default OFF to avoid accidental data loss
 
   let _preparedMeta  = null;   // result from last /api/infer_story_meta call
   let _preparedEpId  = null;   // next episode ID fetched during Prepare (e.g. "s01e01")
@@ -2146,7 +2194,7 @@ Direction    : …"></textarea>
   }
   function toggleMusicMode() {
     const chk = document.getElementById('chk-no-music');
-    noMusic = chk ? chk.checked : !noMusic;
+    noMusic = chk ? !chk.checked : !noMusic;  // checked = Music ON = noMusic false
   }
   function togglePurgeMode() {
     const chk = document.getElementById('chk-purge-assets');
@@ -3193,39 +3241,161 @@ Direction    : …"></textarea>
   async function mediaLoadExisting() {
     if (!_mediaSlug || !_mediaEpId) return;
     const serverUrl = _mediaServerUrl();
+
+    // ── Try 1: load from external media server batch ─────────────────────
     try {
       const r = await fetch(
         '/api/media_batches?slug=' + encodeURIComponent(_mediaSlug)
         + '&ep_id='      + encodeURIComponent(_mediaEpId)
         + '&server_url=' + encodeURIComponent(serverUrl));
       const d = await r.json();
-      if (!r.ok || d.error) return;
-      const done = (d.batches || []).find(b => b.status === 'done');
-      if (!done) return;
-      // Load full results for this batch
-      _mediaBatchId = done.batch_id;
-      const r2 = await fetch(
-        '/api/media_batch_status?batch_id=' + encodeURIComponent(_mediaBatchId)
-        + '&server_url=' + encodeURIComponent(serverUrl));
-      const d2 = await r2.json();
-      if (!r2.ok || d2.error || d2.status !== 'done') return;
-      _mediaResults        = d2.items || {};
-      _mediaResults._topN  = d2.top_n || 5;
-      _mediaRecommendedSeq = d2.recommended_sequence || null;
-      await _mediaLoadShotMap();
-      let totalImg2 = 0, totalVid2 = 0;
-      Object.values(d2.items || {}).forEach(it => {
-        totalImg2 += it.total_images || 0;
-        totalVid2 += it.total_videos || 0;
-      });
-      const elapsed2 = d2.elapsed_sec != null ? ' in ' + d2.elapsed_sec + 's' : '';
-      const nItems2 = Object.keys(d2.items || {}).length;
-      _mediaSetStatus('Loaded batch ' + _mediaBatchId + ' — '
-        + nItems2 + ' backgrounds, '
-        + totalImg2 + ' images + ' + totalVid2 + ' videos'
-        + elapsed2 + '.', false);
-      _mediaRenderResults(_mediaResults);
+      if (r.ok && !d.error) {
+        const done = (d.batches || []).find(b => b.status === 'done');
+        if (done) {
+          _mediaBatchId = done.batch_id;
+          const r2 = await fetch(
+            '/api/media_batch_status?batch_id=' + encodeURIComponent(_mediaBatchId)
+            + '&server_url=' + encodeURIComponent(serverUrl));
+          const d2 = await r2.json();
+          if (r2.ok && !d2.error && d2.status === 'done') {
+            _mediaResults        = d2.items || {};
+            _mediaResults._topN  = d2.top_n || 5;
+            _mediaRecommendedSeq = d2.recommended_sequence || null;
+            await _mediaLoadShotMap();
+            let totalImg2 = 0, totalVid2 = 0;
+            Object.values(d2.items || {}).forEach(it => {
+              totalImg2 += it.total_images || 0;
+              totalVid2 += it.total_videos || 0;
+            });
+            const elapsed2 = d2.elapsed_sec != null ? ' in ' + d2.elapsed_sec + 's' : '';
+            const nItems2 = Object.keys(d2.items || {}).length;
+            _mediaSetStatus('Loaded batch ' + _mediaBatchId + ' — '
+              + nItems2 + ' backgrounds, '
+              + totalImg2 + ' images + ' + totalVid2 + ' videos'
+              + elapsed2 + '.', false);
+            _mediaRenderResults(_mediaResults);
+            // Also restore saved selections on top of batch results
+            await _mediaLoadSavedSelections();
+            return;
+          }
+        }
+      }
     } catch (_) {}
+
+    // ── Try 2: load saved selections.json from disk ──────────────────────
+    await _mediaLoadSavedSelections();
+  }
+
+  async function _mediaLoadSavedSelections() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    try {
+      const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
+        + '&ep_id=' + encodeURIComponent(_mediaEpId)
+        + '&file=assets/media/selections.json');
+      if (!r.ok) return;
+      const saved = await r.json();
+      if (!saved.selections || typeof saved.selections !== 'object') return;
+
+      _mediaBatchId = saved.batch_id || '';
+      const sels = saved.selections;
+      const nSels = Object.keys(sels).length;
+
+      // Restore _mediaSelections from saved data
+      _mediaSelections = sels;
+
+      // If we don't have batch results (media server down), show a summary
+      if (!_mediaResults || Object.keys(_mediaResults).length === 0) {
+        await _mediaLoadShotMap();
+        _mediaRenderSavedSummary(sels);
+        _mediaSetStatus('Loaded ' + nSels + ' saved selection(s) from disk'
+          + ' (media server not available — showing saved selections only).', false);
+      } else {
+        // Batch results available — apply saved selections to the grid
+        _mediaApplySavedToGrid(sels);
+      }
+    } catch (_) {}
+  }
+
+  function _mediaRenderSavedSummary(selections) {
+    // Render a read-only summary of saved selections when media server is unavailable
+    const body = document.getElementById('media-body');
+    body.innerHTML = '';
+
+    const shotDur = _mediaShotDur || {};
+    const shotMap = _mediaShotMap || {};
+
+    for (const [bgId, data] of Object.entries(selections)) {
+      const card = document.createElement('div');
+      card.className = 'media-item-card';
+
+      // Header with background ID and assigned shots
+      const shots = shotMap[bgId] || [];
+      const hdr = document.createElement('div');
+      hdr.className = 'media-item-header';
+      hdr.innerHTML = '<strong>' + escHtml(bgId) + '</strong>'
+        + (shots.length ? '<span style="color:var(--dim);margin-left:8px">→ '
+          + shots.map(s => '<code>' + escHtml(s) + '</code>').join(', ') + '</span>' : '');
+      card.appendChild(hdr);
+
+      const perShot = data.per_shot || {};
+      for (const [shotId, shotData] of Object.entries(perShot)) {
+        const dur = shotDur[shotId] || 0;
+        const row = document.createElement('div');
+        row.style.cssText = 'padding:6px 12px;border-top:1px solid #ffffff10';
+
+        let segsHtml = '<div style="color:var(--dim);font-size:0.82em;margin-bottom:4px">'
+          + '<strong>' + escHtml(shotId) + '</strong>'
+          + (dur ? ' (' + dur.toFixed(1) + 's)' : '') + '</div>';
+
+        const segments = shotData.segments || [shotData];
+        for (const seg of segments) {
+          const rawUrl = seg.url || seg.path || '';
+          // Convert file:/// or absolute paths to /serve_media URLs
+          let url = rawUrl;
+          if (rawUrl.startsWith('file:///')) {
+            url = '/serve_media?path=' + encodeURIComponent(rawUrl.replace('file://', ''));
+          } else if (rawUrl.startsWith('/') && !rawUrl.startsWith('/serve_media')) {
+            url = '/serve_media?path=' + encodeURIComponent(rawUrl);
+          }
+          const type = seg.media_type || 'image';
+          const name = rawUrl.split('/').pop() || '(unknown)';
+          const durS = seg.duration_sec ? ' ' + seg.duration_sec.toFixed(1) + 's' : '';
+          const icon = type === 'video' ? '🎬' : '🖼';
+
+          segsHtml += '<div style="display:flex;align-items:center;gap:8px;margin:2px 0">';
+          if (type === 'video' && url) {
+            segsHtml += '<video src="' + escHtml(url) + '" style="width:120px;height:68px;'
+              + 'object-fit:cover;border-radius:4px;border:1px solid #ffffff20" preload="metadata"></video>';
+          } else if (url) {
+            segsHtml += '<img src="' + escHtml(url) + '" style="width:120px;height:68px;'
+              + 'object-fit:cover;border-radius:4px;border:1px solid #ffffff20" loading="lazy">';
+          }
+          segsHtml += '<span style="font-family:var(--mono);font-size:0.8em;color:var(--text)">'
+            + icon + ' ' + escHtml(name) + durS + '</span></div>';
+        }
+
+        row.innerHTML = segsHtml;
+        card.appendChild(row);
+      }
+
+      body.appendChild(card);
+    }
+
+    if (Object.keys(selections).length === 0) {
+      body.innerHTML = '<div style="color:var(--dim);padding:16px;font-style:italic">'
+        + 'No saved media selections found.</div>';
+    }
+  }
+
+  function _mediaApplySavedToGrid(selections) {
+    // When batch results are available, restore selection highlights
+    for (const [bgId, data] of Object.entries(selections)) {
+      const perShot = data.per_shot || {};
+      for (const [shotId, shotData] of Object.entries(perShot)) {
+        // Refresh shot row display if it exists
+        try { _mediaRenderShotRow(bgId, shotId); } catch (_) {}
+      }
+    }
   }
 
   // ── Voice Cast editor ────────────────────────────────────────────────────────
@@ -4175,8 +4345,11 @@ Direction    : …"></textarea>
     btns.forEach(b => { b.disabled = true; b._orig = b.textContent; b.textContent = '\u2026'; });
     let playing = false;
     try {
+      const _ac = new AbortController();
+      const _to = setTimeout(() => _ac.abort(), 25000);  // 25s timeout
       const r = await fetch('/api/preview_voice', {
         method:  'POST',
+        signal:  _ac.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           azure_voice:  params.azure_voice,
@@ -4189,6 +4362,7 @@ Direction    : …"></textarea>
           text:         vcSampleText(locale, params.style),
         }),
       });
+      clearTimeout(_to);
       const data = await r.json();
       if (data.url) {
         const audio = new Audio(data.url + '&t=' + Date.now());
@@ -4233,6 +4407,12 @@ Direction    : …"></textarea>
         }
       } else {
         appendLine('\u26A0 TTS preview failed: ' + (data.error || 'unknown error'), 'err');
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        appendLine('\u26A0 TTS preview timed out — Azure may be throttled (429)', 'err');
+      } else {
+        appendLine('\u26A0 TTS preview error: ' + e.message, 'err');
       }
     } finally {
       // Only revert buttons if audio never started (synthesis error / network failure)
@@ -5146,11 +5326,19 @@ Direction    : …"></textarea>
       document.getElementById('locale-en-ex').checked       = locs.includes('en');
       document.getElementById('locale-zh-Hans-ex').checked  = locs.includes('zh-Hans');
     }
-    // Restore No Music state into the single top-bar checkbox
+    // Restore Music state into the single top-bar checkbox
+    // meta.no_music=true → skip music → checkbox unchecked
+    // meta.no_music=false → include music → checkbox checked
     if (meta.no_music !== undefined) {
       noMusic = !!meta.no_music;
       const chk = document.getElementById('chk-no-music');
-      if (chk) chk.checked = noMusic;
+      if (chk) chk.checked = !noMusic;
+    }
+    // Restore Purge Cache state
+    if (meta.purge_cache !== undefined) {
+      purgeAssets = !!meta.purge_cache;
+      const chk = document.getElementById('chk-purge-assets');
+      if (chk) chk.checked = purgeAssets;
     }
 
     // Always reload story when switching to a different episode
@@ -5343,12 +5531,13 @@ Direction    : …"></textarea>
       if (n === 10) {
         // Stage 10: numbered Run / Run→7 buttons matching the main stage button style
         const LOCALE_STEPS = [
-          { num: 5, step: 'manifest_merge',  label: '5 — merge'    },
-          { num: 6, step: 'gen_tts',         label: '6 — tts'      },
-          { num: 7, step: 'post_tts',        label: '7 — post_tts' },
-          { num: 8, step: 'resolve_assets',  label: '8 — resolve'  },
-          { num: 9, step: 'gen_render_plan', label: '9 — plan'     },
-          { num: 10, step: 'render_video',   label: '10 — render'  },
+          { num: 5, step: 'manifest_merge',    label: '5 — merge'       },
+          { num: 6, step: 'gen_tts',           label: '6 — tts'         },
+          { num: 7, step: 'post_tts',          label: '7 — post_tts'    },
+          { num: 8, step: 'apply_music_plan',  label: '8 — music plan'  },
+          { num: 9, step: 'resolve_assets',    label: '9 — resolve'     },
+          { num: 10, step: 'gen_render_plan',  label: '10 — plan'       },
+          { num: 11, step: 'render_video',     label: '11 — render'     },
         ];
         const localeStepsMap = status.locale_steps || {};
         const sharedStepsMap = status.shared_steps || {};
@@ -5744,7 +5933,8 @@ Direction    : …"></textarea>
         slug, ep_id, story, title, genre,
         story_format: _selectedFormat,
         locales:      locs.join(','),
-        no_music:     document.getElementById('chk-no-music')?.checked || false,
+        no_music:     !(document.getElementById('chk-no-music')?.checked),
+        purge_cache:  document.getElementById('chk-purge-assets')?.checked || false,
       })
     });
     const d = await r.json();
@@ -5778,7 +5968,7 @@ Direction    : …"></textarea>
     const genre    = document.getElementById('info-genre').value.trim();
     const format   = document.getElementById('info-format-sel').value;
     const locs     = getSelectedLocales();
-    const no_music = document.getElementById('chk-no-music')?.checked || false;
+    const no_music = !(document.getElementById('chk-no-music')?.checked);
     btnEl.disabled = true;
     statusEl.textContent = 'Saving…';
     statusEl.style.color = 'var(--dim)';
@@ -5926,7 +6116,7 @@ Direction    : …"></textarea>
     const genre    = document.getElementById('ex-genre').value.trim();
     const format   = document.getElementById('info-format-sel-existing').value;
     const locs     = getSelectedLocales();
-    const no_music = document.getElementById('chk-no-music')?.checked || false;
+    const no_music = !(document.getElementById('chk-no-music')?.checked);
     btnEl.disabled = true;
     statusEl.textContent = 'Saving…';
     statusEl.style.color = 'var(--dim)';
@@ -5936,7 +6126,8 @@ Direction    : …"></textarea>
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           slug: currentSlug, ep_id: currentEpId,
-          title, genre, story_format: format, locales: locs.join(','), no_music
+          title, genre, story_format: format, locales: locs.join(','), no_music,
+          purge_cache: document.getElementById('chk-purge-assets')?.checked || false
         })
       });
       if (!resp.ok) throw new Error(await resp.text());
@@ -5961,6 +6152,14 @@ Direction    : …"></textarea>
   }
 
   function startPipeStep(params) {
+    // Confirm before purging cached assets (destructive operation)
+    if (purgeAssets && (params.type === 'locale' || params.type === 'shared_chain')) {
+      if (!confirm('🗑 Purge Cache is ON — this will delete cached WAVs, images, '
+                  + 'renders and manifests before running.\n\n'
+                  + 'Continue with purge?')) {
+        return;
+      }
+    }
     if (pipeStepEs) { pipeStepEs.close(); pipeStepEs = null; }
     fetch('/stop', { method: 'POST' }).catch(() => {});   // stop any running proc
 
@@ -6426,6 +6625,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
     meta_format = "episodic"
     meta_locales_str = ",".join(locales) if locales else "en"
     meta_no_music = False
+    meta_purge_cache = False
 
     _meta_json_path = os.path.join(ep_dir, "meta.json")
     if os.path.isfile(_meta_json_path):
@@ -6437,6 +6637,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             meta_format      = _mj.get("story_format", "episodic")
             meta_locales_str = _mj.get("locales", meta_locales_str)
             meta_no_music    = bool(_mj.get("no_music", False))
+            meta_purge_cache = bool(_mj.get("purge_cache", False))
         except Exception:
             pass
     elif os.path.isfile(_pipeline_vars):
@@ -6466,6 +6667,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "story_format": meta_format,
         "locales_str":  meta_locales_str,
         "no_music":     meta_no_music,
+        "purge_cache":  meta_purge_cache,
     }
 
 
@@ -6477,6 +6679,8 @@ def _step_is_done(step: str, slug: str, ep_id: str, locale: str) -> bool:
 
     if step == "manifest_merge":
         return check(os.path.join(ep_dir, f"AssetManifest_merged.{locale}.json"))
+    elif step == "apply_music_plan":
+        return False   # always re-run — user may have changed overrides
     elif step in ("gen_tts", "post_tts"):
         vo_dir = os.path.join(ep_dir, "assets", locale, "audio", "vo")
         return (os.path.isdir(vo_dir) and
@@ -6581,9 +6785,10 @@ def _purge_episode_assets(slug: str, ep_id: str, locale: str = "") -> list[str]:
         for fname in ("output.mp4", "output.srt", "render_output.json", "youtube_dubbed.m4a", "youtube_dubbed.aac"):
             _rm(os.path.join(render_loc, fname))
 
-        # Per-locale derived manifests
-        for pat in (f"AssetManifest_merged.{loc}.json",
-                    f"AssetManifest.media.{loc}.json",
+        # Per-locale derived manifests (NOT AssetManifest_merged — it's the
+        # input to gen_tts/post_tts/resolve_assets; deleting it breaks those
+        # steps.  manifest_merge recreates it via _delete_step_output instead.)
+        for pat in (f"AssetManifest.media.{loc}.json",
                     f"RenderPlan.{loc}.json"):
             _rm(os.path.join(ep_dir, pat))
 
@@ -6642,13 +6847,45 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
             "--out",    ep(f"AssetManifest_merged.{locale}.json"),
         ]
     elif step == "gen_tts":
-        return [
+        cmd = [
             "python3", os.path.join(code_dir, "gen_tts_cloud.py"),
             "--manifest", ep(f"AssetManifest_merged.{locale}.json"),
         ]
+        # ssml_narration mode: primary locale uses wrapper-rebuild + inner
+        # passthrough (same logic as run.sh lines 170-176).
+        _pv_path = ep("pipeline_vars.sh")
+        _story_fmt = ""
+        _primary_loc = ""
+        if os.path.isfile(_pv_path):
+            try:
+                _pv = open(_pv_path, encoding="utf-8").read()
+                for _ln in _pv.splitlines():
+                    if _ln.startswith("export STORY_FORMAT="):
+                        _story_fmt = _ln.split("=", 1)[1].strip().strip('"')
+                    elif _ln.startswith("export PRIMARY_LOCALE="):
+                        _primary_loc = _ln.split("=", 1)[1].strip().strip('"')
+            except Exception:
+                pass
+        if _story_fmt == "ssml_narration" and locale == _primary_loc:
+            project_dir = os.path.join(PIPE_DIR, "projects", slug)
+            cmd += [
+                "--ssml-narration",
+                "--ssml-inner",  ep("ssml_inner.xml"),
+                "--voice-cast",  os.path.join(project_dir, "VoiceCast.json"),
+            ]
+        return cmd
     elif step == "post_tts":
         return [
             "python3", os.path.join(code_dir, "post_tts_analysis.py"),
+            "--manifest", ep(f"AssetManifest_merged.{locale}.json"),
+        ]
+    elif step == "apply_music_plan":
+        music_plan = os.path.join(ep_dir, "assets", "music", "MusicPlan.json")
+        if not os.path.isfile(music_plan):
+            return None   # skip silently if no MusicPlan.json exists
+        return [
+            "python3", os.path.join(code_dir, "apply_music_plan.py"),
+            "--plan",     music_plan,
             "--manifest", ep(f"AssetManifest_merged.{locale}.json"),
         ]
     elif step == "resolve_assets":
@@ -7343,7 +7580,8 @@ Reply with JSON only — no text outside the object:
                 return
 
             LOCALE_STEPS = ["manifest_merge", "gen_tts", "post_tts",
-                            "resolve_assets", "gen_render_plan", "render_video"]
+                            "apply_music_plan", "resolve_assets",
+                            "gen_render_plan", "render_video"]
             # Honour optional from= param — start from a specific step
             from_idx = LOCALE_STEPS.index(from_step) if from_step in LOCALE_STEPS else 0
             # When user explicitly picks a start step ("Run N→7"), force-run all
@@ -7458,7 +7696,8 @@ Reply with JSON only — no text outside the object:
 
             _SHARED_STEPS = ["gen_music_clip", "gen_characters", "gen_backgrounds", "gen_sfx"]
             _LOCALE_STEPS_ALL = ["manifest_merge", "gen_tts", "post_tts",
-                                  "resolve_assets", "gen_render_plan", "render_video"]
+                                  "apply_music_plan", "resolve_assets",
+                                  "gen_render_plan", "render_video"]
             from_idx = _SHARED_STEPS.index(from_step) if from_step in _SHARED_STEPS else 0
 
             # Detect locales from AssetManifest_draft.{locale}.json files
@@ -7580,13 +7819,24 @@ Reply with JSON only — no text outside the object:
         elif parsed.path == "/serve_media":
             params    = parse_qs(parsed.query)
             rel_path  = unquote_plus(params.get("path", [""])[0]).strip()
-            safe_root = os.path.realpath(PIPE_DIR)
 
             if not rel_path:
                 self.send_response(400); self.end_headers(); return
 
-            full_path = os.path.realpath(os.path.join(PIPE_DIR, rel_path))
-            if not full_path.startswith(safe_root + os.sep) and full_path != safe_root:
+            # Allow both relative-to-PIPE_DIR and absolute paths
+            # (media server stores file:/// URLs pointing to /mnt/shared/...)
+            _safe_roots = [os.path.realpath(PIPE_DIR)]
+            _shared = os.environ.get("MEDIA_SHARED_ROOT", "/mnt/shared")
+            if os.path.isdir(_shared):
+                _safe_roots.append(os.path.realpath(_shared))
+
+            if os.path.isabs(rel_path):
+                full_path = os.path.realpath(rel_path)
+            else:
+                full_path = os.path.realpath(os.path.join(PIPE_DIR, rel_path))
+
+            if not any(full_path.startswith(sr + os.sep) or full_path == sr
+                       for sr in _safe_roots):
                 self.send_response(403); self.end_headers(); return
 
             if not os.path.isfile(full_path):
@@ -7595,7 +7845,11 @@ Reply with JSON only — no text outside the object:
             ext  = os.path.splitext(full_path)[1].lower().lstrip(".")
             mime = {"mp4": "video/mp4", "webm": "video/webm", "ogg": "video/ogg",
                     "mp3": "audio/mpeg", "wav": "audio/wav",
-                    "aac": "audio/aac", "m4a": "audio/mp4"}.get(ext, "application/octet-stream")
+                    "aac": "audio/aac", "m4a": "audio/mp4",
+                    "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                    "png": "image/png", "webp": "image/webp",
+                    "gif": "image/gif", "svg": "image/svg+xml",
+                    }.get(ext, "application/octet-stream")
 
             file_size = os.path.getsize(full_path)
             range_hdr = self.headers.get("Range", "")
@@ -7830,6 +8084,7 @@ Reply with JSON only — no text outside the object:
         # Whitelisted files only to limit exposure.
         elif parsed.path == "/api/episode_file":
             _EPISODE_FILE_WHITELIST = {"ShotList.json", "selections.json",
+                                       "assets/media/selections.json",
                                        "assets/music/MusicPlan.json",
                                        "assets/music/user_cut_clips.json",
                                        "assets/meta/gen_music_clip_results.json"}
@@ -8385,6 +8640,7 @@ Reply with JSON only — no text outside the object:
                 story_format = payload.get("story_format", "episodic").strip()
                 locales      = payload.get("locales", "en").strip()
                 no_music     = bool(payload.get("no_music", False))
+                purge_cache  = bool(payload.get("purge_cache", False))
 
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
@@ -8418,6 +8674,7 @@ Reply with JSON only — no text outside the object:
                     "generation_seed": gen_seed,
                     "render_profile": "preview_local",
                     "no_music":       no_music,
+                    "purge_cache":    purge_cache,
                     "created_at":     _dt.now().isoformat(),
                 }
                 with open(os.path.join(ep_dir, "meta.json"), "w", encoding="utf-8") as _f:
@@ -8856,6 +9113,7 @@ Reply with JSON only — no text outside the object:
                 existing_meta["story_format"] = payload.get("story_format", "episodic").strip()
                 existing_meta["locales"]      = payload.get("locales", "en").strip()
                 existing_meta["no_music"]     = bool(payload.get("no_music", False))
+                existing_meta["purge_cache"]  = bool(payload.get("purge_cache", False))
                 with open(meta_path, "w", encoding="utf-8") as _f:
                     json.dump(existing_meta, _f, indent=2, ensure_ascii=False)
                 print(f"  Saved meta.json  slug={slug}  ep={ep_id}")
