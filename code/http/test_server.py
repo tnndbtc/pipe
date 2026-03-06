@@ -43,6 +43,272 @@ if os.path.isfile(_vc_config_path):
 _lock  = threading.Lock()
 _procs = {}   # client_addr → subprocess.Popen
 
+# ── Background-job registry ────────────────────────────────────────────────────
+# Decouples subprocess/loop lifetime from the SSE connection.
+# A job keeps running even if the browser tab disconnects; the client can
+# reconnect and replay the full output from the beginning of the log file.
+import tempfile as _tempfile
+
+_jobs: dict = {}          # job_key → {"log": str, "done": bool, "rc": int|None}
+_jobs_lock = threading.Lock()
+
+
+def _job_log_path(job_key: str) -> str:
+    """Stable tmp path for this job's output log."""
+    h = hashlib.md5(job_key.encode()).hexdigest()
+    d = os.path.join(_tempfile.gettempdir(), "pipe_jobs")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, h + ".log")
+
+
+def _launch_stream_job(job_key: str, cmd: list, env: dict, client) -> str:
+    """Run cmd in a background thread, writing tagged lines to a log file.
+
+    Tags written to log:
+      O\\t{line}  — stdout line
+      E\\t{line}  — stderr line
+      D\\t{rc}    — done sentinel (process exit code)
+
+    Returns the log path.  If the same job is already running (e.g. client
+    reconnected), returns the existing log path so the client can replay from
+    the start.
+    """
+    log_path = _job_log_path(job_key)
+    with _jobs_lock:
+        existing = _jobs.get(job_key)
+        if existing and not existing["done"]:
+            return log_path   # already running — attach to existing log
+        _jobs[job_key] = {"log": log_path, "done": False, "rc": None}
+
+    def _run() -> None:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1, env=env, cwd=PIPE_DIR,
+            )
+            with _lock:
+                _procs[client] = proc
+
+            with open(log_path, "w", buffering=1, encoding="utf-8") as lf:
+                def _drain(stream, prefix: str) -> None:
+                    for ln in stream:
+                        lf.write(prefix + ln.rstrip("\n") + "\n")
+                        lf.flush()
+
+                t_out = threading.Thread(target=_drain,
+                                         args=(proc.stdout, "O\t"), daemon=True)
+                t_err = threading.Thread(target=_drain,
+                                         args=(proc.stderr, "E\t"), daemon=True)
+                t_out.start()
+                t_err.start()
+                t_out.join()
+                t_err.join()
+                proc.wait()
+                lf.write(f"D\t{proc.returncode}\n")
+                lf.flush()
+
+            with _lock:
+                _procs.pop(client, None)
+            with _jobs_lock:
+                _jobs[job_key]["done"] = True
+                _jobs[job_key]["rc"]   = proc.returncode
+
+        except Exception as exc:
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(f"E\tInternal job error: {exc}\n")
+                lf.write("D\t1\n")
+            with _jobs_lock:
+                _jobs[job_key]["done"] = True
+                _jobs[job_key]["rc"]   = 1
+
+    threading.Thread(target=_run, daemon=True).start()
+    return log_path
+
+
+def _launch_fn_job(job_key: str, target_fn) -> str:
+    """Run target_fn(write_log) in a background thread.
+
+    target_fn receives write_log(tag, data) where tag is 'O', 'E', or 'D'.
+    Returns the log path.
+    """
+    log_path = _job_log_path(job_key)
+    with _jobs_lock:
+        existing = _jobs.get(job_key)
+        if existing and not existing["done"]:
+            return log_path
+        _jobs[job_key] = {"log": log_path, "done": False, "rc": None}
+
+    def _run() -> None:
+        try:
+            with open(log_path, "w", buffering=1, encoding="utf-8") as lf:
+                def write_log(tag: str, data: str) -> None:
+                    lf.write(tag + "\t" + data + "\n")
+                    lf.flush()
+                target_fn(write_log)
+        except Exception as exc:
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(f"E\tInternal job error: {exc}\n")
+                lf.write("D\t1\n")
+            with _jobs_lock:
+                _jobs[job_key]["done"] = True
+                _jobs[job_key]["rc"]   = 1
+
+    threading.Thread(target=_run, daemon=True).start()
+    return log_path
+
+
+def _tail_log_to_sse(wfile, log_path: str) -> None:
+    """Replay a tagged log file as SSE events to wfile.
+
+    Blocks until the D (done) sentinel is read or the caller catches
+    BrokenPipeError / ConnectionResetError.
+
+    Tags: O\\t → 'line' event, E\\t → 'error_line' event, D\\t{rc} → 'done' event.
+    """
+    deadline = time.time() + 10.0
+    while not os.path.exists(log_path) and time.time() < deadline:
+        time.sleep(0.05)
+
+    with open(log_path, "r", encoding="utf-8") as lf:
+        while True:
+            line = lf.readline()
+            if not line:          # EOF — process still running, wait for more
+                time.sleep(0.1)
+                continue
+            line = line.rstrip("\n")
+            if line.startswith("O\t"):
+                wfile.write(sse("line", line[2:]))
+                wfile.flush()
+            elif line.startswith("E\t"):
+                wfile.write(sse("error_line", line[2:]))
+                wfile.flush()
+            elif line.startswith("D\t"):
+                wfile.write(sse("done", line[2:]))
+                wfile.flush()
+                return
+
+def _append_tts_usage_to_status_report(slug: str, ep_id: str, write_log) -> None:
+    """Read tts_audit_log.json for this episode + all project episodes,
+    format a TTS usage summary, and append it to status_report.txt.
+    Also emits the summary lines via write_log("O", ...) for the SSE stream.
+    """
+    import glob as _glob
+    from datetime import datetime as _dt2
+
+    ep_dir  = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+    sr_path = os.path.join(ep_dir, "status_report.txt")
+
+    # ── Load this episode's audit log ─────────────────────────────────────────
+    ep_log_path = os.path.join(ep_dir, "assets", "meta", "tts_audit_log.json")
+    ep_audit: dict = {}
+    if os.path.exists(ep_log_path):
+        try:
+            with open(ep_log_path, encoding="utf-8") as fh:
+                ep_audit = json.load(fh)
+        except Exception:
+            pass
+
+    runs: list[dict]     = ep_audit.get("runs", [])
+    accumulated: dict    = ep_audit.get("accumulated", {})
+
+    if not runs and not accumulated:
+        return   # no TTS ran — skip silently
+
+    # ── "This run" = last entry per locale in runs[] ──────────────────────────
+    last_run_per_locale: dict[str, dict] = {}
+    for r in runs:
+        last_run_per_locale[r.get("locale", "?")] = r
+
+    # ── Project-wide totals: sum all episodes' accumulated dicts ──────────────
+    proj_eps_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes")
+    proj_totals: dict[str, dict] = {}
+    for log_file in _glob.glob(
+        os.path.join(proj_eps_dir, "*", "assets", "meta", "tts_audit_log.json")
+    ):
+        try:
+            with open(log_file, encoding="utf-8") as fh:
+                other = json.load(fh)
+            for loc, data in other.get("accumulated", {}).items():
+                t = proj_totals.setdefault(loc, {
+                    "total_raw_chars": 0, "total_ssml_chars": 0,
+                    "total_api_calls": 0, "total_items_synthesized": 0,
+                    "total_items_skipped": 0, "runs": 0,
+                })
+                t["total_raw_chars"]          += data.get("total_raw_chars",          0)
+                t["total_ssml_chars"]         += data.get("total_ssml_chars",         0)
+                t["total_api_calls"]          += data.get("total_api_calls",          0)
+                t["total_items_synthesized"]  += data.get("total_items_synthesized",  0)
+                t["total_items_skipped"]      += data.get("total_items_skipped",      0)
+                t["runs"]                     += data.get("runs",                     0)
+        except Exception:
+            pass
+
+    # ── Format ────────────────────────────────────────────────────────────────
+    lines = ["── Azure TTS Usage ─────────────────────────────────────────────"]
+
+    if last_run_per_locale:
+        lines.append("This run:")
+        for loc in sorted(last_run_per_locale):
+            r = last_run_per_locale[loc]
+            raw   = r.get("raw_chars",     0)
+            ssml  = r.get("ssml_chars",    0)
+            calls = r.get("api_calls",     0)
+            mode  = r.get("mode",          "?")
+            wall  = r.get("wall_time_sec", 0)
+            lines.append(
+                f"  {loc:<10} raw: {raw:>6,} chars │ ssml: {ssml:>7,} chars"
+                f" │ api calls: {calls:>3} │ mode: {mode} │ {wall:.0f}s"
+            )
+
+    if accumulated:
+        lines.append("This episode (lifetime):")
+        for loc in sorted(accumulated):
+            a     = accumulated[loc]
+            raw   = a.get("total_raw_chars",  0)
+            ssml  = a.get("total_ssml_chars", 0)
+            calls = a.get("total_api_calls",  0)
+            n_syn = a.get("total_items_synthesized", 0)
+            nruns = a.get("runs", 0)
+            lines.append(
+                f"  {loc:<10} raw: {raw:>6,} chars │ ssml: {ssml:>7,} chars"
+                f" │ api calls: {calls:>3} │ items synthesized: {n_syn} │ runs: {nruns}"
+            )
+
+    if proj_totals:
+        lines.append(f"This project ({slug}) — all episodes:")
+        for loc in sorted(proj_totals):
+            t     = proj_totals[loc]
+            raw   = t.get("total_raw_chars",  0)
+            ssml  = t.get("total_ssml_chars", 0)
+            calls = t.get("total_api_calls",  0)
+            nruns = t.get("runs",             0)
+            lines.append(
+                f"  {loc:<10} raw: {raw:>6,} chars │ ssml: {ssml:>7,} chars"
+                f" │ api calls: {calls:>3} │ runs: {nruns}"
+            )
+
+    lines.append("─" * 64)
+
+    text = "\n".join(lines)
+
+    # ── Append to status_report.txt ───────────────────────────────────────────
+    try:
+        os.makedirs(ep_dir, exist_ok=True)
+        ts    = _dt2.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"\n{'='*60}\n{ts}\n{'='*60}\n{text}\n"
+        with open(sr_path, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+    except Exception as exc:
+        write_log("E", f"[tts-audit] Could not write status report: {exc}")
+        return
+
+    # ── Echo to SSE stream ────────────────────────────────────────────────────
+    write_log("O", "")
+    for ln in lines:
+        write_log("O", ln)
+
+
 # ── Azure TTS preview — throttle state + lazy imports ─────────────────────────
 _tts_lock             = threading.Lock()
 _tts_last_call: float = 0.0               # monotonic timestamp
@@ -1872,6 +2138,33 @@ placeholder="Enter your story here"></textarea>
     btnStop.style.display = state === 'running' ? 'block' : 'none';
   }
 
+  // ── RAF-batched output flusher ────────────────────────────────────────────────
+  // SSE lines are queued here and flushed in a single DOM write per animation
+  // frame (~16 ms at 60 fps), eliminating per-line reflow during heavy output.
+  let _lineBuf      = [];   // { html: string }[]
+  let _rafPending   = false;
+
+  function _flushLines() {
+    _rafPending = false;
+    if (_lineBuf.length === 0) return;
+    const atBottom =
+      outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight < 40;
+    outputEl.insertAdjacentHTML('beforeend', _lineBuf.map(l => l.html).join(''));
+    lineCount += _lineBuf.length;
+    lineCountEl.textContent = lineCount + (lineCount === 1 ? ' line' : ' lines');
+    _lineBuf = [];
+    if (atBottom) outputEl.scrollTop = outputEl.scrollHeight;
+  }
+
+  function queueLine(text, cls) {
+    const html = cls
+      ? `<span class="${cls}">${escHtml(text)}\n</span>`
+      : escHtml(text) + '\n';
+    _lineBuf.push({ html });
+    if (!_rafPending) { _rafPending = true; requestAnimationFrame(_flushLines); }
+  }
+  // ── end RAF batcher ───────────────────────────────────────────────────────────
+
   function appendLineTs(text, cls) {
     const ts = fmtNow();
     const prefix = `<span class="ts">[${ts}] </span>`;
@@ -2103,7 +2396,7 @@ placeholder="Enter your story here"></textarea>
 
     es.addEventListener('line', e => {
       const text = e.data;
-      appendLine(text, '');
+      queueLine(text, '');
 
       // ── Stage start  (run.sh banner:  "  STAGE N/10  —  label")
       const startM = text.match(/^\s{2}STAGE (\d+)\/\d+\s+[—\-]{1,2}\s+(.+)/);
@@ -6267,7 +6560,7 @@ placeholder="Enter your story here"></textarea>
     pipeStepEs = new EventSource(url);
     pipeStepEs.addEventListener('line', e => {
       const text = e.data;
-      appendLine(text, '');
+      queueLine(text, '');
       // Stage progress (same patterns as runPrompt)
       const startM = text.match(/^\s{2}STAGE (\d+)\/\d+\s+[—\-]{1,2}\s+(.+)/);
       if (startM) {
@@ -7119,38 +7412,18 @@ class Handler(BaseHTTPRequestHandler):
                 run_env["NO_MUSIC"] = "1"
             # Note: LOCALES and STORY_FORMAT are sourced from pipeline_vars.sh by run.sh
 
-            client = self.client_address
-            proc   = None
+            client  = self.client_address
+            job_key = f"stream\x00{ep_dir_param}\x00{from_stage}\x00{to_stage}"
+            log_path = _launch_stream_job(
+                job_key,
+                ["bash", "run.sh", ep_dir_param, from_stage, to_stage],
+                run_env,
+                client,
+            )
             try:
-                proc = subprocess.Popen(
-                    ["bash", "run.sh", ep_dir_param, from_stage, to_stage],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                    env=run_env,
-                    cwd=PIPE_DIR,
-                )
-                with _lock:
-                    _procs[client] = proc
-
-                for raw in proc.stdout:
-                    self.wfile.write(sse("line", raw.rstrip("\n")))
-                    self.wfile.flush()
-
-                proc.wait()
-
-                for raw in proc.stderr:
-                    line = raw.rstrip("\n")
-                    if line:
-                        self.wfile.write(sse("error_line", line))
-                        self.wfile.flush()
-
-                self.wfile.write(sse("done", str(proc.returncode)))
-                self.wfile.flush()
-
+                _tail_log_to_sse(self.wfile, log_path)
             except (BrokenPipeError, ConnectionResetError):
-                pass   # client disconnected or server shutting down
+                pass   # client disconnected — job keeps running in background
             except Exception as exc:
                 try:
                     self.wfile.write(sse("error_line", f"Server error: {exc}"))
@@ -7158,11 +7431,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 except Exception:
                     pass
-            finally:
-                with _lock:
-                    _procs.pop(client, None)
-                if proc and proc.poll() is None:
-                    proc.terminate()
 
         # List all projects / episodes / artifact files
         elif parsed.path == "/list_projects":
@@ -7616,76 +7884,65 @@ class Handler(BaseHTTPRequestHandler):
             force_run = bool(from_step)
             step_env = os.environ.copy()
             step_env.pop("CLAUDECODE", None)
-            client = self.client_address
+            client   = self.client_address
+            job_key  = f"run_locale\x00{slug}\x00{ep_id}\x00{locale}\x00{from_step}"
 
-            try:
-                # ── Purge stale assets before running ────────────────────────
+            # Capture loop vars for background thread closure
+            _fr = force_run
+            def _run_locale_job(write_log):
+                _force = _fr
                 if purge:
-                    self.wfile.write(sse("line",
-                        f"\n🗑  Purging cached assets for [{locale}]…"))
-                    self.wfile.flush()
+                    write_log("O", f"\n🗑  Purging cached assets for [{locale}]…")
                     removed = _purge_episode_assets(slug, ep_id, locale)
-                    self.wfile.write(sse("line",
-                        f"   Deleted {len(removed)} file(s)"))
-                    self.wfile.flush()
-                    force_run = True   # purge implies force-run all steps
+                    write_log("O", f"   Deleted {len(removed)} file(s)")
+                    _force = True
 
                 for step in LOCALE_STEPS[from_idx:]:
-                    if force_run:
+                    if _force:
                         _delete_step_output(step, slug, ep_id, locale)
                     elif _step_is_done(step, slug, ep_id, locale):
-                        self.wfile.write(sse("line",
-                            f"  ✓ {step} — already done, skipping"))
-                        self.wfile.flush()
+                        write_log("O", f"  ✓ {step} — already done, skipping")
                         continue
 
-                    self.wfile.write(sse("line",
-                        f"\n── {step} ──────────────────────────────────────────"))
-                    self.wfile.flush()
+                    write_log("O", f"\n── {step} ──────────────────────────────────────────")
 
                     cmd = _build_step_cmd(step, slug, ep_id, locale, profile, no_music)
                     if not cmd:
-                        self.wfile.write(sse("error_line", f"Unknown step: {step!r}"))
-                        self.wfile.write(sse("done", "1"))
-                        self.wfile.flush()
+                        write_log("E", f"Unknown step: {step!r}")
+                        write_log("D", "1")
                         return
 
-                    proc = None
-                    try:
-                        proc = subprocess.Popen(
-                            cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True, bufsize=1,
-                            env=step_env, cwd=PIPE_DIR,
-                        )
-                        with _lock:
-                            _procs[client] = proc
-                        for raw_line in proc.stdout:
-                            self.wfile.write(sse("line", raw_line.rstrip("\n")))
-                            self.wfile.flush()
-                        proc.wait()
-                    finally:
-                        with _lock:
-                            _procs.pop(client, None)
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True, bufsize=1,
+                        env=step_env, cwd=PIPE_DIR,
+                    )
+                    with _lock:
+                        _procs[client] = proc
+                    for raw_line in proc.stdout:
+                        write_log("O", raw_line.rstrip("\n"))
+                    proc.wait()
+                    with _lock:
+                        _procs.pop(client, None)
 
                     if proc.returncode != 0:
-                        self.wfile.write(sse("error_line",
-                            f"✗ {step} failed (exit {proc.returncode})"))
-                        self.wfile.write(sse("done", str(proc.returncode)))
-                        self.wfile.flush()
+                        write_log("E", f"✗ {step} failed (exit {proc.returncode})")
+                        write_log("D", str(proc.returncode))
                         return
 
-                    self.wfile.write(sse("line", f"✓ {step}"))
-                    self.wfile.flush()
+                    write_log("O", f"✓ {step}")
 
-                self.wfile.write(sse("line",
-                    f"\n✓ [{locale}] All post-processing steps complete"))
-                self.wfile.write(sse("done", "0"))
-                self.wfile.flush()
+                write_log("O", f"\n✓ [{locale}] All post-processing steps complete")
+                _append_tts_usage_to_status_report(slug, ep_id, write_log)
+                write_log("D", "0")
 
+            log_path = _launch_fn_job(job_key, _run_locale_job)
+            try:
+                _tail_log_to_sse(self.wfile, log_path)
             except (BrokenPipeError, ConnectionResetError):
-                pass   # client disconnected or server shutting down
+                pass   # client disconnected — job keeps running in background
             except Exception as exc:
                 try:
                     self.wfile.write(sse("error_line", f"Server error: {exc}"))
@@ -7693,9 +7950,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 except Exception:
                     pass
-            finally:
-                if proc and proc.poll() is None:
-                    proc.terminate()
 
         # SSE stream: shared steps N-4 then all locale steps 5-10 (Run N→10 from shared step)
         elif parsed.path == "/run_stage10":
@@ -7737,99 +7991,78 @@ class Handler(BaseHTTPRequestHandler):
 
             step_env = os.environ.copy()
             step_env.pop("CLAUDECODE", None)
-            client = self.client_address
-            proc = None
+            client   = self.client_address
+            job_key  = f"run_stage10\x00{slug}\x00{ep_id}\x00{from_step}"
 
-            def _run_cmd_s10(cmd):
-                nonlocal proc
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
-                )
-                with _lock:
-                    _procs[client] = proc
-                for raw_line in proc.stdout:
-                    self.wfile.write(sse("line", raw_line.rstrip("\n")))
-                    self.wfile.flush()
-                proc.wait()
-                with _lock:
-                    _procs.pop(client, None)
-                return proc.returncode
+            def _run_stage10_job(write_log):
+                def _run_cmd(cmd) -> int:
+                    p = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                    )
+                    with _lock:
+                        _procs[client] = p
+                    for raw_line in p.stdout:
+                        write_log("O", raw_line.rstrip("\n"))
+                    p.wait()
+                    with _lock:
+                        _procs.pop(client, None)
+                    return p.returncode
 
-            try:
                 # ── Purge stale assets (all locales) before running ───────────
                 if purge:
-                    self.wfile.write(sse("line",
-                        "\n🗑  Purging cached assets for all locales…"))
-                    self.wfile.flush()
+                    write_log("O", "\n🗑  Purging cached assets for all locales…")
                     _total_removed = _purge_episode_assets(slug, ep_id, "")
-                    self.wfile.write(sse("line",
-                        f"   Deleted {len(_total_removed)} file(s)"))
-                    self.wfile.flush()
+                    write_log("O", f"   Deleted {len(_total_removed)} file(s)")
 
                 # ── Shared steps (locale-free) ────────────────────────────────
                 for _step in _SHARED_STEPS[from_idx:]:
-                    self.wfile.write(sse("line",
-                        f"\n── {_step} (shared) ────────────────────────────────"))
-                    self.wfile.flush()
+                    write_log("O", f"\n── {_step} (shared) ────────────────────────────────")
                     _cmd = _build_step_cmd(_step, slug, ep_id, "", profile, no_music)
                     if not _cmd:
-                        self.wfile.write(sse("error_line", f"Unknown step: {_step!r}"))
-                        self.wfile.write(sse("done", "1"))
-                        self.wfile.flush()
+                        write_log("E", f"Unknown step: {_step!r}")
+                        write_log("D", "1")
                         return
-                    _rc = _run_cmd_s10(_cmd)
+                    _rc = _run_cmd(_cmd)
                     if _rc != 0:
-                        self.wfile.write(sse("error_line",
-                            f"✗ {_step} failed (exit {_rc})"))
-                        self.wfile.write(sse("done", str(_rc)))
-                        self.wfile.flush()
+                        write_log("E", f"✗ {_step} failed (exit {_rc})")
+                        write_log("D", str(_rc))
                         return
-                    self.wfile.write(sse("line", f"✓ {_step}"))
-                    self.wfile.flush()
+                    write_log("O", f"✓ {_step}")
 
                 # ── Per-locale steps ──────────────────────────────────────────
                 if not _locales_s10:
-                    self.wfile.write(sse("error_line",
-                        "No locales found — run Stage 9 first to create manifests"))
-                    self.wfile.write(sse("done", "1"))
-                    self.wfile.flush()
+                    write_log("E", "No locales found — run Stage 9 first to create manifests")
+                    write_log("D", "1")
                     return
 
                 for _locale in _locales_s10:
-                    self.wfile.write(sse("line",
-                        f"\n── locale: {_locale} ────────────────────────────────"))
-                    self.wfile.flush()
+                    write_log("O", f"\n── locale: {_locale} ────────────────────────────────")
                     for _step in _LOCALE_STEPS_ALL:
-                        self.wfile.write(sse("line",
-                            f"\n── {_step} [{_locale}] ──────────────────────────"))
-                        self.wfile.flush()
+                        write_log("O", f"\n── {_step} [{_locale}] ──────────────────────────")
                         _cmd = _build_step_cmd(_step, slug, ep_id, _locale, profile, no_music)
                         if not _cmd:
-                            self.wfile.write(sse("error_line", f"Unknown step: {_step!r}"))
-                            self.wfile.write(sse("done", "1"))
-                            self.wfile.flush()
+                            write_log("E", f"Unknown step: {_step!r}")
+                            write_log("D", "1")
                             return
-                        _rc = _run_cmd_s10(_cmd)
+                        _rc = _run_cmd(_cmd)
                         if _rc != 0:
-                            self.wfile.write(sse("error_line",
-                                f"✗ {_step} [{_locale}] failed (exit {_rc})"))
-                            self.wfile.write(sse("done", str(_rc)))
-                            self.wfile.flush()
+                            write_log("E", f"✗ {_step} [{_locale}] failed (exit {_rc})")
+                            write_log("D", str(_rc))
                             return
-                        self.wfile.write(sse("line", f"✓ {_step} [{_locale}]"))
-                        self.wfile.flush()
-                    self.wfile.write(sse("line",
-                        f"✓ [{_locale}] all locale steps complete"))
-                    self.wfile.flush()
+                        write_log("O", f"✓ {_step} [{_locale}]")
+                    write_log("O", f"✓ [{_locale}] all locale steps complete")
 
-                self.wfile.write(sse("line", "\n✓ Stage 10 — all steps complete"))
-                self.wfile.write(sse("done", "0"))
-                self.wfile.flush()
+                write_log("O", "\n✓ Stage 10 — all steps complete")
+                _append_tts_usage_to_status_report(slug, ep_id, write_log)
+                write_log("D", "0")
 
+            log_path = _launch_fn_job(job_key, _run_stage10_job)
+            try:
+                _tail_log_to_sse(self.wfile, log_path)
             except (BrokenPipeError, ConnectionResetError):
-                pass   # client disconnected or server shutting down
+                pass   # client disconnected — job keeps running in background
             except Exception as exc:
                 try:
                     self.wfile.write(sse("error_line", f"Server error: {exc}"))
@@ -7837,9 +8070,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 except Exception:
                     pass
-            finally:
-                if proc and proc.poll() is None:
-                    proc.terminate()
 
         # Range-request-capable media streaming (for HTML5 <video>)
         elif parsed.path == "/serve_media":

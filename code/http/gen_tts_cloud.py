@@ -47,6 +47,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import logging
 import os
@@ -55,6 +57,8 @@ import struct
 import sys
 import tempfile
 import time
+import uuid
+import zipfile
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -644,6 +648,1640 @@ def split_and_write_wavs(
 
 
 # ---------------------------------------------------------------------------
+# Chunk-alignment synthesis infrastructure (Phase 1 — az.txt plan)
+# ---------------------------------------------------------------------------
+
+_HD_OMNI_PATTERN = re.compile(r"DragonHDOmni",  re.IGNORECASE)
+_HD_VOICE_PATTERN = re.compile(r"DragonHD",     re.IGNORECASE)
+
+# Average spoken characters per second — conservative estimate for chunk sizing.
+# Intentionally safe: underestimates → smaller chunks → easier debugging.
+_CHARS_PER_SEC_BY_LOCALE: dict[str, float] = {
+    "zh-hans": 4.5,
+    "zh-cn":   4.5,
+    "zh":      4.5,
+    "ja":      5.0,
+    "ko":      5.0,
+    "en":      14.0,
+    "en-us":   14.0,
+}
+_CHARS_PER_SEC_DEFAULT = 12.0
+
+# Prosody rate string → multiplier (higher = slower speech = longer duration)
+_RATE_TO_MULT: dict[str, float] = {
+    "-25%": 1.33, "-20%": 1.25, "-15%": 1.18, "-10%": 1.11, "-5%": 1.05,
+    "0%": 1.0,
+    "+5%": 0.95, "+10%": 0.91, "+15%": 0.87, "+20%": 0.83, "+25%": 0.80,
+    "slow": 1.33, "medium": 1.0, "fast": 0.75,
+}
+
+# TTS cache versioning — bump when synthesis config or normalization logic changes
+_TTS_ENGINE_VERSION = "1"
+_TTS_OUTPUT_FORMAT  = "Riff24Khz16BitMonoPcm"
+_TTS_SAMPLE_RATE    = str(AZURE_SAMPLE_RATE)
+
+
+def _rate_to_multiplier(rate_str: str) -> float:
+    """Convert a prosody rate string to a duration multiplier (> 1 = slower)."""
+    rate_str = (rate_str or "0%").strip()
+    if rate_str in _RATE_TO_MULT:
+        return _RATE_TO_MULT[rate_str]
+    if rate_str.endswith("%"):
+        try:
+            pct = float(rate_str[:-1])
+            return 1.0 / (1.0 + pct / 100.0) if pct != 0 else 1.0
+        except ValueError:
+            pass
+    # Raw float (ssml_rate_raw e.g. "0.86")
+    try:
+        v = float(rate_str)
+        return 1.0 / v if v > 0 else 1.0
+    except ValueError:
+        pass
+    return 1.0
+
+
+def _is_hd_voice(voice: str) -> bool:
+    """True if voice is any DragonHD variant (HD, HDFlash, HDOmni)."""
+    return bool(_HD_VOICE_PATTERN.search(voice))
+
+
+def _is_hd_omni_voice(voice: str) -> bool:
+    """True if voice is DragonHDOmni (the only HD variant with word-boundary events)."""
+    return bool(_HD_OMNI_PATTERN.search(voice))
+
+
+def _estimate_duration_sec(text: str, locale: str, rate: str) -> float:
+    """Rough estimate of spoken duration for chunk-sizing heuristics.
+
+    Uses locale-specific character-per-second rate adjusted by prosody rate.
+    Conservative (may underestimate); intentionally safe for chunk planning.
+    """
+    locale_key = locale.lower()
+    cps  = _CHARS_PER_SEC_BY_LOCALE.get(locale_key, _CHARS_PER_SEC_DEFAULT)
+    mult = _rate_to_multiplier(rate)
+    chars = len(text.strip())
+    if chars == 0:
+        return 0.0
+    return (chars / cps) * mult
+
+
+def _xml_escape(text: str) -> str:
+    """Escape XML special characters for SSML text content."""
+    return (text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;"))
+
+
+def build_ssml_minimal(
+    text: str,
+    voice: str,
+    azure_lang: str,
+    *,
+    rate: str,
+    pitch: str | None,
+    style: str | None,
+    style_degree: float,
+    break_ms: int = 0,
+    inner_only: bool = False,
+) -> str:
+    """Build SSML for a single utterance — minimal overhead, no default breaks.
+
+    Phase 1 change vs build_ssml():
+    - break_ms injection is disabled by default (break_ms=0 means no injection).
+      Callers must explicitly pass break_ms > 0 to enable it.
+    - inner_only=True returns just the <voice> block without the <speak> wrapper,
+      suitable for embedding in a multi-sentence chunk SSML.
+    """
+    escaped = _xml_escape(text)
+
+    # Explicit break injection — caller-controlled only, not default behaviour
+    if break_ms > 0:
+        escaped = re.sub(
+            r'([.!?](?:\s|$))',
+            lambda m: (m.group(1).rstrip()
+                       + f'<break time="{break_ms}ms"/>'
+                       + (m.group(1)[len(m.group(1).rstrip()):] or ' ')),
+            escaped,
+        )
+
+    prosody_parts: list[str] = []
+    if rate and rate != "0%":
+        prosody_parts.append(f'rate="{rate}"')
+    if pitch:
+        prosody_parts.append(f'pitch="{pitch}"')
+
+    spoken = (
+        f"<prosody {' '.join(prosody_parts)}>{escaped}</prosody>"
+        if prosody_parts else escaped
+    )
+
+    if style:
+        spoken = (
+            f'<mstts:express-as style="{style}" styledegree="{style_degree}">'
+            f"{spoken}</mstts:express-as>"
+        )
+
+    voice_block = f"<voice name='{voice}'>{spoken}</voice>"
+
+    if inner_only:
+        return voice_block
+
+    return (
+        f"<speak version='1.0' xml:lang='{azure_lang}' "
+        f"xmlns='http://www.w3.org/2001/10/synthesis' "
+        f"xmlns:mstts='http://www.w3.org/2001/mstts'>"
+        f"{voice_block}"
+        f"</speak>"
+    )
+
+
+def group_sentences_into_chunks(
+    sentence_frags: list[dict],
+    items: list[dict],
+    voice: str,
+    style: str | None,
+    style_degree: float,
+    rate: str,
+    pitch: str | None,
+    azure_lang: str,
+    locale: str,
+    target_dur_sec: float = 35.0,
+    max_dur_sec: float    = 45.0,
+    max_chars: int        = 1000,
+) -> list[dict]:
+    """Group sentence fragments into synthesis chunks for chunk_alignment mode.
+
+    Each chunk dict contains:
+      {
+        "sentences":          [{"text", "pause_ms", "item_id", "vo"}, ...],
+        "total_chars":        int,
+        "estimated_dur_sec":  float,
+        "voice":              str,
+        "style":              str|None,
+        "style_degree":       float,
+        "rate":               str,
+        "pitch":              str|None,
+        "azure_lang":         str,
+      }
+
+    Chunking strategy (duration-first, az.txt §Step 3):
+    1. Estimate duration per sentence via _estimate_duration_sec().
+    2. Hard flush at scene boundaries: if the previous sentence's pause_ms >= 2000ms,
+       flush the current chunk before starting a new one.
+    3. Hard flush when voice or style changes (handled by caller grouping).
+    4. Soft flush when accumulated est_dur_sec reaches target_dur_sec.
+    5. Hard flush when adding the next sentence would exceed max_dur_sec or max_chars.
+    6. Minimum 1 sentence per chunk guaranteed.
+    """
+    total = min(len(items), len(sentence_frags))
+
+    def _make_chunk(sentences: list[dict], dur: float, chars: int) -> dict:
+        return {
+            "sentences":         sentences,
+            "total_chars":       chars,
+            "estimated_dur_sec": dur,
+            "voice":             voice,
+            "style":             style,
+            "style_degree":      style_degree,
+            "rate":              rate,
+            "pitch":             pitch,
+            "azure_lang":        azure_lang,
+            "locale":            locale,
+        }
+
+    chunks: list[dict] = []
+    cur_sentences: list[dict] = []
+    cur_dur   = 0.0
+    cur_chars = 0
+
+    for idx in range(total):
+        frag  = sentence_frags[idx]
+        vo    = items[idx]
+        text  = frag["text"]
+        est   = _estimate_duration_sec(text, locale, rate)
+        chars = len(text)
+
+        # Hard flush: scene boundary (pause_ms >= 2000ms on the last accumulated sentence)
+        # per az.txt §Step 3 — "Hard break at scene boundaries (pauses ≥ 2000ms)"
+        if cur_sentences and cur_sentences[-1].get("pause_ms", 0) >= 2000:
+            chunks.append(_make_chunk(list(cur_sentences), cur_dur, cur_chars))
+            cur_sentences = []
+            cur_dur   = 0.0
+            cur_chars = 0
+
+        # Soft flush: sentence would exceed duration or char limits
+        elif cur_sentences and (cur_dur + est > max_dur_sec or cur_chars + chars > max_chars):
+            chunks.append(_make_chunk(list(cur_sentences), cur_dur, cur_chars))
+            cur_sentences = []
+            cur_dur   = 0.0
+            cur_chars = 0
+
+        cur_sentences.append({
+            "text":     text,
+            "pause_ms": frag.get("pause_ms", 0),
+            "item_id":  vo["item_id"],
+            "vo":       vo,
+        })
+        cur_dur   += est
+        cur_chars += chars
+
+        # Flush at soft target
+        if cur_dur >= target_dur_sec:
+            chunks.append(_make_chunk(list(cur_sentences), cur_dur, cur_chars))
+            cur_sentences = []
+            cur_dur   = 0.0
+            cur_chars = 0
+
+    if cur_sentences:
+        chunks.append(_make_chunk(cur_sentences, cur_dur, cur_chars))
+
+    return chunks
+
+
+def _build_chunk_ssml(chunk: dict) -> str:
+    """Build a single SSML document covering all sentences in a chunk.
+
+    All sentences share one <speak> wrapper + one <voice> block + one
+    <prosody>/<express-as> wrapper.  The ~175-char <speak> overhead is paid
+    once per chunk instead of once per sentence.
+
+    Inter-sentence pauses are injected as <break time="Nms"/> after each
+    sentence (except the last) using the sentence's pause_ms value.
+    """
+    voice        = chunk["voice"]
+    style        = chunk["style"]
+    style_degree = chunk["style_degree"]
+    rate         = chunk["rate"]
+    pitch        = chunk["pitch"]
+    azure_lang   = chunk["azure_lang"]
+    sentences    = chunk["sentences"]
+
+    parts: list[str] = []
+    for i, sent in enumerate(sentences):
+        escaped  = _xml_escape(sent["text"])
+        is_last  = (i == len(sentences) - 1)
+        pause_ms = sent.get("pause_ms", 0) if not is_last else 0
+        if pause_ms > 0:
+            parts.append(f'{escaped}<break time="{pause_ms}ms"/>')
+        else:
+            parts.append(escaped)
+
+    inner_text = " ".join(parts)
+
+    prosody_parts: list[str] = []
+    if rate and rate != "0%":
+        prosody_parts.append(f'rate="{rate}"')
+    if pitch:
+        prosody_parts.append(f'pitch="{pitch}"')
+
+    spoken = (
+        f"<prosody {' '.join(prosody_parts)}>{inner_text}</prosody>"
+        if prosody_parts else inner_text
+    )
+
+    if style:
+        spoken = (
+            f'<mstts:express-as style="{style}" styledegree="{style_degree}">'
+            f"{spoken}</mstts:express-as>"
+        )
+
+    return (
+        f"<speak version='1.0' xml:lang='{azure_lang}' "
+        f"xmlns='http://www.w3.org/2001/10/synthesis' "
+        f"xmlns:mstts='http://www.w3.org/2001/mstts'>"
+        f"<voice name='{voice}'>{spoken}</voice>"
+        f"</speak>"
+    )
+
+
+def _get_pcm_from_wav_bytes(wav_bytes: bytes) -> bytes:
+    """Extract raw PCM payload from WAV bytes (data-chunk search, never hardcodes 44)."""
+    data_tag_pos = wav_bytes.index(b"data")
+    return wav_bytes[data_tag_pos + 8:]
+
+
+def _pcm_duration_sec(pcm_bytes: bytes, sample_rate: int = AZURE_SAMPLE_RATE) -> float:
+    """Duration of a 16-bit mono PCM byte string in seconds."""
+    return len(pcm_bytes) / (sample_rate * 2)
+
+
+def _align_proportional(chunk_wav_bytes: bytes, chunk: dict) -> list[dict]:
+    """Align sentences within a chunk by proportional character ratio.
+
+    Divides chunk duration proportionally to each sentence's character count.
+    Simple, zero dependencies, always succeeds.
+
+    Returns list of {"item_id": str, "start_sec": float, "end_sec": float}.
+    """
+    pcm        = _get_pcm_from_wav_bytes(chunk_wav_bytes)
+    total_dur  = _pcm_duration_sec(pcm)
+    sentences  = chunk["sentences"]
+    total_chars = sum(len(s["text"]) for s in sentences)
+
+    if total_chars == 0:
+        per = total_dur / max(len(sentences), 1)
+        return [
+            {"item_id": s["item_id"],
+             "start_sec": round(i * per, 4),
+             "end_sec":   round((i + 1) * per, 4)}
+            for i, s in enumerate(sentences)
+        ]
+
+    offsets: list[dict] = []
+    cursor = 0.0
+    for s in sentences:
+        frac = len(s["text"]) / total_chars
+        dur  = total_dur * frac
+        offsets.append({
+            "item_id":   s["item_id"],
+            "start_sec": round(cursor, 4),
+            "end_sec":   round(cursor + dur, 4),
+        })
+        cursor += dur
+
+    return offsets
+
+
+def _align_by_silence(
+    chunk_wav_bytes: bytes,
+    chunk: dict,
+    silence_threshold: int = 500,
+    min_silence_frames: int | None = None,
+) -> list[dict] | None:
+    """Align sentences by detecting silence gaps in 16-bit mono PCM.
+
+    Uses the inter-sentence <break> pauses injected by _build_chunk_ssml as
+    alignment anchors.  Only silence runs >= 80% of the chunk's minimum
+    break_ms are considered, which filters out intra-sentence drama pauses
+    (em-dash ~150-350ms, comma ~50-150ms) while reliably catching the
+    explicit sentence-boundary breaks (typically >=200ms).
+
+    Returns list of {item_id, start_sec, end_sec}, or None if the detected
+    gap count doesn't match the expected (n_sentences - 1) boundaries.
+
+    Args:
+        silence_threshold  : PCM amplitude below which a frame is "silent".
+                             500 works for Azure Neural/DragonHD whose <break>
+                             pauses are digital silence; intra-sentence pauses
+                             may have residual room tone at ~100–300 amplitude.
+        min_silence_frames : minimum consecutive silent frames for a gap to count.
+                             When None (default), auto-derived from the chunk's
+                             pause_ms values: 80% of the shortest non-zero break,
+                             minimum 100ms.  Overrides only needed in tests.
+    """
+    try:
+        pcm       = _get_pcm_from_wav_bytes(chunk_wav_bytes)
+        sentences = chunk["sentences"]
+        n_sents   = len(sentences)
+
+        # Derive min silence from the inter-sentence break settings in this chunk.
+        # Use 80% of the minimum break so we detect only the explicit breaks, not
+        # intra-sentence drama pauses (em-dashes / commas).
+        if min_silence_frames is None:
+            min_pauses = [s.get("pause_ms", 0) for s in sentences[:-1]
+                          if s.get("pause_ms", 0) > 0]
+            if min_pauses:
+                min_silence_ms = max(100, int(min(min_pauses) * 0.80))
+            else:
+                min_silence_ms = 100  # default: 100ms when no breaks defined
+            min_silence_frames = int(min_silence_ms / 1000 * AZURE_SAMPLE_RATE)
+
+        if n_sents == 1:
+            dur = _pcm_duration_sec(pcm)
+            return [{"item_id": sentences[0]["item_id"],
+                     "start_sec": 0.0, "end_sec": round(dur, 4)}]
+
+        n_samples = len(pcm) // 2
+        samples = struct.unpack(f"<{n_samples}h", pcm[:n_samples * 2])
+
+        # Detect silence runs → midpoint timestamps
+        silence_midpoints: list[float] = []
+        in_silence   = False
+        silence_start = 0
+        for i, s in enumerate(samples):
+            is_silent = abs(s) < silence_threshold
+            if is_silent and not in_silence:
+                in_silence    = True
+                silence_start = i
+            elif not is_silent and in_silence:
+                in_silence = False
+                run_len = i - silence_start
+                if run_len >= min_silence_frames:
+                    mid = (silence_start + i) / 2
+                    silence_midpoints.append(mid / AZURE_SAMPLE_RATE)
+        # Handle trailing silence
+        if in_silence:
+            run_len = n_samples - silence_start
+            if run_len >= min_silence_frames:
+                mid = (silence_start + n_samples) / 2
+                silence_midpoints.append(mid / AZURE_SAMPLE_RATE)
+
+        if len(silence_midpoints) < n_sents - 1:
+            return None   # not enough gaps found at this threshold
+
+        # Take the first n_sents-1 gaps as boundaries (they're already in time order)
+        boundaries = sorted(silence_midpoints[: n_sents - 1])
+        total_dur  = _pcm_duration_sec(pcm)
+
+        offsets: list[dict] = []
+        prev = 0.0
+        for i, sent in enumerate(sentences):
+            end = boundaries[i] if i < len(boundaries) else total_dur
+            offsets.append({
+                "item_id":   sent["item_id"],
+                "start_sec": round(prev, 4),
+                "end_sec":   round(end, 4),
+            })
+            prev = end
+        # Ensure last sentence reaches chunk end
+        offsets[-1]["end_sec"] = round(total_dur, 4)
+
+        # Proportionality guard: reject alignment if any sentence's duration is
+        # wildly shorter than its char-count share.  This catches intra-sentence
+        # HD voice pauses being mis-identified as inter-sentence boundaries.
+        #
+        # Rules:
+        #  - Skip the LAST sentence: always gets trailing chunk silence (inflated).
+        #  - Skip sentences with < 20 chars: short dramatic lines are inherently
+        #    variable (e.g. "Hush." gets a long break + Azure pad).
+        #  - For others: reject if actual < 0.20 × proportional share.
+        total_chars = sum(len(s.get("text", "")) for s in sentences)
+        if total_chars > 0:
+            for idx, (off, sent) in enumerate(zip(offsets, sentences)):
+                if idx == len(offsets) - 1:
+                    continue   # last sentence: skip (trailing silence is expected)
+                sent_chars = len(sent.get("text", ""))
+                if sent_chars < 20:
+                    continue   # short lines: naturally variable ratio
+                prop_dur   = (sent_chars / total_chars) * total_dur
+                if prop_dur <= 0:
+                    continue
+                actual_dur = off["end_sec"] - off["start_sec"]
+                ratio = actual_dur / prop_dur
+                if ratio < 0.20:
+                    log.debug(
+                        f"[chunk_align] silence-gap proportionality fail: "
+                        f"{sent['item_id']} actual={actual_dur:.2f}s "
+                        f"prop={prop_dur:.2f}s ratio={ratio:.2f} < 0.20"
+                    )
+                    return None   # fall through to proportional
+
+        return offsets
+
+    except Exception as exc:
+        log.debug(f"[chunk_align] silence detection failed: {exc}")
+        return None
+
+
+def _validate_alignment(
+    offsets: list[dict],
+    chunk_dur_sec: float,
+    epsilon: float = 0.01,
+    min_sent_sec: float = 0.08,
+) -> bool:
+    """Validate alignment output contract (az.txt §Step 4C).
+
+    Rules checked:
+    - sentence_i.start_sec <= sentence_i.end_sec
+    - sentence_i.end_sec <= sentence_{i+1}.start_sec + epsilon  (no overlap)
+    - all offsets within [0, chunk_dur_sec + epsilon]
+    - no sentence shorter than min_sent_sec (80 ms) — logged as warning only
+
+    Returns True only if all structural checks pass.
+    """
+    for i, off in enumerate(offsets):
+        s = off["start_sec"]
+        e = off["end_sec"]
+        if s < -epsilon or e < -epsilon:
+            log.warning(f"[validate_alignment] negative offset idx={i}: start={s} end={e}")
+            return False
+        if e > chunk_dur_sec + epsilon:
+            log.warning(f"[validate_alignment] end exceeds chunk_dur at idx={i}: "
+                        f"end={e} chunk_dur={chunk_dur_sec}")
+            return False
+        if s > e + epsilon:
+            log.warning(f"[validate_alignment] start > end at idx={i}: start={s} end={e}")
+            return False
+        if (e - s) < min_sent_sec:
+            log.debug(f"[validate_alignment] short sentence at idx={i}: {e-s:.3f}s")
+        if i + 1 < len(offsets):
+            next_start = offsets[i + 1]["start_sec"]
+            if e > next_start + epsilon:
+                log.warning(f"[validate_alignment] overlap at idx={i}: "
+                            f"end={e} next_start={next_start}")
+                return False
+    return True
+
+
+def _clamp_alignment(offsets: list[dict], chunk_dur_sec: float) -> list[dict]:
+    """Clamp all alignment offset values to [0, chunk_dur_sec]."""
+    return [
+        {
+            "item_id":   off["item_id"],
+            "start_sec": max(0.0, min(off["start_sec"], chunk_dur_sec)),
+            "end_sec":   max(0.0, min(off["end_sec"],   chunk_dur_sec)),
+        }
+        for off in offsets
+    ]
+
+
+def _write_sentence_wavs_from_chunk(
+    chunk_wav_bytes: bytes,
+    offsets: list[dict],
+    out_dir: Path,
+    voice: str,
+    style: str | None,
+) -> list[dict]:
+    """Slice a chunk WAV into per-sentence WAV files.
+
+    Args:
+        chunk_wav_bytes : raw bytes from Azure TTS for the entire chunk
+        offsets         : validated list of {item_id, start_sec, end_sec}
+        out_dir         : directory to write {item_id}.wav files
+        voice           : for license sidecar
+        style           : for license sidecar
+
+    Returns list of result dicts: {item_id, output, size_bytes, duration_sec, status}.
+    """
+    pcm            = _get_pcm_from_wav_bytes(chunk_wav_bytes)
+    bytes_per_sec  = AZURE_SAMPLE_RATE * 2   # 16-bit mono = 2 bytes/sample
+
+    results: list[dict] = []
+    for off in offsets:
+        item_id    = off["item_id"]
+        start_byte = round(off["start_sec"] * bytes_per_sec)
+        end_byte   = round(off["end_sec"]   * bytes_per_sec)
+
+        # Align to 2-byte (16-bit sample) boundary
+        start_byte = (start_byte // 2) * 2
+        end_byte   = (end_byte   // 2) * 2
+
+        # Clamp to PCM buffer
+        start_byte = max(0, min(start_byte, len(pcm)))
+        end_byte   = max(start_byte, min(end_byte, len(pcm)))
+
+        pcm_slice = pcm[start_byte:end_byte]
+        out_path  = out_dir / f"{item_id}.wav"
+
+        _write_wav(str(out_path), pcm_slice, sample_rate=AZURE_SAMPLE_RATE, channels=1, bits=16)
+        write_license_sidecar(out_path, voice, style)
+
+        size       = out_path.stat().st_size
+        duration_s = len(pcm_slice) / bytes_per_sec
+        log.info(f"  [chunk] {out_path}  ({duration_s:.2f}s, {size:,} bytes)")
+        print(f"  [chunk] {item_id}  ({duration_s:.2f}s, {size:,} bytes)")
+
+        results.append({
+            "item_id":               item_id,
+            "output":                str(out_path),
+            "size_bytes":            size,
+            "duration_sec":          round(duration_s, 3),
+            "chunk_offset_start_sec": round(off["start_sec"], 4),
+            "chunk_offset_end_sec":   round(off["end_sec"],   4),
+            "status":                "success",
+        })
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# TTS cache (SHA256-keyed WAV cache — az.txt §Step 5)
+# ---------------------------------------------------------------------------
+
+def _normalize_ssml_for_cache(ssml: str) -> str:
+    """Normalize insignificant XML whitespace for cache key computation.
+
+    Per az.txt §Step 5:
+    - Normalize insignificant whitespace and attribute ordering only.
+    - Do NOT lowercase spoken text — would change pronunciation/semantics.
+    """
+    # Collapse whitespace runs between tags to a single space
+    normalized = re.sub(r'>\s+<', '> <', ssml)
+    return normalized.strip()
+
+
+def _tts_cache_key(ssml: str, voice: str, locale: str) -> str:
+    """Compute SHA256 cache key for a TTS request.
+
+    Key inputs (per az.txt §Step 5):
+      normalized_ssml + voice + locale + output_format + sample_rate + engine_version
+    """
+    normalized = _normalize_ssml_for_cache(ssml)
+    payload = "\n".join([
+        normalized,
+        voice,
+        locale,
+        _TTS_OUTPUT_FORMAT,
+        _TTS_SAMPLE_RATE,
+        _TTS_ENGINE_VERSION,
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _tts_cache_get(cache_dir: Path, key: str) -> bytes | None:
+    """Return cached WAV bytes for the given key, or None on cache miss."""
+    wav_path = cache_dir / f"{key}.wav"
+    if wav_path.exists() and wav_path.stat().st_size > 44:
+        try:
+            return wav_path.read_bytes()
+        except OSError:
+            return None
+    return None
+
+
+def _tts_cache_put(cache_dir: Path, key: str, wav_bytes: bytes, meta: dict) -> None:
+    """Write WAV bytes and metadata JSON to the cache directory."""
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / f"{key}.wav").write_bytes(wav_bytes)
+        (cache_dir / f"{key}.json").write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError as exc:
+        log.warning(f"[tts_cache] write failed: {exc}")
+
+
+def _per_item_legacy_chunk(
+    synthesizer,
+    chunk: dict,
+    voice: str,
+    style: str | None,
+    style_degree: float,
+    rate: str,
+    pitch: str | None,
+    azure_lang: str,
+    out_dir: Path,
+) -> list[dict]:
+    """Per-sentence fallback synthesis for a single chunk.
+
+    Used when chunk synthesis or alignment fails.  Each sentence in the chunk
+    is synthesised individually (original pre-Phase-1 behaviour).
+    """
+    results: list[dict] = []
+    for sent in chunk["sentences"]:
+        item_id  = sent["item_id"]
+        text     = sent["text"]
+        vo       = sent["vo"]
+        out_path = out_dir / f"{item_id}.wav"
+
+        ssml = build_ssml_minimal(
+            text=text,
+            voice=voice,
+            azure_lang=azure_lang,
+            rate=rate,
+            pitch=pitch,
+            style=style,
+            style_degree=style_degree,
+            break_ms=0,
+        )
+
+        try:
+            wav_bytes = synthesise(synthesizer, ssml)
+            if out_path.exists():
+                out_path.unlink()
+            out_path.write_bytes(wav_bytes)
+            write_license_sidecar(out_path, voice, style)
+
+            size       = out_path.stat().st_size
+            pcm_len    = max(0, len(_get_pcm_from_wav_bytes(wav_bytes)))
+            duration_s = pcm_len / (AZURE_SAMPLE_RATE * 2)
+            print(f"  [fallback] {item_id}  ({duration_s:.2f}s, {size:,} bytes)")
+
+            results.append({
+                "item_id":      item_id,
+                "speaker":      vo.get("speaker", "narrator"),
+                "voice":        voice,
+                "azure_lang":   azure_lang,
+                "style":        style or "",
+                "style_degree": style_degree,
+                "rate":         rate,
+                "output":       str(out_path),
+                "size_bytes":   size,
+                "duration_sec": round(duration_s, 3),
+                "status":       "success",
+            })
+        except Exception as exc:
+            print(f"  [fallback ERROR] {item_id}: {exc}")
+            results.append({
+                "item_id":    item_id,
+                "speaker":    vo.get("speaker", "narrator"),
+                "voice":      voice,
+                "output":     str(out_path),
+                "size_bytes": 0,
+                "status":     "failed",
+                "error":      str(exc),
+            })
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Phase 2, Step 8 — HDOmni word-boundary alignment
+# ---------------------------------------------------------------------------
+
+def synthesise_with_word_boundaries(
+    synthesizer,
+    ssml: str,
+) -> tuple[bytes, list[dict]]:
+    """Synthesise SSML and collect per-word boundary events (HDOmni voices only).
+
+    DragonHDOmni fires synthesis_word_boundary events with audio offset and
+    duration per word, enabling accurate sentence alignment without local
+    forced-alignment models.
+
+    Returns:
+        wav_bytes   : raw WAV bytes (same as synthesise())
+        word_events : [{word, start_sec, end_sec, text_offset}, ...]
+                      sorted by start_sec ascending
+    """
+    import azure.cognitiveservices.speech as speechsdk
+
+    word_events_raw: list[dict] = []
+
+    def _on_word_boundary(evt) -> None:
+        # Skip Punctuation and SentenceBoundary pseudo-events — Word only
+        if hasattr(evt, "boundary_type"):
+            bt = str(evt.boundary_type)
+            if "Punctuation" in bt or "Sentence" in bt:
+                return
+        word_events_raw.append({
+            "word":           evt.text,
+            "start_ticks":    evt.audio_offset,
+            "duration_ticks": getattr(evt, "duration", 0),
+            "text_offset":    getattr(evt, "text_offset", 0),
+        })
+
+    synthesizer.synthesis_word_boundary.connect(_on_word_boundary)
+    try:
+        result = synthesizer.speak_ssml_async(ssml).get()
+    finally:
+        synthesizer.synthesis_word_boundary.disconnect_all()
+
+    if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
+        details = result.cancellation_details
+        err_lower = (details.error_details or "").lower()
+        if any(t in err_lower for t in _REST_TRIGGER):
+            # 429 / WebSocket throttle — REST fallback (no word boundaries)
+            log.warning("[word_boundary] SDK throttled; falling back to REST (no word events)")
+            return _synthesise_rest(ssml), []
+        raise RuntimeError(
+            f"HDOmni synthesis cancelled: {details.reason} — {details.error_details}"
+        )
+
+    # Convert 100-ns ticks to seconds
+    word_events: list[dict] = sorted(
+        [
+            {
+                "word":        ev["word"],
+                "start_sec":   ev["start_ticks"] / 10_000_000,
+                "end_sec":     (ev["start_ticks"] + ev["duration_ticks"]) / 10_000_000,
+                "text_offset": ev["text_offset"],
+            }
+            for ev in word_events_raw
+        ],
+        key=lambda e: e["start_sec"],
+    )
+    return result.audio_data, word_events
+
+
+def _align_by_word_boundaries(
+    word_events: list[dict],
+    chunk: dict,
+) -> list[dict] | None:
+    """Map per-word boundary events to sentence start/end offsets (HDOmni).
+
+    Strategy (word-count based):
+    1. Tokenise each sentence into words (whitespace split).
+    2. Consume that many word events from the sorted event list.
+    3. sentence_start = first consumed event's start_sec
+       sentence_end   = last consumed event's end_sec
+
+    Returns list of {item_id, start_sec, end_sec} or None if mapping fails.
+    """
+    sentences = chunk["sentences"]
+
+    if not word_events:
+        return None
+
+    def _tokenise(text: str) -> list[str]:
+        return [w for w in re.split(r'\s+', text.strip()) if w]
+
+    ev_idx  = 0
+    offsets: list[dict] = []
+
+    for sent in sentences:
+        words   = _tokenise(sent["text"])
+        n_words = len(words)
+
+        if n_words == 0:
+            # Punctuation-only sentence — zero-width at current position
+            cur_sec = word_events[ev_idx]["start_sec"] if ev_idx < len(word_events) else 0.0
+            offsets.append({
+                "item_id":   sent["item_id"],
+                "start_sec": round(cur_sec, 4),
+                "end_sec":   round(cur_sec, 4),
+            })
+            continue
+
+        if ev_idx + n_words > len(word_events):
+            log.warning(f"[word_boundary] insufficient events: need {n_words} more, "
+                        f"only {len(word_events) - ev_idx} remain "
+                        f"for '{sent['text'][:40]}'")
+            return None
+
+        start_sec = word_events[ev_idx]["start_sec"]
+        end_sec   = word_events[ev_idx + n_words - 1]["end_sec"]
+        offsets.append({
+            "item_id":   sent["item_id"],
+            "start_sec": round(start_sec, 4),
+            "end_sec":   round(end_sec, 4),
+        })
+        ev_idx += n_words
+
+    return offsets
+
+
+# ---------------------------------------------------------------------------
+# CTC forced alignment (DragonHD / HDFlash — no word-boundary events)
+# ---------------------------------------------------------------------------
+
+# Locale → BCP-47 language tag understood by ctc-forced-aligner
+_CTC_LANG_MAP: dict[str, str] = {
+    "zh-hans": "zh-Hans",
+    "zh-cn":   "zh-Hans",
+    "zh-tw":   "zh-Hant",
+    "zh":      "zh-Hans",
+    "en":      "eng",
+    "en-us":   "eng",
+    "en-gb":   "eng",
+    "ja":      "jpn",
+    "ko":      "kor",
+    "fr":      "fra",
+    "es":      "spa",
+    "pt":      "por",
+    "de":      "deu",
+}
+
+
+def _align_by_ctc(
+    chunk_wav_bytes: bytes,
+    chunk: dict,
+    locale: str,
+) -> "list[dict] | None":
+    """Align sentences using CTC forced alignment (ctc-forced-aligner library).
+
+    Used as primary alignment path for DragonHD / HDFlash voices (Step 4C
+    Path 2 in az.txt) — these voices support neither bookmark events (Path A)
+    nor word-boundary events (HDOmni only).
+
+    Strategy:
+    1. Concatenate all sentence texts (space-separated).
+    2. Run word-level CTC alignment on the concatenated text.
+    3. Map word offsets → sentence offsets using word-count bucketing
+       (same approach as _align_by_word_boundaries).
+
+    Requires:  pip install ctc-forced-aligner torch
+    Falls back gracefully (returns None) if library is not installed or fails.
+
+    Confidence check: text coverage < 0.85 → return None so caller falls
+    back to silence-gap or proportional.
+    """
+    try:
+        import ctc_forced_aligner as cfa  # type: ignore[import]
+        import torch                       # type: ignore[import]
+    except ImportError:
+        log.debug("[ctc_align] ctc-forced-aligner / torch not installed — skipping")
+        return None
+
+    sentences  = chunk["sentences"]
+    lang_key   = locale.lower()
+    lang       = _CTC_LANG_MAP.get(lang_key, "eng")
+    full_text  = " ".join(s["text"] for s in sentences)
+
+    if not full_text.strip():
+        return None
+
+    tmp_wav: str | None = None
+    try:
+        # Write chunk WAV to a temp file (ctc-forced-aligner reads from path)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            tf.write(chunk_wav_bytes)
+            tmp_wav = tf.name
+
+        device = "cpu"
+        model, tokenizer, dev = cfa.load_alignment_model(device, dtype=torch.float32)
+
+        audio_waveform, audio_sample_rate = cfa.load_audio(
+            tmp_wav, model.dtype, dev
+        )
+
+        emissions, stride = cfa.generate_emissions(
+            model, audio_waveform,
+            window_size=30, context_size=2, batch_size=8,
+        )
+
+        tokens = cfa.preprocess_text(full_text, lang, tokenizer)
+        segments, scores = cfa.get_alignments(emissions, tokens, tokenizer)
+        spans = cfa.get_segments(segments, audio_waveform, full_text)
+
+        # Confidence check: text coverage
+        aligned_chars = sum(len(sp.get("text", "")) for sp in spans)
+        coverage = aligned_chars / max(len(full_text.replace(" ", "")), 1)
+        if coverage < 0.85:
+            log.warning(f"[ctc_align] low text coverage {coverage:.2f} < 0.85 — skipping")
+            return None
+
+        # Build word_events compatible with _align_by_word_boundaries
+        word_events: list[dict] = [
+            {
+                "word":      sp.get("text", ""),
+                "start_sec": float(sp.get("start", 0.0)),
+                "end_sec":   float(sp.get("end",   0.0)),
+            }
+            for sp in spans
+            if sp.get("text", "").strip()
+        ]
+
+        if not word_events:
+            return None
+
+        return _align_by_word_boundaries(word_events, chunk)
+
+    except Exception as exc:
+        log.warning(f"[ctc_align] alignment failed: {exc}")
+        return None
+    finally:
+        if tmp_wav:
+            try:
+                os.unlink(tmp_wav)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Phase 2, Step 6 — Mode selection + chunk_alignment for manifest items
+# ---------------------------------------------------------------------------
+
+_MODE_BATCH_BOOKMARK  = "batch_bookmark"
+_MODE_CHUNK_ALIGNMENT = "chunk_alignment"
+_MODE_PER_ITEM_LEGACY = "per_item_legacy"
+
+
+def _select_synthesis_mode(
+    items: list[dict],
+    ssml_narration: bool,
+    asset_id: str | None,
+) -> str:
+    """Select the TTS synthesis mode for this run (az.txt §Step 6).
+
+    Decision tree:
+    ┌─ asset_id set                                    → per_item_legacy
+    ├─ ssml_narration                                  → chunk_alignment
+    │    (DragonHD — typical — can't use bookmarks)
+    ├─ all voices in BATCH_VOICES + count ≤ max        → batch_bookmark
+    ├─ any HD voice in unsupported set                 → chunk_alignment
+    └─ other unsupported (custom endpoint, etc.)       → per_item_legacy
+    """
+    if asset_id is not None:
+        return _MODE_PER_ITEM_LEGACY
+
+    if ssml_narration:
+        return _MODE_CHUNK_ALIGNMENT
+
+    voices_used  = {it["voice"] for it in items}
+    unsupported  = voices_used - BATCH_VOICES
+
+    if not unsupported and len(items) <= BATCH_MAX_VOICE_ELEMENTS:
+        return _MODE_BATCH_BOOKMARK
+
+    if any(_is_hd_voice(v) for v in unsupported):
+        return _MODE_CHUNK_ALIGNMENT
+
+    return _MODE_PER_ITEM_LEGACY
+
+
+def _chunk_meta(
+    chunk_idx: int,
+    chunk: dict,
+    chunk_wav_path: "Path | None",
+) -> dict:
+    """Build chunk-level metadata dict for gen_tts_cloud_chunks.json."""
+    meta: dict = {
+        "chunk_id":    chunk_idx,
+        "voice":       chunk["voice"],
+        "style":       chunk["style"] or "",
+        "rate":        chunk["rate"],
+        "sentences":   [s["item_id"] for s in chunk["sentences"]],
+        "total_chars": chunk["total_chars"],
+        "est_dur_sec": round(chunk["estimated_dur_sec"], 2),
+    }
+    if chunk_wav_path is not None and chunk_wav_path.exists():
+        meta["chunk_wav"] = str(chunk_wav_path)
+    return meta
+
+
+def run_chunk_alignment_from_items(
+    synthesizer,
+    items: list[dict],
+    out_dir: Path,
+    assets_dir: "Path | None" = None,
+    keep_chunks: bool = False,
+) -> tuple[list[dict], list[dict]]:
+    """Chunk-alignment synthesis for manifest-sourced vo_items.
+
+    Phase 2 extension: used by run() when:
+    - mode == chunk_alignment AND ssml_narration == False
+    - Typical case: continuous_narration / illustrated_narration with HD voices
+      that are not in BATCH_VOICES (no bookmark support).
+
+    Multi-voice handling: chunk boundaries are forced at voice changes so every
+    chunk is voice-homogeneous and shares one <voice>/<prosody>/<express-as>.
+
+    Returns:
+        (results, chunks_meta) where results = per-sentence result dicts and
+        chunks_meta = list of dicts written to gen_tts_cloud_chunks.json.
+    """
+    t_start = time.time()
+    if not items:
+        return [], []
+
+    locale     = items[0]["locale"]
+    azure_lang = LOCALE_TO_AZURE_LANG.get(locale.lower(), "en-US")
+
+    cache_dir = (assets_dir / "meta" / "tts_cache") if assets_dir else (
+        out_dir.parent.parent.parent / "meta" / "tts_cache"
+    )
+
+    # Build sentence_frags from manifest items (text already present)
+    sentence_frags = [
+        {"text": it["text"], "pause_ms": it.get("break_ms", 0)} for it in items
+    ]
+
+    # Group into voice-homogeneous, duration-limited chunks.
+    # Hard break at every voice change to keep chunks voice-homogeneous.
+    all_chunks: list[dict] = []
+
+    cur_items: list[dict] = []
+    cur_frags: list[dict] = []
+
+    def _flush_group() -> None:
+        if not cur_items:
+            return
+        vo0   = cur_items[0]
+        voice = vo0["voice"]
+        style = vo0.get("style") or vo0.get("tts_style") or vo0.get("azure_style")
+        s_deg = float(vo0.get("style_degree", 1.5))
+        rate  = vo0.get("rate", "0%")
+        pitch = vo0.get("pitch")
+        lang  = vo0.get("azure_lang", azure_lang)
+
+        group_chunks = group_sentences_into_chunks(
+            sentence_frags = list(cur_frags),
+            items          = list(cur_items),
+            voice          = voice,
+            style          = style,
+            style_degree   = s_deg,
+            rate           = rate,
+            pitch          = pitch,
+            azure_lang     = lang,
+            locale         = locale,
+        )
+        all_chunks.extend(group_chunks)
+
+    prev_voice: str | None = None
+    for it, fr in zip(items, sentence_frags):
+        cur_voice = it["voice"]
+        if prev_voice is not None and cur_voice != prev_voice:
+            _flush_group()
+            cur_items = []
+            cur_frags = []
+        cur_items.append(it)
+        cur_frags.append(fr)
+        prev_voice = cur_voice
+    _flush_group()
+
+    n_chunks           = len(all_chunks)
+    stat_raw_chars     = sum(len(it["text"]) for it in items)
+    stat_ssml_chars    = 0
+    stat_api_calls     = 0
+    stat_cache_hits    = 0
+    stat_align_success = 0
+    stat_align_fallback = 0
+
+    print(f"\n[CHUNK-ALIGN] {len(items)} items → {n_chunks} chunks  locale={locale}")
+    print(f"[CHUNK-ALIGN] Raw spoken chars: {stat_raw_chars:,}")
+
+    results:     list[dict] = []
+    chunks_meta: list[dict] = []
+
+    for chunk_idx, chunk in enumerate(all_chunks):
+        sents       = chunk["sentences"]
+        n           = len(sents)
+        voice       = chunk["voice"]
+        style       = chunk["style"]
+        style_deg   = chunk["style_degree"]
+        rate        = chunk["rate"]
+        pitch       = chunk["pitch"]
+        chunk_label = f"chunk {chunk_idx+1}/{n_chunks} ({n} sent, voice={voice.split(':')[-1]})"
+        print(f"\n[chunk] {chunk_label}  est={chunk['estimated_dur_sec']:.1f}s")
+
+        chunk_ssml = _build_chunk_ssml(chunk)
+        ssml_chars = len(chunk_ssml)
+        stat_ssml_chars += ssml_chars
+
+        cache_key   = _tts_cache_key(chunk_ssml, voice, locale)
+        wav_bytes   = _tts_cache_get(cache_dir, cache_key)
+        word_events: list[dict] | None = None
+
+        if wav_bytes is not None:
+            stat_cache_hits += 1
+            print(f"  [cache HIT]  {cache_key[:16]}…")
+        else:
+            try:
+                if _is_hd_omni_voice(voice):
+                    wav_bytes, word_events = synthesise_with_word_boundaries(
+                        synthesizer, chunk_ssml
+                    )
+                else:
+                    wav_bytes = synthesise(synthesizer, chunk_ssml)
+                stat_api_calls += 1
+                _tts_cache_put(cache_dir, cache_key, wav_bytes, {
+                    "voice": voice, "locale": locale, "chunk_idx": chunk_idx,
+                    "n_sentences": n, "ssml_chars": ssml_chars,
+                })
+            except Exception as exc:
+                log.error(f"[chunk] synthesis error for {chunk_label}: {exc}")
+                print(f"  [FALLBACK] per-sentence: {exc}")
+                stat_align_fallback += n
+                fb = _per_item_legacy_chunk(
+                    synthesizer, chunk, voice, style, style_deg, rate, pitch,
+                    chunk["azure_lang"], out_dir,
+                )
+                results.extend(fb)
+                chunks_meta.append(_chunk_meta(chunk_idx, chunk, None))
+                continue
+
+        # --- Alignment ---
+        pcm       = _get_pcm_from_wav_bytes(wav_bytes)
+        chunk_dur = _pcm_duration_sec(pcm)
+        aligned: list[dict] | None = None
+
+        if n == 1:
+            aligned = [{"item_id": sents[0]["item_id"],
+                        "start_sec": 0.0, "end_sec": round(chunk_dur, 4)}]
+            stat_align_success += 1
+        else:
+            # Path 0: word-boundary events (HDOmni only)
+            if word_events is not None:
+                aligned = _align_by_word_boundaries(word_events, chunk)
+                if aligned is not None:
+                    aligned = _clamp_alignment(aligned, chunk_dur)
+                    if not _validate_alignment(aligned, chunk_dur):
+                        aligned = None
+                    else:
+                        stat_align_success += n
+                        print(f"  [align] word-boundary ({n} sentences)")
+
+            # Path 1: CTC forced alignment (DragonHD / HDFlash — az.txt §Step 4C Path 2)
+            if aligned is None and not _is_hd_omni_voice(voice):
+                chunk_locale = chunk.get("locale", locale)
+                aligned = _align_by_ctc(wav_bytes, chunk, chunk_locale)
+                if aligned is not None:
+                    aligned = _clamp_alignment(aligned, chunk_dur)
+                    if not _validate_alignment(aligned, chunk_dur):
+                        aligned = None
+                    else:
+                        stat_align_success += n
+                        print(f"  [align] CTC forced alignment ({n} sentences)")
+
+            # Path 2: silence-gap detection
+            if aligned is None:
+                aligned = _align_by_silence(wav_bytes, chunk)
+                if aligned is not None:
+                    aligned = _clamp_alignment(aligned, chunk_dur)
+                    if not _validate_alignment(aligned, chunk_dur):
+                        aligned = None
+                    else:
+                        stat_align_success += n
+                        print(f"  [align] silence-gap ({n} sentences)")
+
+            # Path 3: proportional fallback
+            if aligned is None:
+                aligned = _align_proportional(wav_bytes, chunk)
+                aligned = _clamp_alignment(aligned, chunk_dur)
+                if not _validate_alignment(aligned, chunk_dur):
+                    log.error(f"[chunk] all alignment paths failed for {chunk_label} → per-sentence")
+                    stat_align_fallback += n
+                    fb = _per_item_legacy_chunk(
+                        synthesizer, chunk, voice, style, style_deg, rate, pitch,
+                        chunk["azure_lang"], out_dir,
+                    )
+                    results.extend(fb)
+                    chunks_meta.append(_chunk_meta(chunk_idx, chunk, None))
+                    continue
+                else:
+                    stat_align_fallback += 1
+                    stat_align_success  += n - 1
+                    print(f"  [align] proportional fallback (CTC+silence unavailable)")
+
+        # --- Phase 3, Step 10: optionally keep full chunk WAV ---
+        chunk_wav_path: Path | None = None
+        if keep_chunks:
+            chunk_wav_path = out_dir.parent / "vo_chunks" / f"chunk_{chunk_idx:04d}.wav"
+            chunk_wav_path.parent.mkdir(parents=True, exist_ok=True)
+            chunk_wav_path.write_bytes(wav_bytes)
+
+        # --- Slice per-sentence WAVs ---
+        slice_results = _write_sentence_wavs_from_chunk(
+            chunk_wav_bytes = wav_bytes,
+            offsets         = aligned,
+            out_dir         = out_dir,
+            voice           = voice,
+            style           = style,
+        )
+        item_meta = {s["item_id"]: s["vo"] for s in sents}
+        for r in slice_results:
+            vo = item_meta.get(r["item_id"], {})
+            r.update({
+                "speaker":       vo.get("speaker", "narrator"),
+                "voice":         voice,
+                "azure_lang":    chunk["azure_lang"],
+                "style":         style or "",
+                "style_degree":  style_deg,
+                "rate":          rate,
+                "source_chunk":  chunk_idx,
+            })
+        results.extend(slice_results)
+        chunks_meta.append(_chunk_meta(chunk_idx, chunk, chunk_wav_path))
+
+    wall_time      = time.time() - t_start
+    overhead_ratio = stat_ssml_chars / max(stat_raw_chars, 1)
+    ok             = sum(1 for r in results if r.get("status") == "success")
+
+    print(f"\n[CHUNK-ALIGN] ═══ Instrumentation ═══")
+    print(f"  raw chars    : {stat_raw_chars:,}")
+    print(f"  SSML chars   : {stat_ssml_chars:,}  (ratio {overhead_ratio:.2f}×)")
+    print(f"  API calls    : {stat_api_calls}  cache hits: {stat_cache_hits}")
+    print(f"  chunks       : {n_chunks}")
+    print(f"  align ok     : {stat_align_success}  fallback: {stat_align_fallback}")
+    print(f"  wall time    : {wall_time:.1f}s")
+    print(f"  items OK     : {ok}/{len(items)}")
+
+    stats = {
+        "mode":              "chunk_alignment",
+        "items_total":       len(items),
+        "items_synthesized": ok,
+        "items_skipped":     len(items) - ok,
+        "items_cache_hit":   stat_cache_hits,
+        "raw_chars":         stat_raw_chars,
+        "ssml_chars":        stat_ssml_chars,
+        "ssml_ratio":        round(overhead_ratio, 2),
+        "api_calls":         stat_api_calls,
+        "cache_hits":        stat_cache_hits,
+        "chunks":            n_chunks,
+        "align_ok":          stat_align_success,
+        "align_fallback":    stat_align_fallback,
+        "wall_time_sec":     round(wall_time, 1),
+    }
+    return results, chunks_meta, stats
+
+
+# ---------------------------------------------------------------------------
+# Phase 2, Step 7 — write_tts_results() centralization
+# ---------------------------------------------------------------------------
+
+def write_tts_results(
+    results: list[dict],
+    meta_dir: Path,
+    chunks_meta: "list[dict] | None" = None,
+) -> Path:
+    """Write gen_tts_cloud_results.json (and gen_tts_cloud_chunks.json if provided).
+
+    Centralises all TTS output writing — replaces scattered results_path logic
+    in main().  Always called at the end of every synthesis run.
+
+    Returns the path to gen_tts_cloud_results.json.
+    """
+    meta_dir.mkdir(parents=True, exist_ok=True)
+
+    results_path = meta_dir / f"{SCRIPT_NAME}_results.json"
+    if results_path.exists():
+        results_path.unlink()
+    results_path.write_text(
+        json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    if chunks_meta is not None:
+        chunks_path = meta_dir / f"{SCRIPT_NAME}_chunks.json"
+        chunks_path.write_text(
+            json.dumps(chunks_meta, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    return results_path
+
+
+# ---------------------------------------------------------------------------
+# TTS Audit Log
+# ---------------------------------------------------------------------------
+
+def _append_tts_audit_log(meta_dir: Path, locale: str, stats: dict) -> None:
+    """Append a synthesis run entry to tts_audit_log.json.
+
+    File location: assets/meta/tts_audit_log.json
+    Accumulates across re-runs; each entry records per-run stats.
+    Accumulated totals per locale track lifetime chars sent to Azure.
+    """
+    import datetime
+
+    log_path = meta_dir / "tts_audit_log.json"
+
+    if log_path.exists():
+        try:
+            audit = json.loads(log_path.read_text(encoding="utf-8"))
+        except Exception:
+            audit = {}
+    else:
+        audit = {}
+
+    # Derive project_id / episode_id from path:
+    # meta_dir = projects/{slug}/episodes/{ep_id}/assets/meta
+    try:
+        ep_id      = meta_dir.parent.parent.name
+        project_id = meta_dir.parent.parent.parent.name
+    except Exception:
+        ep_id = project_id = ""
+
+    audit.setdefault("project_id",   project_id)
+    audit.setdefault("episode_id",   ep_id)
+    audit.setdefault("runs",         [])
+    audit.setdefault("accumulated",  {})
+
+    entry = {
+        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "locale":    locale,
+        **stats,
+    }
+    audit["runs"].append(entry)
+
+    acc = audit["accumulated"].setdefault(locale, {
+        "total_raw_chars":        0,
+        "total_ssml_chars":       0,
+        "total_api_calls":        0,
+        "total_items_synthesized": 0,
+        "total_items_skipped":    0,
+        "runs":                   0,
+    })
+    acc["total_raw_chars"]         += stats.get("raw_chars",          0)
+    acc["total_ssml_chars"]        += stats.get("ssml_chars",         0)
+    acc["total_api_calls"]         += stats.get("api_calls",          0)
+    acc["total_items_synthesized"] += stats.get("items_synthesized",  0)
+    acc["total_items_skipped"]     += stats.get("items_skipped",      0)
+    acc["runs"]                    += 1
+
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        json.dumps(audit, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    print(f"  ✓ tts_audit_log → {log_path}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3, Step 9 — Azure Batch Synthesis REST API (standard voices only)
+# ---------------------------------------------------------------------------
+#
+# SCOPE: Standard Neural voices only.  HD/Dragon voices are real-time only
+# (confirmed in az.txt §O4 — Batch Synthesis API does not support DragonHD,
+# HDFlash, or HDOmni).  This path is NOT enabled by default; use
+# --use-batch-rest to opt in.
+#
+# Why it matters: allows >50 sentences per request (SDK batch is capped at 50
+# <voice> elements).  Returns sentence-boundary JSON → no bookmark split needed.
+# Trade-off: async (submit → poll → download), adds ~30–120s latency overhead.
+# ---------------------------------------------------------------------------
+
+_BATCH_REST_API_VERSION = "2024-04-01"
+_BATCH_REST_POLL_INTERVAL = 5.0   # seconds between status checks
+
+
+def _batch_rest_headers(json_body: bool = True) -> dict:
+    """Build HTTP headers for Azure Batch Synthesis REST requests."""
+    key = os.environ.get("AZURE_SPEECH_KEY", "")
+    if not key:
+        raise RuntimeError("AZURE_SPEECH_KEY not set for Batch REST API")
+    hdrs = {"Ocp-Apim-Subscription-Key": key}
+    if json_body:
+        hdrs["Content-Type"] = "application/json"
+    return hdrs
+
+
+def _batch_rest_base_url() -> str:
+    """Construct the Batch Synthesis REST base URL from AZURE_SPEECH_REGION."""
+    region = os.environ.get("AZURE_SPEECH_REGION", "")
+    if not region:
+        raise RuntimeError("AZURE_SPEECH_REGION not set for Batch REST API")
+    return (
+        f"https://{region}.customvoice.api.speech.microsoft.com"
+        f"/api/texttospeech/3.1-preview1/batchsyntheses"
+    )
+
+
+def batch_synthesis_rest_submit(
+    ssml: str,
+    synthesis_id: str,
+    output_format: str = "riff-24khz-16bit-mono-pcm",
+) -> str:
+    """Submit an Azure Batch Synthesis job via REST.
+
+    Phase 3, Step 9 — standard Neural voices only.
+
+    Args:
+        ssml           : full SSML document string
+        synthesis_id   : unique job identifier (caller-provided UUID)
+        output_format  : Azure audio output format string
+
+    Returns the job URL to use for polling.
+    """
+    import urllib.request
+    import urllib.error
+
+    base_url = _batch_rest_base_url()
+    job_url  = f"{base_url}/{synthesis_id}?api-version={_BATCH_REST_API_VERSION}"
+    headers  = _batch_rest_headers(json_body=True)
+    body = json.dumps({
+        "displayName": f"pipe-{synthesis_id[:8]}",
+        "description": "gen_tts_cloud Phase 3 batch synthesis",
+        "textType":    "SSML",
+        "inputs":      [{"text": ssml}],
+        "properties":  {
+            "outputFormat":            output_format,
+            "sentenceBoundaryEnabled": True,
+            "wordBoundaryEnabled":     False,
+        },
+    }).encode("utf-8")
+
+    req = urllib.request.Request(job_url, data=body, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()   # discard response body; status 201 = submitted
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(
+            f"Batch REST submit HTTP {exc.code}: {exc.read()[:300].decode()}"
+        )
+
+    log.info(f"[batch-rest] job submitted: {synthesis_id}")
+    return job_url
+
+
+def batch_synthesis_rest_poll(
+    job_url: str,
+    timeout_sec: float = 600.0,
+) -> dict:
+    """Poll a Batch Synthesis job until it succeeds, fails, or times out.
+
+    Returns the final job response dict (status = "Succeeded").
+    Raises RuntimeError on failure or TimeoutError on timeout.
+    """
+    import urllib.request
+    import urllib.error
+
+    headers  = _batch_rest_headers(json_body=False)
+    deadline = time.time() + timeout_sec
+
+    while time.time() < deadline:
+        req = urllib.request.Request(job_url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                job = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"Batch REST poll HTTP {exc.code}")
+
+        status = job.get("status", "Unknown")
+        print(f"  [batch-rest] status={status}")
+
+        if status == "Succeeded":
+            return job
+        if status in ("Failed", "Canceled"):
+            err = job.get("properties", {}).get("error", "")
+            raise RuntimeError(f"Batch synthesis {status}: {err}")
+
+        time.sleep(_BATCH_REST_POLL_INTERVAL)
+
+    raise TimeoutError(f"Batch synthesis did not complete within {timeout_sec:.0f}s")
+
+
+def _parse_timespan(ts: str) -> float:
+    """Parse Azure TimeSpan string to seconds.
+
+    Azure Batch Synthesis uses "hh:mm:ss.fffffff" (100-ns tick precision).
+    Examples: "00:00:01.5000000" → 1.5,  "00:01:23.4567890" → 83.456789
+    """
+    ts = ts.strip()
+    try:
+        parts = ts.split(":")
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        return float(ts)
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def batch_synthesis_rest_download(job: dict) -> tuple[bytes, list[dict]]:
+    """Download WAV + timing JSON from a completed Batch Synthesis job.
+
+    The result is a SAS-authenticated ZIP containing:
+    - 0001.wav  : synthesised audio
+    - 0001.json : boundary info (SentenceBoundary + WordBoundary entries)
+
+    Returns:
+        (wav_bytes, sentence_boundaries) where sentence_boundaries is a list of
+        {"text_offset": int, "word_length": int,
+         "start_sec": float, "end_sec": float, "text": str}
+        for each SentenceBoundary entry, sorted by start_sec.
+        Empty list if timing JSON is absent or unparseable.
+    """
+    import urllib.request
+    import urllib.error
+
+    outputs    = job.get("outputs", {})
+    result_url = outputs.get("result")
+    if not result_url:
+        raise RuntimeError("Batch synthesis job has no 'result' URL in outputs")
+
+    # SAS URL — no auth header needed
+    req = urllib.request.Request(result_url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            zip_bytes = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Batch REST download HTTP {exc.code}")
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = zf.namelist()
+
+        # Extract WAV
+        wav_names = [n for n in names if n.lower().endswith(".wav")]
+        if not wav_names:
+            raise RuntimeError("Batch synthesis ZIP contains no WAV files")
+        wav_bytes = zf.read(wav_names[0])
+
+        # Extract + parse timing JSON
+        json_names = [n for n in names if n.lower().endswith(".json")]
+        sentence_boundaries: list[dict] = []
+
+        for jname in json_names:
+            try:
+                timing = json.loads(zf.read(jname).decode("utf-8"))
+                # timing may be a list of objects or a single object
+                if isinstance(timing, dict):
+                    timing = [timing]
+                for doc in timing:
+                    for entry in doc.get("Boundary", []):
+                        if entry.get("BoundaryType") != "SentenceBoundary":
+                            continue
+                        start_sec = _parse_timespan(entry.get("AudioOffset", "0"))
+                        dur_sec   = _parse_timespan(entry.get("Duration", "0"))
+                        sentence_boundaries.append({
+                            "text":        entry.get("Text", ""),
+                            "text_offset": entry.get("TextOffset", 0),
+                            "word_length": entry.get("WordLength", 0),
+                            "start_sec":   start_sec,
+                            "end_sec":     start_sec + dur_sec,
+                        })
+            except Exception as exc:
+                log.warning(f"[batch-rest] could not parse timing JSON {jname}: {exc}")
+
+        sentence_boundaries.sort(key=lambda e: e["start_sec"])
+        if sentence_boundaries:
+            print(f"  [batch-rest] parsed {len(sentence_boundaries)} sentence boundaries")
+
+        return wav_bytes, sentence_boundaries
+
+
+def synthesise_batch_rest(ssml: str) -> bytes:
+    """Full Batch Synthesis REST cycle: submit → poll → download → WAV bytes.
+
+    Phase 3, Step 9.  Standard Neural voices only.  Synchronous from caller.
+
+    Use cases:
+    - More than BATCH_MAX_VOICE_ELEMENTS sentences (SDK batch cap is 50)
+    - --use-batch-rest flag explicitly requested
+    - Avoids WebSocket entirely (different throttle budget from real-time API)
+    """
+    synthesis_id = str(uuid.uuid4())
+    print(f"  [batch-rest] submitting {synthesis_id[:8]}…")
+    job_url  = batch_synthesis_rest_submit(ssml, synthesis_id)
+    job      = batch_synthesis_rest_poll(job_url)
+    wav_bytes, _sent_bounds = batch_synthesis_rest_download(job)
+    print(f"  [batch-rest] downloaded {len(wav_bytes):,} bytes")
+    return wav_bytes
+
+
+# ---------------------------------------------------------------------------
 # Manifest helpers
 # ---------------------------------------------------------------------------
 
@@ -912,7 +2550,7 @@ def synthesise(synthesizer, ssml: str) -> bytes:
 # Backend runner
 # ---------------------------------------------------------------------------
 
-def _synthesise_per_item(synthesizer, items: list[dict], out_dir: Path) -> list[dict]:
+def _synthesise_per_item(synthesizer, items: list[dict], out_dir: Path, force: bool = False) -> list[dict]:
     """Per-item synthesis loop (original implementation, preserved as fallback).
 
     Called by run() when:
@@ -926,7 +2564,7 @@ def _synthesise_per_item(synthesizer, items: list[dict], out_dir: Path) -> list[
         out_path = out_dir / f"{vo['item_id']}.wav"
 
         # Skip already-valid WAVs (size > 44 = more than just a WAV header)
-        if out_path.exists() and out_path.stat().st_size > 44:
+        if not force and out_path.exists() and out_path.stat().st_size > 44:
             size      = out_path.stat().st_size
             pcm_bytes = max(0, size - 44)
             duration_s = pcm_bytes / (AZURE_SAMPLE_RATE * 2)
@@ -942,19 +2580,18 @@ def _synthesise_per_item(synthesizer, items: list[dict], out_dir: Path) -> list[
                 "output":       str(out_path),
                 "size_bytes":   size,
                 "duration_sec": round(duration_s, 3),
-                "status":       "success",
+                "status":       "skipped",
             })
             continue
 
-        print(f"\n[{idx}/{total}] {vo['item_id']}")
-        print(f"  Speaker      : {vo['speaker']}")
-        print(f"  Voice        : {vo['voice']}  (lang={vo['azure_lang']})")
-        print(f"  Voice style  : {vo['voice_style'] or '(not set)'}")
-        print(f"  Emotion      : {vo['emotion'] or '(not set)'}  →  style={vo['style'] or 'none'}  degree={vo['style_degree']}")
-        print(f"  Rate         : {vo['rate']}"
-              + (f"  pitch={vo['pitch']}" if vo.get('pitch') else "")
-              + (f"  break={vo['break_ms']}ms" if vo.get('break_ms') else ""))
-        print(f"  Text         : \"{vo['text'][:80]}{'...' if len(vo['text']) > 80 else ''}\"")
+        _style_tag  = vo['style'] or 'no-style'
+        _rate_tag   = f"rate={vo['rate']}" if vo.get('rate') else ''
+        _pitch_tag  = f"pitch={vo['pitch']}" if vo.get('pitch') else ''
+        _extra      = '  '.join(t for t in [_rate_tag, _pitch_tag] if t)
+        _text_snip  = vo['text'][:80] + ('…' if len(vo['text']) > 80 else '')
+        print(f"[{idx}/{total}] {vo['item_id']}  {vo['voice']} / {_style_tag}"
+              + (f"  {_extra}" if _extra else "")
+              + f"  \"{_text_snip}\"")
 
         ssml = build_ssml(
             text=vo["text"],
@@ -1252,26 +2889,37 @@ def run_ssml_narration(
     items: list[dict],
     out_dir: Path,
 ) -> list[dict]:
-    """Synthesise ssml_narration content via per-sentence synthesis.
+    """Synthesise ssml_narration content via chunk_alignment synthesis (Phase 1).
 
-    DragonHD voices do not support bookmark events, so the batch+bookmark
-    approach is not viable.  Instead:
+    Phase 1 optimization (az.txt plan):
+    - Group sentences into ~35 s chunks to amortise <speak> SSML overhead.
+    - Synthesise each chunk as a single Azure TTS call (one <speak> per chunk).
+    - Align sentence boundaries within the chunk WAV using silence-gap detection
+      with proportional character-ratio fallback.
+    - Slice per-sentence WAVs for downstream compatibility (no changes to
+      post_tts_analysis, gen_render_plan, or render_video required).
+    - Cache chunk WAVs by SHA256(normalized_ssml+voice+locale+format+rate+ver).
 
-    1. Parse ssml_inner.xml into per-sentence fragments (text + pause_ms).
-    2. Read VoiceCast.json for voice/style/rate/pitch (Layer 1).
-    3. For each sentence, build a mini SSML and synthesise individually.
-    4. Voice comes from VoiceCast (NOT from manifest — manifest may have
-       wrong voice if it was copied from another locale).
+    Fallback guarantee: if chunk synthesis or both alignment methods fail for
+    a given chunk, that chunk falls back to per_item_legacy synthesis (one
+    Azure call per sentence) so no items are silently dropped.
+
+    DragonHD voices do not support bookmark events (batch path not viable).
+    DragonHDOmni word-boundary alignment is reserved for Phase 2.
+
+    Voice comes from VoiceCast (NOT from manifest — manifest may have wrong
+    voice if it was copied from another locale).
     """
+    t_start = time.time()
+
     synthesizer = load_azure_synthesizer()
+    ssml_inner  = Path(ssml_inner_path).read_text(encoding="utf-8")
+    voice_cast  = json.loads(Path(voice_cast_path).read_text(encoding="utf-8"))
 
-    ssml_inner = Path(ssml_inner_path).read_text(encoding="utf-8")
-    voice_cast = json.loads(Path(voice_cast_path).read_text(encoding="utf-8"))
-
-    locale = items[0]["locale"] if items else "en"
+    locale     = items[0]["locale"] if items else "en"
     azure_lang = LOCALE_TO_AZURE_LANG.get(locale.lower(), "en-US")
 
-    # Get narrator voice params from VoiceCast (Layer 1)
+    # --- Get narrator voice params from VoiceCast (Layer 1) ---
     narrator = None
     for ch in voice_cast.get("characters", []):
         if ch.get("character_id") == "narrator":
@@ -1286,148 +2934,383 @@ def run_ssml_narration(
     style_deg = vc_locale.get("azure_style_degree", 1.5)
     rate      = vc_locale.get("azure_rate", "0%")
     pitch     = vc_locale.get("azure_pitch")
-    break_ms_default = vc_locale.get("azure_break_ms", 0)
 
-    # Parse ssml_inner.xml into sentences (mirrors Script.json structure)
+    # --- Parse ssml_inner.xml into sentence fragments ---
     sentence_frags = _parse_ssml_inner_fragments(ssml_inner)
 
-    print(f"\n[SSML-NARRATION] Per-sentence synthesis: {len(items)} items, "
-          f"{len(sentence_frags)} sentences from ssml_inner.xml")
-    print(f"[SSML-NARRATION] Voice: {voice}  style: {style}  rate: {rate}")
-
+    total = min(len(items), len(sentence_frags))
     if len(sentence_frags) != len(items):
         log.warning("ssml_inner sentence count (%d) != manifest item count (%d); "
-                     "using min()", len(sentence_frags), len(items))
+                    "using min()", len(sentence_frags), len(items))
+
+    # --- Derive cache directory: assets/meta/tts_cache/ ---
+    # out_dir is assets/{locale}/audio/vo — go up 3 levels to assets/
+    cache_dir = out_dir.parent.parent.parent / "meta" / "tts_cache"
+
+    # --- Instrumentation counters (az.txt §Phase 1) ---
+    stat_raw_chars      = sum(len(sentence_frags[i]["text"]) for i in range(total))
+    stat_ssml_chars     = 0
+    stat_api_calls      = 0
+    stat_cache_hits     = 0
+    stat_align_success  = 0
+    stat_align_fallback = 0
+
+    print(f"\n[SSML-NARRATION] chunk_alignment mode: {total} sentences  voice={voice}")
+    print(f"[SSML-NARRATION] style={style}  rate={rate}  locale={locale}")
+    print(f"[SSML-NARRATION] Raw spoken chars: {stat_raw_chars:,}")
+
+    # --- Group sentences into synthesis chunks ---
+    chunks = group_sentences_into_chunks(
+        sentence_frags = sentence_frags[:total],
+        items          = items[:total],
+        voice          = voice,
+        style          = style,
+        style_degree   = style_deg,
+        rate           = rate,
+        pitch          = pitch,
+        azure_lang     = azure_lang,
+        locale         = locale,
+    )
+    n_chunks = len(chunks)
+    print(f"[SSML-NARRATION] {n_chunks} chunks planned "
+          f"(target_dur=35s, max_dur=45s, max_chars=1000)")
 
     results: list[dict] = []
-    total = min(len(items), len(sentence_frags))
 
-    for idx in range(total):
-        vo = items[idx]
-        frag = sentence_frags[idx]
-        out_path = out_dir / f"{vo['item_id']}.wav"
+    for chunk_idx, chunk in enumerate(chunks):
+        sents       = chunk["sentences"]
+        n           = len(sents)
+        chunk_label = f"chunk {chunk_idx+1}/{n_chunks} ({n} sent)"
+        print(f"\n[chunk] {chunk_label}  "
+              f"est={chunk['estimated_dur_sec']:.1f}s  chars={chunk['total_chars']}")
 
-        # Use text from ssml_inner.xml, NOT from manifest
-        text = frag["text"]
+        chunk_ssml = _build_chunk_ssml(chunk)
+        ssml_chars = len(chunk_ssml)
+        stat_ssml_chars += ssml_chars
 
-        print(f"\n[{idx+1}/{total}] {vo['item_id']}")
-        print(f"  Voice : {voice} (from VoiceCast)")
-        print(f"  Text  : \"{text[:60]}{'...' if len(text) > 60 else ''}\"")
+        # --- TTS cache lookup ---
+        cache_key = _tts_cache_key(chunk_ssml, voice, locale)
+        wav_bytes = _tts_cache_get(cache_dir, cache_key)
 
-        ssml = build_ssml(
-            text=text,
-            voice=voice,
-            azure_lang=azure_lang,
-            rate=rate,
-            style=style,
-            style_degree=style_deg,
-            pitch=pitch,
-            break_ms=break_ms_default,
+        word_events: list[dict] | None = None
+
+        if wav_bytes is not None:
+            stat_cache_hits += 1
+            print(f"  [cache HIT]  {cache_key[:16]}…  ({len(wav_bytes):,} bytes)")
+        else:
+            # --- Azure TTS synthesis ---
+            try:
+                if _is_hd_omni_voice(voice):
+                    # HDOmni: capture word-boundary events for alignment (Phase 2, Step 8)
+                    wav_bytes, word_events = synthesise_with_word_boundaries(
+                        synthesizer, chunk_ssml
+                    )
+                    if word_events:
+                        print(f"  [Azure TTS]  {len(wav_bytes):,} bytes  "
+                              f"ssml_chars={ssml_chars}  word_events={len(word_events)}")
+                    else:
+                        print(f"  [Azure TTS]  {len(wav_bytes):,} bytes  ssml_chars={ssml_chars}"
+                              f"  (no word events — REST fallback used)")
+                else:
+                    wav_bytes = synthesise(synthesizer, chunk_ssml)
+                    print(f"  [Azure TTS]  {len(wav_bytes):,} bytes  ssml_chars={ssml_chars}")
+
+                stat_api_calls += 1
+                _tts_cache_put(cache_dir, cache_key, wav_bytes, {
+                    "voice": voice, "locale": locale, "chunk_idx": chunk_idx,
+                    "n_sentences": n, "ssml_chars": ssml_chars,
+                })
+            except Exception as exc:
+                log.error(f"[chunk] synthesis failed for {chunk_label}: {exc}")
+                print(f"  [FALLBACK] synthesis error → per-sentence: {exc}")
+                stat_align_fallback += n
+                results.extend(_per_item_legacy_chunk(
+                    synthesizer, chunk, voice, style, style_deg,
+                    rate, pitch, azure_lang, out_dir,
+                ))
+                continue
+
+        # --- Sentence alignment ---
+        pcm       = _get_pcm_from_wav_bytes(wav_bytes)
+        chunk_dur = _pcm_duration_sec(pcm)
+        aligned: list[dict] | None = None
+
+        if n == 1:
+            # Single sentence — entire chunk is the sentence; no alignment needed
+            aligned = [{"item_id": sents[0]["item_id"],
+                        "start_sec": 0.0, "end_sec": round(chunk_dur, 4)}]
+            stat_align_success += 1
+        else:
+            # Path 0: word-boundary events (HDOmni only — Phase 2, Step 8)
+            if word_events is not None:
+                aligned = _align_by_word_boundaries(word_events, chunk)
+                if aligned is not None:
+                    aligned = _clamp_alignment(aligned, chunk_dur)
+                    if not _validate_alignment(aligned, chunk_dur):
+                        aligned = None
+                    else:
+                        stat_align_success += n
+                        print(f"  [align] word-boundary ({n} sentences)")
+
+            # Path 1: CTC forced alignment (DragonHD / HDFlash — az.txt §Step 4C Path 2)
+            if aligned is None and not _is_hd_omni_voice(voice):
+                aligned = _align_by_ctc(wav_bytes, chunk, locale)
+                if aligned is not None:
+                    aligned = _clamp_alignment(aligned, chunk_dur)
+                    if not _validate_alignment(aligned, chunk_dur):
+                        aligned = None
+                    else:
+                        stat_align_success += n
+                        print(f"  [align] CTC forced alignment ({n} sentences)")
+
+            # Path 2: silence-gap alignment
+            if aligned is None:
+                aligned = _align_by_silence(wav_bytes, chunk)
+                if aligned is not None:
+                    aligned = _clamp_alignment(aligned, chunk_dur)
+                    if not _validate_alignment(aligned, chunk_dur):
+                        log.warning(f"[chunk] silence alignment invalid — trying proportional")
+                        aligned = None
+                    else:
+                        stat_align_success += n
+                        print(f"  [align] silence-gap  ({n} sentences)")
+
+            # Path 3: proportional fallback
+            if aligned is None:
+                aligned = _align_proportional(wav_bytes, chunk)
+                aligned = _clamp_alignment(aligned, chunk_dur)
+                if not _validate_alignment(aligned, chunk_dur):
+                    # All paths failed — fall back to per_item_legacy for this chunk
+                    log.error(f"[chunk] all alignment paths invalid for {chunk_label} "
+                              f"— falling back to per-sentence")
+                    print(f"  [FALLBACK] alignment failed → per-sentence for {chunk_label}")
+                    stat_align_fallback += n
+                    results.extend(_per_item_legacy_chunk(
+                        synthesizer, chunk, voice, style, style_deg,
+                        rate, pitch, azure_lang, out_dir,
+                    ))
+                    continue
+                else:
+                    stat_align_fallback += 1        # count proportional use as partial fallback
+                    stat_align_success  += n - 1
+                    print(f"  [align] proportional fallback (CTC+silence unavailable)")
+
+        # --- Slice per-sentence WAVs ---
+        slice_results = _write_sentence_wavs_from_chunk(
+            chunk_wav_bytes = wav_bytes,
+            offsets         = aligned,
+            out_dir         = out_dir,
+            voice           = voice,
+            style           = style,
         )
 
-        try:
-            wav_bytes = synthesise(synthesizer, ssml)
-
-            if out_path.exists():
-                out_path.unlink()
-            out_path.write_bytes(wav_bytes)
-
-            size = out_path.stat().st_size
-            with open(str(out_path), "rb") as fh:
-                raw = fh.read()
-            data_tag_pos = raw.index(b"data")
-            pcm_len = max(0, len(raw) - (data_tag_pos + 8))
-            duration_s = pcm_len / (AZURE_SAMPLE_RATE * 2)
-
-            write_license_sidecar(out_path, voice, style)
-            print(f"  [OK] {out_path.name}  ({duration_s:.2f}s, {size:,} bytes)")
-
-            results.append({
-                "item_id":      vo["item_id"],
-                "speaker":      vo["speaker"],
+        # Augment results with speaker/voice metadata from the vo item
+        item_meta = {s["item_id"]: s["vo"] for s in sents}
+        for r in slice_results:
+            vo = item_meta.get(r["item_id"], {})
+            r.update({
+                "speaker":      vo.get("speaker", "narrator"),
                 "voice":        voice,
                 "azure_lang":   azure_lang,
                 "style":        style or "",
                 "style_degree": style_deg,
                 "rate":         rate,
-                "output":       str(out_path),
-                "size_bytes":   size,
-                "duration_sec": round(duration_s, 3),
-                "status":       "success",
-            })
-        except Exception as exc:
-            print(f"  [ERROR] {vo['item_id']}: {exc}")
-            results.append({
-                "item_id":    vo["item_id"],
-                "speaker":    vo["speaker"],
-                "voice":      voice,
-                "output":     str(out_path),
-                "size_bytes": 0,
-                "status":     "failed",
-                "error":      str(exc),
             })
 
-    ok = len([r for r in results if r["status"] == "success"])
-    print(f"\n[SSML-NARRATION] Complete: {ok}/{total} items")
-    return results
+        results.extend(slice_results)
+
+    # --- Instrumentation summary (az.txt §Phase 1) ---
+    wall_time      = time.time() - t_start
+    overhead_ratio = stat_ssml_chars / max(stat_raw_chars, 1)
+    ok             = sum(1 for r in results if r.get("status") == "success")
+
+    print(f"\n[SSML-NARRATION] ═══ Phase 1 Instrumentation ═══")
+    print(f"  raw spoken chars     : {stat_raw_chars:,}")
+    print(f"  SSML chars sent      : {stat_ssml_chars:,}  (ratio {overhead_ratio:.2f}×)")
+    print(f"  Azure API calls      : {stat_api_calls}")
+    print(f"  cache hits           : {stat_cache_hits} / {n_chunks} chunks")
+    print(f"  chunk count          : {n_chunks}")
+    print(f"  align success        : {stat_align_success}  fallback: {stat_align_fallback}")
+    print(f"  wall-clock TTS time  : {wall_time:.1f}s")
+    print(f"  items OK             : {ok}/{total}")
+
+    stats = {
+        "mode":              "ssml_narration",
+        "items_total":       total,
+        "items_synthesized": ok,
+        "items_skipped":     total - ok,
+        "items_cache_hit":   stat_cache_hits,
+        "raw_chars":         stat_raw_chars,
+        "ssml_chars":        stat_ssml_chars,
+        "ssml_ratio":        round(overhead_ratio, 2),
+        "api_calls":         stat_api_calls,
+        "cache_hits":        stat_cache_hits,
+        "chunks":            n_chunks,
+        "align_ok":          stat_align_success,
+        "align_fallback":    stat_align_fallback,
+        "wall_time_sec":     round(wall_time, 1),
+    }
+    return results, stats
 
 
-def run(items: list[dict], out_dir: Path, asset_id: str | None = None,
-        ssml_narration: bool = False, ssml_inner_path: str | None = None,
-        voice_cast_path: str | None = None, manifest: dict | None = None) -> list[dict]:
-    """Synthesise all items with Azure TTS. Returns a list of result dicts.
+def run(
+    items: list[dict],
+    out_dir: Path,
+    asset_id: str | None = None,
+    ssml_narration: bool = False,
+    ssml_inner_path: str | None = None,
+    voice_cast_path: str | None = None,
+    manifest: dict | None = None,
+    assets_dir: "Path | None" = None,
+    keep_chunks: bool = False,
+    use_batch_rest: bool = False,
+    force: bool = False,
+) -> tuple[list[dict], list[dict], dict]:
+    """Synthesise all items with Azure TTS.
 
-    When *asset_id* is None (full episode synthesis), attempts a single batched
-    API call via ``build_episode_ssml`` / ``synthesise_with_bookmarks`` /
-    ``split_and_write_wavs``.  On any failure, falls back transparently to the
-    original per-item loop.
+    Returns (results, chunks_meta, stats):
+      results     : per-sentence result dicts (same schema as before)
+      chunks_meta : chunk-level metadata (non-empty only for chunk_alignment mode)
+      stats       : instrumentation dict written to tts_audit_log.json by main()
 
-    When *asset_id* is set (single-item re-synthesis), uses the per-item path
-    directly — batch synthesis for a single item would be wasteful and the
-    caller already filtered ``items`` to the one matching item.
+    Mode selection (Phase 2, Step 6 — az.txt §Step 6):
+    ┌─ asset_id set                      → per_item_legacy
+    ├─ ssml_narration                    → chunk_alignment
+    ├─ all voices in whitelist + ≤ max   → batch_bookmark
+    ├─ any HD voice not in whitelist     → chunk_alignment
+    └─ other unsupported voices          → per_item_legacy
     """
-    # ssml_narration dispatch — wrapper-rebuild + inner passthrough
-    if ssml_narration:
-        if not ssml_inner_path or not voice_cast_path:
-            raise ValueError("ssml_narration requires ssml_inner_path and voice_cast_path")
-        return run_ssml_narration(ssml_inner_path, voice_cast_path, manifest or {}, items, out_dir)
+    mode = _select_synthesis_mode(items, ssml_narration, asset_id)
+    print(f"\n[MODE] {mode}")
 
+    # ── per_item_legacy: single-item re-synthesis or last resort ──────────────
+    if mode == _MODE_PER_ITEM_LEGACY:
+        synthesizer = load_azure_synthesizer()
+        if ssml_narration:
+            if not ssml_inner_path or not voice_cast_path:
+                raise ValueError("ssml_narration requires --ssml-inner and --voice-cast")
+            results, stats = run_ssml_narration(
+                ssml_inner_path, voice_cast_path, manifest or {}, items, out_dir
+            )
+            return results, [], stats
+        results = _synthesise_per_item(synthesizer, items, out_dir, force=force)
+        n_syn  = sum(1 for r in results if r.get("status") == "success")
+        n_skip = sum(1 for r in results if r.get("status") == "skipped")
+        stats  = {
+            "mode":              "per_item_legacy",
+            "items_total":       len(items),
+            "items_synthesized": n_syn,
+            "items_skipped":     n_skip,
+            "items_cache_hit":   0,
+            "raw_chars":         sum(len(it.get("text", "")) for it in items
+                                     if it["item_id"] not in
+                                     {r["item_id"] for r in results
+                                      if r.get("status") == "skipped"}),
+            "ssml_chars":        0,
+            "api_calls":         n_syn,
+            "cache_hits":        0,
+            "chunks":            0,
+        }
+        return results, [], stats
+
+    # ── chunk_alignment: ssml_narration OR HD voices in non-batch episodes ────
+    if mode == _MODE_CHUNK_ALIGNMENT:
+        if ssml_narration:
+            if not ssml_inner_path or not voice_cast_path:
+                raise ValueError("ssml_narration requires --ssml-inner and --voice-cast")
+            synthesizer = load_azure_synthesizer()
+            results, stats = run_ssml_narration(
+                ssml_inner_path, voice_cast_path, manifest or {}, items, out_dir
+            )
+            return results, [], stats
+        else:
+            # Non-ssml_narration with HD voices (continuous / illustrated narration)
+            synthesizer = load_azure_synthesizer()
+            return run_chunk_alignment_from_items(
+                synthesizer, items, out_dir,
+                assets_dir  = assets_dir,
+                keep_chunks = keep_chunks,
+            )
+
+    # ── batch_bookmark: standard Neural voices, full episode, SDK path ────────
+    locale      = items[0]["locale"] if items else "en"
     synthesizer = load_azure_synthesizer()
 
-    # ------------------------------------------------------------------
-    # Single-item path (--asset-id): per-item synthesis, unchanged.
-    # ------------------------------------------------------------------
-    if asset_id is not None:
-        return _synthesise_per_item(synthesizer, items, out_dir)
+    # Phase 3, Step 9: REST batch path (standard Neural voices, opt-in via --use-batch-rest)
+    # Submits full episode SSML, polls until done, downloads WAV + sentence-boundary JSON,
+    # then splits WAV by sentence offsets (no bookmark events needed).
+    if use_batch_rest:
+        try:
+            print(f"\n[BATCH-REST] Attempting REST batch for {len(items)} items…")
+            rest_ssml = build_episode_ssml(items, locale)
+            synthesis_id = str(uuid.uuid4())
+            job_url = batch_synthesis_rest_submit(rest_ssml, synthesis_id)
+            job     = batch_synthesis_rest_poll(job_url)
+            wav_bytes_rest, sent_bounds = batch_synthesis_rest_download(job)
 
-    # ------------------------------------------------------------------
-    # Full-episode batch path: one API call for the entire locale.
-    # Falls back to per-item on any exception.
-    #
-    # Gate: only attempt batch if ALL voices support bookmark events
-    # (listed in prompts/azure_tts_batch.json) AND item count ≤ max.
-    # DragonHD / DragonHDFlash / DragonHDOmni do NOT support bookmarks.
-    # ------------------------------------------------------------------
-    locale = items[0]["locale"] if items else "en"
+            if sent_bounds and len(sent_bounds) == len(items):
+                # Map sentence boundaries → per-sentence WAVs using _write_sentence_wavs_from_chunk
+                # Build a synthetic chunk covering all items
+                rest_chunk = {
+                    "sentences": [
+                        {"item_id": it["item_id"], "text": it["text"],
+                         "pause_ms": it.get("break_ms", 0), "vo": it}
+                        for it in items
+                    ],
+                    "voice":        items[0]["voice"],
+                    "style":        items[0].get("style", ""),
+                    "style_degree": items[0].get("style_degree", 1.5),
+                    "rate":         items[0].get("rate", "0%"),
+                    "pitch":        items[0].get("pitch"),
+                    "azure_lang":   items[0].get("azure_lang", "en-US"),
+                }
+                offsets = [
+                    {"item_id": items[i]["item_id"],
+                     "start_sec": b["start_sec"], "end_sec": b["end_sec"]}
+                    for i, b in enumerate(sent_bounds)
+                ]
+                slice_results = _write_sentence_wavs_from_chunk(
+                    wav_bytes_rest, offsets, out_dir,
+                    items[0]["voice"], items[0].get("style"),
+                )
+                item_meta = {it["item_id"]: it for it in items}
+                for r in slice_results:
+                    it = item_meta.get(r["item_id"], {})
+                    r.update({
+                        "speaker": it.get("speaker", ""),
+                        "voice": it.get("voice", ""),
+                        "azure_lang": it.get("azure_lang", ""),
+                        "style": it.get("style", ""),
+                        "style_degree": it.get("style_degree", 1.5),
+                        "rate": it.get("rate", "0%"),
+                    })
+                print(f"[BATCH-REST] Complete: {len(slice_results)} items")
+                rest_ssml_chars = len(rest_ssml)
+                rest_raw_chars  = sum(len(it.get("text", "")) for it in items)
+                rest_stats = {
+                    "mode":              "batch_rest",
+                    "items_total":       len(items),
+                    "items_synthesized": len(slice_results),
+                    "items_skipped":     0,
+                    "items_cache_hit":   0,
+                    "raw_chars":         rest_raw_chars,
+                    "ssml_chars":        rest_ssml_chars,
+                    "ssml_ratio":        round(rest_ssml_chars / max(rest_raw_chars, 1), 3),
+                    "api_calls":         1,
+                    "cache_hits":        0,
+                    "chunks":            1,
+                }
+                return slice_results, [], rest_stats
+            else:
+                log.warning(f"[BATCH-REST] Sentence boundary count mismatch "
+                            f"({len(sent_bounds)} vs {len(items)} items) — falling back to SDK batch")
+        except Exception as exc:
+            log.warning(f"[BATCH-REST] Failed ({exc}), falling back to SDK batch")
 
-    # Check batch eligibility
-    voices_used = {it["voice"] for it in items}
-    unsupported = voices_used - BATCH_VOICES
-    can_batch = (not unsupported) and len(items) <= BATCH_MAX_VOICE_ELEMENTS
-
-    if unsupported:
-        print(f"\n[BATCH] Skipped — voice(s) not in batch_voices list: {', '.join(sorted(unsupported))}")
-        print(f"[BATCH] Using per-item synthesis for {len(items)} items")
-        return _synthesise_per_item(synthesizer, items, out_dir)
-
-    if len(items) > BATCH_MAX_VOICE_ELEMENTS:
-        print(f"\n[BATCH] Skipped — {len(items)} items exceeds max {BATCH_MAX_VOICE_ELEMENTS} voice elements")
-        print(f"[BATCH] Using per-item synthesis for {len(items)} items")
-        return _synthesise_per_item(synthesizer, items, out_dir)
-
+    # SDK batch: one call for entire episode using bookmark events
     try:
-        log.info("Batch synthesis: building episode SSML...")
-        print(f"\n[BATCH] Building episode SSML for {len(items)} items...")
+        log.info("Batch synthesis: building episode SSML…")
+        print(f"\n[BATCH] Building episode SSML for {len(items)} items…")
         ssml         = build_episode_ssml(items, locale)
         expected_ids = [it["item_id"] for it in items]
 
@@ -1440,21 +3323,18 @@ def run(items: list[dict], out_dir: Path, asset_id: str | None = None,
             except OSError:
                 pass
 
-        log.info(f"Batch synthesis complete: {len(items)} items written")
-        print(f"[BATCH] Complete: {len(items)} items written to {out_dir}")
+        print(f"[BATCH] Complete: {len(items)} items → {out_dir}")
 
-        # Build results list from the written files (mirrors per-item result schema)
-        results = []
+        results: list[dict] = []
         for vo in items:
             out_path = out_dir / f"{vo['item_id']}.wav"
             if out_path.exists():
-                size      = out_path.stat().st_size
-                # Use raw.index approach for accurate duration — same as split_and_write_wavs
+                size = out_path.stat().st_size
                 with open(str(out_path), "rb") as fh:
                     raw = fh.read()
                 data_tag_pos = raw.index(b"data")
-                pcm_len   = max(0, len(raw) - (data_tag_pos + 8))
-                duration_s = pcm_len / (AZURE_SAMPLE_RATE * 2)
+                pcm_len      = max(0, len(raw) - (data_tag_pos + 8))
+                duration_s   = pcm_len / (AZURE_SAMPLE_RATE * 2)
                 results.append({
                     "item_id":      vo["item_id"],
                     "speaker":      vo["speaker"],
@@ -1476,14 +3356,50 @@ def run(items: list[dict], out_dir: Path, asset_id: str | None = None,
                     "output":     str(out_path),
                     "size_bytes": 0,
                     "status":     "failed",
-                    "error":      "WAV file not found after batch split",
+                    "error":      "WAV not found after batch split",
                 })
-        return results
+        batch_ssml    = build_episode_ssml(items, locale)
+        batch_raw     = sum(len(it.get("text", "")) for it in items)
+        batch_ssml_ch = len(batch_ssml)
+        n_ok   = sum(1 for r in results if r.get("status") == "success")
+        sdk_stats = {
+            "mode":              "batch_bookmark",
+            "items_total":       len(items),
+            "items_synthesized": n_ok,
+            "items_skipped":     0,
+            "items_cache_hit":   0,
+            "raw_chars":         batch_raw,
+            "ssml_chars":        batch_ssml_ch,
+            "ssml_ratio":        round(batch_ssml_ch / max(batch_raw, 1), 3),
+            "api_calls":         1,
+            "cache_hits":        0,
+            "chunks":            1,
+        }
+        return results, [], sdk_stats
 
-    except Exception as e:
-        log.warning(f"Batch synthesis failed ({e}); falling back to per-item synthesis")
-        print(f"\n[BATCH] Failed ({e}); falling back to per-item synthesis...")
-        return _synthesise_per_item(synthesizer, items, out_dir)
+    except Exception as exc:
+        log.warning(f"Batch synthesis failed ({exc}); falling back to per-item")
+        print(f"\n[BATCH] Failed ({exc}); falling back to per-item…")
+        fallback_results = _synthesise_per_item(synthesizer, items, out_dir, force=force)
+        fb_syn  = sum(1 for r in fallback_results if r.get("status") == "success")
+        fb_skip = sum(1 for r in fallback_results if r.get("status") == "skipped")
+        fb_raw  = sum(len(it.get("text", "")) for it in items
+                      if it["item_id"] not in
+                      {r["item_id"] for r in fallback_results if r.get("status") == "skipped"})
+        fallback_stats = {
+            "mode":              "batch_bookmark_fallback",
+            "items_total":       len(items),
+            "items_synthesized": fb_syn,
+            "items_skipped":     fb_skip,
+            "items_cache_hit":   0,
+            "raw_chars":         fb_raw,
+            "ssml_chars":        0,
+            "ssml_ratio":        0,
+            "api_calls":         fb_syn,
+            "cache_hits":        0,
+            "chunks":            0,
+        }
+        return fallback_results, [], fallback_stats
 
 
 # ---------------------------------------------------------------------------
@@ -1527,6 +3443,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--voice-cast", type=str, default=None, dest="voice_cast",
         help="Path to VoiceCast.json (required when --ssml-narration).",
+    )
+    parser.add_argument(
+        "--keep-chunks", action="store_true", default=False, dest="keep_chunks",
+        help=(
+            "Phase 3, Step 10: retain full chunk WAVs in assets/{locale}/audio/vo_chunks/ "
+            "after slicing into sentence WAVs.  Enables future deferred-slicing render path."
+        ),
+    )
+    parser.add_argument(
+        "--use-batch-rest", action="store_true", default=False, dest="use_batch_rest",
+        help=(
+            "Phase 3, Step 9: submit standard-voice episodes via Azure Batch Synthesis "
+            "REST API instead of SDK batch.  Experimental — sentence-boundary parsing "
+            "from REST response not yet fully implemented."
+        ),
+    )
+    parser.add_argument(
+        "--force", action="store_true", default=False,
+        help="Overwrite existing WAV files instead of skipping them. "
+             "Used by polish_locale_vo re-synthesis loop.",
     )
     return parser.parse_args()
 
@@ -1588,11 +3524,22 @@ def main() -> None:
     print(f"Output   : {out_dir}")
     print(f"{'='*60}")
 
-    results = run(items, out_dir, asset_id=args.asset_id,
-                  ssml_narration=args.ssml_narration,
-                  ssml_inner_path=args.ssml_inner,
-                  voice_cast_path=args.voice_cast,
-                  manifest=manifest)
+    t_start = time.time()
+    results, chunks_meta, stats = run(
+        items,
+        out_dir,
+        asset_id        = args.asset_id,
+        ssml_narration  = args.ssml_narration,
+        ssml_inner_path = args.ssml_inner,
+        voice_cast_path = args.voice_cast,
+        manifest        = manifest,
+        assets_dir      = assets_dir,
+        keep_chunks     = args.keep_chunks,
+        use_batch_rest  = args.use_batch_rest,
+        force           = args.force,
+    )
+    stats["wall_time_sec"] = round(time.time() - t_start, 1)
+    _append_tts_audit_log(meta_dir, locale, stats)
 
     # ── ssml_narration: patch manifest vo_items text with source-locale text ──
     # The zh-Hans manifest may have been copied from en with English text.
@@ -1616,11 +3563,11 @@ def main() -> None:
         print(f"\n[SSML-NARRATION] Patched {patched} manifest vo_items with "
               f"source-locale text → {manifest_path.name}")
 
-    results_path = meta_dir / f"{SCRIPT_NAME}_results.json"
-    if results_path.exists():
-        results_path.unlink()
-    results_path.write_text(
-        json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8"
+    # Phase 2, Step 7: centralised result writer — also writes chunks.json when present
+    results_path = write_tts_results(
+        results,
+        meta_dir,
+        chunks_meta = chunks_meta if chunks_meta else None,
     )
 
     ok_count    = sum(1 for r in results if r.get("status") == "success")
@@ -1629,6 +3576,8 @@ def main() -> None:
 
     print(f"\n{'='*60}")
     print(f"{ok_count}/{len(results)} completed | {total_bytes:,} bytes total")
+    if chunks_meta:
+        print(f"Chunks   : {len(chunks_meta)} chunks written to {meta_dir}/{SCRIPT_NAME}_chunks.json")
     if failed:
         print(f"FAILED ({len(failed)}):")
         for r in failed:

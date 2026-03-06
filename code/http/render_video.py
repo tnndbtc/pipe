@@ -450,15 +450,38 @@ def render_shot(
 
     # ── 4. VO audio streams ────────────────────────────────────────────────
     for vo_i, vl in enumerate(vo_lines):
-        line_id = vl.get("line_id", "")
+        line_id  = vl.get("line_id", "")
+        delay_ms = vl["timeline_in_ms"]
+        lbl      = f"vo{vo_i}"
+
+        # Phase 3, Step 10: chunk-WAV deferred slicing path
+        # When the RenderPlan vo_line carries audio_chunk_uri, seek into the
+        # full chunk WAV with -ss/-t instead of opening the per-sentence WAV.
+        chunk_uri = vl.get("audio_chunk_uri", "")
+        if chunk_uri:
+            chunk_path = uri_to_path(chunk_uri)
+            if chunk_path and chunk_path.exists():
+                start_sec = float(vl.get("audio_start_sec", 0.0))
+                end_sec   = float(vl.get("audio_end_sec",   0.0))
+                dur_sec   = max(0.001, end_sec - start_sec)
+                v_idx = add_input(
+                    ["-ss", f"{start_sec:.4f}", "-t", f"{dur_sec:.4f}"],
+                    str(chunk_path),
+                )
+                filter_parts.append(
+                    f"[{v_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+                    f"adelay={delay_ms}|{delay_ms}[{lbl}]"
+                )
+                all_audio.append(f"[{lbl}]")
+                continue  # handled — skip per-sentence WAV path below
+
+        # Original per-sentence WAV path (backward compatible)
         vo_info = asset_map.get(line_id, {})
         vo_uri  = vo_info.get("uri", "")
         vo_path = uri_to_path(vo_uri)
         if not vo_path or not vo_path.exists() or vo_info.get("is_placeholder", True):
             continue  # missing VO → silence for that line
-        delay_ms = vl["timeline_in_ms"]
-        v_idx    = add_input([], str(vo_path))
-        lbl      = f"vo{vo_i}"
+        v_idx = add_input([], str(vo_path))
         filter_parts.append(
             f"[{v_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
             f"adelay={delay_ms}|{delay_ms}[{lbl}]"

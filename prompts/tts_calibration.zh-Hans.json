@@ -60,6 +60,42 @@
       "en_rate": "-15%",
       "normal_cps": 3.408,
       "normal_n": 48
+    },
+    {
+      "run_id": "hero-saves-earth/s01e01",
+      "date": "2026-03-06",
+      "voice": "zh-CN-XiaomengNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "en-US-AriaNeural",
+      "en_style": null,
+      "en_rate": "0%",
+      "normal_cps": 4.055,
+      "normal_n": 1
+    },
+    {
+      "run_id": "the-rivers-whisper/s01e01",
+      "date": "2026-03-06",
+      "voice": "zh-CN-Xiaoxiao2:DragonHDFlashLatestNeural",
+      "style": "sentiment",
+      "rate": "-15%",
+      "en_voice": "en-GB-RyanNeural",
+      "en_style": "whispering",
+      "en_rate": "-15%",
+      "normal_cps": 4.177,
+      "normal_n": 37
+    },
+    {
+      "run_id": "hero-saves-earth/s01e01",
+      "date": "2026-03-06",
+      "voice": "zh-CN-XiaomengNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "en-US-AriaNeural",
+      "en_style": null,
+      "en_rate": "0%",
+      "normal_cps": 3.65,
+      "normal_n": 22
     }
   ],
   "defaults": {

@@ -3,24 +3,25 @@
 # ══════════════════════════════════════════════════════════════════════
 #
 # 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
-#     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
-#     {{EPISODE_ID}}     →  e.g. "s01e02"
-#     {{LOCALES}}        →  e.g. "en, zh-Hans"
-#     {{STORY_FORMAT}}   →  e.g. "episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"
+#     {{PROJECT_SLUG}}    →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}      →  e.g. "s01e02"
+#     {{LOCALES}}         →  e.g. "en, zh-Hans"
+#     {{PRIMARY_LOCALE}}  →  e.g. "en" or "zh-Hans" — the source locale for translation
+#     {{STORY_FORMAT}}    →  e.g. "episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"
 #
 # 📥 FILES READ (written by earlier stages):
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json    (Stage 2)
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json         (Stage 3)
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json       (Stage 4)
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json (Stage 5)
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json     (Stage 6)
-#     projects/{{PROJECT_SLUG}}/canon.json                                   (Stage 7)
-#     projects/{{PROJECT_SLUG}}/VoiceCast.json                              (Stage 0)
-#     contracts/schemas/*.v1.json  (same schemas as English artifacts)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json                    (Stage 2)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json                         (Stage 3)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json                       (Stage 4)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.{{PRIMARY_LOCALE}}.json  (Stage 5)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json                     (Stage 6)
+#     projects/{{PROJECT_SLUG}}/canon.json                                                   (Stage 7)
+#     projects/{{PROJECT_SLUG}}/VoiceCast.json                                              (Stage 0)
+#     contracts/schemas/*.v1.json  (same schemas as primary-locale artifacts)
 #
-# 📤 OUTPUT (one file per artifact per non-en locale):
+# 📤 OUTPUT (one file per artifact per non-primary locale):
 #     • Stdout: progress per locale  (web UI)
-#     • <artifact>.<locale>.json in the same directory as the English source
+#     • <artifact>.<locale>.json in the same directory as the primary-locale source
 #     • canon.<locale>.json  in the project root
 #
 # ▶ Invoked by run.sh as:
@@ -29,30 +30,31 @@
 
 You are Stage 8 of a 10-stage AI narrative pipeline.
 Your ONLY job: create translated locale variants of all artifacts
-for every locale beyond "en".
+for every locale that is not the primary locale.
 
 ---
 
 ## Context
 
-Locales      : {{LOCALES}}   ("en" is the source; translate all others)
-Episode dir  : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
-Project dir  : projects/{{PROJECT_SLUG}}/
-Story format : {{STORY_FORMAT}}
+Locales         : {{LOCALES}}
+Primary locale  : {{PRIMARY_LOCALE}}  ← this is the SOURCE for translation; translate all other locales FROM this one
+Episode dir     : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Project dir     : projects/{{PROJECT_SLUG}}/
+Story format    : {{STORY_FORMAT}}
 
 Read these files before writing anything:
   1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
   2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
   3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
-  4. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json
+  4. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.{{PRIMARY_LOCALE}}.json
   5. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
   6. projects/{{PROJECT_SLUG}}/canon.json
   7. projects/{{PROJECT_SLUG}}/VoiceCast.json
   8. contracts/schemas/AssetManifest.v1.json
 
-For each non-en locale, also try to read (if it exists):
+For each non-primary locale, also try to read (if it exists):
   • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/vo_hints.<locale>.json
-  (Character-count hints generated from measured EN WAV durations by
+  (Character-count hints generated from measured primary-locale WAV durations by
   prep_locale_hints.py.  Available from the second episode run onward.
   If the file is missing, fall back to the word-count estimation below.)
 
@@ -66,6 +68,12 @@ Print: `▶ [8/9] Stage 8 — Produce locale variants  …`
 
 Story format: **{{STORY_FORMAT}}**
 
+If `STORY_FORMAT` is `ssml_narration`:
+  Skip ALL work and print:
+  `ℹ️  Stage 8: ssml_narration format — locale TTS is handled by gen_tts_cloud.py --ssml-narration. No manifest variants needed.`
+  `✓ [8/9] Stage 8 — Produce locale variants  done`
+  (then stop immediately — do NOT read or write any files)
+
 If `STORY_FORMAT` is `continuous_narration` or `documentary`:
 - There are NO `character_packs` in this manifest. Do not attempt to translate or look up character pack entries.
 - All VO lines belong to `narrator`. Translate narrator VO only.
@@ -75,12 +83,30 @@ For all other formats: proceed normally.
 
 ---
 
-Parse {{LOCALES}}.  If the only locale is "en", skip all work and print:
-  `ℹ️  Stage 8: only locale is "en" — no variants needed.`
+Parse {{LOCALES}}.  If {{PRIMARY_LOCALE}} is the only locale, skip all work and print:
+  `ℹ️  Stage 8: only one locale ({{PRIMARY_LOCALE}}) — no variants needed.`
   `✓ [8/9] Stage 8 — Produce locale variants  done`
   (then stop)
 
-For each locale OTHER than "en":
+---
+
+## ⚠️ FAITHFULNESS RULE — Read this before translating anything
+
+**Translation MUST preserve the exact meaning and content of every source line.**
+
+- Do NOT add imagery, metaphors, atmosphere, or narrative detail that is not present in the source text.
+- Do NOT invent new content to fill duration — rephrase the same meaning instead.
+- Do NOT interpret a source line as a creative prompt and generate something "in the spirit of" it.
+- A short source line that translates to a short target line is CORRECT. Short fragments are handled by the renderer.
+- When in doubt: a faithful short translation is always better than an inventive long one.
+
+Duration adjustment (when needed) is achieved ONLY by:
+  ✓ Using a more formal or elaborate sentence structure that expresses the same meaning
+  ✓ Spelling out implied subjects or objects already present in the source
+  ✓ Choosing a longer synonym or set phrase for a word already in the source
+  ✗ NEVER by adding content not present in the source line
+
+For each locale OTHER than "{{PRIMARY_LOCALE}}":
 
   Process each artifact in this order:
     StoryPrompt   → <episode_dir>/StoryPrompt.<locale>.json
@@ -90,8 +116,8 @@ For each locale OTHER than "en":
     canon_diff    → <episode_dir>/canon_diff.<locale>.json
     canon         → <project_dir>/canon.<locale>.json
 
-  Method: copy English artifact as base, then translate ONLY the fields
-  listed below.  All other fields must remain IDENTICAL to English source.
+  Method: copy the primary-locale artifact as base, then translate ONLY the fields
+  listed below.  All other fields must remain IDENTICAL to the primary-locale source.
 
   **Exception — AssetManifest**: do NOT copy the full English manifest.
   Instead produce a brand-new locale-scoped manifest (see below).
@@ -130,7 +156,7 @@ For each locale OTHER than "en":
   }
   ```
 
-  For vo_items[]: copy every entry from AssetManifest_draft.en.json, then apply
+  For vo_items[]: copy every entry from AssetManifest_draft.{{PRIMARY_LOCALE}}.json, then apply
   the following changes per item:
 
   **Always change:**
@@ -143,7 +169,7 @@ For each locale OTHER than "en":
     - tts_prompt.azure_rate   → character[<locale>].azure_rate from VoiceCast.json
     - tts_prompt.azure_style  → apply Emotion Policy (see below)
 
-  **Keep unchanged (copy byte-for-byte from AssetManifest_draft.en.json):**
+  **Keep unchanged (copy byte-for-byte from AssetManifest_draft.{{PRIMARY_LOCALE}}.json):**
     - item_id        ← CRITICAL: copy the exact string; never invent a new id
     - speaker_id     ← CRITICAL: copy the exact string (e.g. "narrator"); do NOT omit
     - shot_id        (may be null — copy the null)
@@ -195,54 +221,70 @@ For each locale OTHER than "en":
 
   Duration Matching Rule — applies to every vo_item.text translation:
 
-    English and the target locale speak at different natural rates.  To keep
-    the dubbed audio aligned with the video, write translated text that — at
+    The primary locale and the target locale speak at different natural rates.
+    To keep dubbed audio aligned with video, write translated text that — at
     the SAME tts_prompt.pace — takes approximately the same time to speak as
-    the English source line.
+    the source line.
 
-    Step 1 — Determine the target character count for this item.
+    ⚠️ FAITHFULNESS FIRST: Before adjusting for duration, always write the
+    faithful literal translation. Only then adjust phrasing for timing.
+    See the FAITHFULNESS RULE above — it overrides duration matching.
+
+    ### Two-pass approach (mandatory)
+
+    Pass 1 — Faithful translation:
+      Translate the source text accurately and completely. Note the
+      character/word count of your translation.
+
+    Pass 2 — Duration adjustment (only if needed):
+      If count is outside ±10% of target_chars, adjust phrasing only.
+      Never change the meaning. See allowed/forbidden adjustments below.
+
+    ### Step 1 — Determine the target character count for this item
 
     **If vo_hints.<locale>.json was loaded successfully:**
       Find the entry with matching item_id.  Use its `target_chars` value
       directly as your target character count.  Also note `fragment_type`:
-        • fragment_type = "normal"  (en_duration_sec > 1.5 s)  — standard line
-        • fragment_type = "short"   (en_duration_sec ≤ 1.5 s)  — see short note below
+        • fragment_type = "normal"  (source_duration_sec > 1.5 s)  — standard line
+        • fragment_type = "short"   (source_duration_sec ≤ 1.5 s)  — see short note below
 
     **If vo_hints.<locale>.json is not available (first run):**
-      Estimate from word count:
-        estimated_sec  = word_count(english_text) / 2.5
-        (English narration at normal pace ≈ 2.5 words / second)
-        target_chars   = round(estimated_sec × 3.2)
+      Estimate from word count of the source text:
+        estimated_sec  = word_count(source_text) / 2.5
+        (narration at normal pace ≈ 2.5 words / second for Latin-script locales)
+        target_chars   = round(estimated_sec × chars_per_sec_for_target_locale)
         (zh-Hans narration at normal pace ≈ 3.2 chars / second)
 
-    Step 2 — Write target-locale text that hits approximately target_chars.
-    Adjust character / word count as needed:
+    ### Step 2 — Adjust translation to hit target_chars if needed
 
-    If the literal translation would be TOO SHORT (fewer chars than target):
-      • Add contextual description of the scene or emotion already implied
-      • Use the character's title or honorific in full rather than abbreviated
-      • Elaborate on a sensory detail (sound, light, atmosphere) present in
-        the English
-      • Adopt a slightly more classical or formal narrative register
+    If the faithful translation is TOO SHORT (fewer chars than target):
+      ✓ Use a more formal or literary sentence structure for the same meaning
+      ✓ Spell out implied subjects or objects already present in the source
+      ✓ Use a longer synonym or set phrase for a word already in the source
+      ✓ Use an honorific or title in full where abbreviated in source
+      ✗ Do NOT add sensory details not present in the source
+      ✗ Do NOT add scene description not present in the source
+      ✗ Do NOT add emotional elaboration not stated in the source
 
-    If the literal translation would be TOO LONG (more chars than target):
-      • Use concise idioms or set phrases that compress meaning
-      • Drop connective filler ("and then", "at that moment") where the
+    If the faithful translation is TOO LONG (more chars than target):
+      ✓ Use concise idioms or set phrases that compress meaning
+      ✓ Drop connective filler ("and then", "at that moment") where
         meaning is clear without it
-      • Prefer a direct subject-verb-object structure
+      ✓ Prefer direct subject-verb-object structure
 
-    Short-fragment note (fragment_type = "short" or estimated_sec ≤ 1.5 s):
+    ### Short-fragment note
+    (fragment_type = "short" or estimated_sec ≤ 1.5 s)
       These are exclamations, reactions, or single-phrase beats (e.g. "Stop!",
       "Yes, my lord.").  For short fragments:
       • Keep the translation punchy — do NOT pad to fill silence
       • A short line speaking quickly is correct; the renderer handles the gap
       • Use target_chars as a ceiling, not a floor
 
-    Rules:
+    ### Rules
       • NEVER change tts_prompt.pace — voice quality is critical
       • Tolerance: ±10 % of target_chars is acceptable
-      • Natural, high-quality target-locale prose takes priority over
-        exact timing; do NOT pad with meaningless syllables or filler
+      • Faithful meaning takes absolute priority over exact timing
+      • Do NOT pad with meaningless syllables or invented content
 
   ⚠️  DO NOT include: music_items, sfx_items — those live in the shared manifest.
   ⚠️  DO NOT translate: search_prompt, ai_prompt, motion.description.

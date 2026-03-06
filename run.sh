@@ -10,12 +10,12 @@
 #   ep_dir      — path to episode directory
 #                 e.g.  projects/my-project/episodes/s01e01
 #   from_stage  — first stage to run  (default: 0)
-#   to_stage    — last  stage to run  (default: 10)
+#   to_stage    — last  stage to run  (default: 10, which maps to Stage 9 render)
 #
 # Examples:
-#   ./run.sh projects/my-project/episodes/s01e01          # stages 0–10
+#   ./run.sh projects/my-project/episodes/s01e01          # stages 0–9 (full run)
 #   ./run.sh projects/my-project/episodes/s01e01 2 4      # re-run stages 2–4
-#   ./run.sh projects/my-project/episodes/s01e01 9 9      # re-run stage 9 only
+#   ./run.sh projects/my-project/episodes/s01e01 10 10    # re-run Stage 9 render only
 #
 # NOTE: The old ./run.sh story_N.txt interface is gone. New interface only.
 #
@@ -107,8 +107,7 @@ stage_label() {
     6)  _label="Identify new story facts to record" ;;
     7)  _label="Update story memory (world canon)" ;;
     8)  _label="Translate & adapt for each language" ;;
-    9)  _label="Finalize assets & build render plan" ;;
-   10)  _label="Merge assets, render video & export dubbed audio" ;;
+    9)  _label="Merge assets, render video & export dubbed audio" ;;
     *)  _label="Stage $n_base" ;;
   esac
   if [[ "$n_suffix" == "_c" ]]; then
@@ -117,26 +116,26 @@ stage_label() {
   echo "$_label"
 }
 
-# ── Stage 10: asset merge + render (no LLM) ────────────────────────────
+# ── Stage 9: asset merge + render (no LLM) ─────────────────────────────
 run_stage_10() {
   local label
-  label=$(stage_label "10")
+  label=$(stage_label "9")
   echo ""
   echo "══════════════════════════════════════════════════════════════"
-  echo "  STAGE 10/10  —  ${label}"
+  echo "  STAGE 9  —  ${label}"
   echo "  locales: ${LOCALES:-en}"
   echo "══════════════════════════════════════════════════════════════"
 
   local code_dir
   code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
 
-  # ── [1/8] Music clips — locale-free, runs once, skips if no resources ─
-  echo "  [1/8] Generating music clips (skips gracefully if no resources)…"
+  # ── [1] Music clips — locale-free, runs once, skips if no resources ──
+  echo "  [1] Generating music clips (skips gracefully if no resources)…"
   python3 "${code_dir}/gen_music_clip.py" \
-    --manifest "${EP_DIR}/AssetManifest_draft.shared.json"
+    --manifest "${EP_DIR}/AssetManifest_draft.shared.json" || true
 
-  # ── [1b/8] Music loop candidates — auto, no pause ─────────────────────
-  echo "  [1b/8] Analysing music loop candidates…"
+  # ── [1b] Music loop candidates — auto, no pause ───────────────────────
+  echo "  [1b] Analysing music loop candidates…"
   python3 "${code_dir}/music_prepare_loops.py" \
     --manifest "${EP_DIR}/AssetManifest_draft.shared.json" || true
 
@@ -168,13 +167,13 @@ run_stage_10() {
     echo ""
     echo "  ── Locale: ${locale} ───────────────────────────────────────────"
 
-    echo "  [2/8] Merging shared + locale manifests…"
+    echo "  [5] Merging shared + locale manifests…"
     python3 "${code_dir}/manifest_merge.py" \
       --shared "${EP_DIR}/AssetManifest_draft.shared.json" \
       --locale "${EP_DIR}/AssetManifest_draft.${locale}.json" \
       --out    "${EP_DIR}/AssetManifest_merged.${locale}.json"
 
-    echo "  [3/8] Generating voice-over audio…"
+    echo "  [6] Generating voice-over audio…"
     if [[ "${STORY_FORMAT:-}" == "ssml_narration" && "$locale" == "$_primary" ]]; then
       # PRIMARY_LOCALE uses ssml_narration: wrapper-rebuild + inner passthrough
       python3 "${code_dir}/gen_tts_cloud.py" \
@@ -188,7 +187,7 @@ run_stage_10() {
         --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
     fi
 
-    # ── [3b/8] Phase 1 — convergence loop (non-EN locales only) ─────────
+    # ── [6b] Phase 1 — convergence loop (non-primary locales only) ───────
     # Read alignment thresholds from their single source of truth.
     local vo_thresh vo_thresh_high
     vo_thresh=$(python3 -c "import sys; sys.path.insert(0,'${code_dir}'); from polish_locale_vo import THRESHOLD; print(f'{THRESHOLD:.2f}')" 2>/dev/null || echo "0.90")
@@ -198,7 +197,7 @@ run_stage_10() {
     # repeats up to 3 times.
     # Writes calibration data to prompts/tts_calibration.{locale}.json.
     if [[ "$locale" != "$_primary" ]]; then
-      echo "  [3b/8] Polishing locale VO duration alignment…"
+      echo "  [6b] Polishing locale VO duration alignment…"
       python3 "${code_dir}/polish_locale_vo.py" \
         --manifest        "${EP_DIR}/AssetManifest_merged.${locale}.json" \
         --locale          "${locale}" \
@@ -206,15 +205,15 @@ run_stage_10() {
         --primary-locale  "${_primary}" || true
     fi
 
-    echo "  [4/8] Analysing voice timing…"
+    echo "  [7] Analysing voice timing…"
     python3 "${code_dir}/post_tts_analysis.py" \
       --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
 
-    # ── [4b/8] Music review checkpoint (only when Music is enabled) ─────────
+    # ── [8] Music review checkpoint (only when Music is enabled) ──────────
     _music_plan="${EP_DIR}/assets/music/MusicPlan.json"
     if [[ -z "${NO_MUSIC:-}" ]]; then
       if [[ ! -f "$_music_plan" ]]; then
-        echo "  [4b/8] Generating music review pack…"
+        echo "  [8] Generating music review pack…"
         python3 "${code_dir}/music_review_pack.py" \
           --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" || true
         echo ""
@@ -228,20 +227,20 @@ run_stage_10() {
         echo "    4. Click ✔ Confirm to save MusicPlan.json"
         echo ""
         echo "  Then resume the pipeline:"
-        echo "    ./run.sh ${EP_DIR} 10"
+        echo "    ./run.sh ${EP_DIR} 9"
         echo "══════════════════════════════════════════════════════════════"
         exit 0
       else
-        echo "  [4b/8] Applying music plan overrides…"
+        echo "  [8] Applying music plan overrides…"
         python3 "${code_dir}/apply_music_plan.py" \
           --plan "$_music_plan" \
           --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
       fi
     else
-      echo "  [4b/8] Music disabled — skipping music review checkpoint"
+      echo "  [8] Music disabled — skipping music review checkpoint"
     fi
 
-    echo "  [5/8] Resolving asset file paths…"
+    echo "  [9] Resolving asset file paths…"
     # Pass --selections when the VC editor has saved stock media choices.
     # resolve_assets.py also auto-detects this file, but being explicit here
     # makes the intent clear in the log output.
@@ -255,7 +254,7 @@ run_stage_10() {
       --out      "${EP_DIR}/AssetManifest.media.${locale}.json" \
       ${_sel_arg}
 
-    echo "  [6/8] Building per-shot render plan…"
+    echo "  [10] Building per-shot render plan…"
     # Phase 2 — Timeline Lock: floor locale shot durations to the primary
     # locale's reference plan.  The primary locale is rendered first (loop
     # reorder above), so its RenderPlan.{primary}.json is the authority.
@@ -273,7 +272,7 @@ run_stage_10() {
         --story-format  "${STORY_FORMAT:-episodic}"
     fi
 
-    echo "  [7/8] Rendering video…"
+    echo "  [11] Rendering video…"
     python3 "${code_dir}/render_video.py" \
       --plan    "${EP_DIR}/RenderPlan.${locale}.json" \
       --locale  "${locale}" \
@@ -283,7 +282,7 @@ run_stage_10() {
 
     echo "  ✓ ${locale}  →  ${EP_DIR}/renders/${locale}/output.mp4"
 
-    echo "  [8/8] Exporting YouTube dubbed audio…"
+    echo "  [11b] Exporting YouTube dubbed audio…"
     if [[ "$locale" != "$_primary" ]]; then
       python3 "${code_dir}/export_youtube_dubbed.py" \
         "${EP_DIR}" \
@@ -295,7 +294,7 @@ run_stage_10() {
   done
 
   echo ""
-  echo "✓ Stage 10 complete"
+  echo "✓ Stage 9 complete"
 }
 
 # ── File inlining ──────────────────────────────────────────────────────
@@ -368,7 +367,7 @@ fill_and_run() {
   label=$(stage_label "$N")
   echo ""
   echo "══════════════════════════════════════════════════════════════"
-  echo "  STAGE ${N}/10  —  ${label}"
+  echo "  STAGE ${N}/9  —  ${label}"
   echo "  model: ${model}"
   echo "══════════════════════════════════════════════════════════════"
 
@@ -417,7 +416,7 @@ fill_and_run() {
 
 # ── Print pipeline plan ────────────────────────────────────────────────
 echo "══════════════════════════════════════════════════════════════"
-echo "  PIPELINE PLAN  —  10 stages  (step 9 is conditional)"
+echo "  PIPELINE PLAN  —  9 stages  (LLM: 0–8, Render: 9)"
 echo "══════════════════════════════════════════════════════════════"
 echo "  [0]  Extract story variables & set up project"
 echo "  [1]  Check story & world consistency"
@@ -428,8 +427,9 @@ echo "  [5]  List required assets — images, voice, music"
 echo "  [6]  Identify new story facts to record"
 echo "  [7]  Update story memory (world canon)"
 echo "  [8]  Translate & adapt for each language"
-echo "  [9]  Finalize assets & build render plan  ← conditional"
-echo "  [10] Merge assets, render video & export dubbed audio"
+echo "  [9]  Merge assets, render video & export dubbed audio"
+echo "       Sub-steps: [1] music  [5] merge  [6] tts  [7] post-tts"
+echo "                  [8] music-plan  [9] resolve  [10] plan  [11] render"
 echo "══════════════════════════════════════════════════════════════"
 echo "  Episode dir : $EP_DIR"
 echo "  Story file  : $STORY_FILE"
@@ -449,7 +449,7 @@ if [[ "$FROM_STAGE" -le 0 && "$TO_STAGE" -ge 0 ]]; then
   if [[ "$_s0_fmt" == "ssml_narration" ]]; then
     echo ""
     echo "══════════════════════════════════════════════════════════════"
-    echo "  STAGE 0/10  —  Extract story variables & set up project"
+    echo "  STAGE 0/9  —  Extract story variables & set up project"
     echo "  mode: ssml_preprocess.py (ssml_narration format)"
     echo "══════════════════════════════════════════════════════════════"
     python3 "${_s0_code_dir}/ssml_preprocess.py" "$EP_DIR"
@@ -462,7 +462,7 @@ if [[ "$FROM_STAGE" -le 0 && "$TO_STAGE" -ge 0 ]]; then
     # P4: narrator-only formats — deterministic vars + voice selection
     echo ""
     echo "══════════════════════════════════════════════════════════════"
-    echo "  STAGE 0/10  —  Extract story variables & set up project"
+    echo "  STAGE 0/9  —  Extract story variables & set up project"
     echo "  mode: gen_pipeline_vars.py + voice_cast_narrator.py (${_s0_fmt})"
     echo "══════════════════════════════════════════════════════════════"
     python3 "${_s0_code_dir}/gen_pipeline_vars.py" "$EP_DIR"
@@ -502,7 +502,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
     # Also preserves the pre-render checkpoint pause (FIX3).
     if [[ "$N" -eq 9 ]]; then
       echo ""
-      echo "  ⏭  Stage 9 skipped (replaced by gen_render_plan.py in Stage 10)"
+      echo "  ⏭  Stage 9 (p_9.txt) skipped — gen_render_plan.py runs as Stage 9[10]"
       if [[ "$TO_STAGE" -gt 9 ]]; then
         _sel_file="${EP_DIR}/assets/media/selections.json"
         echo ""
@@ -511,7 +511,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
         echo ""
         echo "  All LLM stages complete.  Before rendering, verify:"
         if [[ ! -f "$_sel_file" ]]; then
-          echo "    ⚠  No media selections found — Stage 10 will lack stock media"
+          echo "    ⚠  No media selections found — Stage 9 will lack stock media"
         else
           echo "    ✓  Media selections: $_sel_file"
         fi
@@ -519,7 +519,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
         echo "    •  RenderPlan.*            — render plan"
         echo ""
         echo "  To render:"
-        echo "    ./run.sh ${EP_DIR} 10"
+        echo "    ./run.sh ${EP_DIR} 9"
         echo "══════════════════════════════════════════════════════════════"
         exit 0
       fi
@@ -530,7 +530,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
     if [[ "$N" -eq 1 ]]; then
       echo ""
       echo "══════════════════════════════════════════════════════════════"
-      echo "  STAGE 1/10  —  Check story & world consistency"
+      echo "  STAGE 1/9  —  Check story & world consistency"
       echo "  mode: canon_check.py (deterministic)"
       echo "══════════════════════════════════════════════════════════════"
       _log1="stage_logs/${PROJECT_SLUG:-unknown}.${EPISODE_ID:-unknown}.stage_1.log"
@@ -548,7 +548,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
             "$_fmt3" == "documentary" ]]; then
         echo ""
         echo "══════════════════════════════════════════════════════════════"
-        echo "  STAGE 3/10  —  Write script & character dialogue"
+        echo "  STAGE 3/9  —  Write script & character dialogue"
         echo "  mode: gen_script_narration.py (deterministic, ${_fmt3})"
         echo "══════════════════════════════════════════════════════════════"
         _log3="stage_logs/${PROJECT_SLUG:-unknown}.${EPISODE_ID:-unknown}.stage_3.log"
@@ -563,7 +563,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
     if [[ "$N" -eq 7 ]]; then
       echo ""
       echo "══════════════════════════════════════════════════════════════"
-      echo "  STAGE 7/10  —  Update story memory (world canon)"
+      echo "  STAGE 7/9  —  Update story memory (world canon)"
       echo "  mode: canon_merge.py (deterministic)"
       echo "══════════════════════════════════════════════════════════════"
       _log7="stage_logs/${PROJECT_SLUG:-unknown}.${EPISODE_ID:-unknown}.stage_7.log"
@@ -661,8 +661,8 @@ for N in 1 2 3 4 5 6 7 8 9; do
     fi
 
     # ── Pre-Stage 8 hook: compute locale character-count hints ──────────
-    # Uses EN WAV durations from the previous Stage 10 run to give Stage 8
-    # (the translation LLM) calibrated target_chars per VO line.
+    # Uses primary-locale WAV durations from the previous Stage 9 run to give
+    # Stage 8 (the translation LLM) calibrated target_chars per VO line.
     # Skips gracefully on the first run when no EN WAVs exist yet.
     if [[ "$N" -eq 8 && "${STORY_FORMAT:-}" != "ssml_narration" ]]; then
       _hint_code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
@@ -682,7 +682,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
     fill_and_run "$N"
 
     # ── Hard stop after Stage 5: media selection checkpoint ────────────
-    # Stage 5 produces AssetManifest_draft.  Stage 10 needs
+    # Stage 5 produces AssetManifest_draft.  Stage 9 needs
     # assets/media/selections.json (written by the VC editor Media tab).
     # If the user asked to continue past stage 5 but hasn't selected
     # media yet, pause here so they can do that first.
@@ -710,7 +710,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
 
     # ── Hard stop after Stage 9: pre-render checkpoint ─────────────────
     # All LLM stages are done.  Pause before the (potentially long)
-    # Stage 10 render so the user can review artefacts first.
+    # Stage 9 render so the user can review artefacts first.
     if [[ "$N" -eq 9 && "$TO_STAGE" -gt 9 ]]; then
       _sel_file="${EP_DIR}/assets/media/selections.json"
       echo ""
@@ -727,7 +727,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
       echo "    •  RenderPlan.*            — render plan"
       echo ""
       echo "  To render:"
-      echo "    ./run.sh ${EP_DIR} 10"
+      echo "    ./run.sh ${EP_DIR} 9"
       echo "══════════════════════════════════════════════════════════════"
       exit 0
     fi
@@ -735,7 +735,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
   fi
 done
 
-# ── Stage 10: merge assets & render video ─────────────────────────────
+# ── Stage 9: merge assets & render video ──────────────────────────────
 if [[ "$FROM_STAGE" -le 10 && "$TO_STAGE" -ge 10 ]]; then
   run_stage_10
 fi

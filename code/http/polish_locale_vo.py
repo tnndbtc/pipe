@@ -257,7 +257,8 @@ def resynthesize_items(manifest_path: Path, item_ids: list[str]) -> None:
         subprocess.run(
             ["python3", str(CODE_DIR / "gen_tts_cloud.py"),
              "--manifest", str(manifest_path),
-             "--asset-id", iid],
+             "--asset-id", iid,
+             "--force"],
             cwd=str(PIPE_DIR),
         )
 

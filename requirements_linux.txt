@@ -60,3 +60,7 @@ soundfile>=0.12.0      # WAV writing (may already be installed)
 # Azure Neural TTS — cloud synthesis, no GPU required  (gen_tts_cloud.py)
 # ---------------------------------------------------------------------------
 azure-cognitiveservices-speech>=1.38.0
+# NOTE: do NOT install from PyPI — the PyPI package (deskpai, v1.0.x) has a
+# different API and is missing load_alignment_model. Install from GitHub:
+#   pip install git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
+ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git

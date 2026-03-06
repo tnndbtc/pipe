@@ -28,11 +28,11 @@ It has four layers:
              │  spawns subprocess          │  HTTP proxy
 ┌────────────▼──────────────────┐  ┌───────▼──────────────────────┐
 │  run.sh  (pipeline orch.)     │  │  Media Search Server         │
-│  • Stages 0–9: claude -p      │  │  (code/media/http/server.py) │
-│  • Stage 10: Python scripts   │  │  • FastAPI on port 8200      │
+│  • Stages 0–8: claude -p      │  │  (code/media/http/server.py) │
+│  • Stage 9: Python scripts    │  │  • FastAPI on port 8200      │
 │  • Hard stop after Stage 5    │  │  • NFS server 192.168.86.33  │
 │  •   (media selection gate)   │  │  • Pexels/Pixabay download   │
-│  • Hard stop after Stage 9    │  │  • CLIP scoring + ranking    │
+│  • Hard stop after Stage 8    │  │  • CLIP scoring + ranking    │
 │  •   (pre-render checkpoint)  │  │  • Env: MEDIA_API_KEY,       │
 │  • Streams stdout via SSE     │  │    PEXELS_API_KEY,           │
 └────────────┬──────────────────┘  │    PIXABAY_API_KEY           │
@@ -54,10 +54,10 @@ It has four layers:
 │      ├── assets/media/selections.json  (VC editor Confirm)  │
 │      ├── assets/media/{batch_id}/      (media server state) │
 │      │   └── batch_state.json                                │
-│      ├── AssetManifest_merged.{locale}.json  (Stage 10[2]) │
-│      ├── AssetManifest.media.{locale}.json   (Stage 10[5]) │
-│      ├── RenderPlan.{locale}.json            (Stage 10[6]) │
-│      └── renders/{locale}/output.mp4         (Stage 10[7]) │
+│      ├── AssetManifest_merged.{locale}.json  (Stage 9[2/8]) │
+│      ├── AssetManifest.media.{locale}.json   (Stage 9[5/8]) │
+│      ├── RenderPlan.{locale}.json            (Stage 9[6/8]) │
+│      └── renders/{locale}/output.mp4         (Stage 9[7/8]) │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -207,13 +207,13 @@ Working directory: `PIPE_DIR` (repo root)
 - If missing AND `TO_STAGE > 5`: prints instructions and `exit 0`
 - If present: prints `✓ Media selections found` and continues
 - User resumes with: `./run.sh <ep_dir> 6`
-- Purpose: Stage 10 `resolve_assets.py` needs `selections.json` to map stock media
+- Purpose: Stage 9 `resolve_assets.py` needs `selections.json` to map stock media
 
-**After Stage 9 — pre-render checkpoint:**
-- Always fires when `TO_STAGE > 9` (regardless of selections.json)
+**After Stage 8 — pre-render checkpoint:**
+- Always fires when `TO_STAGE > 8` (regardless of selections.json)
 - Shows checklist: media selections (✓ or ⚠), manifest, render plan
-- `exit 0` — user verifies artefacts, then resumes: `./run.sh <ep_dir> 10`
-- Purpose: prevent accidentally running a long Stage 10 render before review
+- `exit 0` — user verifies artefacts, then resumes: `./run.sh <ep_dir> 9`
+- Purpose: prevent accidentally running a long Stage 9 render before review
 
 **Both use `exit 0` (clean pause), not `exit 1` (error).**
 
@@ -221,9 +221,9 @@ Working directory: `PIPE_DIR` (repo root)
 ```bash
 ./run.sh <ep_dir>           # runs 0→5, pauses (no selections.json)
 # → UI Media tab → search → select → Confirm
-./run.sh <ep_dir> 6         # runs 6→9, pauses (pre-render)
+./run.sh <ep_dir> 6         # runs 6→8, pauses (pre-render)
 # → verify artefacts
-./run.sh <ep_dir> 10        # runs 10 only (render)
+./run.sh <ep_dir> 9         # runs Stage 9 only (render)
 ```
 
 ### Regression risks for run.sh
@@ -232,9 +232,9 @@ Working directory: `PIPE_DIR` (repo root)
 3. `set -euo pipefail` means any stage failure exits the whole script immediately.
 4. Stage 0 MUST write `pipeline_vars.sh` — run.sh checks for its existence after Stage 0 and exits with error if missing.
 5. Hard stop after Stage 5 checks `${EP_DIR}/assets/media/selections.json` — exits 0 if missing, continues if present
-6. Hard stop after Stage 9 always exits 0 when `TO_STAGE > 9` — unconditional pre-render pause
+6. Hard stop after Stage 8 always exits 0 when `TO_STAGE > 8` — unconditional pre-render pause
 7. `resolve_assets.py` call passes `--selections <path>` when `selections.json` exists on disk
-5. `NO_MUSIC=1` env var: Stage 10 passes `--no-music` to `render_video.py` only if this is set. The web UI `/stream` handler reads `no_music` from `meta.json` if not overridden by checkbox.
+8. `NO_MUSIC=1` env var: Stage 9 passes `--no-music` to `render_video.py` only if this is set. The web UI `/stream` handler reads `no_music` from `meta.json` if not overridden by checkbox.
 
 ---
 
@@ -565,17 +565,42 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 
 ---
 
-### Stage 9 — DEPRECATED (replaced by gen_render_plan.py in Stage 10)
-**File:** `prompts/p_9.txt` — still present but largely superseded.
-**Gate check:** exits without writing if `AssetManifest.media.{locale}.json` doesn't exist.
-**NOTE:** In the current architecture, `gen_render_plan.py` (Stage 10[6]) replaces the LLM-based approach in p_9.txt. The `p_9.txt` prompt references the old single-locale `AssetManifest.media.json` path. Do not rely on p_9.txt output in the current pipeline.
+### p_9.txt — SUPERSEDED (replaced by gen_render_plan.py in Stage 9)
+**File:** `prompts/p_9.txt` — still present on disk but NOT invoked by the current pipeline.
+**NOTE:** `gen_render_plan.py` (Stage 9[6/8]) does the same job deterministically without LLM calls.
+`p_9.txt` referenced the old single-locale `AssetManifest.media.json` path — incompatible with
+current multi-locale manifest structure. Do NOT re-enable p_9.txt in run.sh.
 
 ---
 
-## PART 5 — STAGE 10: PYTHON POST-PROCESSING SCRIPTS
+## PART 5 — STAGE 9 (formerly Stage 10): PYTHON POST-PROCESSING SCRIPTS
 
-Stage 10 runs entirely without LLM calls. Invoked by `run_stage_10()` in `run.sh`.
+Stage 9 runs entirely without LLM calls. Invoked by `run_stage_10()` in `run.sh`
+(function name kept for backward compat; the pipeline stage number is now 9).
 Iterates over each locale in `${LOCALES}` (comma-separated, trimmed).
+
+### Web UI step numbering vs run.sh labels
+
+The web UI shows 11 numbered steps; run.sh uses [N/8] labels. They do not align 1-to-1:
+
+```
+Web UI [1]  = run.sh [1/8]  gen_music_clip       (shared, locale-free)
+Web UI [2]  = web UI only   gen_characters        (shared; triggered via /run_step API)
+Web UI [3]  = web UI only   gen_backgrounds       (shared; triggered via /run_step API)
+Web UI [4]  = web UI only   gen_sfx               (shared; triggered via /run_step API)
+             run.sh [1b/8]  music_prepare_loops   (shared, auto-runs after gen_music_clip)
+             run.sh [2/8]   manifest_merge        (per locale)
+Web UI [5]  = run.sh [2/8]  manifest_merge        (per locale)
+Web UI [6]  = run.sh [3/8]  gen_tts_cloud         (per locale)
+             run.sh [3b/8]  polish_locale_vo      (per non-primary locale)
+Web UI [7]  = run.sh [4/8]  post_tts_analysis     (per locale)
+             run.sh [4b/8]  music review checkpoint / apply_music_plan  (per locale)
+Web UI [8]  = run.sh [4b/8] apply_music_plan      (per locale, if not NO_MUSIC)
+Web UI [9]  = run.sh [5/8]  resolve_assets        (per locale)
+Web UI [10] = run.sh [6/8]  gen_render_plan       (per locale)
+Web UI [11] = run.sh [7/8]  render_video          (per locale)
+             run.sh [8/8]   export_youtube_dubbed (per non-primary locale)
+```
 
 **Sub-step [1/8] — gen_music_clip.py** (locale-free, runs once)
 ```
@@ -586,8 +611,19 @@ Output: projects/{slug}/episodes/{ep_id}/assets/music/{item_id}.wav
 - Reads MOOD tags from source files in `projects/resources/music/`
 - Uses CLAP model to match `music_mood` text to best music segment
 - Skips gracefully if no resources dir or no music_items
+- Called with `|| true` — failure is non-fatal; Stage 9 continues without music clips
 - Requires: `pip install laion-clap mutagen librosa soundfile numpy scipy`
 - Checkpoint auto-downloaded to `~/.cache/laion_clap/` on first run
+
+**Sub-step [1b/8] — music_prepare_loops.py** (locale-free, runs once, auto after [1/8])
+```
+Input:  projects/{slug}/episodes/{ep_id}/assets/music/{item_id}.wav  (from gen_music_clip)
+        projects/{slug}/resources/music/*.mp3  (source tracks)
+Output: projects/{slug}/episodes/{ep_id}/assets/music/music_loop_candidates.json
+        (BPM, duration, candidate loop points per source track)
+```
+- Called with `|| true` — failure is non-fatal
+- Provides metadata for the Music tab Source Browser in the web UI
 
 **Sub-step [2/8] — manifest_merge.py** (per locale)
 ```
@@ -606,12 +642,34 @@ Input:  AssetManifest_merged.{locale}.json  (reads vo_items[].tts_prompt)
 Output: assets/{locale}/audio/vo/{item_id}.wav
         assets/{locale}/audio/vo/licenses/{item_id}.license.json
         assets/meta/gen_tts_cloud_results.json
+        assets/meta/tts_audit_log.json          ← appended each run
 ```
 - Calls Azure Cognitive Services Speech SDK
 - Requires env vars: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`
 - Uses SSML with: `<voice>`, `<mstts:express-as style= styledegree=>`, `<prosody rate= pitch=>`, `<break time='Nms'/>`
 - **Null-style rule:** when `azure_style` is null or empty, `<mstts:express-as>` is omitted entirely — bare `<voice>` + `<prosody>` is valid SSML; Azure rejects `style=""` attribute
 - Voice selection priority: `azure_voice` field > `character_packs[].gender` > `voice_style` > hardcoded default
+
+**Synthesis mode selection (`_select_synthesis_mode`):**
+- `batch_bookmark` (default): all voices in whitelist (standard Neural, ≤ BATCH_MAX items) → one multi-speaker SSML call with `<bookmark>` events; WAV split by byte offsets
+- `chunk_alignment`: any HD/Dragon voice, OR episode too large for batch → synthesises N chunks in parallel; uses CTC forced aligner (ctc_forced_aligner) for per-sentence timing, falls back to silence-gap detection; yields full instrumentation log
+- `per_item_legacy`: single-item `--asset-id` re-synthesis OR last-resort fallback → one Azure call per item; slowest path
+- `run()` returns a **3-tuple** `(results, chunks_meta, stats)` — callers MUST unpack all three; `chunks_meta` is `[]` for non-chunk modes
+
+**TTS cache (`assets/meta/tts_cache/`):**
+- SHA256-keyed WAV cache shared across all runs; key = `normalized_ssml + voice + locale + output_format + sample_rate + style_engine_version`
+- Cleared by `_purge_episode_assets()` (Purge Cache checkbox). Deleting WAV files alone does NOT clear the cache — Azure calls will NOT be re-issued unless the cache is also cleared.
+
+**`--force` flag:**
+- Bypasses the existing-WAV skip in `_synthesise_per_item()` — overwrites existing WAVs unconditionally
+- Required for `polish_locale_vo.py` re-synthesis loop to actually converge (without `--force`, every iteration measures the same stale WAV duration)
+
+**`tts_audit_log.json` (`assets/meta/tts_audit_log.json`):**
+- Appended by `_append_tts_audit_log()` after every `main()` run (including partial `--asset-id` runs)
+- Accumulates per-locale totals: `total_raw_chars`, `total_ssml_chars`, `total_api_calls`, `total_items_synthesized`, `total_items_skipped`, `runs`
+- Each entry records: `timestamp`, `locale`, `mode`, `raw_chars`, `ssml_chars`, `ssml_ratio`, `api_calls`, `cache_hits`, `chunks`, `items_synthesized`, `items_skipped`, `wall_time_sec`
+- Use this to verify actual Azure character consumption across re-runs. Cache hits do not add to `api_calls` or `ssml_chars`.
+
 - **Batch path (default):** builds one multi-speaker SSML per locale with `<bookmark mark="{item_id}"/>` as the FIRST CHILD INSIDE each `<voice>` block (NOT as a sibling before `<voice>`); single `speak_ssml_async()` call returns one WAV; `BookmarkReached` events give per-item byte offsets; WAV is split into individual `{item_id}.wav` files. `--asset-id` flag bypasses batch and uses per-item path
 - **SSML bookmark placement is critical:** `<bookmark>` must be inside `<voice>`: `<voice name='...'><bookmark mark='id'/>{text}</voice>`. Azure error 1007 ("RootSpeak should not contain node [bookmark]") fires if bookmark is placed as direct child of `<speak>`.
 - **Azure SDK EventSignal:** `synthesizer.bookmark_reached` uses `.connect(cb)` and `.disconnect_all()` — there is NO `.disconnect(cb)` method. Calling `disconnect(cb)` in a `finally` block raises `AttributeError` even when synthesis succeeded, causing every batch call to fall back to per-item.
@@ -633,8 +691,10 @@ Output: AssetManifest_merged.{locale}.json   (patched with rewritten text)
 - Lines below THRESHOLD get `direction="expand"`; lines above THRESHOLD_HIGH get `direction="shorten"`
 - Calls `claude -p --model sonnet` in batches of BATCH_SIZE (default 15) with 300 s timeout per batch
 - MUST unset `CLAUDECODE` env var before spawning the claude subprocess (nested sessions are blocked)
-- After Claude rewrites, patches both merged and draft manifests, then calls `gen_tts_cloud.py --asset-id` per patched item to re-synthesize; repeats up to MAX_ITERS (default 3)
+- After Claude rewrites, patches both merged and draft manifests, then calls `gen_tts_cloud.py --asset-id --force` per patched item to re-synthesize; repeats up to MAX_ITERS (default 3)
+- **`--force` is mandatory in re-synthesis calls:** without it, `gen_tts_cloud.py` skips existing WAVs unconditionally → every iteration measures the same unchanged duration → ratio never improves → loop runs MAX_ITERS with zero progress. The `--force` flag is passed explicitly by `resynthesize_items()`.
 - **Stale WAV guard in gen_tts_cloud.py --asset-id mode:** uses `all_manifest_ids` (all vo_items in the full manifest) for stale cleanup — NOT the single-item filtered set. This prevents `--asset-id` calls from deleting every other item's WAV.
+- **Timeline Lock interaction:** when locale is non-primary, the primary locale's shot durations floor the non-primary durations. If `polish_locale_vo` cannot converge (ratio stays outside [0.90, 1.10] after MAX_ITERS), the non-primary WAV will be truncated by the render — there is no error; the video just cuts the audio short within the shot.
 - Skipped entirely if locale == "en" or if EN WAV directory doesn't exist
 - Requires: stdlib only (claude CLI must be on PATH; AZURE_SPEECH_KEY needed for re-synthesis)
 
@@ -651,6 +711,20 @@ Output: AssetManifest_draft.{locale}.json  (adds start_sec, end_sec to vo_items[
 - Overflow handling: writes `background_overrides[]` with extended `duration_sec` + `_music_item.duration_sec` patches
 - **Must run BEFORE manifest_merge.py for accurate duck_intervals** (but run.sh runs it after; see ordering note below)
 - Requires: `pip install soundfile`
+
+**Sub-step [4b/8] — apply_music_plan.py** (per locale, skipped if NO_MUSIC=1)
+```
+Input:  projects/{slug}/episodes/{ep_id}/MusicPlan.json  (if confirmed via Music tab)
+        assets/music/{item_id}.wav  (clips from gen_music_clip)
+Output: assets/music/{item_id}_loop.wav  (looped clips to cover shot duration)
+        (also writes per-shot applied clips if overrides present)
+```
+- Preceded by a music review checkpoint: if MusicPlan.json exists → applies it;
+  if not → skips silently (music_items in shared manifest stay as-is)
+- `shot_overrides[].music_asset_id` may be a source stem (e.g. "djokovic_bg_climax")
+  rather than an existing item_id; apply_music_plan extracts a new clip from the source
+  MP3 in that case
+- Skipped entirely when `NO_MUSIC=1` env var is set
 
 **Sub-step [5/8] — resolve_assets.py** (per locale)
 ```
@@ -718,22 +792,45 @@ Output: renders/{locale}/youtube_dubbed.aac
 - Skipped for `en` locale (primary upload uses the video's own audio)
 - Requires: FFmpeg in PATH
 
-### CRITICAL ORDERING NOTE for Stage 10
-The sub-steps in run.sh run in this order within each locale:
+### CRITICAL ORDERING NOTE for Stage 9
+The sub-steps in run.sh run in this order (shared steps first, then per-locale loop):
 ```
-[1]  gen_music_clip    (shared, once)
-[2]  manifest_merge    ← runs BEFORE TTS
-[3]  gen_tts_cloud     ← generates WAVs
-[3b] polish_locale_vo  ← non-en only; rewrites short/long lines, re-synthesizes
-[4]  post_tts_analysis ← measures WAVs, writes start_sec/end_sec into locale manifest
-[5]  resolve_assets
-[6]  gen_render_plan
-[7]  render_video
-[8]  export_youtube_dubbed
+── SHARED (locale-free, run once) ─────────────────────────────────────────────
+[1/8]   gen_music_clip       ← || true (non-fatal)
+[1b/8]  music_prepare_loops  ← || true (non-fatal); auto-follows [1/8]
+
+── PER-LOCALE LOOP (repeats for each locale in ${LOCALES}) ────────────────────
+[2/8]   manifest_merge       ← runs BEFORE TTS; duck_intervals empty on first run
+[3/8]   gen_tts_cloud        ← generates WAVs; caches in assets/meta/tts_cache/
+[3b/8]  polish_locale_vo     ← non-primary locale only; rewrites out-of-ratio lines,
+                                re-synthesizes with gen_tts_cloud --asset-id --force
+[4/8]   post_tts_analysis    ← measures WAVs, writes start_sec/end_sec into draft manifest
+[4b/8]  music review checkpoint / apply_music_plan
+                             ← skipped if NO_MUSIC=1; applies MusicPlan.json if confirmed
+[5/8]   resolve_assets       ← maps stock media URLs; needs selections.json if media was chosen
+[6/8]   gen_render_plan      ← deterministic; replaced p_9.txt LLM stage
+[7/8]   render_video         ← per-shot MKV → concat → output.mp4 + output.srt
+[8/8]   export_youtube_dubbed← non-primary locale only; extracts AAC audio track
 ```
-manifest_merge [2] runs BEFORE TTS [3] and post_tts_analysis [4], meaning on the first run,
-`start_sec`/`end_sec` don't exist yet and duck_intervals will be empty.
-This is intentional — re-running from step [2] after step [4] produces accurate duck intervals.
+
+**Web UI step numbers ([1]–[11])** displayed in the progress panel:
+```
+[1]  gen_music_clip      (shared)
+[2]  gen_characters      (shared, web-UI-triggered via /run_step)
+[3]  gen_backgrounds     (shared, web-UI-triggered via /run_step)
+[4]  gen_sfx             (shared, web-UI-triggered via /run_step)
+[5]  manifest_merge      (per locale)
+[6]  gen_tts             (per locale — includes polish_locale_vo [3b/8] internally)
+[7]  post_tts            (per locale)
+[8]  apply_music_plan    (per locale — corresponds to [4b/8])
+[9]  resolve_assets      (per locale)
+[10] gen_render_plan     (per locale)
+[11] render_video        (per locale — export_youtube_dubbed [8/8] follows automatically)
+```
+
+manifest_merge [2/8] runs BEFORE TTS [3/8] and post_tts_analysis [4/8], meaning on the
+first run `start_sec`/`end_sec` don't exist yet and duck_intervals will be empty.
+This is intentional — re-running from step [2/8] after step [4/8] produces accurate duck intervals.
 
 ---
 
@@ -938,7 +1035,7 @@ API endpoints: `GET /list_projects`, `GET /pipeline_status`
 - JS: `mediaConfirm()` calls `_mediaReleaseAllConnections()` first (drains lazy queue, aborts all actively-downloading videos) to guarantee a free HTTP connection slot
 - Then `POST /api/media_confirm` with `{slug, ep_id, batch_id, version, selections}`
 - Server writes `{ep_dir}/assets/media/selections.json`
-- This file is read by run.sh (Stage 5 hard stop check) and `resolve_assets.py` (Stage 10[5])
+- This file is read by run.sh (Stage 5 hard stop check) and `resolve_assets.py` (Stage 9[5/8])
 
 ### CLIP scoring modes
 
@@ -953,7 +1050,7 @@ API endpoints: `GET /list_projects`, `GET /pipeline_status`
 3. `MEDIA_API_KEY` must only be read from `os.environ` in the three proxy routes — do NOT add it to HTML, JS, or query params
 4. `{{MEDIA_SERVER_URL}}` replacement happens at HTML serve time in `do_GET` — must match the placeholder in the `<input>` value attribute
 5. Media tab JS polling (`setInterval`) continues running when user switches to other tabs (tabs are CSS visibility, not page navigation)
-6. `selections.json` must be written before Stage 10 `resolve_assets.py` runs — enforced by the Stage 5 hard stop
+6. `selections.json` must be written before Stage 9 `resolve_assets.py` runs — enforced by the Stage 5 hard stop
 7. **HTTP/1.1 6-connection-per-host limit**: video thumbnails, SSE streams, pollers, and fetch requests all share the same 6-slot budget. `_mediaLazyLoad` throttle MUST stay ≤ 2 concurrent. `_mediaStopVid()` MUST NOT re-set `vid.src` after clearing it (per HTML spec, setting `.src` triggers the load algorithm and opens a new HTTP connection even with `preload='none'`). `_mediaReleaseAllConnections()` MUST be called before `mediaConfirm()` POST.
 8. **`/api/serve_media_file` streams in 256 KB chunks** — does NOT read entire files into RAM. `BrokenPipeError`/`ConnectionResetError` are caught and silently ignored (browser closes connection after getting metadata).
 
@@ -969,7 +1066,7 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/stream` | `ep_dir`, `from`, `to`, `test`, `profile`, `no_music` | SSE stream of run.sh output |
 | `/run_step` | `step`, `slug`, `ep_id`, `locale`, `profile`, `no_music` | SSE stream of single post-proc step |
 | `/run_locale` | `slug`, `ep_id`, `locale`, `profile`, `no_music`, `purge` (default=1), `from` | SSE stream of all post-proc steps for locale |
-| `/run_stage10` | `slug`, `ep_id`, `from`, `profile`, `no_music`, `purge` (default=1) | SSE stream of shared Stage 10 steps then all-locale steps |
+| `/run_stage10` | `slug`, `ep_id`, `from`, `profile`, `no_music`, `purge` (default=1) | SSE stream of shared Stage 9 steps then all-locale steps (endpoint name kept for backward compat) |
 | `/list_projects` | — | `[{slug, episodes: [{id, files:[]}]}]` |
 | `/pipeline_status` | `slug`, `ep_id` | `{story_file, voice_cast, stages: {N: bool}}` |
 | `/view_artifact` | `slug`, `ep_id`, `artifact` | JSON content of named artifact file |
@@ -1100,7 +1197,7 @@ The `/stream` endpoint passes `ep_dir=` to `run.sh` as arg 1.
 **The old interface** (`./run.sh story_N.txt`) **is completely removed.**
 Any code that passes `story_file=` to `/stream`, or that builds a command like `./run.sh story_N.txt`, is broken.
 
-### 8. Stage 10 script execution order within a locale
+### 8. Stage 9 script execution order within a locale
 Must NOT be reordered:
 ```
 [1]  gen_music_clip    (shared) → writes assets/music/*.wav
@@ -1211,19 +1308,19 @@ When `STORY_FORMAT` is changed or a new format is added, these are ALL the place
 | `p_5.txt` (Stage 5) | `continuous_narration`/`documentary`/`ssml_narration`: `character_packs: []` — no character images |
 | `run.sh` (Stage 6) | ALL formats: scaffold+fill pattern (`canon_diff_chars.py` → `p_6.txt` → `validate_scaffold.py`) |
 | `run.sh` (Stage 7) | ALL formats: `canon_merge.py` replaces LLM (deterministic) |
-| `run.sh` (Stage 9) | ALL formats: skipped entirely (replaced by `gen_render_plan.py` in Stage 10) |
+| `run.sh` (p_9.txt) | ALL formats: p_9.txt skipped entirely (replaced by `gen_render_plan.py` in Stage 9[6/8]) |
 | `p_8.txt` (Stage 8) | `continuous_narration`/`documentary`: skip character_packs translation, translate narrator VO only |
-| `run.sh` (Stage 10[3]) | `ssml_narration`: passes `--ssml-narration --ssml-inner --voice-cast` to `gen_tts_cloud.py` for wrapper-rebuild + inner passthrough |
-| `run.sh` (Stage 10[3b]) | `ssml_narration`: polish_locale_vo SKIPPED (authored SSML timing is immutable) |
-| `run.sh` (Stage 10[8]) | `ssml_narration`: export_youtube_dubbed SKIPPED |
+| `run.sh` (Stage 9[3/8]) | `ssml_narration`: passes `--ssml-narration --ssml-inner --voice-cast` to `gen_tts_cloud.py` for wrapper-rebuild + inner passthrough |
+| `run.sh` (Stage 9[3b/8]) | `ssml_narration`: polish_locale_vo SKIPPED (authored SSML timing is immutable) |
+| `run.sh` (Stage 9[8/8]) | `ssml_narration`: export_youtube_dubbed SKIPPED |
 | `test_server.py` | `ssml_narration`: `/api/infer_story_meta` detects SSML tags via regex, returns `story_format: "ssml_narration"` without haiku call |
-| `render_video.py` (Stage 10[7]) | `n_chars == 0` case (no character compositing) — handled at line ~401 |
+| `render_video.py` (Stage 9[7/8]) | `n_chars == 0` case (no character compositing) — handled at line ~401 |
 
 **STORY_FORMAT flows via:**
 `meta.json.story_format` → `pipeline_vars.sh export STORY_FORMAT=...` → `run.sh sed {{STORY_FORMAT}}` → prompt content → LLM behavior
 
 **ssml_narration special flow:**
-`meta.json.story_format=ssml_narration` → `pipeline_vars.sh` stub (written by createEpisode) → `run.sh` sources stub → Stage 0 dispatches to `ssml_preprocess.py` → stages 1,2,3,8 skipped → stages 4,5,6,7,9 run with LLM → Stage 10 uses `--ssml-narration` mode for TTS
+`meta.json.story_format=ssml_narration` → `pipeline_vars.sh` stub (written by createEpisode) → `run.sh` sources stub → Stage 0 dispatches to `ssml_preprocess.py` → stages 1,2,3,8 skipped → stages 4,5,6,7 run with LLM → Stage 9 uses `--ssml-narration` mode for TTS
 
 ---
 
@@ -1241,12 +1338,12 @@ Run through the relevant items after any modification:
 
 ### After modifying run.sh
 - [ ] All 11 placeholders still substituted ({{EPISODE_DIR}} through {{STORY_FORMAT}})
-- [ ] Stage 10 sub-step sequence preserved (music→merge→tts→post_tts→resolve→renderplan→render→export)
+- [ ] Stage 9 sub-step sequence preserved: [1/8] gen_music_clip → [1b/8] music_prepare_loops → (per-locale:) [2/8] manifest_merge → [3/8] gen_tts → [3b/8] polish_locale_vo → [4/8] post_tts → [4b/8] apply_music_plan → [5/8] resolve_assets → [6/8] gen_render_plan → [7/8] render_video → [8/8] export_youtube_dubbed
 - [ ] Stage 0 re-source of `pipeline_vars.sh` still happens after Stage 0 completes
 - [ ] `run.sh` still accepts `<ep_dir> [from] [to]` signature (not story_file)
 - [ ] `fill_and_run` still passes `--dangerously-skip-permissions --no-session-persistence` to claude
 - [ ] Hard stop after Stage 5 checks `${EP_DIR}/assets/media/selections.json` — exits 0 if missing, continues if present
-- [ ] Hard stop after Stage 9 always exits 0 when `TO_STAGE > 9` — unconditional pre-render pause
+- [ ] Hard stop after Stage 8 always exits 0 when `TO_STAGE > 8` — unconditional pre-render pause
 - [ ] `resolve_assets.py` call passes `--selections <path>` when `selections.json` exists on disk
 - [ ] `ssml_narration` stage skip guard: stages 1, 2, 3, 8 print `⏭ skipped` and `continue` when `STORY_FORMAT=ssml_narration`
 - [ ] `ssml_narration` Stage 0 branch: calls `ssml_preprocess.py "$EP_DIR"` instead of `fill_and_run 0`
@@ -1257,14 +1354,14 @@ Run through the relevant items after any modification:
 - [ ] Stage 5 narration guard: scaffold+fill (`gen_manifest_structure.py` → `fill_and_run "5_c"` → `validate_scaffold.py` → `gen_vo_manifest.py` per-locale) for narration formats, `fill_and_run 5` for episodic/monologue
 - [ ] Stage 6: always scaffold+fill (`canon_diff_chars.py` → `fill_and_run "6"` → `validate_scaffold.py`)
 - [ ] Stage 7: always calls `canon_merge.py "$EP_DIR"` (no `fill_and_run`)
-- [ ] Stage 9: always skipped (checkpoint preserved inside skip block when `TO_STAGE > 9`)
+- [ ] p_9.txt: always skipped (run.sh skips LLM Stage 9; gen_render_plan.py handles it in Stage 9[6/8])
 - [ ] `get_stage_model()` strips `_c` suffix via `n_base="${n%%_*}"` before case match — `"5_c"` → `"5"` → sonnet
 - [ ] `stage_label()` strips `_c` suffix, appends " (creative fill)" when suffix is `_c`
 - [ ] `validate_scaffold.py` after `fill_and_run "4_c"` and `fill_and_run "6"`: strict mode (exit 1 on drift); after `fill_and_run "5_c"`: `--warn-only` (warn on drift)
 - [ ] `code_dir` variable set before the stage loop: `code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"`
-- [ ] `ssml_narration` Stage 10[3]: passes `--ssml-narration --ssml-inner --voice-cast` to `gen_tts_cloud.py`
-- [ ] `ssml_narration` Stage 10[3b]: polish_locale_vo skipped (guard: `STORY_FORMAT != ssml_narration`)
-- [ ] `ssml_narration` Stage 10[8]: export_youtube_dubbed skipped (guard: `STORY_FORMAT != ssml_narration`)
+- [ ] `ssml_narration` Stage 9[3/8]: passes `--ssml-narration --ssml-inner --voice-cast` to `gen_tts_cloud.py`
+- [ ] `ssml_narration` Stage 9[3b/8]: polish_locale_vo skipped (guard: `STORY_FORMAT != ssml_narration`)
+- [ ] `ssml_narration` Stage 9[8/8]: export_youtube_dubbed skipped (guard: `STORY_FORMAT != ssml_narration`)
 
 ### After modifying test_server.py
 - [ ] `/stream` passes `ep_dir=` (not `story_file=`) to `run.sh`
@@ -1291,7 +1388,7 @@ Run through the relevant items after any modification:
 - [ ] **Video lazy-load concurrency** `_mediaLazyLoad` limit is 2 (NOT 4) — leaves headroom for SSE + pollers within the 6-connection HTTP/1.1 budget
 - [ ] `/api/infer_story_meta` SSML pre-check: regex `<(?:speak|voice|prosody|mstts:)\b` on first 2000 chars → returns `story_format: "ssml_narration"` without haiku call; `else:` branch runs normal haiku extraction
 
-### After modifying any Stage 10 Python script
+### After modifying any Stage 9 Python script
 - [ ] CLI arg names unchanged (`--manifest`, `--shared`, `--locale`, `--media`, `--plan`, `--out`, etc.)
 - [ ] Output file paths still match what the next script reads as input
 - [ ] `_build_step_cmd()` in `test_server.py` references correct script name and args
@@ -1301,6 +1398,11 @@ Run through the relevant items after any modification:
 - [ ] `gen_tts_cloud.py` stale WAV cleanup: uses `all_manifest_ids` (built from **full** `manifest.get("vo_items", [])`, NOT from the `--asset-id`-filtered `items` list) so that single-item re-synthesis calls do not delete WAVs belonging to other items
 - [ ] `gen_tts_cloud.py` `--ssml-narration` mode: requires `--ssml-inner` and `--voice-cast`; calls `run_ssml_narration()` which rebuilds SSML wrappers from VoiceCast.json + passes through ssml_inner.xml content; injects `auto_sent_NNN` bookmarks; remaps to vo_item_ids; archives `_full_narration.wav`
 - [ ] `gen_tts_cloud.py` `build_ssml_narration()`: bookmark placement inside `<voice>` block (same rule as `build_episode_ssml()`); prosody/style wrappers rebuilt from VoiceCast.json narrator entry
+- [ ] `gen_tts_cloud.py` `run()` returns a **3-tuple** `(results, chunks_meta, stats)` — do NOT unpack as 2-tuple; `main()` does `results, chunks_meta, stats = run(...)` and calls `_append_tts_audit_log(meta_dir, locale, stats)` after
+- [ ] `gen_tts_cloud.py` synthesis mode: `_select_synthesis_mode()` returns one of `batch_bookmark` / `chunk_alignment` / `per_item_legacy`; HD/Dragon voices always → `chunk_alignment`; single `--asset-id` always → `per_item_legacy`
+- [ ] `gen_tts_cloud.py` `--force` flag: skips the existing-WAV guard in `_synthesise_per_item()`; required for `polish_locale_vo` re-synthesis to converge
+- [ ] `gen_tts_cloud.py` `tts_audit_log.json`: appended after every `main()` run; accumulates `total_raw_chars`/`total_ssml_chars`/`total_api_calls` per locale; skipped items appear as `status: "skipped"` (NOT `"success"`)
+- [ ] `polish_locale_vo.py` `resynthesize_items()`: passes `--force` to every `gen_tts_cloud.py --asset-id` call — without it the loop never converges
 - [ ] `gen_render_plan.py` VO completeness guard: loop over `merged.get("vo_items")` injecting missing IDs still present before `build_shot()` calls
 - [ ] `gen_render_plan.py` VO_TAIL_MS = 2000 still applied as floor: `duration_ms = max(duration_ms, vo_end_ms + VO_TAIL_MS)`
 - [ ] `gen_render_plan.py` `build_media_map()` composite key: per-shot items keyed as `"bg_id:shot_id"`, background-level items keyed as `"bg_id"`, multi-segment items (with `segment_index`) grouped in `"_segments"` dict
@@ -1392,8 +1494,8 @@ Run through the relevant items after any modification:
 4. **VoiceCast.json is project-level, not episode-level**
    Lives at `projects/{slug}/VoiceCast.json`, shared across all episodes of a series for voice consistency. Stage 0 appends new characters but never overwrites existing ones.
 
-5. **Stage 9 (p_9.txt) is superseded**
-   `gen_render_plan.py` (Stage 10[6]) does the same job deterministically. `p_9.txt` still exists as a fallback but is not the primary path in the current pipeline.
+5. **p_9.txt (old LLM Stage 9) is superseded**
+   `gen_render_plan.py` (Stage 9[6/8]) does the same job deterministically. `p_9.txt` still exists on disk but is NOT invoked by run.sh in the current pipeline. The stage formerly called "Stage 10" is now referred to as "Stage 9".
 
 6. **manifest_merge runs before TTS (by design)**
    First run produces approximate duck_intervals (since WAV durations aren't known yet). Re-running steps [2]–[6] after step [4] gives accurate timing. The web UI `/run_locale` endpoint supports re-running individual steps.
@@ -1411,7 +1513,7 @@ Run through the relevant items after any modification:
 10. **WAV item_id names are tied to scene_id values in the Script**
     Stage 4 assigns `vo_item_ids = ["vo-{scene_id}-{NNN}"]` where `{scene_id}` is the slug from
     `Script.json scenes[].scene_id`. If Stage 3 is re-run and scene IDs change (e.g. old slug
-    `scene_001_river_night` → new slug `s1`), Stage 5 and all subsequent Stage 10 re-runs produce
+    `scene_001_river_night` → new slug `s1`), Stage 5 and all subsequent Stage 9 re-runs produce
     WAVs with the new naming scheme. Old WAV files from the previous run (e.g.
     `vo-scene_001_river_night-001.wav`) remain on disk alongside the new ones (`vo-s1-001.wav`).
     `resolve_assets.py` may find and silently reuse stale WAVs if it happens to probe an old
@@ -1428,10 +1530,10 @@ Run through the relevant items after any modification:
 
 11. **Purge-before-run is the safe default**
     Any time Stages 1–8 are re-run (which may change scene IDs, VO text, speaker assignments, or
-    locale manifests), Stage 10 caches become stale. The 🗑 Purge Cache checkbox defaults to ON so
-    that clicking "Run Locale" or "Run Stage 10" always rebuilds from scratch. Users who know the
+    locale manifests), Stage 9 caches become stale. The 🗑 Purge Cache checkbox defaults to ON so
+    that clicking "Run Locale" or "Run Stage 9" always rebuilds from scratch. Users who know the
     caches are still valid (e.g. only re-running render_video after a render-plan tweak) can
-    uncheck it to reuse existing WAVs and images. Re-running Stage 10 without purging after
+    uncheck it to reuse existing WAVs and images. Re-running Stage 9 without purging after
     Stage 3 changed is the most common source of "wrong audio" or "stale image" bugs.
 
 14. **Media API keys are server-side only**
@@ -1452,9 +1554,9 @@ Run through the relevant items after any modification:
     and is self-contained — does NOT depend on `requirements_linux.txt`.
 
 17. **Pipeline hard stops use exit 0, not exit 1**
-    The Stage 5 and Stage 9 checkpoints are clean pauses, not errors. `exit 0` ensures the pipeline
+    The Stage 5 and Stage 8 checkpoints are clean pauses, not errors. `exit 0` ensures the pipeline
     reports success to the caller. The user manually resumes with `./run.sh <ep_dir> 6` or
-    `./run.sh <ep_dir> 10`. Do NOT change to `exit 1` — that would cause the SSE stream to report
+    `./run.sh <ep_dir> 9`. Do NOT change to `exit 1` — that would cause the SSE stream to report
     a failure to the web UI.
 
 18. **Media server requirements are self-contained**
@@ -1521,7 +1623,7 @@ Run through the relevant items after any modification:
 24. **Stages 1, 7, 9 are fully deterministic (no LLM)**
     - Stage 1: `canon_check.py` — reads canon.json, prints structured report
     - Stage 7: `canon_merge.py` — merges canon_diff.json into canon.json
-    - Stage 9: skipped entirely (replaced by `gen_render_plan.py` in Stage 10)
+    - p_9.txt: skipped entirely (replaced by `gen_render_plan.py` in Stage 9[6/8])
     These stages have zero creative content — their outputs are fully determined by their inputs.
     Do NOT revert to LLM (`fill_and_run`) for these stages.
 
@@ -1547,6 +1649,31 @@ Run through the relevant items after any modification:
     function that finds the earliest STALE or MISSING stage by comparing input/output timestamps.
     This eliminates an LLM call that added latency and occasionally produced wrong stage numbers.
     Do NOT revert to the haiku call.
+
+28. **SSE subprocess lifetime is decoupled from browser connection**
+    Early versions of `/stream`, `/run_locale`, and `/run_stage10` killed the subprocess in a
+    `finally` block when the SSE connection dropped (`BrokenPipeError` → `proc.terminate()` → SIGTERM).
+    Long-running Stage 9 steps (e.g. polish_locale_vo re-synthesizing 47 items via Azure, ~3 min)
+    were silently killed when the browser disconnected or the connection timed out.
+
+    Current architecture uses a persistent log-file per job:
+    - `_jobs: dict` — registry of active/completed jobs keyed by `job_key`
+    - `_job_log_path(job_key)` — stable tmp path `{TMPDIR}/vc_job_{job_key}.log`
+    - `_launch_stream_job(job_key, cmd, env, client)` — starts subprocess in background thread; streams stdout/stderr to log file tagged `O\t{line}` (stdout) / `E\t{line}` (stderr) / `D\t{rc}` (done sentinel)
+    - `_launch_fn_job(job_key, target_fn)` — runs a Python function in a background thread; `target_fn` receives a `write_log(tag, line)` callback
+    - `_tail_log_to_sse(wfile, log_path)` — tails the log file from the start, streams tagged lines to SSE; stops on `D\t` sentinel or on `BrokenPipeError`; reconnecting client replays the full log from the beginning
+
+    The subprocess/function runs to completion regardless of browser connection state. A reconnecting
+    client gets the full log replayed. Do NOT revert to the try/finally proc.terminate() pattern.
+
+29. **`gen_music_clip.py` failure is non-fatal (run.sh `|| true`)**
+    Stage 9[1/8] calls `gen_music_clip.py --manifest AssetManifest_draft.shared.json`. Projects
+    without a shared manifest (e.g. documentaries that never reached Stage 5) would cause `sys.exit(1)`
+    inside gen_music_clip.py, aborting the entire Stage 9 run before any TTS work began.
+    `run.sh` now appends `|| true` to this call — the same treatment already applied to
+    `music_prepare_loops.py`. Stage 9 continues even if music clip generation fails; the music
+    steps simply produce no clips, and render_video falls back to silence for music tracks.
+    Do NOT remove the `|| true` — projects without music should not fail Stage 9.
 
 22. **ssml_narration skips stages 1, 2, 3, 8 — by design**
     These stages are unnecessary because:

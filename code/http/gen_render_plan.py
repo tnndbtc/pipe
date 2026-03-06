@@ -99,6 +99,60 @@ def build_media_map(media: dict) -> dict[str, dict]:
     return out
 
 
+def load_tts_chunk_info(episode_dir: Path) -> dict[str, dict]:
+    """Load TTS chunk info keyed by item_id for chunk-WAV deferred slicing.
+
+    Reads gen_tts_cloud_results.json (per-item chunk offsets) and
+    gen_tts_cloud_chunks.json (chunk → WAV path mapping) from the episode's
+    assets/meta/ directory.
+
+    Returns {item_id: {"chunk_wav": str, "start_sec": float, "end_sec": float}}
+    for items that have a chunk WAV available.  Returns {} if files are absent.
+    """
+    meta_dir = episode_dir / "assets" / "meta"
+    results_path = meta_dir / "gen_tts_cloud_results.json"
+    chunks_path  = meta_dir / "gen_tts_cloud_chunks.json"
+
+    if not results_path.exists() or not chunks_path.exists():
+        return {}
+
+    try:
+        results = json.load(results_path.open(encoding="utf-8"))
+        chunks  = json.load(chunks_path.open(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    # Build chunk_id → chunk_wav lookup
+    chunk_wav_by_id: dict[int, str] = {}
+    for ch in chunks:
+        cid = ch.get("chunk_id")
+        wav = ch.get("chunk_wav", "")
+        if cid is not None and wav:
+            from pathlib import Path as _Path
+            if _Path(wav).exists():
+                chunk_wav_by_id[cid] = wav
+
+    # Build item_id → chunk info
+    info: dict[str, dict] = {}
+    for r in results:
+        iid        = r.get("item_id", "")
+        chunk_id   = r.get("source_chunk")
+        start_sec  = r.get("chunk_offset_start_sec")
+        end_sec    = r.get("chunk_offset_end_sec")
+        if not iid or chunk_id is None or start_sec is None or end_sec is None:
+            continue
+        chunk_wav = chunk_wav_by_id.get(chunk_id, "")
+        if not chunk_wav:
+            continue
+        info[iid] = {
+            "chunk_wav": chunk_wav,
+            "start_sec": float(start_sec),
+            "end_sec":   float(end_sec),
+        }
+
+    return info
+
+
 def build_vo_map(merged: dict) -> dict[str, dict]:
     """Build {item_id → vo_item} from merged manifest for timing lookups."""
     return {v["item_id"]: v for v in merged.get("vo_items", [])}
@@ -180,13 +234,14 @@ def build_final(
 # ── RenderPlan shot builder ───────────────────────────────────────────────────
 
 def build_shot(
-    shot:         dict,
-    media_map:    dict[str, dict],
-    vo_map:       dict[str, dict],
-    music_map:    dict[str, dict],
-    override_map: dict[str, float],
-    story_format: str = "episodic",
-    ref_dur_map:  dict | None = None,
+    shot:           dict,
+    media_map:      dict[str, dict],
+    vo_map:         dict[str, dict],
+    music_map:      dict[str, dict],
+    override_map:   dict[str, float],
+    story_format:   str = "episodic",
+    ref_dur_map:    dict | None = None,
+    tts_chunk_info: dict | None = None,
 ) -> dict:
     """
     Build one RenderedShot entry for RenderPlan.shots[].
@@ -312,13 +367,22 @@ def build_shot(
         item_pause_ms = vo_item.get("pause_after_ms", INTER_LINE_PAUSE_MS)
         cursor_ms = timeline_out_ms + item_pause_ms
 
-        vo_lines.append({
+        vo_line: dict = {
             "line_id":         vid,
             "speaker_id":      speaker,
             "text":            text,
             "timeline_in_ms":  timeline_in_ms,
             "timeline_out_ms": timeline_out_ms,
-        })
+        }
+        # Phase 3, Step 10: chunk-WAV deferred slicing fields (optional)
+        chunk_info = (tts_chunk_info or {}).get(vid)
+        if chunk_info:
+            from pathlib import Path as _Path
+            chunk_wav = chunk_info["chunk_wav"]
+            vo_line["audio_chunk_uri"]  = _Path(chunk_wav).as_uri()
+            vo_line["audio_start_sec"]  = chunk_info["start_sec"]
+            vo_line["audio_end_sec"]    = chunk_info["end_sec"]
+        vo_lines.append(vo_line)
 
     # Ensure at least VO_TAIL_MS of silence after the last spoken line.
     # When VO overflows the ShotList estimate this also prevents the shot from
@@ -430,13 +494,14 @@ def build_shot(
 # ── RenderPlan builder ────────────────────────────────────────────────────────
 
 def build_plan(
-    merged:       dict,
-    media:        dict,
-    final:        dict,
-    shotlist:     dict,
-    profile:      str,
-    story_format: str = "episodic",
-    ref_dur_map:  dict | None = None,
+    merged:        dict,
+    media:         dict,
+    final:         dict,
+    shotlist:      dict,
+    profile:       str,
+    story_format:  str = "episodic",
+    ref_dur_map:   dict | None = None,
+    episode_dir:   Path | None = None,
 ) -> dict:
     """Build the full RenderPlan document."""
     project_id = merged.get("project_id", "")
@@ -447,6 +512,14 @@ def build_plan(
     vo_map       = build_vo_map(merged)
     music_map    = build_music_map(merged)
     override_map = build_override_map(merged)
+
+    # Phase 3, Step 10: load TTS chunk info for deferred WAV slicing
+    # Determines which vo_lines can reference chunk WAVs instead of sentence WAVs.
+    tts_chunk_info: dict = {}
+    if episode_dir is not None:
+        tts_chunk_info = load_tts_chunk_info(episode_dir)
+        if tts_chunk_info:
+            print(f"  [CHUNK-DEFERRED] {len(tts_chunk_info)} items have chunk WAV references")
 
     # resolved_assets: flat view of AssetManifest_final.items[]
     resolved_assets = [
@@ -487,7 +560,7 @@ def build_plan(
     # shots: one RenderedShot per ShotList shot
     shots = [
         build_shot(shot, media_map, vo_map, music_map, override_map,
-                   story_format, ref_dur_map or {})
+                   story_format, ref_dur_map or {}, tts_chunk_info)
         for shot in shotlist.get("shots", [])
     ]
 
@@ -676,7 +749,7 @@ def main() -> None:
 
     # Build RenderPlan
     plan = build_plan(merged, media, final, shotlist, args.profile, args.story_format,
-                      ref_dur_map or None)
+                      ref_dur_map or None, episode_dir=episode_dir)
     save_json(plan, out_plan)
 
     n_shots   = len(plan["shots"])
