@@ -3659,16 +3659,20 @@ placeholder="Enter your story here"></textarea>
       { n:0, key:'stage_0'  }, { n:1,  key:'stage_1'  }, { n:2,  key:'stage_2'  },
       { n:3, key:'stage_3'  }, { n:4,  key:'stage_4'  }, { n:5,  key:'stage_5'  },
       { n:6, key:'stage_6'  }, { n:7,  key:'stage_7'  }, { n:8,  key:'stage_8'  },
-      { n:9, key:'stage_9'  }, { n:10, key:'stage_10' },
+      { n:10, key:'stage_10' },
     ];
-    const stageLabels = [
-      'Cast voices & pipeline vars',  'Check story consistency',
-      'Write episode direction',       'Write script & dialogue',
-      'Break script into shots',       'List required assets',
-      'Identify new story facts',      'Update story memory',
-      'Translate & adapt locales',     'Finalize assets & render plan',
-      'Merge assets & render video',
-    ];
+    const stageLabels = {
+      0:  'Cast voices & pipeline vars',
+      1:  'Check story consistency',
+      2:  'Write episode direction',
+      3:  'Write script & dialogue',
+      4:  'Break script into shots',
+      5:  'List required assets',
+      6:  'Identify new story facts',
+      7:  'Update story memory',
+      8:  'Translate & adapt locales',
+      10: 'Merge assets & render video',
+    };
     // Sequential done propagation (mirrors renderPipelineStatus)
     let maxDone = -1;
     llmKeys.forEach(({ n, key }) => { if ((stagesMap[key] || {}).done) maxDone = n; });
@@ -3686,7 +3690,7 @@ placeholder="Enter your story here"></textarea>
                    msg: '▶  Re-run Stage 10  —  ' + (status.no_music ? 'no music' : 'music confirmed') + ', resuming from step [5/8] resolve assets → render' };
         }
         return { state: 'action',
-                 msg: '▶  Run ' + n + ' → 10  —  Stage ' + n + ': ' + stageLabels[n] };
+                 msg: '▶  Run ' + n + ' → 10  —  Stage ' + n + ': ' + (stageLabels[n] || '') };
       }
     }
     return { state: 'done', msg: '✅  All stages complete — episode is ready.' };
@@ -5287,24 +5291,44 @@ placeholder="Enter your story here"></textarea>
 
   // ── Stage command detail strings ─────────────────────────────────────────────
   const stageDetail = {
-    0:  'claude -p --model haiku  prompts/p_0.txt\n→ reads meta.json + story.txt, casts voices per locale\n→ writes VoiceCast.json, overwrites pipeline_vars.sh (adds VOICE_CAST_FILE)',
-    1:  'claude -p --model haiku  prompts/p_1.txt\n→ checks world & character consistency (no output file)',
+    0:  'canon_check.py / gen_pipeline_vars.py + voice_cast_narrator.py  (narration formats)\n' +
+        'claude -p --model haiku  prompts/p_0.txt  (episodic/monologue)\n' +
+        '→ reads meta.json + story.txt, casts voices per locale\n' +
+        '→ writes VoiceCast.json, pipeline_vars.sh',
+    1:  'canon_check.py  (deterministic — no LLM)\n→ reads canon.json, prints consistency report',
     2:  'claude -p --model sonnet prompts/p_2.txt\n→ writes StoryPrompt.json',
-    3:  'claude -p --model sonnet prompts/p_3.txt\n→ writes Script.json',
-    4:  'claude -p --model sonnet prompts/p_4.txt\n→ writes ShotList.json',
-    5:  'claude -p --model sonnet prompts/p_5.txt\n→ writes AssetManifest_draft.shared.json + AssetManifest_draft.en.json',
-    6:  'claude -p --model haiku  prompts/p_6.txt\n→ writes canon_diff.json',
-    7:  'claude -p --model haiku  prompts/p_7.txt\n→ updates canon.json',
-    8:  'claude -p --model sonnet prompts/p_8.txt\n→ writes StoryPrompt.{locale}.json per non-en locale',
-    9:  'claude -p --model haiku  prompts/p_9.txt\n→ writes AssetManifest_final.json, RenderPlan.json',
-    10: '[1/7] gen_music_clip.py     --manifest AssetManifest_draft.shared.json\n' +
-        '      (skips gracefully if no music resources found)\n' +
-        '[2/7] manifest_merge.py     --shared ... --locale ...{locale}.json  (per locale)\n' +
-        '[3/7] gen_tts_cloud.py      --manifest AssetManifest_merged.{locale}.json\n' +
-        '[4/7] post_tts_analysis.py  --manifest AssetManifest_merged.{locale}.json\n' +
-        '[5/7] resolve_assets.py     --manifest ... --out AssetManifest.media.{locale}.json\n' +
-        '[6/7] gen_render_plan.py    --manifest ... --media ...\n' +
-        '[7/7] render_video.py       --plan RenderPlan.{locale}.json  →  renders/{locale}/output.mp4',
+    3:  'gen_script_narration.py  (narration formats, deterministic)\n' +
+        'claude -p --model sonnet prompts/p_3.txt  (episodic/monologue)\n' +
+        '→ writes Script.json',
+    4:  'gen_shotlist_scaffold.py → claude prompts/p_4_c.txt  (narration formats)\n' +
+        'claude -p --model sonnet prompts/p_4.txt  (episodic/monologue)\n' +
+        '→ writes ShotList.json',
+    5:  'gen_manifest_structure.py → claude prompts/p_5_c.txt → gen_vo_manifest.py  (narration)\n' +
+        'claude -p --model sonnet prompts/p_5.txt  (episodic/monologue)\n' +
+        '→ writes AssetManifest_draft.shared.json + AssetManifest_draft.{locale}.json',
+    6:  'canon_diff_chars.py → claude prompts/p_6.txt → validate_scaffold.py\n→ writes canon_diff.json',
+    7:  'canon_merge.py  (deterministic — no LLM)\n→ updates projects/{slug}/canon.json',
+    8:  'claude -p --model sonnet prompts/p_8.txt\n→ writes AssetManifest_draft.{locale}.json per non-en locale',
+    10: '── Shared steps (once, all locales) ──\n' +
+        '[ 1] gen_music_clip.py      --manifest AssetManifest_draft.shared.json\n' +
+        '[ 2] gen_characters.py      --manifest AssetManifest_draft.shared.json\n' +
+        '[ 3] gen_backgrounds.py     --manifest AssetManifest_draft.shared.json\n' +
+        '[ 4] gen_sfx.py             --manifest AssetManifest_draft.shared.json\n' +
+        '── Per-locale steps ──\n' +
+        '[ 5] manifest_merge.py      --shared ...shared.json --locale ...{locale}.json\n' +
+        '                            --out AssetManifest_merged.{locale}.json\n' +
+        '[ 6] gen_tts_cloud.py       --manifest AssetManifest_merged.{locale}.json\n' +
+        '[ 7] post_tts_analysis.py   --manifest AssetManifest_merged.{locale}.json\n' +
+        '[ 8] apply_music_plan.py    --plan assets/music/MusicPlan.json\n' +
+        '                            --manifest AssetManifest_merged.{locale}.json\n' +
+        '     (skipped if Music disabled; ⏸ pauses to wait for Music tab confirm if plan missing)\n' +
+        '[ 9] resolve_assets.py      --manifest AssetManifest_merged.{locale}.json\n' +
+        '                            --out AssetManifest.media.{locale}.json\n' +
+        '[10] gen_render_plan.py     --manifest AssetManifest_merged.{locale}.json\n' +
+        '                            --media AssetManifest.media.{locale}.json\n' +
+        '                            → RenderPlan.{locale}.json\n' +
+        '[11] render_video.py        --plan RenderPlan.{locale}.json --locale {locale}\n' +
+        '                            --out renders/{locale}/  →  renders/{locale}/output.mp4',
   };
 
   // ── syncRunTabFromPipeline(slug, epId, storyFile, voiceCast) ─────────────────
@@ -5440,7 +5464,7 @@ placeholder="Enter your story here"></textarea>
 
     const hdr = document.createElement('div');
     hdr.className = 'pipe-section-hdr';
-    hdr.innerHTML = '⚡ Pipeline — <span style="font-family:var(--mono);color:var(--dim);font-weight:400">run.sh  stages 0 – 10</span>';
+    hdr.innerHTML = '⚡ Pipeline — <span style="font-family:var(--mono);color:var(--dim);font-weight:400">run.sh  stages 0 – 8, 10</span>';
     section.appendChild(hdr);
     body.appendChild(section);
 
@@ -5454,7 +5478,6 @@ placeholder="Enter your story here"></textarea>
       { n:6,  label:'Stage 6  — Identify new story facts to record',          key:'stage_6'  },
       { n:7,  label:'Stage 7  — Update story memory (world canon)',           key:'stage_7'  },
       { n:8,  label:'Stage 8  — Translate & adapt for each language',         key:'stage_8'  },
-      { n:9,  label:'Stage 9  — Finalize assets & build render plan',         key:'stage_9'  },
       { n:10, label:'Stage 10 — Merge assets & generate video (output.mp4)',  key:'stage_10' },
     ];
 
@@ -5533,15 +5556,22 @@ placeholder="Enter your story here"></textarea>
       detailEl.className = 'pipe-detail';
 
       if (n === 10) {
-        // Stage 10: numbered Run / Run→7 buttons matching the main stage button style
+        // Stage 10: numbered Run / Run→11 buttons matching the main stage button style
         const LOCALE_STEPS = [
-          { num: 5, step: 'manifest_merge',    label: '5 — merge'       },
-          { num: 6, step: 'gen_tts',           label: '6 — tts'         },
-          { num: 7, step: 'post_tts',          label: '7 — post_tts'    },
-          { num: 8, step: 'apply_music_plan',  label: '8 — music plan'  },
-          { num: 9, step: 'resolve_assets',    label: '9 — resolve'     },
-          { num: 10, step: 'gen_render_plan',  label: '10 — plan'       },
-          { num: 11, step: 'render_video',     label: '11 — render'     },
+          { num: 5,  step: 'manifest_merge',   label: '5 — merge',
+            cmd: 'manifest_merge.py --shared AssetManifest_draft.shared.json --locale AssetManifest_draft.{locale}.json --out AssetManifest_merged.{locale}.json' },
+          { num: 6,  step: 'gen_tts',          label: '6 — tts',
+            cmd: 'gen_tts_cloud.py --manifest AssetManifest_merged.{locale}.json' },
+          { num: 7,  step: 'post_tts',         label: '7 — post_tts',
+            cmd: 'post_tts_analysis.py --manifest AssetManifest_merged.{locale}.json' },
+          { num: 8,  step: 'apply_music_plan', label: '8 — music plan',
+            cmd: 'apply_music_plan.py --plan assets/music/MusicPlan.json --manifest AssetManifest_merged.{locale}.json  (skipped if Music disabled)' },
+          { num: 9,  step: 'resolve_assets',   label: '9 — resolve',
+            cmd: 'resolve_assets.py --manifest AssetManifest_merged.{locale}.json --out AssetManifest.media.{locale}.json' },
+          { num: 10, step: 'gen_render_plan',  label: '10 — plan',
+            cmd: 'gen_render_plan.py --manifest AssetManifest_merged.{locale}.json --media AssetManifest.media.{locale}.json  → RenderPlan.{locale}.json' },
+          { num: 11, step: 'render_video',     label: '11 — render',
+            cmd: 'render_video.py --plan RenderPlan.{locale}.json --locale {locale} --out renders/{locale}/  → renders/{locale}/output.mp4' },
         ];
         const localeStepsMap = status.locale_steps || {};
         const sharedStepsMap = status.shared_steps || {};
@@ -5562,11 +5592,15 @@ placeholder="Enter your story here"></textarea>
 
         // ── Steps 1–4: shared (no locale) ───────────────────────────────────
         [
-          { num: 1, step: 'gen_music_clip',  label: '1 — gen_music_clip'  },
-          { num: 2, step: 'gen_characters',  label: '2 — gen_characters'  },
-          { num: 3, step: 'gen_backgrounds', label: '3 — gen_backgrounds' },
-          { num: 4, step: 'gen_sfx',         label: '4 — gen_sfx'         },
-        ].forEach(({ num, step, label }) => {
+          { num: 1, step: 'gen_music_clip',  label: '1 — gen_music_clip',
+            cmd: 'gen_music_clip.py --manifest AssetManifest_draft.shared.json' },
+          { num: 2, step: 'gen_characters',  label: '2 — gen_characters',
+            cmd: 'gen_characters.py --manifest AssetManifest_draft.shared.json' },
+          { num: 3, step: 'gen_backgrounds', label: '3 — gen_backgrounds',
+            cmd: 'gen_backgrounds.py --manifest AssetManifest_draft.shared.json' },
+          { num: 4, step: 'gen_sfx',         label: '4 — gen_sfx',
+            cmd: 'gen_sfx.py --manifest AssetManifest_draft.shared.json' },
+        ].forEach(({ num, step, label, cmd }) => {
           const done = (sharedStepsMap[step] || {}).done || false;
           const row = document.createElement('div');
           row.className = 'pipe-substep-row';
@@ -5576,14 +5610,16 @@ placeholder="Enter your story here"></textarea>
           const nameSpan = document.createElement('span');
           nameSpan.className = 'pipe-substep-locale';
           nameSpan.style.cssText = 'min-width:0;flex:1';
-          nameSpan.textContent = label;
+          nameSpan.innerHTML = escHtml(label) +
+            '<br><span style="font-family:var(--mono);font-size:0.72em;color:var(--dim)">' +
+            escHtml(cmd) + '</span>';
           row.appendChild(nameSpan);
           const btnWrap = document.createElement('span');
           btnWrap.style.cssText = 'margin-left:auto;display:flex;gap:4px;flex-shrink:0';
           btnWrap.appendChild(makeRunBtn('Run ' + num, () =>
             startPipeStep({ type: 'post', step,
                             slug: pipeEpSlug, ep_id: pipeEpId, locale: '' })));
-          btnWrap.appendChild(makeRunBtn('Run ' + num + '→10', () =>
+          btnWrap.appendChild(makeRunBtn('Run ' + num + '→11', () =>
             startPipeStep({ type: 'shared_chain', from_step: step,
                             slug: pipeEpSlug, ep_id: pipeEpId })));
           row.appendChild(btnWrap);
@@ -5594,7 +5630,7 @@ placeholder="Enter your story here"></textarea>
         if (locales.length === 0) {
           const hint = document.createElement('div');
           hint.style.cssText = 'color:var(--dim);font-size:0.78em;padding:4px 0';
-          hint.textContent = 'No locales yet — run Stage 9 first.';
+          hint.textContent = 'No locales yet — run Stages 0–8 first.';
           detailEl.appendChild(hint);
         } else {
           locales.forEach(locale => {
@@ -5605,7 +5641,7 @@ placeholder="Enter your story here"></textarea>
             detailEl.appendChild(hdr);
 
             const lsteps = localeStepsMap[locale] || {};
-            LOCALE_STEPS.forEach(({ num, step, label }) => {
+            LOCALE_STEPS.forEach(({ num, step, label, cmd }) => {
               const done = (lsteps[step] || {}).done || false;
               const row  = document.createElement('div');
               row.className = 'pipe-substep-row';
@@ -5613,20 +5649,23 @@ placeholder="Enter your story here"></textarea>
               row.appendChild(Object.assign(document.createElement('span'), {
                 innerHTML: statusIcon(done), style: 'flex-shrink:0'
               }));
-              // step label (flex:1 to push buttons right)
-              row.appendChild(Object.assign(document.createElement('span'), {
-                className: 'pipe-substep-locale',
-                style: 'min-width:0;flex:1',
-                textContent: label
-              }));
+              // step label + sample command
+              const cmdDisplay = cmd.replace(/\{locale\}/g, locale);
+              const nameSpan = document.createElement('span');
+              nameSpan.className = 'pipe-substep-locale';
+              nameSpan.style.cssText = 'min-width:0;flex:1';
+              nameSpan.innerHTML = escHtml(label) +
+                '<br><span style="font-family:var(--mono);font-size:0.72em;color:var(--dim)">' +
+                escHtml(cmdDisplay) + '</span>';
+              row.appendChild(nameSpan);
               // Run N  [Run N→7]  — right-aligned
               const btnWrap = document.createElement('span');
               btnWrap.style.cssText = 'margin-left:auto;display:flex;gap:4px;flex-shrink:0';
               btnWrap.appendChild(makeRunBtn('Run ' + num, () =>
                 startPipeStep({ type: 'post', step,
                                 slug: pipeEpSlug, ep_id: pipeEpId, locale })));
-              if (num < 10) {
-                btnWrap.appendChild(makeRunBtn('Run ' + num + '→10', () =>
+              if (num < 11) {
+                btnWrap.appendChild(makeRunBtn('Run ' + num + '→11', () =>
                   startPipeStep({ type: 'locale', from_step: step,
                                   slug: pipeEpSlug, ep_id: pipeEpId, locale })));
               }
