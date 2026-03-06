@@ -78,14 +78,15 @@ export STORY_FILE
 #
 get_stage_model() {
   local n="$1"
+  local n_base="${n%%_*}"   # strip _c suffix: "5_c" → "5", "4" → "4"
   # Global override
   if [[ -n "${MODEL:-}" ]]; then echo "$MODEL"; return; fi
   # Per-stage override  (e.g.  STAGE_MODEL_3=opus)
   local var="STAGE_MODEL_${n}"
   local val="${!var:-}"
   if [[ -n "$val" ]]; then echo "$val"; return; fi
-  # Defaults
-  case "$n" in
+  # Defaults (match on base stage number so "5_c" → sonnet, "6_c" → haiku)
+  case "$n_base" in
     2|3|4|5|8) echo "sonnet" ;;   # creative writing / complex JSON derivation
     *)          echo "haiku"  ;;   # variable extraction, diffs, assembly
   esac
@@ -93,20 +94,27 @@ get_stage_model() {
 
 # ── Stage human-readable labels ────────────────────────────────────────
 stage_label() {
-  case "$1" in
-    0) echo "Extract story variables & set up project" ;;
-    1) echo "Check story & world consistency" ;;
-    2) echo "Write episode direction (StoryPrompt)" ;;
-    3) echo "Write script & character dialogue" ;;
-    4) echo "Break script into visual shots (ShotList)" ;;
-    5) echo "List required assets — images, voice, music" ;;
-    6) echo "Identify new story facts to record" ;;
-    7) echo "Update story memory (world canon)" ;;
-    8) echo "Translate & adapt for each language" ;;
-    9) echo "Finalize assets & build render plan" ;;
-   10) echo "Merge assets, render video & export dubbed audio" ;;
-    *) echo "Stage $1" ;;
+  local n_base="${1%%_*}"    # strip _c suffix: "5_c" → "5"
+  local n_suffix="${1#"$n_base"}"  # "" or "_c"
+  local _label
+  case "$n_base" in
+    0)  _label="Extract story variables & set up project" ;;
+    1)  _label="Check story & world consistency" ;;
+    2)  _label="Write episode direction (StoryPrompt)" ;;
+    3)  _label="Write script & character dialogue" ;;
+    4)  _label="Break script into visual shots (ShotList)" ;;
+    5)  _label="List required assets — images, voice, music" ;;
+    6)  _label="Identify new story facts to record" ;;
+    7)  _label="Update story memory (world canon)" ;;
+    8)  _label="Translate & adapt for each language" ;;
+    9)  _label="Finalize assets & build render plan" ;;
+   10)  _label="Merge assets, render video & export dubbed audio" ;;
+    *)  _label="Stage $n_base" ;;
   esac
+  if [[ "$n_suffix" == "_c" ]]; then
+    _label="${_label} (creative fill)"
+  fi
+  echo "$_label"
 }
 
 # ── Stage 10: asset merge + render (no LLM) ────────────────────────────
@@ -202,31 +210,35 @@ run_stage_10() {
     python3 "${code_dir}/post_tts_analysis.py" \
       --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
 
-    # ── [4b/8] Music review checkpoint ─────────────────────────────────────
+    # ── [4b/8] Music review checkpoint (only when Music is enabled) ─────────
     _music_plan="${EP_DIR}/assets/music/MusicPlan.json"
-    if [[ ! -f "$_music_plan" ]]; then
-      echo "  [4b/8] Generating music review pack…"
-      python3 "${code_dir}/music_review_pack.py" \
-        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" || true
-      echo ""
-      echo "══════════════════════════════════════════════════════════════"
-      echo "  ⏸  PAUSED — Music review required"
-      echo ""
-      echo "  Music review pack is ready. Open the VC editor:"
-      echo "    1. Go to the 🎵 Music tab"
-      echo "    2. Review the timeline and preview audio"
-      echo "    3. Adjust loop selections and shot overrides"
-      echo "    4. Click ✔ Confirm to save MusicPlan.json"
-      echo ""
-      echo "  Then resume the pipeline:"
-      echo "    ./run.sh ${EP_DIR} 10"
-      echo "══════════════════════════════════════════════════════════════"
-      exit 0
+    if [[ -z "${NO_MUSIC:-}" ]]; then
+      if [[ ! -f "$_music_plan" ]]; then
+        echo "  [4b/8] Generating music review pack…"
+        python3 "${code_dir}/music_review_pack.py" \
+          --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" || true
+        echo ""
+        echo "══════════════════════════════════════════════════════════════"
+        echo "  ⏸  PAUSED — Music review required"
+        echo ""
+        echo "  Music review pack is ready. Open the VC editor:"
+        echo "    1. Go to the 🎵 Music tab"
+        echo "    2. Review the timeline and preview audio"
+        echo "    3. Adjust loop selections and shot overrides"
+        echo "    4. Click ✔ Confirm to save MusicPlan.json"
+        echo ""
+        echo "  Then resume the pipeline:"
+        echo "    ./run.sh ${EP_DIR} 10"
+        echo "══════════════════════════════════════════════════════════════"
+        exit 0
+      else
+        echo "  [4b/8] Applying music plan overrides…"
+        python3 "${code_dir}/apply_music_plan.py" \
+          --plan "$_music_plan" \
+          --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+      fi
     else
-      echo "  [4b/8] Applying music plan overrides…"
-      python3 "${code_dir}/apply_music_plan.py" \
-        --plan "$_music_plan" \
-        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+      echo "  [4b/8] Music disabled — skipping music review checkpoint"
     fi
 
     echo "  [5/8] Resolving asset file paths…"
@@ -432,16 +444,33 @@ echo "  PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
 
 # ── Stage 0: read story, write pipeline_vars.sh ────────────────────────
 if [[ "$FROM_STAGE" -le 0 && "$TO_STAGE" -ge 0 ]]; then
-  if [[ "${STORY_FORMAT:-}" == "ssml_narration" ]]; then
+  _s0_code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
+  _s0_fmt="${STORY_FORMAT:-}"
+  if [[ "$_s0_fmt" == "ssml_narration" ]]; then
     echo ""
     echo "══════════════════════════════════════════════════════════════"
     echo "  STAGE 0/10  —  Extract story variables & set up project"
     echo "  mode: ssml_preprocess.py (ssml_narration format)"
     echo "══════════════════════════════════════════════════════════════"
-    python3 "$(cd "$(dirname "$0")" && pwd)/code/http/ssml_preprocess.py" "$EP_DIR"
+    python3 "${_s0_code_dir}/ssml_preprocess.py" "$EP_DIR"
     echo ""
     echo "✓ Stage 0 complete (ssml_preprocess.py)"
+  elif [[ "$_s0_fmt" == "continuous_narration" || \
+          "$_s0_fmt" == "illustrated_narration" || \
+          "$_s0_fmt" == "documentary" || \
+          "$_s0_fmt" == "monologue" ]]; then
+    # P4: narrator-only formats — deterministic vars + voice selection
+    echo ""
+    echo "══════════════════════════════════════════════════════════════"
+    echo "  STAGE 0/10  —  Extract story variables & set up project"
+    echo "  mode: gen_pipeline_vars.py + voice_cast_narrator.py (${_s0_fmt})"
+    echo "══════════════════════════════════════════════════════════════"
+    python3 "${_s0_code_dir}/gen_pipeline_vars.py" "$EP_DIR"
+    python3 "${_s0_code_dir}/voice_cast_narrator.py" "$EP_DIR"
+    echo ""
+    echo "✓ Stage 0 complete (gen_pipeline_vars.py + voice_cast_narrator.py)"
   else
+    # episodic: LLM (character identification + voice matching)
     fill_and_run 0
   fi
 
@@ -455,6 +484,9 @@ if [[ "$FROM_STAGE" -le 0 && "$TO_STAGE" -ge 0 ]]; then
   echo "  Vars file  : $VARS_FILE"
 fi
 
+# ── Helper: path to deterministic Python scripts ──────────────────────
+code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
+
 # ── Stages 1–9 (LLM) ─────────────────────────────────────────────────
 for N in 1 2 3 4 5 6 7 8 9; do
   if [[ "$N" -ge "$FROM_STAGE" && "$N" -le "$TO_STAGE" ]]; then
@@ -463,6 +495,168 @@ for N in 1 2 3 4 5 6 7 8 9; do
     if [[ "${STORY_FORMAT:-}" == "ssml_narration" && ( "$N" -eq 1 || "$N" -eq 2 || "$N" -eq 3 || "$N" -eq 8 || "$N" -eq 9 ) ]]; then
       echo ""
       echo "  ⏭  Stage $N skipped (ssml_narration)"
+      continue
+    fi
+
+    # ── P1+FIX3: Stage 9 skip (replaced by gen_render_plan.py) ─────────
+    # Also preserves the pre-render checkpoint pause (FIX3).
+    if [[ "$N" -eq 9 ]]; then
+      echo ""
+      echo "  ⏭  Stage 9 skipped (replaced by gen_render_plan.py in Stage 10)"
+      if [[ "$TO_STAGE" -gt 9 ]]; then
+        _sel_file="${EP_DIR}/assets/media/selections.json"
+        echo ""
+        echo "══════════════════════════════════════════════════════════════"
+        echo "  ⏸  PAUSED after Stage 9 — ready to render"
+        echo ""
+        echo "  All LLM stages complete.  Before rendering, verify:"
+        if [[ ! -f "$_sel_file" ]]; then
+          echo "    ⚠  No media selections found — Stage 10 will lack stock media"
+        else
+          echo "    ✓  Media selections: $_sel_file"
+        fi
+        echo "    •  AssetManifest_final.*   — asset manifest"
+        echo "    •  RenderPlan.*            — render plan"
+        echo ""
+        echo "  To render:"
+        echo "    ./run.sh ${EP_DIR} 10"
+        echo "══════════════════════════════════════════════════════════════"
+        exit 0
+      fi
+      continue
+    fi
+
+    # ── P2: Stage 1 → canon_check.py (deterministic) ────────────────────
+    if [[ "$N" -eq 1 ]]; then
+      echo ""
+      echo "══════════════════════════════════════════════════════════════"
+      echo "  STAGE 1/10  —  Check story & world consistency"
+      echo "  mode: canon_check.py (deterministic)"
+      echo "══════════════════════════════════════════════════════════════"
+      _log1="stage_logs/${PROJECT_SLUG:-unknown}.${EPISODE_ID:-unknown}.stage_1.log"
+      python3 "${code_dir}/canon_check.py" "$EP_DIR" 2>&1 | tee "$_log1"
+      echo ""
+      echo "✓ Stage 1 complete  →  log: ${_log1}"
+      continue
+    fi
+
+    # ── P7: Stage 3 → gen_script_narration.py for narration formats ─────
+    if [[ "$N" -eq 3 ]]; then
+      _fmt3="${STORY_FORMAT:-episodic}"
+      if [[ "$_fmt3" == "continuous_narration" || \
+            "$_fmt3" == "illustrated_narration" || \
+            "$_fmt3" == "documentary" ]]; then
+        echo ""
+        echo "══════════════════════════════════════════════════════════════"
+        echo "  STAGE 3/10  —  Write script & character dialogue"
+        echo "  mode: gen_script_narration.py (deterministic, ${_fmt3})"
+        echo "══════════════════════════════════════════════════════════════"
+        _log3="stage_logs/${PROJECT_SLUG:-unknown}.${EPISODE_ID:-unknown}.stage_3.log"
+        python3 "${code_dir}/gen_script_narration.py" "$EP_DIR" 2>&1 | tee "$_log3"
+        echo ""
+        echo "✓ Stage 3 complete (gen_script_narration.py)  →  log: ${_log3}"
+        continue
+      fi
+    fi
+
+    # ── P3: Stage 7 → canon_merge.py (deterministic) ────────────────────
+    if [[ "$N" -eq 7 ]]; then
+      echo ""
+      echo "══════════════════════════════════════════════════════════════"
+      echo "  STAGE 7/10  —  Update story memory (world canon)"
+      echo "  mode: canon_merge.py (deterministic)"
+      echo "══════════════════════════════════════════════════════════════"
+      _log7="stage_logs/${PROJECT_SLUG:-unknown}.${EPISODE_ID:-unknown}.stage_7.log"
+      python3 "${code_dir}/canon_merge.py" "$EP_DIR" 2>&1 | tee "$_log7"
+      echo ""
+      echo "✓ Stage 7 complete (canon_merge.py)  →  log: ${_log7}"
+      continue
+    fi
+
+    # ── P9: Stage 6 → canon_diff_chars.py + LLM narrative fill ─────────
+    if [[ "$N" -eq 6 ]]; then
+      python3 "${code_dir}/canon_diff_chars.py" "$EP_DIR"
+      fill_and_run "6"
+      # FIX2: validate scaffold fidelity (no residual __FILL__, no drift)
+      python3 "${code_dir}/validate_scaffold.py" \
+        --scaffold "${EP_DIR}/canon_diff_partial.json" \
+        --output   "${EP_DIR}/canon_diff.json"
+      continue
+    fi
+
+    # ── P8: Stage 4 → scaffold + creative fill for narration formats ─────
+    if [[ "$N" -eq 4 ]]; then
+      _fmt4="${STORY_FORMAT:-episodic}"
+      if [[ "$_fmt4" == "continuous_narration" || \
+            "$_fmt4" == "illustrated_narration" || \
+            "$_fmt4" == "documentary"           || \
+            "$_fmt4" == "ssml_narration" ]]; then
+        python3 "${code_dir}/gen_shotlist_scaffold.py" "$EP_DIR"
+        fill_and_run "4_c"
+        # FIX2: validate scaffold fidelity (no residual __FILL__, no drift)
+        python3 "${code_dir}/validate_scaffold.py" \
+          --scaffold "${EP_DIR}/ShotList_scaffold.json" \
+          --output   "${EP_DIR}/ShotList.json"
+        continue
+      fi
+      # episodic / monologue: fall through to fill_and_run below
+    fi
+
+    # ── P6: Stage 5 → scaffold + creative fill (narration) or LLM (episodic)
+    # Handles the media selection checkpoint for both paths.
+    if [[ "$N" -eq 5 ]]; then
+      _fmt5="${STORY_FORMAT:-episodic}"
+      if [[ "$_fmt5" == "continuous_narration" || \
+            "$_fmt5" == "illustrated_narration" || \
+            "$_fmt5" == "documentary"           || \
+            "$_fmt5" == "ssml_narration" ]]; then
+        # Narration: deterministic scaffold → creative fill → locale VO manifests
+        python3 "${code_dir}/gen_manifest_structure.py" "$EP_DIR"
+        fill_and_run "5_c"
+        # FIX2: check for residual __FILL__ tokens in output (same-file pattern)
+        python3 "${code_dir}/validate_scaffold.py" \
+          --scaffold "${EP_DIR}/AssetManifest_draft.shared.json" \
+          --output   "${EP_DIR}/AssetManifest_draft.shared.json" \
+          --warn-only
+        # Generate per-locale VO manifests deterministically
+        IFS=',' read -ra _s5_locales <<< "${LOCALES:-en}"
+        for _s5_raw in "${_s5_locales[@]}"; do
+          _s5_locale="$(echo "$_s5_raw" | tr -d ' ')"
+          [[ -z "$_s5_locale" ]] && continue
+          echo "  [5] Generating VO manifest for locale: ${_s5_locale}…"
+          python3 "${code_dir}/gen_vo_manifest.py" \
+            --script    "${EP_DIR}/Script.json" \
+            --shotlist  "${EP_DIR}/ShotList.json" \
+            --voice-cast "projects/${PROJECT_SLUG}/VoiceCast.json" \
+            --locale    "$_s5_locale" \
+            --out       "${EP_DIR}/AssetManifest_draft.${_s5_locale}.json"
+        done
+      else
+        # Episodic / monologue: full LLM (shared + locale manifests)
+        fill_and_run "5"
+      fi
+      # Both paths: run the media selection checkpoint
+      if [[ "$TO_STAGE" -gt 5 ]]; then
+        _sel_file="${EP_DIR}/assets/media/selections.json"
+        if [[ ! -f "$_sel_file" ]]; then
+          echo ""
+          echo "══════════════════════════════════════════════════════════════"
+          echo "  ⏸  PAUSED after Stage 5 — media selections required"
+          echo ""
+          echo "  AssetManifest_draft is ready.  Open the VC editor:"
+          echo "    1. Go to the 🖼 Media tab"
+          echo "    2. Select this episode and click Search Media"
+          echo "    3. Choose images/videos for each background"
+          echo "    4. Click ✔ Confirm Selections"
+          echo ""
+          echo "  Then resume the pipeline:"
+          echo "    ./run.sh ${EP_DIR} 6"
+          echo "══════════════════════════════════════════════════════════════"
+          exit 0
+        else
+          echo "  ✓ Media selections found: $_sel_file"
+        fi
+      fi
       continue
     fi
 

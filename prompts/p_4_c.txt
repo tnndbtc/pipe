@@ -1,0 +1,145 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 4-C — ShotList creative fill (narration formats)
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}     →  e.g. "s01e02"
+#     {{STORY_FORMAT}}   →  e.g. "continuous_narration", "documentary", "ssml_narration"
+#
+# 📥 FILES READ (written by scaffold script + earlier stages):
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList_scaffold.json  (gen_shotlist_scaffold.py)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json             (Stage 3)
+#     projects/{{PROJECT_SLUG}}/VoiceCast.json                                  (Stage 0)
+#     contracts/schemas/ShotList.v1.json
+#
+# 📤 OUTPUT:
+#     • Stdout: progress + validation result  (web UI)
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_4_c_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 4 of a 10-stage AI narrative pipeline (creative fill phase).
+The scaffold script has pre-computed all structural fields. Your ONLY job:
+replace every `__FILL__` marker with the correct creative value.
+
+---
+
+## Context
+
+Episode ID    : {{EPISODE_ID}}
+Episode dir   : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Schema        : contracts/schemas/ShotList.v1.json
+Story format  : {{STORY_FORMAT}}
+
+Read these files before writing anything:
+  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList_scaffold.json
+  2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
+  3. projects/{{PROJECT_SLUG}}/VoiceCast.json
+  4. contracts/schemas/ShotList.v1.json
+
+---
+
+## Task
+
+Print: `▶ [4/9] Stage 4-C — ShotList creative fill  …`
+
+### Fields you MUST fill (marked `__FILL__` in the scaffold)
+
+**`background_id`**
+  Format: `"bg-<descriptive-slug>"` (e.g. `"bg-nile-at-dusk"`, `"bg-burial-chamber-torchlight"`)
+  Derive the slug from the VO text mood and implied setting of the shot.
+  Multiple shots may share the same `background_id` when the scene does not change.
+
+**`camera_framing`**
+  Choose exactly one:
+    `"close-up"` — tight on a detail or face; emotional intensity
+    `"medium"`   — balanced; most common for dialogue or narrative beats
+    `"wide"`     — reveals environment; used on scene openings or establishing moments
+    `"extreme-wide"` — epic scale; landscape, crowd, or geography shots
+
+**`camera_movement`**
+  Choose exactly one:
+    `"static"`    — locked-off; stability, contemplation
+    `"slow_push"` — gradual zoom-in; building tension or intimacy
+    `"tracking"`  — follows subject or pans through space
+    `"pan"`       — horizontal sweep; reveal or survey
+    `"tilt"`      — vertical sweep; scale or ascent/descent
+
+**`audio_intent.sfx_tags`**
+  Array of 1–3 short strings. Name the physical sound, not the emotion.
+  Examples: `"wind_gentle"`, `"footsteps_stone"`, `"crowd_murmur"`, `"fire_crackling"`
+  Use `[]` only when the shot is genuinely silent (rare).
+
+**`audio_intent.music_mood`**
+  One concise phrase describing the music direction, e.g. `"tense strings, low drone"`.
+  Set to `null` only when no underscoring is needed (e.g. an isolated SFX moment).
+
+**`audio_intent.sfx_item_ids`**
+  Derive from `sfx_tags` count. Format: `"sfx-{shot_id}-{NNN}"` (NNN zero-padded).
+  Must be parallel with `sfx_tags[]` — same count, same order.
+  Use `[]` when `sfx_tags` is `[]`.
+
+**`audio_intent.music_item_id`**
+  `"music-{shot_id}"` when `music_mood` is not null.
+  `null` when `music_mood` is null.
+
+### Fields you MUST NOT change
+
+Do NOT modify any of these fields — they are pre-computed and locked:
+  `shot_id`, `scene_id`, `duration_sec`, `characters`, `timing_lock_hash`,
+  `vo_item_ids`, `vo_speaker_id`, `vo_text`
+
+Do NOT add or remove shots.
+
+### Story format rules
+
+Story format: **{{STORY_FORMAT}}**
+
+For `continuous_narration`, `documentary`, and `ssml_narration`:
+  Every shot already has `"characters": []` — keep it that way.
+  Backgrounds should be atmospheric and cinematic — no character positions.
+  `camera_framing` and `camera_movement` describe the implied virtual camera,
+  not a real character movement.
+
+For `illustrated_narration`:
+  Characters appear in the scaffold. Background and camera choices should
+  support the illustrated visual style — evocative, composed, painterly.
+
+---
+
+## Output
+
+Write the COMPLETE ShotList.json (every shot fully filled, no `__FILL__` remaining) to:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
+
+Validate the artifact against contracts/schemas/ShotList.v1.json using
+Python + jsonschema.  If validation fails, fix and retry.
+
+Also run this VO completeness check and fix before writing if it fails:
+```python
+import json
+script   = json.load(open("projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json"))
+shotlist = json.load(open("projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json"))
+script_vo_count = sum(1 for s in script["scenes"] for a in s["actions"] if a["type"] == "dialogue")
+shotlist_vo_ids = [vid for shot in shotlist["shots"] for vid in shot["audio_intent"].get("vo_item_ids", [])]
+assert len(shotlist_vo_ids) == script_vo_count, (
+    f"VO count mismatch: ShotList has {len(shotlist_vo_ids)} IDs, "
+    f"Script has {script_vo_count} dialogue lines"
+)
+assert len(shotlist_vo_ids) == len(set(shotlist_vo_ids)), "Duplicate vo_item_ids found"
+print(f"VO completeness: {len(shotlist_vo_ids)}/{script_vo_count} ✓")
+```
+
+Print validation result:
+```
+── Stage 4-C validation ─────────────────────────────────────
+ShotList.json  →  VALID ✓
+Total duration : <N> seconds
+Shots          : <count>
+────────────────────────────────────────────────────────────
+```
+
+Print: `✓ [4/9] Stage 4-C — ShotList creative fill  done`

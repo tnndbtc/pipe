@@ -1531,13 +1531,7 @@ HTML = r"""<!DOCTYPE html>
     </select>
   </div>
     <textarea id="story" spellcheck="false"
-placeholder="Story title  : The Pharaoh Who Defied Death
-Project slug : the-pharaoh-who-defied-death
-Episode num  : 01
-Episode id   : s01e01
-Locales      : en, zh-Hans
-Genre        : Ancient Egyptian Epic / Mystery / Supernatural / Political Drama
-Direction    : …"></textarea>
+placeholder="Enter your story here"></textarea>
     <div id="vc-editor" style="display:none">
       <div id="vc-locale-tabs"></div>
       <div id="vc-cards"></div>
@@ -3681,6 +3675,16 @@ Direction    : …"></textarea>
     for (const { n, key } of llmKeys) {
       const done = n <= maxDone || ((stagesMap[key] || {}).done === true);
       if (!done) {
+        // Stage 10 paused at [4b/8] music review checkpoint? (only when music is enabled)
+        if (n === 10 && status.tts_done && !status.no_music && !status.music_plan_done) {
+          return { state: 'action',
+                   msg: '🎵  Music review needed — open the Music tab, confirm the plan, then re-run Stage 10' };
+        }
+        // Stage 10 music confirmed (or music disabled) but render not yet done?
+        if (n === 10 && status.tts_done && (status.no_music || status.music_plan_done)) {
+          return { state: 'action',
+                   msg: '▶  Re-run Stage 10  —  ' + (status.no_music ? 'no music' : 'music confirmed') + ', resuming from step [5/8] resolve assets → render' };
+        }
         return { state: 'action',
                  msg: '▶  Run ' + n + ' → 10  —  Stage ' + n + ': ' + stageLabels[n] };
       }
@@ -6538,8 +6542,10 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             "artifacts": [],
         },
         "stage_9": {
-            "done": check(ep("AssetManifest_final.json"), ep("RenderPlan.json")),
-            "artifacts": [ep_rel("AssetManifest_final.json"), ep_rel("RenderPlan.json")],
+            # Stage 9 (p_9.txt) is permanently skipped — gen_render_plan.py in Stage 10
+            # handles this deterministically. Mark as done so the Pipeline tab shows ✓.
+            "done": True,
+            "artifacts": [],
         },
         "stage_10": {
             # Done when every locale has a rendered output.mp4
@@ -6603,6 +6609,16 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "gen_sfx":         {"done": _any_files(os.path.join(_assets_dir, "sfx"),    ".wav")},
     }
 
+    # Music plan checkpoint: [4b/8] in Stage 10 — pipeline pauses here until user confirms
+    _music_plan_path = os.path.join(_assets_dir, "music", "MusicPlan.json")
+    music_plan_done = os.path.isfile(_music_plan_path)
+
+    # TTS done: at least one locale has WAV files (proxy for Stage 10 having started)
+    tts_done = any(
+        (locale_steps.get(loc) or {}).get("gen_tts", {}).get("done", False)
+        for loc in locales
+    )
+
     # story.txt is in the episode folder (written by Create Episode in web UI)
     story_file_detected = ""
     _ep_story = os.path.join(ep_dir, "story.txt")
@@ -6662,12 +6678,14 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "ready_dubbed": ready_dubbed,
         "story_file": story_file_detected,
         "voice_cast": voice_cast,
-        "title":        meta_title,
-        "genre":        meta_genre,
-        "story_format": meta_format,
-        "locales_str":  meta_locales_str,
-        "no_music":     meta_no_music,
-        "purge_cache":  meta_purge_cache,
+        "title":          meta_title,
+        "genre":          meta_genre,
+        "story_format":   meta_format,
+        "locales_str":    meta_locales_str,
+        "no_music":       meta_no_music,
+        "purge_cache":    meta_purge_cache,
+        "music_plan_done": music_plan_done,
+        "tts_done":        tts_done,
     }
 
 
@@ -7295,7 +7313,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # ── AI pipeline diagnostics — which stage to re-run? ──────────────────
         elif parsed.path == "/api/diagnose_pipeline":
-            import hashlib as _hl, tempfile as _tf, datetime as _dt
+            import hashlib as _hl
             params = parse_qs(parsed.query)
             slug   = unquote_plus(params.get("slug",  [""])[0]).strip()
             ep_id  = unquote_plus(params.get("ep_id", [""])[0]).strip()
@@ -7426,56 +7444,25 @@ class Handler(BaseHTTPRequestHandler):
                         with open(_sr_path, encoding="utf-8") as _fh:
                             _sr_tail = "".join(_fh.readlines()[-30:]).strip()
 
-                    _prompt = f"""You are a pipeline diagnostics tool for a 10-stage AI video pipeline.
+                    # P10: deterministic diagnose — linear scan for earliest STALE/MISSING stage.
+                    # Replaces haiku call; same output schema, zero LLM cost, instant.
+                    def _run_diagnose(dep_lines: list[tuple]) -> dict:
+                        """Find earliest STALE or MISSING stage; return diagnose result dict."""
+                        earliest = None
+                        reason   = "All stages fresh — no re-run needed."
+                        for (sn, slabel, sins, souts) in dep_lines:
+                            tag, desc = _dep_status(sins, souts)
+                            if tag in ("STALE", "MISSING"):
+                                earliest = sn
+                                reason = f"Stage {sn} ({slabel}) is {tag}" + (f": {desc}" if desc else "") + ". Re-run from here."
+                                break
+                        if earliest is not None:
+                            return {"from_stage": earliest, "to_stage": 10,
+                                    "reason": reason, "confidence": "high"}
+                        return {"from_stage": None, "to_stage": None,
+                                "reason": reason, "confidence": "high"}
 
-File dependency status for episode {slug}/{ep_id}
-(FRESH = outputs newer than inputs; STALE = an input was modified after the output was created; MISSING = output file does not exist):
-
-{_dep_summary}
-
-Locales: {', '.join(_locales) if _locales else 'en only'}
-
-Status report notes (last 30 lines):
-{_sr_tail if _sr_tail else '(empty)'}
-
-Rules:
-- A STALE or MISSING stage means it and all downstream stages must re-run.
-- Find the earliest such stage — that is from_stage; to_stage is always 10.
-- If all FRESH: from_stage = null, to_stage = null.
-- confidence: "high" if timestamps alone are conclusive; "medium" if notes affect the answer; "low" if ambiguous.
-
-Reply with JSON only — no text outside the object:
-{{"from_stage": <int or null>, "to_stage": <int or null>, "reason": "<one concise sentence>", "confidence": "high|medium|low"}}"""
-
-                    # Call claude haiku via CLI
-                    _result = {"error": "unknown"}
-                    try:
-                        with _tf.NamedTemporaryFile(
-                                mode="w", suffix=".txt", delete=False,
-                                encoding="utf-8") as _tmp:
-                            _tmp.write(_prompt)
-                            _tmp_path = _tmp.name
-                        _proc = subprocess.run(
-                            ["claude", "-p", _tmp_path,
-                             "--model", "haiku",
-                             "--dangerously-skip-permissions",
-                             "--no-session-persistence"],
-                            capture_output=True, timeout=45, cwd=PIPE_DIR,
-                        )
-                        os.unlink(_tmp_path)
-                        _raw = _proc.stdout.decode("utf-8", errors="replace").strip()
-                        _j0 = _raw.find("{"); _j1 = _raw.rfind("}") + 1
-                        if _j0 >= 0 and _j1 > _j0:
-                            _result = json.loads(_raw[_j0:_j1])
-                        else:
-                            _result = {"from_stage": None, "to_stage": None,
-                                       "reason": _raw[:300], "confidence": "low"}
-                    except subprocess.TimeoutExpired:
-                        _result = {"error": "claude timed out (>45s)"}
-                    except FileNotFoundError:
-                        _result = {"error": "claude CLI not found — check PATH"}
-                    except Exception as _exc:
-                        _result = {"error": str(_exc)}
+                    _result = _run_diagnose(_stage_deps)
 
                     # Store in cache (cap at 100 entries)
                     _diagnose_cache[_cache_key] = _result

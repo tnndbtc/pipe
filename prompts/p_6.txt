@@ -1,16 +1,15 @@
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 6 — Write canon_diff.json
+# STAGE 6-C — Canon diff narrative fill
 # ══════════════════════════════════════════════════════════════════════
 #
 # 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
 #     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
 #     {{EPISODE_ID}}     →  e.g. "s01e02"
 #
-# 📥 FILES READ (written by earlier stages):
-#     episode_direction.txt                                             (Stage 0)
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json    (Stage 3)
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json  (Stage 4)
-#     projects/{{PROJECT_SLUG}}/canon.json   (if it exists)
+# 📥 FILES READ (written by scaffold script + earlier stages):
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff_partial.json  (canon_diff_chars.py)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json              (Stage 3)
+#     projects/{{PROJECT_SLUG}}/canon.json                                        (if it exists)
 #     contracts/schemas/CanonDiff.v1.json
 #
 # 📤 OUTPUT:
@@ -18,12 +17,12 @@
 #     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
 #
 # ▶ Invoked by run.sh as:
-#     claude -p prompts/p_6_filled.txt
+#     claude -p prompts/p_6_c_filled.txt
 # ══════════════════════════════════════════════════════════════════════
 
-You are Stage 6 of a 10-stage AI narrative pipeline.
-Your ONLY job: produce a valid canon_diff.json that records every
-story fact introduced or changed in this episode.
+You are Stage 6 of a 10-stage AI narrative pipeline (creative fill phase — canon diff).
+The scaffold script has already populated `added_characters` and `updated_states`
+from Script.json cast. Your ONLY job: fill the three remaining narrative fields.
 
 ---
 
@@ -34,56 +33,69 @@ Episode dir : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
 Schema      : contracts/schemas/CanonDiff.v1.json
 
 Read these files before writing anything:
-  1. episode_direction.txt
+  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff_partial.json
   2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
-  3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
-  4. projects/{{PROJECT_SLUG}}/canon.json  (read if it exists)
-  5. contracts/schemas/CanonDiff.v1.json   — inspect all required fields
+  3. projects/{{PROJECT_SLUG}}/canon.json
+  4. contracts/schemas/CanonDiff.v1.json
 
 ---
 
 ## Task
 
-Print: `▶ [6/9] Stage 6 — Write canon_diff.json  …`
+Print: `▶ [6/9] Stage 6-C — Canon diff narrative fill  …`
 
-Produce canon_diff.json with this structure:
-```json
-{
-  "episode"              : "{{EPISODE_ID}}",
-  "added_characters"     : [
-    {
-      "id"            : "<char_id>",
-      "role"          : "<role>",
-      "status"        : "alive",
-      "location"      : "<location at episode end>",
-      "knows"         : [],
-      "relationships" : {}
-    }
-  ],
-  "updated_states"       : [],
-  "new_world_facts"      : ["<fact1>", "<fact2>"],
-  "new_unresolved_threads": ["<open question or thread>"],
-  "resolved_threads"     : []
-}
-```
+### Fields already populated — do NOT modify
 
-Rules:
-  • added_characters: only NEW characters introduced in this episode.
-  • updated_states: characters from prior canon whose status/location changed.
-  • new_world_facts: facts established this episode (locations, objects, rules).
-  • new_unresolved_threads: open questions or cliffhangers this episode creates.
-  • resolved_threads: threads closed this episode (reference by prior thread text).
-  • Do NOT contradict anything in canon.json (if it existed).
+`added_characters` and `updated_states` are pre-filled by the scaffold script.
+Copy them verbatim from `canon_diff_partial.json` into the output.
 
-Validate the artifact against contracts/schemas/CanonDiff.v1.json using
-Python + jsonschema.  If validation fails, fix and retry.
+### Fields you MUST fill
 
-Write the validated artifact to:
+**`new_world_facts`**
+  List of new, immutable facts about the world that this episode establishes.
+  Draw only from explicit dialogue and action text in Script.json — do not infer
+  or embellish. A fact is immutable if it cannot be undone by later episodes
+  (e.g. a death, a location revealed, an artefact named, a law declared).
+  Format: array of concise declarative strings.
+  Use `[]` if the episode establishes no new world facts.
+
+**`new_unresolved_threads`**
+  List of open plot questions or cliffhangers this episode introduces.
+  Each thread must be a question or incomplete situation that the audience is
+  left wondering about. Do not include threads that are resolved within the same
+  episode. Do not duplicate threads already present in `canon.json`.
+  Format: array of concise strings phrased as open questions or dangling states.
+  Use `[]` if no new threads are opened.
+
+**`resolved_threads`**
+  List of threads from `canon.unresolved_threads` (if canon.json exists) that
+  are definitively closed by this episode's events or revelations.
+  Reference threads by their exact text as it appears in canon.json.
+  Use `[]` if no prior threads are resolved, or if canon.json does not exist.
+
+### Rules
+
+  - Do NOT contradict anything in canon.json.
+  - Do NOT invent facts or threads not evidenced in Script.json dialogue.
+  - Do NOT leave any `__FILL__` markers in the output.
+
+---
+
+## Output
+
+Write the COMPLETE canon_diff.json (not the partial) to:
   projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
+
+The file must contain all five top-level fields with no `__FILL__` markers:
+  `episode`, `added_characters`, `updated_states`,
+  `new_world_facts`, `new_unresolved_threads`, `resolved_threads`
+
+Validate against contracts/schemas/CanonDiff.v1.json using Python + jsonschema.
+If validation fails, fix and retry.
 
 Print validation result:
 ```
-── Stage 6 validation ───────────────────────────────────────
+── Stage 6-C validation ─────────────────────────────────────
 canon_diff.json  →  VALID ✓
 added_characters      : <count>
 updated_states        : <count>
@@ -93,4 +105,4 @@ resolved_threads      : <count>
 ────────────────────────────────────────────────────────────
 ```
 
-Print: `✓ [6/9] Stage 6 — Write canon_diff.json  done`
+Print: `✓ [6/9] Stage 6-C — Canon diff narrative fill  done`

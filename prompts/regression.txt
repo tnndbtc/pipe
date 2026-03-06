@@ -241,8 +241,9 @@ Working directory: `PIPE_DIR` (repo root)
 ## PART 4 — PIPELINE STAGES 0–9 (LLM-driven)
 
 ### Stage 0 — Voice Casting
-**File:** `prompts/p_0.txt`
-**Model:** haiku
+**File:** `prompts/p_0.txt` (LLM path — episodic/monologue only)
+**Deterministic alternative:** `gen_pipeline_vars.py` + `voice_cast_narrator.py` for `continuous_narration`, `illustrated_narration`, `documentary`
+**Model:** haiku (episodic/monologue), none (narration formats)
 **Reads:**
 - `{{EPISODE_DIR}}/meta.json` — all pipeline variables (source of truth)
 - `{{EPISODE_DIR}}/story.txt` — for voice casting decisions only
@@ -263,6 +264,11 @@ Working directory: `PIPE_DIR` (repo root)
 - NEVER cast a `[MULTITALKER]` voice as a character voice — these are Azure pair-synthesis voices, not usable as individual character voices; they produce broken TTS output
 - Before selecting a voice for a locale, verify its `supports()` list includes that locale. Multilingual voices may list both en-* and zh-* in `supports()` and may be assigned to either locale. Never assign a voice to a locale not in its `supports()` list.
 
+**Narrator format deterministic path (`gen_pipeline_vars.py` + `voice_cast_narrator.py`):**
+- `gen_pipeline_vars.py` reads `meta.json`, writes full `pipeline_vars.sh` (all 13 vars, same format as LLM would produce)
+- `voice_cast_narrator.py` parses `prompts/azure_tts_styles.txt`, selects best narrator voice per locale (prefers `narration-professional` style), writes/appends to `VoiceCast.json`
+- Used for `continuous_narration`, `illustrated_narration`, `documentary` — formats that only need a narrator character
+
 **ssml_narration alternative:** When `STORY_FORMAT=ssml_narration`, Stage 0 runs `ssml_preprocess.py` instead of `fill_and_run 0`. This script:
 - Parses authored SSML from `story.txt` to extract voice params, sentence structure, and inner content
 - Writes: `Script.json`, `VoiceCast.json` (append-only), `ssml_inner.xml`, `pipeline_vars.sh` (full), `NarrationText.txt`
@@ -275,14 +281,16 @@ Working directory: `PIPE_DIR` (repo root)
 ---
 
 ### Stage 1 — Canon Check
-**File:** `prompts/p_1.txt`
-**Model:** haiku
+**File:** `prompts/p_1.txt` (LLM path — no longer used)
+**Deterministic replacement:** `canon_check.py` (Python, all formats)
+**Model:** none (deterministic)
 **Reads:** `projects/{{PROJECT_SLUG}}/canon.json` (may not exist for ep 1)
-**Writes:** `{{EPISODE_DIR}}/stage_1_check.txt`
+**Writes:** stdout report (captured to `stage_logs/{slug}.{ep_id}.stage_1.log` via `tee`)
 
 **Critical invariants:**
 - If canon.json doesn't exist: NOT an error; episode is treated as episode 1
 - Output is informational only; no downstream stage reads `stage_1_check.txt`
+- `canon_check.py` prints a structured report (character count, world facts, threads, episode summaries) — always > 100 bytes for log-based done-detection
 
 **Pipeline tab done detection (important):**
 Stage 1 done status in the Pipeline tab is determined by the **stage log file**, NOT by
@@ -316,8 +324,9 @@ in the Run tab.
 ---
 
 ### Stage 3 — Produce Script.json
-**File:** `prompts/p_3.txt`
-**Model:** sonnet
+**File:** `prompts/p_3.txt` (LLM path — episodic/monologue only)
+**Deterministic alternative:** `gen_script_narration.py` for `continuous_narration`, `illustrated_narration`, `documentary`
+**Model:** sonnet (episodic/monologue), none (narration formats)
 **Reads:** `episode_direction.txt`, `projects/{{PROJECT_SLUG}}/VoiceCast.json`, `{{EPISODE_DIR}}/StoryPrompt.json`, `contracts/schemas/Script.v1.json`
 **Writes:** `{{EPISODE_DIR}}/Script.json`
 
@@ -331,6 +340,13 @@ in the Run tab.
 - `scenes[].dialogue[].speaker_id` MUST match a `cast[].character_id`
 - Maximum 5 scenes
 
+**Narration format deterministic path (`gen_script_narration.py`):**
+- Reads `NarrationText.txt` + `pipeline_vars.sh` + VoiceCast.json
+- Splits prose into sentences, groups into scenes via paragraph breaks → section dividers → N/3 fallback
+- Produces a fully valid Script.v1.json with cast=[narrator], all actions type="dialogue", speaker_id="narrator"
+- location="unspecified", time_of_day="unspecified", generic scene_ids (e.g. `s01e02_sc01`)
+- Validates output against `contracts/schemas/Script.v1.json`
+
 **Story format rules ({{STORY_FORMAT}} affects ALL of these):**
 | Format | Script rule |
 |--------|-------------|
@@ -343,8 +359,9 @@ in the Run tab.
 ---
 
 ### Stage 4 — Produce ShotList.json
-**File:** `prompts/p_4.txt`
-**Model:** sonnet
+**File:** `prompts/p_4.txt` (LLM path — episodic/monologue), `prompts/p_4_c.txt` (creative fill — narration formats)
+**Deterministic scaffold:** `gen_shotlist_scaffold.py` for `continuous_narration`, `illustrated_narration`, `documentary`, `ssml_narration`
+**Model:** sonnet (all paths)
 **Reads:** `{{EPISODE_DIR}}/Script.json`, `projects/{{PROJECT_SLUG}}/VoiceCast.json`, `contracts/schemas/ShotList.v1.json`
 **Writes:** `{{EPISODE_DIR}}/ShotList.json`
 
@@ -368,6 +385,11 @@ in the Run tab.
 - `vo_item_ids` format: `"vo-{scene_id}-{NNN}"` where `{scene_id}` is the EXACT `scenes[].scene_id` from Script.json — do NOT invent a descriptive slug
 - **VO count validation (built into prompt):** after writing ShotList.json, p_4.txt runs a Python assertion: `total vo_item_ids across all shots == total dialogue actions in Script.json`. If it fails, the LLM must fix and retry before finishing Stage 4.
 
+**Narration format scaffold+fill path (`gen_shotlist_scaffold.py` → `p_4_c.txt` → `validate_scaffold.py`):**
+1. `gen_shotlist_scaffold.py` reads Script.json + VoiceCast.json, assigns all vo_item_ids, computes VO-anchored durations (with min 5s merge / max 45s split), computes `timing_lock_hash`, writes `ShotList_scaffold.json` with 7 creative `__FILL__` fields per shot (background_id, camera_framing, camera_movement, sfx_tags, music_mood, sfx_item_ids, music_item_id)
+2. `fill_and_run "4_c"` sends scaffold to LLM via `p_4_c.txt` — LLM fills ONLY the `__FILL__` fields, overwrites `ShotList.json`
+3. `validate_scaffold.py` verifies no residual `__FILL__` tokens + no pre-filled field drift
+
 **Story format rules:**
 | Format | Shot rule |
 |--------|-----------|
@@ -384,12 +406,13 @@ in the Run tab.
 ---
 
 ### Stage 5 — Produce AssetManifest drafts
-**File:** `prompts/p_5.txt`
-**Model:** sonnet
+**File:** `prompts/p_5.txt` (LLM path — episodic/monologue), `prompts/p_5_c.txt` (creative fill — narration formats)
+**Deterministic scaffolds:** `gen_manifest_structure.py` (shared manifest) + `gen_vo_manifest.py` (per-locale VO manifests) for narration formats
+**Model:** sonnet (all paths)
 **Reads:** `{{EPISODE_DIR}}/ShotList.json`, `{{EPISODE_DIR}}/Script.json` (for `cast[].gender`), `projects/{{PROJECT_SLUG}}/VoiceCast.json`, `episode_direction.txt`, `contracts/schemas/AssetManifest.v1.json`
 **Writes:**
 - `{{EPISODE_DIR}}/AssetManifest_draft.shared.json` — locale-free (images, SFX, music)
-- `{{EPISODE_DIR}}/AssetManifest_draft.en.json` — English VO only
+- `{{EPISODE_DIR}}/AssetManifest_draft.{locale}.json` — per-locale VO manifests
 
 **Validates against:** `contracts/schemas/AssetManifest.v1.json`
 
@@ -448,11 +471,18 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 
 **Whisper special case:** when `azure_style = "whispering"`, set `azure_break_ms = 0` (pauses sound robotic in whispers)
 
+**Narration format scaffold+fill path (`gen_manifest_structure.py` → `p_5_c.txt` → `validate_scaffold.py` → `gen_vo_manifest.py`):**
+1. `gen_manifest_structure.py` reads Script.json + ShotList.json, builds `AssetManifest_draft.shared.json` with all deterministic fields pre-filled and 8 creative `__FILL__` fields per background (visual description, search queries, scoring hints, etc.)
+2. `fill_and_run "5_c"` sends scaffold to LLM via `p_5_c.txt` — fills visual/search fields in backgrounds[] + sfx_items[] tags, overwrites shared manifest in-place
+3. `validate_scaffold.py --warn-only` checks for residual `__FILL__` tokens and pre-filled drift (warn-only because LLM may legitimately restructure some visual fields)
+4. `gen_vo_manifest.py` runs per-locale: reads Script.json + ShotList.json + VoiceCast.json, produces `AssetManifest_draft.{locale}.json` with fully-built vo_items (azure_voice, azure_style with fallback chain, azure_rate, azure_style_degree)
+
 ---
 
 ### Stage 6 — Write canon_diff.json
-**File:** `prompts/p_6.txt`
-**Model:** haiku
+**File:** `prompts/p_6.txt` (LLM path — no longer used directly), `prompts/p_6.txt` (creative fill)
+**Deterministic scaffold:** `canon_diff_chars.py` (extracts characters, produces `canon_diff_partial.json`)
+**Model:** haiku (creative fill for narrative fields only)
 **Reads:** `episode_direction.txt`, `{{EPISODE_DIR}}/Script.json`, `{{EPISODE_DIR}}/ShotList.json`, `projects/{{PROJECT_SLUG}}/canon.json` (optional), `contracts/schemas/CanonDiff.v1.json`
 **Writes:** `{{EPISODE_DIR}}/canon_diff.json`
 
@@ -470,11 +500,18 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 }
 ```
 
+**Scaffold+fill path (`canon_diff_chars.py` → `p_6.txt` → `validate_scaffold.py`):**
+1. `canon_diff_chars.py` reads Script.json cast + canon.json characters, computes `added_characters` (new) and `updated_states` (changed status/location), writes `canon_diff_partial.json` with `__FILL__` markers for `new_world_facts`, `new_unresolved_threads`, `resolved_threads`
+2. Idempotency guard: if `canon_diff.json` already exists with no `__FILL__` tokens, exits 0 (skips)
+3. `fill_and_run "6"` sends partial to LLM via `p_6.txt` — fills narrative fields only, writes complete `canon_diff.json`
+4. `validate_scaffold.py` verifies no residual `__FILL__` tokens + no pre-filled character field drift
+
 ---
 
 ### Stage 7 — Update canon.json
-**File:** `prompts/p_7.txt`
-**Model:** haiku
+**File:** `prompts/p_7.txt` (LLM path — no longer used)
+**Deterministic replacement:** `canon_merge.py` (Python, all formats)
+**Model:** none (deterministic)
 **Reads:** `{{EPISODE_DIR}}/canon_diff.json`, `projects/{{PROJECT_SLUG}}/canon.json` (may not exist), `contracts/schemas/Canon.v1.json`
 **Writes:** `projects/{{PROJECT_SLUG}}/canon.json` (created or updated)
 
@@ -483,6 +520,7 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 **Merge rules:**
 - If canon.json didn't exist: create fresh from diff
 - If it existed: append new characters, update states, append world_facts (no duplicates), merge threads, append episode_summaries entry for this episode_id
+- Prefers `episode_summary` from `canon_diff.json` if present; falls back to template "{episode_id}: See Script.json for details"
 
 ---
 
@@ -1162,11 +1200,18 @@ When `STORY_FORMAT` is changed or a new format is added, these are ALL the place
 | Stage/Script | What changes for non-episodic formats |
 |---|---|
 | `p_0.txt` (Stage 0) | `continuous_narration`/`illustrated_narration`/`documentary`: narrator ONLY; `monologue`: protagonist only, NO narrator entry |
-| `run.sh` (Stage 0) | `ssml_narration`: runs `ssml_preprocess.py` instead of `fill_and_run 0` — produces Script.json, VoiceCast.json, ssml_inner.xml, pipeline_vars.sh, NarrationText.txt |
+| `run.sh` (Stage 0) | `continuous_narration`/`illustrated_narration`/`documentary`: runs `gen_pipeline_vars.py` + `voice_cast_narrator.py` (deterministic, no LLM); `ssml_narration`: runs `ssml_preprocess.py` |
+| `run.sh` (Stage 1) | ALL formats: `canon_check.py` replaces LLM (deterministic) |
 | `p_3.txt` (Stage 3) | `continuous_narration`/`illustrated_narration`/`documentary`: ALL `speaker_id: "narrator"`; `monologue`: protagonist's id only |
-| `run.sh` (Stages 1,2,3,8) | `ssml_narration`: stages 1, 2, 3, 8 are SKIPPED entirely (Script.json produced by ssml_preprocess.py, no translation needed) |
+| `run.sh` (Stage 3) | `continuous_narration`/`illustrated_narration`/`documentary`: `gen_script_narration.py` (deterministic, no LLM); `ssml_narration`: skipped (ssml_preprocess.py already wrote Script.json) |
+| `run.sh` (Stages 1,2,3,8) | `ssml_narration`: stages 1, 2, 3, 8 are SKIPPED entirely |
+| `run.sh` (Stage 4) | `continuous_narration`/`illustrated_narration`/`documentary`/`ssml_narration`: scaffold+fill pattern (`gen_shotlist_scaffold.py` → `p_4_c.txt` → `validate_scaffold.py`); `episodic`/`monologue`: full LLM via `p_4.txt` |
 | `p_4.txt` (Stage 4) | `continuous_narration`/`documentary`/`ssml_narration`: `characters: []` on all shots; `monologue`: protagonist always center; **all narrative formats**: `duration_sec` VO-anchored (word_count ÷ effective_wpm + breaks + 2 s buffer) — NOT creative guess; `ssml_narration`: 60-120s total constraint does NOT apply, use `pause_after_ms` from Script.json |
+| `run.sh` (Stage 5) | `continuous_narration`/`illustrated_narration`/`documentary`/`ssml_narration`: scaffold+fill pattern (`gen_manifest_structure.py` → `p_5_c.txt` → `validate_scaffold.py` → `gen_vo_manifest.py`); `episodic`/`monologue`: full LLM via `p_5.txt` |
 | `p_5.txt` (Stage 5) | `continuous_narration`/`documentary`/`ssml_narration`: `character_packs: []` — no character images |
+| `run.sh` (Stage 6) | ALL formats: scaffold+fill pattern (`canon_diff_chars.py` → `p_6.txt` → `validate_scaffold.py`) |
+| `run.sh` (Stage 7) | ALL formats: `canon_merge.py` replaces LLM (deterministic) |
+| `run.sh` (Stage 9) | ALL formats: skipped entirely (replaced by `gen_render_plan.py` in Stage 10) |
 | `p_8.txt` (Stage 8) | `continuous_narration`/`documentary`: skip character_packs translation, translate narrator VO only |
 | `run.sh` (Stage 10[3]) | `ssml_narration`: passes `--ssml-narration --ssml-inner --voice-cast` to `gen_tts_cloud.py` for wrapper-rebuild + inner passthrough |
 | `run.sh` (Stage 10[3b]) | `ssml_narration`: polish_locale_vo SKIPPED (authored SSML timing is immutable) |
@@ -1205,6 +1250,18 @@ Run through the relevant items after any modification:
 - [ ] `resolve_assets.py` call passes `--selections <path>` when `selections.json` exists on disk
 - [ ] `ssml_narration` stage skip guard: stages 1, 2, 3, 8 print `⏭ skipped` and `continue` when `STORY_FORMAT=ssml_narration`
 - [ ] `ssml_narration` Stage 0 branch: calls `ssml_preprocess.py "$EP_DIR"` instead of `fill_and_run 0`
+- [ ] Narrator format Stage 0 branch: calls `gen_pipeline_vars.py "$EP_DIR"` + `voice_cast_narrator.py "$EP_DIR"` for `continuous_narration`/`illustrated_narration`/`documentary`
+- [ ] Stage 1: always calls `canon_check.py "$EP_DIR"` (no `fill_and_run`)
+- [ ] Stage 3 narration guard: calls `gen_script_narration.py "$EP_DIR"` for `continuous_narration`/`illustrated_narration`/`documentary`, `fill_and_run 3` for episodic/monologue
+- [ ] Stage 4 narration guard: scaffold+fill (`gen_shotlist_scaffold.py` → `fill_and_run "4_c"` → `validate_scaffold.py`) for narration formats, `fill_and_run 4` for episodic/monologue
+- [ ] Stage 5 narration guard: scaffold+fill (`gen_manifest_structure.py` → `fill_and_run "5_c"` → `validate_scaffold.py` → `gen_vo_manifest.py` per-locale) for narration formats, `fill_and_run 5` for episodic/monologue
+- [ ] Stage 6: always scaffold+fill (`canon_diff_chars.py` → `fill_and_run "6"` → `validate_scaffold.py`)
+- [ ] Stage 7: always calls `canon_merge.py "$EP_DIR"` (no `fill_and_run`)
+- [ ] Stage 9: always skipped (checkpoint preserved inside skip block when `TO_STAGE > 9`)
+- [ ] `get_stage_model()` strips `_c` suffix via `n_base="${n%%_*}"` before case match — `"5_c"` → `"5"` → sonnet
+- [ ] `stage_label()` strips `_c` suffix, appends " (creative fill)" when suffix is `_c`
+- [ ] `validate_scaffold.py` after `fill_and_run "4_c"` and `fill_and_run "6"`: strict mode (exit 1 on drift); after `fill_and_run "5_c"`: `--warn-only` (warn on drift)
+- [ ] `code_dir` variable set before the stage loop: `code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"`
 - [ ] `ssml_narration` Stage 10[3]: passes `--ssml-narration --ssml-inner --voice-cast` to `gen_tts_cloud.py`
 - [ ] `ssml_narration` Stage 10[3b]: polish_locale_vo skipped (guard: `STORY_FORMAT != ssml_narration`)
 - [ ] `ssml_narration` Stage 10[8]: export_youtube_dubbed skipped (guard: `STORY_FORMAT != ssml_narration`)
@@ -1253,6 +1310,32 @@ Run through the relevant items after any modification:
 - [ ] `resolve_assets.py` `_load_selections()` detects `per_shot` key → resolves each shot entry independently via `_resolve_one_entry()`; detects `segments` key within per_shot entries for v3 multi-segment
 - [ ] `resolve_assets.py` per-shot items include `item["shot_id"] = shot_id` — this field enables composite key lookup in `gen_render_plan.py`
 - [ ] `resolve_assets.py` v3 segment items additionally include `segment_index`, `duration_sec`, and `hold_sec` fields
+
+### After modifying deterministic stage scripts (code/http/canon_check.py, canon_merge.py, gen_script_narration.py, gen_pipeline_vars.py, voice_cast_narrator.py, canon_diff_chars.py, gen_shotlist_scaffold.py, gen_manifest_structure.py, gen_vo_manifest.py, validate_scaffold.py)
+- [ ] Script reads `pipeline_vars.sh` via same parse logic (regex `^(?:export\s+)?([A-Z_]...)`) — do NOT use `source` or `eval`
+- [ ] `canon_check.py` output is always > 100 bytes (Stage 1 done detection depends on log size)
+- [ ] `canon_merge.py` is append-only for characters, world_facts, threads — never removes existing canon entries
+- [ ] `canon_merge.py` prefers `episode_summary` from `canon_diff.json` if present, falls back to template
+- [ ] `gen_script_narration.py` validates output against `contracts/schemas/Script.v1.json` — exit 1 on failure
+- [ ] `gen_pipeline_vars.py` writes all 13 pipeline vars (same set as LLM Stage 0 would produce)
+- [ ] `voice_cast_narrator.py` is append-only on VoiceCast.json — never overwrites existing character entries
+- [ ] `voice_cast_narrator.py` reads `prompts/azure_tts_styles.txt` — same voice catalog as LLM Stage 0
+- [ ] `canon_diff_chars.py` idempotency guard: skips if `canon_diff.json` exists with no `__FILL__` tokens
+- [ ] `gen_shotlist_scaffold.py` assigns ALL vo_item_ids from Script.json (no orphans) before computing durations
+- [ ] `gen_shotlist_scaffold.py` applies min 5s merge / max 45s split rules
+- [ ] `gen_shotlist_scaffold.py` computes `timing_lock_hash` = SHA256 of sorted shot_ids
+- [ ] `gen_manifest_structure.py` marks exactly 8 creative fields per background as `__FILL__`
+- [ ] `gen_vo_manifest.py` accesses VoiceCast locale as `character[locale]` (flat key, not `character["locales"][locale]`)
+- [ ] `gen_vo_manifest.py` handles both Script formats: `scene.actions[].line` (type=="dialogue") and `scene.dialogue[]`
+- [ ] `validate_scaffold.py` Part A (residual `__FILL__`) always exits 1; Part B (drift) respects `--warn-only`
+
+### After modifying creative fill prompts (prompts/p_4_c.txt, p_5_c.txt, p_6.txt)
+- [ ] Prompt reads scaffold JSON from `{{EPISODE_DIR}}` — same file the deterministic script wrote
+- [ ] Prompt outputs ONLY the filled JSON (no markdown fences, no explanation text)
+- [ ] `p_4_c.txt` fills exactly 7 fields per shot: background_id, camera_framing, camera_movement, sfx_tags, music_mood, sfx_item_ids, music_item_id
+- [ ] `p_5_c.txt` fills backgrounds[] visual/search fields + sfx_items[] tags; overwrites shared manifest in-place
+- [ ] `p_6.txt` fills new_world_facts, new_unresolved_threads, resolved_threads; outputs complete `canon_diff.json`
+- [ ] No `_c` prompt modifies any pre-filled field (timing, IDs, structure) — only fills `__FILL__` markers
 
 ### After modifying prompts/azure_tts_styles.txt
 - [ ] `supports()` lines present on all en-capable and zh-capable entries
@@ -1422,6 +1505,48 @@ Run through the relevant items after any modification:
     (c) Inject `auto_sent_NNN` bookmarks at sentence boundaries for per-item WAV splitting
     Do NOT merge the layers or modify `ssml_inner.xml` after creation — it represents the user's
     authored voice timing exactly as pasted.
+
+23. **Scaffold → LLM Complete → Validate pattern**
+    Stages 4 (narration), 5 (narration), and 6 (all formats) use a three-step pattern:
+    (a) Python script writes a scaffold JSON with `__FILL__` markers on creative fields only
+    (b) `fill_and_run "N_c"` sends scaffold to LLM via `p_N_c.txt` — LLM fills ONLY the markers
+    (c) `validate_scaffold.py` post-validates: Part A checks no residual `__FILL__` tokens,
+        Part B checks pre-filled fields weren't changed by the LLM
+    This pattern guarantees deterministic fields (IDs, durations, structure) cannot be corrupted
+    by LLM hallucination while still leveraging creative capability for visual descriptions,
+    search queries, and narrative summaries. The `_c` suffix on stage numbers triggers
+    `get_stage_model()` and `stage_label()` to strip it via `n_base="${n%%_*}"`.
+    Do NOT merge the scaffold and fill steps — the separation is the safety mechanism.
+
+24. **Stages 1, 7, 9 are fully deterministic (no LLM)**
+    - Stage 1: `canon_check.py` — reads canon.json, prints structured report
+    - Stage 7: `canon_merge.py` — merges canon_diff.json into canon.json
+    - Stage 9: skipped entirely (replaced by `gen_render_plan.py` in Stage 10)
+    These stages have zero creative content — their outputs are fully determined by their inputs.
+    Do NOT revert to LLM (`fill_and_run`) for these stages.
+
+25. **Stage 0 narrator format split (gen_pipeline_vars.py + voice_cast_narrator.py)**
+    For `continuous_narration`, `illustrated_narration`, `documentary`: Stage 0 runs two Python
+    scripts instead of the LLM. `gen_pipeline_vars.py` writes `pipeline_vars.sh` from `meta.json`
+    (pure data copy). `voice_cast_narrator.py` parses `azure_tts_styles.txt`, selects best
+    narrator voice per locale (prefers `narration-professional` style), and appends to
+    `VoiceCast.json`. These formats only need a narrator — no creative casting decisions.
+    `episodic` and `monologue` still use the LLM (`fill_and_run 0`) because they require
+    multi-character voice casting with personality matching.
+
+26. **Stage 3 narration format determinism (gen_script_narration.py)**
+    For `continuous_narration`, `illustrated_narration`, `documentary`: Stage 3 runs
+    `gen_script_narration.py` instead of the LLM. The script reads `NarrationText.txt`,
+    splits into sentences, groups into scenes (paragraph breaks → section dividers → N/3),
+    and produces a valid Script.v1.json with narrator-only cast. All fields are deterministic
+    (no creative language generation needed — the text already exists in `NarrationText.txt`).
+    `episodic` and `monologue` still use the LLM because they require creative dialogue writing.
+
+27. **`/api/diagnose_pipeline` is fully deterministic**
+    The haiku LLM call in `/api/diagnose_pipeline` was replaced with `_run_diagnose()` — a Python
+    function that finds the earliest STALE or MISSING stage by comparing input/output timestamps.
+    This eliminates an LLM call that added latency and occasionally produced wrong stage numbers.
+    Do NOT revert to the haiku call.
 
 22. **ssml_narration skips stages 1, 2, 3, 8 — by design**
     These stages are unnecessary because:

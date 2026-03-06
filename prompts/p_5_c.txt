@@ -1,0 +1,180 @@
+# ══════════════════════════════════════════════════════════════════════
+# STAGE 5-C — Shared manifest creative fill (narration formats)
+# ══════════════════════════════════════════════════════════════════════
+#
+# 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
+#     {{PROJECT_SLUG}}   →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}     →  e.g. "s01e02"
+#     {{STORY_FORMAT}}   →  e.g. "continuous_narration", "documentary", "ssml_narration"
+#
+# 📥 FILES READ (written by scaffold script + earlier stages):
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json  (gen_manifest_structure.py)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json                    (Stage 4 / 4-C)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json                      (Stage 3)
+#     contracts/schemas/AssetManifest.v1.json
+#
+# 📤 OUTPUT:
+#     • Stdout: progress + validation result  (web UI)
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json  (overwritten in-place)
+#
+# ▶ Invoked by run.sh as:
+#     claude -p prompts/p_5_c_filled.txt
+# ══════════════════════════════════════════════════════════════════════
+
+You are Stage 5 of a 10-stage AI narrative pipeline (creative fill phase — shared manifest).
+The scaffold script has pre-computed all structural and computed fields.
+Your ONLY job: replace every `__FILL__` marker with the correct creative value.
+
+---
+
+## Context
+
+Episode ID    : {{EPISODE_ID}}
+Episode dir   : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
+Schema        : contracts/schemas/AssetManifest.v1.json
+Story format  : {{STORY_FORMAT}}
+
+Read these files before writing anything:
+  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json
+  2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
+  3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
+  4. contracts/schemas/AssetManifest.v1.json
+
+---
+
+## Task
+
+Print: `▶ [5/9] Stage 5-C — Shared manifest creative fill  …`
+
+### Fields you MUST fill (marked `__FILL__` in the scaffold)
+
+#### backgrounds[] entries
+
+**`ai_prompt`**
+  ~2 sentence cinematic description for an image generation model.
+  Include: time period, setting detail, lighting quality, mood, compositional direction.
+  Example: `"Wide shot of an ancient Egyptian desert at twilight, warm amber light
+  washing over rolling sand dunes. The horizon glows with fading red, shadows
+  long and dramatic, completely uninhabited — vast, timeless, solitary."`
+
+**`search_prompt`**
+  Single string of 4–8 keywords for stock photo fallback search.
+  Example: `"ancient Egypt desert dusk twilight sand dunes cinematic"`
+
+**`search_queries`**
+  Array of 2–4 diverse search phrases approaching the same visual concept
+  from different angles — vary vocabulary, granularity, and descriptive focus.
+  Example:
+  ```json
+  [
+    "ancient Egyptian desert at twilight dramatic",
+    "empty sand dunes sunset cinematic wide",
+    "arid landscape golden hour no people",
+    "Sahara desert dusk atmospheric photography"
+  ]
+  ```
+
+**`scoring_hints`**
+  JSON object with four keys used for multi-dimensional CLIP scoring:
+    `subjects`    : list of concrete objects or subjects that should be visible
+    `environment` : surrounding space, surfaces, atmosphere descriptors
+    `style`       : photographic style, lighting quality, cinematography keywords
+    `motion`      : movement descriptor matching the desired motion level
+  Example:
+  ```json
+  {
+    "subjects":    ["sand dunes", "distant horizon", "sun near setting"],
+    "environment": ["open desert", "no vegetation", "vast empty sky"],
+    "style":       ["cinematic photography", "warm golden light", "wide angle lens"],
+    "motion":      ["completely still", "no movement", "static landscape"]
+  }
+  ```
+
+**`include_keywords`**
+  Array of 2–4 hard-include terms that MUST appear in asset metadata for the
+  result to be accepted. Be specific enough to filter irrelevant results.
+  Example: `["desert", "ancient"]`
+
+**`exclude_keywords`**
+  Array of 3–5 hard-exclude terms that must NOT appear in asset metadata.
+  Always include pollution terms that would contaminate the scene type.
+  Example: `["people", "person", "modern", "car", "text"]`
+
+**`continuity_hints`**
+  JSON object linking shots that should look visually consistent.
+  Required sub-fields:
+    `group_id`      : string identifying the continuity sequence (e.g. `"desert-journey"`)
+    `palette_target`: dominant hue direction — one of:
+                      `"warm_amber"` | `"cool_blue"` | `"earthy_brown"` |
+                      `"desaturated_grey"` | `"deep_green"` | `"none"`
+  Optional sub-fields (include when editorially relevant):
+    `motion_budget` : `"none"` | `"very_low"` | `"low"` | `"medium"` | `"high"`
+    `camera_energy` : `"locked"` | `"gentle_drift"` | `"active"` | `"handheld"`
+    `allowed_shift` : number 0.0–1.0, maximum hue-histogram L1 distance between consecutive shots
+  Backgrounds that stand alone with no continuity requirement: omit the whole object.
+
+**`lighting`**
+  One of:
+    `"golden_hour"`      — warm low-angle sun; dawn or dusk
+    `"overcast"`         — soft flat daylight; diffused, no hard shadows
+    `"harsh_noon"`       — high sun, short shadows, bleached
+    `"dim"`              — interior with limited light sources; shadows dominate
+    `"night"`            — dark scene; moonlight or firelight only
+    `"dramatic"`         — strong directional light with high contrast; cinematic
+
+#### sfx_items[] entries
+
+**`tag`**
+  Expand the short sfx_tags[] string from ShotList into a full natural-language
+  description suitable for an audio generation model. Add acoustic context from
+  the scene (reverb, distance, environment texture).
+  Example: `"wind_gentle"` → `"gentle wind rustling through dry desert scrub,
+  sparse and airy, no echo, open-air ambience"`
+
+**`search_queries`**
+  Array of 2–3 search phrases for finding this SFX in a stock audio library.
+  Example: `["gentle desert wind ambient", "soft breeze outdoor nature sound"]`
+
+### Fields you MUST NOT change
+
+Do NOT modify any pre-filled field. The following are locked:
+  `asset_id`, `type`, `license_type`, `motion_level`, `cinematic_role`,
+  `search_filters`, `source_filters`, `motion`, `description`,
+  all `music_items[]` fields, all `character_packs[]` fields,
+  all `vo_items[]` fields, all top-level manifest metadata fields.
+
+### Style guidance
+
+Story format: **{{STORY_FORMAT}}**
+
+For `continuous_narration`, `documentary`, and `ssml_narration`:
+  Backgrounds are atmospheric and cinematic — no human characters in frame.
+  `ai_prompt` should emphasise environment, light, and mood over narrative action.
+  `exclude_keywords` must include `"people"` and `"person"` for pure landscape/atmosphere shots.
+
+For `illustrated_narration`:
+  Backgrounds may be painterly and stylised — match the illustrated aesthetic.
+
+---
+
+## Output
+
+Overwrite the scaffold file in-place with the COMPLETE filled version
+(no `__FILL__` markers remaining):
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json
+
+Validate against contracts/schemas/AssetManifest.v1.json using Python + jsonschema.
+If validation fails, fix and retry.
+
+Print validation result:
+```
+── Stage 5-C validation ─────────────────────────────────────
+AssetManifest_draft.shared.json  →  VALID ✓
+  backgrounds     : <count>
+  sfx_items       : <count>
+  music_items     : <count>
+  character_packs : <count>
+────────────────────────────────────────────────────────────
+```
+
+Print: `✓ [5/9] Stage 5-C — Shared manifest creative fill  done`

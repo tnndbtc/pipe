@@ -109,12 +109,23 @@ while true; do
     echo ""
     echo "${BOLD}=== Media Service Setup ===${RESET}"
     echo "  1) Show usage (server & worker options)"
+    echo "  2) Install dependencies"
     echo "  0) Exit"
     echo ""
-    read -rp "Choose [0-1]: " choice
+    read -rp "Choose [0-2]: " choice
 
     case "$choice" in
         1) show_usage ;;
+        2)
+            echo ""
+            echo "${BOLD}Install dependencies${RESET}"
+            echo "${DIM}This will:${RESET}"
+            echo "${DIM}  - Install system packages: ffmpeg, ffprobe${RESET}"
+            echo "${DIM}  - Install PyTorch CPU-only wheel${RESET}"
+            echo "${DIM}  - Run: pip install -r ${HTTP_DIR}/requirements.txt${RESET}"
+            echo ""
+            bash "$SCRIPT_DIR/install_deps.sh" --pip --torch-cpu
+            ;;
         0) echo "Bye."; exit 0 ;;
         *) echo "Invalid option: $choice" ;;
     esac
