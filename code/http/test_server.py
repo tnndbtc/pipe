@@ -5289,8 +5289,12 @@ placeholder="Enter your story here"></textarea>
   let _musicCutClips  = [];     // user-cut clips: [{clip_id, stem, start_sec, end_sec, path}]
   let _musicClipLookup = {};   // clip_id → { wavStem, path, item_id } — built by _musicRenderBody
   let _musicMarks     = {};     // per-stem marks: { stem: {start: N, end: N} }
-  let _musicOverrides = {};     // { item_id: {duck_db, fade_sec, ...} }
-  let _musicLoopSel   = {};     // { track_stem: {start_sec, duration_sec, mode, crossfade_ms} }
+  let _musicOverrides = {};       // { item_id: {duck_db, fade_sec, ...} }
+  let _musicTrackVolumes = {};    // { stem: dB_offset } — persists across regenerations
+  let _musicClipVolumes  = {};    // { item_id|clip_id: dB_offset }
+                                  // auto clips  → keyed by item_id  (e.g. "music-s01e01_sh01")
+                                  // user-cut    → keyed by clip_id  (e.g. "djokovic_bg_calm:19.4s-40.3s")
+  let _musicLoopSel   = {};       // { track_stem: {start_sec, duration_sec, mode, crossfade_ms} }
   let _musicBusy      = false;
 
   function _musicSetStatus(msg, spinning) {
@@ -5332,6 +5336,8 @@ placeholder="Enter your story here"></textarea>
     const v = document.getElementById('music-ep-select').value;
     if (!v) { _musicSlug = null; _musicEpId = null; return; }
     [_musicSlug, _musicEpId] = v.split('|');
+    _musicClipVolumes = {};
+    _musicCutClips    = [];   // reset on episode change; repopulated from disk by _musicLoadExisting
     document.getElementById('music-btn-review').disabled  = false;
     _musicSetStatus('Episode selected. Click Generate Music Review to begin.');
     // Try to load existing data
@@ -5387,8 +5393,10 @@ placeholder="Enter your story here"></textarea>
         + '&ep_id=' + encodeURIComponent(_musicEpId) + '&file=assets/music/MusicPlan.json');
       if (pr.ok) {
         const plan = await pr.json();
-        _musicLoopSel  = plan.loop_selections || {};
-        _musicOverrides = {};
+        _musicLoopSel      = plan.loop_selections || {};
+        _musicTrackVolumes = plan.track_volumes   || {};
+        _musicClipVolumes  = plan.clip_volumes    || {};
+        _musicOverrides    = {};
         (plan.shot_overrides || []).forEach(o => { _musicOverrides[o.item_id] = o; });
       }
     } catch (_) {}
@@ -5405,12 +5413,39 @@ placeholder="Enter your story here"></textarea>
         loop_selections: _musicLoopSel,
         shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id),
       };
+      if (Object.keys(_musicTrackVolumes).length)
+        plan.track_volumes = _musicTrackVolumes;
+      if (Object.keys(_musicClipVolumes).length)
+        plan.clip_volumes = _musicClipVolumes;
       await fetch('/api/music_plan_save', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ slug: _musicSlug, ep_id: _musicEpId, plan: plan }),
       });
     } catch (_) {}
+  }
+
+  function _musicSetClipVolume(key, val) {
+    val = parseInt(val, 10);
+    if (isNaN(val) || val === 0) { delete _musicClipVolumes[key]; }
+    else                         { _musicClipVolumes[key] = val; }
+    // Update any rendered audio preview — compare via dataset to avoid CSS
+    // special-char issues with clip_id keys containing ":" and "."
+    const gain = Math.pow(10, (val || 0) / 20);
+    document.querySelectorAll('audio[data-clip-vol-key]').forEach(a => {
+      if (a.dataset.clipVolKey === key) {
+        a.dataset.volDb = (val || 0);
+        a.volume = Math.min(1, Math.max(0, gain));
+      }
+    });
+    _musicAutoSave();
+  }
+
+  function _musicSetTrackVolume(stem, val) {
+    val = parseInt(val, 10);
+    if (isNaN(val) || val === 0) { delete _musicTrackVolumes[stem]; }
+    else                         { _musicTrackVolumes[stem] = val; }
+    _musicAutoSave();
   }
 
   async function musicGenerateReview() {
@@ -5620,10 +5655,20 @@ placeholder="Enter your story here"></textarea>
         const mark = _musicMarks[s.stem] || {};
         const markStartTxt = mark.start != null ? mark.start.toFixed(1) + 's' : '—';
         const markEndTxt   = mark.end   != null ? mark.end.toFixed(1)   + 's' : '—';
+        const volVal = _musicTrackVolumes[s.stem] || 0;
+        const volStyle = volVal !== 0
+          ? 'color:var(--gold);font-weight:700' : 'color:var(--dim)';
         srcHtml += '<div class="music-src-row">'
           + '<div class="music-src-top">'
           + '<span class="music-src-stem">' + s.stem + '</span>'
           + '<span class="music-src-meta">' + dur + (bpm ? ' · ' + bpm : '') + '</span>'
+          + '<label style="margin-left:auto;display:flex;align-items:center;gap:4px;font-size:0.80em">'
+          + '<span style="' + volStyle + '">vol</span>'
+          + '<input type="number" step="1" min="-18" max="0" value="' + volVal + '"'
+          + ' title="Track volume offset in dB (0 = default -6 dB base; -6 = plays at -12 dB; attenuation only)"'
+          + ' style="width:52px;background:var(--input-bg,#1e1e2e);color:' + (volVal !== 0 ? 'var(--gold)' : 'var(--text)') + ';border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.95em"'
+          + ' onchange="_musicSetTrackVolume(\'' + s.stem + '\',this.value);this.style.color=parseInt(this.value)!==0?\'var(--gold)\':\'var(--text)\'">'
+          + '</label>'
           + '<div class="music-src-player">'
           + '<audio id="music-src-audio-' + si + '" controls preload="none" style="width:100%;height:32px"'
           + ' src="/serve_media?path=' + encodeURIComponent(s.path) + '"></audio>'
@@ -5645,30 +5690,65 @@ placeholder="Enter your story here"></textarea>
       body.appendChild(srcCard);
     }
 
-    // ── Generated Clips (auto + user-cut) ──
+    // ── Generated Clips (auto + user-cut, unified) ──
+    // allClips includes both origins, so user cuts show even when auto clips are absent.
     if (allClips.length > 0) {
       const clipCard = document.createElement('div');
       clipCard.className = 'music-card';
       let clipHtml = '<div class="music-card-hdr">Generated Clips</div>'
         + '<div class="music-card-sub">Auto-extracted and user-cut clips available for shot assignment.</div>'
         + '<table class="music-cand-table"><thead><tr>'
-        + '<th>Clip</th><th>Duration</th><th>Score</th><th style="width:220px">Preview</th>'
+        + '<th style="max-width:160px">Clip</th><th>Duration</th><th>Score</th>'
+        + '<th style="width:60px" title="Volume offset in dB (0 = default -6 dB; attenuation only)">Vol</th>'
+        + '<th style="width:440px">Preview</th>'
         + '</tr></thead><tbody>';
       allClips.forEach(c => {
-        const durTxt = c.duration_sec.toFixed(1) + 's';
+        const durTxt   = c.duration_sec.toFixed(1) + 's';
         const scoreTxt = c.score != null ? c.score.toFixed(3) : (c.origin === 'user' ? 'cut' : '—');
+        // Vol control:
+        //   auto clips  → keyed by item_id  (direct manifest link, no assignment needed)
+        //   user-cut    → keyed by clip_id  (persisted now; resolved to item_id at apply time
+        //                                    via shot_overrides[].music_clip_id when assigned)
+        const volKey   = c.item_id ? c.item_id : c.clip_id;
+        const volVal   = _musicClipVolumes[volKey] || 0;
+        const volColor = volVal !== 0 ? 'var(--gold)' : 'var(--text)';
+        const safeKey  = volKey.replace(/'/g, "\\'");
+        const volTitle = c.item_id
+          ? 'Volume offset in dB (0 = default -6 dB; -6 = plays at -12 dB). Applied directly via manifest item_id.'
+          : 'Volume offset in dB. Persisted now; applied to final output when this clip is assigned to a shot.';
+        const volCell  = '<input type="number" step="1" min="-18" max="0" value="' + volVal + '"'
+          + ' title="' + volTitle + '"'
+          + ' style="width:52px;background:var(--input-bg,#1e1e2e);color:' + volColor + ';'
+          + 'border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.90em"'
+          + ' onchange="'
+          + '_musicSetClipVolume(\'' + safeKey + '\',this.value);'
+          + 'var _db=parseInt(this.value)||0;'
+          + 'var _a=this.closest(\'tr\').querySelector(\'audio\');'
+          + 'if(_a){_a.dataset.volDb=_db;_a.volume=Math.pow(10,_db/20);}'
+          + 'this.style.color=_db!==0?\'var(--gold)\':\'var(--text)\'">';
         clipHtml += '<tr>'
           + '<td style="font-family:var(--mono);font-size:0.82em;color:'
-          + (c.origin === 'user' ? 'var(--gold)' : 'var(--text)') + '">' + c.clip_id + '</td>'
+          + (c.origin === 'user' ? 'var(--gold)' : 'var(--text)') + ';'
+          + 'max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"'
+          + ' title="' + c.clip_id + '">' + c.clip_id + '</td>'
           + '<td>' + durTxt + '</td>'
           + '<td>' + scoreTxt + '</td>'
-          + '<td><audio controls preload="none" style="height:28px;width:210px"'
+          + '<td>' + volCell + '</td>'
+          + '<td><audio controls preload="none" style="height:28px;width:430px"'
+          + ' data-clip-vol-key="' + safeKey + '"'
+          + ' data-vol-db="' + volVal + '"'
+          + ' onplay="this.volume=Math.pow(10,(+(this.dataset.volDb)||0)/20)"'
           + ' src="/serve_media?path=' + encodeURIComponent(c.wavPath) + '"></audio></td>'
           + '</tr>';
       });
       clipHtml += '</tbody></table>';
       clipCard.innerHTML = clipHtml;
       body.appendChild(clipCard);
+      // Set initial volume on all previews immediately — onplay alone is unreliable
+      clipCard.querySelectorAll('audio[data-vol-db]').forEach(a => {
+        const db = +(a.dataset.volDb) || 0;
+        if (db !== 0) a.volume = Math.pow(10, db / 20);
+      });
     }
 
     // ── Shot Timeline (read-only reference, bottom) ──
@@ -5821,6 +5901,10 @@ placeholder="Enter your story here"></textarea>
         loop_selections: _musicLoopSel,
         shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id),
       };
+      if (Object.keys(_musicTrackVolumes).length)
+        plan.track_volumes = _musicTrackVolumes;
+      if (Object.keys(_musicClipVolumes).length)
+        plan.clip_volumes = _musicClipVolumes;
       const r = await fetch('/api/music_plan_save', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},

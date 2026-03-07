@@ -520,7 +520,9 @@ def render_shot(
         duck_intervals = shot.get("duck_intervals", [])
         duck_db        = shot.get("duck_db", -12.0)
         fade_sec       = shot.get("music_fade_sec", 0.15)
-        duck_expr      = build_duck_expr(duck_intervals, duck_db, fade_sec)
+        music_base_db  = shot.get("base_db", BASE_MUSIC_DB)
+        duck_expr      = build_duck_expr(duck_intervals, duck_db, fade_sec,
+                                         base_db=music_base_db)
 
         # Seek to music_start_sec for seamless same-music continuation.
         # Do NOT use -stream_loop -1 here: an infinite loop combined with

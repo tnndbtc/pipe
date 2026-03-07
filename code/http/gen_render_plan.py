@@ -44,6 +44,7 @@ PRODUCER = "gen_render_plan.py"
 RENDER_RESOLUTION = "1280x720"
 RENDER_ASPECT    = "16:9"
 RENDER_FPS       = 24
+BASE_MUSIC_DB    = -6.0   # music un-ducked level (mirrors render_video.py)
 INTER_LINE_PAUSE_MS = 300   # 0.3s gap between consecutive VO lines (matches post_tts_analysis)
 VO_TAIL_MS          = 2000  # minimum silence after last spoken line before shot ends
 
@@ -416,12 +417,14 @@ def build_shot(
             # duck_db and fade_sec from the merged manifest (correct)
             duck_db  = music_item.get("duck_db",  -12.0)
             fade_sec = music_item.get("fade_sec",  0.15)
+            base_db  = music_item.get("base_db",  BASE_MUSIC_DB)  # per-track vol offset
             fade_ms  = round(fade_sec * 1000)
             # Recompute shot-relative duck_intervals from the vo_lines we just built
             duck_ivs = compute_duck_intervals_from_vo(vo_lines, fade_ms)
             music_extra["duck_intervals"] = duck_ivs
             music_extra["duck_db"]        = duck_db
             music_extra["music_fade_sec"] = fade_sec
+            music_extra["base_db"]        = base_db
             # start_sec: delay before music begins within the shot (from MusicPlan override)
             _music_start = music_item.get("start_sec", 0.0)
             if _music_start:

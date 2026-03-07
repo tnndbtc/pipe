@@ -49,6 +49,24 @@
         }
       }
     },
+    "track_volumes": {
+      "type": "object",
+      "description": "Per-track volume offset in dB added to BASE_MUSIC_DB (-6 dB). Key = music_asset_id stem (e.g. 'djokovic_bg_calm'). Value = dB offset (e.g. -6 makes the track play at -12 dB un-ducked). Only applies to shots where that stem was explicitly assigned as music_asset_id.",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": -18,
+        "maximum": 0
+      }
+    },
+    "clip_volumes": {
+      "type": "object",
+      "description": "Per-clip volume offset in dB added to BASE_MUSIC_DB (-6 dB). Value = negative dB offset (e.g. -6 → plays at -12 dB un-ducked). Two key types: (1) manifest item_id (e.g. 'music-s01e01_sh01') for auto-generated clips — applied directly, no shot_override needed; (2) clip_id string (e.g. 'djokovic_bg_calm:19.4s-40.3s') for user-cut clips — persisted immediately, resolved to item_id via shot_overrides[].music_clip_id at apply time.",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": -18,
+        "maximum": 0
+      }
+    },
     "shot_overrides": {
       "type": "array",
       "description": "Per-shot overrides for ducking, continuity, and track assignment. Only include shots that need changes — omitted shots keep their original values.",
@@ -104,6 +122,12 @@
             "type": "number",
             "minimum": 0,
             "description": "Crossfade duration at shot boundaries when music changes (seconds)"
+          },
+          "base_db": {
+            "type": "number",
+            "minimum": -30,
+            "maximum": 0,
+            "description": "Absolute un-ducked music level in dB for this shot (e.g. -12.0). Written by apply_music_plan.py when a clip_volumes offset is resolved; overrides BASE_MUSIC_DB for this shot only."
           }
         }
       }

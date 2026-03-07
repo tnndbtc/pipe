@@ -212,10 +212,13 @@ def generate_loop_wav(
 
 # ── Shot override application ────────────────────────────────────────────────
 
+BASE_MUSIC_DB = -6.0   # music un-ducked level (mirrors render_video.py)
+
 OVERRIDE_FIELDS = {
     "duck_db", "fade_sec", "start_sec", "duration_sec",
     "music_asset_id", "crossfade_sec",
     "clip_start_sec", "clip_duration_sec",
+    "base_db",          # per-shot base level (future use); track-level handled separately
 }
 
 
@@ -479,6 +482,82 @@ def main():
             assets_music_dir=assets_music_dir,
         )
 
+    # ── Apply per-track volume offsets (track_volumes) ───────────────────────
+    # Must run AFTER apply_shot_overrides() so music_asset_id is populated.
+    # Per-shot base_db (set via shot_overrides) takes priority — skip those.
+    track_volumes = plan.get("track_volumes", {})
+    if track_volumes:
+        print(f"\n── Track volume offsets ({len(track_volumes)} track(s)) ──")
+        for mi in manifest.get("music_items", []):
+            if mi.get("base_db") is not None:
+                continue  # per-shot override already set; do not stomp
+            stem = mi.get("music_asset_id", "")
+            if not stem:
+                continue
+            offset = track_volumes.get(stem)
+            if offset is not None and offset != 0:
+                mi["base_db"] = BASE_MUSIC_DB + offset
+                print(f"  [VOL] {mi['item_id']}: base_db={mi['base_db']:.1f} dB "
+                      f"({offset:+.0f} dB offset, stem='{stem}')")
+        unmatched = [s for s in track_volumes
+                     if not any(mi.get("music_asset_id") == s
+                                for mi in manifest.get("music_items", []))]
+        for s in unmatched:
+            print(f"  [WARN] track_volumes stem '{s}' matched no music_item "
+                  "(shot may not have been assigned this track)", file=sys.stderr)
+
+    # ── Apply per-clip volume offsets (clip_volumes) ─────────────────────────
+    # Two key types coexist in clip_volumes:
+    #   item_id  (e.g. "music-s01e01_sh01")      — auto clips, direct manifest match
+    #   clip_id  (e.g. "stem:Xs-Ys")             — user-cut clips, resolved via shot_overrides
+    # track_volumes and per-shot base_db take priority if already set.
+    clip_volumes = plan.get("clip_volumes", {})
+    if clip_volumes:
+        print(f"\n── Clip volume offsets ({len(clip_volumes)} clip(s)) ──")
+        applied = 0
+        music_items = manifest.get("music_items", [])
+        music_item_ids = {mi["item_id"] for mi in music_items}
+
+        # Pass 1: direct item_id match (auto-generated clips)
+        for mi in music_items:
+            if mi.get("base_db") is not None:
+                continue
+            offset = clip_volumes.get(mi["item_id"])
+            if offset is not None and offset != 0:
+                mi["base_db"] = BASE_MUSIC_DB + offset
+                print(f"  [CLIP-VOL] {mi['item_id']}: base_db={mi['base_db']:.1f} dB "
+                      f"({offset:+.0f} dB, direct)")
+                applied += 1
+
+        # Pass 2: clip_id → item_id via shot_overrides (user-cut clips)
+        # shot_overrides[].music_clip_id holds the clip_id when a user-cut clip
+        # is assigned to a shot.
+        item_to_music_clip: dict[str, str] = {
+            o["item_id"]: o["music_clip_id"]
+            for o in shot_overrides
+            if "music_clip_id" in o
+        }
+        for mi in music_items:
+            if mi.get("base_db") is not None:
+                continue
+            clip_id = item_to_music_clip.get(mi["item_id"], "")
+            if not clip_id:
+                continue
+            offset = clip_volumes.get(clip_id)
+            if offset is not None and offset != 0:
+                mi["base_db"] = BASE_MUSIC_DB + offset
+                print(f"  [CLIP-VOL] {mi['item_id']}: base_db={mi['base_db']:.1f} dB "
+                      f"({offset:+.0f} dB, via clip_id='{clip_id}')")
+                applied += 1
+
+        # Warn on unresolved keys
+        resolved = music_item_ids | set(item_to_music_clip.values())
+        for key in clip_volumes:
+            if key not in resolved:
+                print(f"  [WARN] clip_volumes key '{key}' not matched "
+                      "(user-cut clip not yet assigned to a shot?)", file=sys.stderr)
+        print(f"  Applied clip_volumes to {applied} music_item(s).")
+
     # ── Default duck_db to 0 (no ducking) for items without an explicit
     #    override.  This matches the preview behaviour in music_review_pack.py
     #    which defaults duck_db to 0.  The gen_music_clip.py values (-12, -15,
@@ -494,7 +573,7 @@ def main():
     if duck_reset:
         print(f"  Reset duck_db to 0 for {duck_reset} item(s) without explicit override")
 
-    if shot_overrides or duck_reset:
+    if shot_overrides or duck_reset or track_volumes:
         save_manifest(manifest, manifest_path)
         print(f"\n  Manifest updated: {manifest_path}")
 
