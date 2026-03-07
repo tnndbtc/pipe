@@ -724,6 +724,20 @@ Output: assets/music/{item_id}_loop.wav  (looped clips to cover shot duration)
 - `shot_overrides[].music_asset_id` may be a source stem (e.g. "djokovic_bg_climax")
   rather than an existing item_id; apply_music_plan extracts a new clip from the source
   MP3 in that case
+- **`track_volumes`** (MusicPlan top-level, optional): per-source-track dB offset (−18 to 0).
+  Applied AFTER `apply_shot_overrides()` so `music_asset_id` is populated on manifest items.
+  Writes `base_db = BASE_MUSIC_DB + offset` onto matching `music_items[]`.
+  Skips any item that already has `base_db` set (per-shot override takes priority).
+  Unmatched stems produce a non-fatal warning.
+- **`clip_volumes`** (MusicPlan top-level, optional): per-clip dB offset (−18 to 0); dual-key strategy:
+  - `item_id` key (e.g. `"music-s01e01_sh01"`) — auto clips; applied directly to matching manifest item
+  - `clip_id` key (e.g. `"djokovic_bg_calm:19.4s-40.3s"`) — user-cut clips; resolved via
+    `shot_overrides[].music_clip_id` at apply time (persisted by clip_id immediately, resolved to
+    item_id when assigned to a shot)
+  Both key types coexist in the same dict. Items with `base_db` already set are skipped.
+- **Priority chain (highest → lowest):** `shot_overrides[].base_db` > `clip_volumes` > `track_volumes` > `BASE_MUSIC_DB` (−6.0 dB)
+- `BASE_MUSIC_DB = -6.0` defined locally in apply_music_plan.py (same constant duplicated in
+  gen_render_plan.py and render_video.py; future cleanup: move to shared constants module)
 - Skipped entirely when `NO_MUSIC=1` env var is set
 
 **Sub-step [5/8] — resolve_assets.py** (per locale)
@@ -756,7 +770,10 @@ Output: AssetManifest_final.{locale}.json
 - VO `timeline_in_ms`/`timeline_out_ms` come from measured `start_sec`/`end_sec` (NOT evenly distributed)
 - `duration_ms` respects `background_overrides` for overflow shots
 - `timing_lock_hash` comes from `AssetManifest_merged` (locale-adjusted)
-- Passes `duck_intervals`/`duck_db`/`fade_sec` into each shot's music entry
+- Passes `duck_intervals`/`duck_db`/`fade_sec`/`base_db` into each shot's music entry;
+  `base_db` is read from the music_item (written by apply_music_plan.py); falls back to
+  `BASE_MUSIC_DB` (−6.0) if absent. Without this threading, `base_db` written by
+  apply_music_plan.py is silently dropped before reaching render_video.py.
 - **VO_TAIL_MS floor (all formats):** `duration_ms = max(duration_ms, last_vo_out_ms + 2000)` — every shot gets at least 2 s after the final spoken word regardless of format. Applied before the ceiling.
 - **Narrative-format ceiling (narrative formats only):** for `continuous_narration`/`documentary`/`illustrated_narration`, `duration_ms` is further capped at `last_vo_out_ms + 2000` — floor and ceiling converge to the same value, pinning duration exactly. Music item `end_ms` and `duck_interval` endpoints are also clamped to the corrected duration.
 - **VO completeness guard:** after building `shotlist_vo_ids`, any `vo_item` in the merged manifest that has a valid `shot_id` but is NOT in any shot's `vo_item_ids` is auto-injected into that shot before building `vo_lines`. Prints `[VO-INJECT]` log. Protects against Stage 4 LLM silently dropping the last line of a scene from `vo_item_ids`.
@@ -777,7 +794,11 @@ Output: renders/{locale}/output.mp4
 - Multi-segment backgrounds (v3): uses FFmpeg `concat` filter to stitch multiple clips/images per shot — no `-stream_loop` seam artifacts; falls back to single-bg loop for v1/v2
 - Character compositing: 1=center, 2=left/right thirds, 3=even thirds, 4+=quarters
 - Active speaker: scale×1.05 opacity 1.0; inactive: scale×0.95 opacity 0.80
-- Audio mixing: VO at 0 dB, music at -6 dB (ducked via volume=expr), SFX at -3 dB
+- Audio mixing: VO at 0 dB, music at `base_db` dB un-ducked (default −6 dB; per-track or
+  per-clip volume offset applied via `base_db` field in shot dict), SFX at −3 dB
+- `build_duck_expr()` receives `base_db` from `shot.get("base_db", BASE_MUSIC_DB)`; `duck_db`
+  is multiplicative relative to `base_db` (`duck_amp = base_amp * 10^(duck_db/20)`), so existing
+  duck values are preserved unchanged when `base_db` shifts
 - Loudnorm: -16 LUFS (linear=true) applied in concat pass
 - Music continuity: same `music_asset_id` across shots = seamless; different = hard cut
 - n_chars == 0 case (continuous_narration/documentary): no character compositing; verified handled at line ~401
@@ -1733,6 +1754,39 @@ Run through the relevant items after any modification:
     The result object includes `duration_warn: True` when drift exceeds the threshold, giving
     the user a signal but no automatic fix. V2 scope: auto-update `duration_sec` and recompute
     subsequent `start_sec` values after successful retune.
+
+33. **Per-track and per-clip music volume offsets (track_volumes / clip_volumes in MusicPlan)**
+    MusicPlan.v1.json now has two optional top-level volume maps:
+
+    **`track_volumes`** `{ stem: dB_offset }` (−18 to 0)
+    - Coarse knob: one setting applies to every shot that uses that source stem.
+    - Written by the Music tab "vol" input in the Source Music Library card.
+    - Applied by apply_music_plan.py AFTER apply_shot_overrides() so that `music_asset_id`
+      is already populated on manifest items. Writes `base_db = BASE_MUSIC_DB + offset`.
+    - Skips items with `base_db` already set (per-shot priority).
+
+    **`clip_volumes`** `{ key: dB_offset }` (−18 to 0) — dual-key strategy:
+    - `item_id` key (e.g. `"music-s01e01_sh01"`) for auto clips → applied directly to manifest.
+    - `clip_id` key (e.g. `"djokovic_bg_calm:19.4s-40.3s"`) for user-cut clips → persisted
+      immediately; resolved to item_id via shot_overrides[].music_clip_id at apply time.
+    - Written by the "Vol" column input in the Generated Clips table.
+
+    **Data flow through the pipeline:**
+    ```
+    apply_music_plan.py  →  writes base_db onto manifest music_items[]
+    gen_render_plan.py   →  reads music_item["base_db"], threads into music_extra["base_db"]
+    render_video.py      →  reads shot.get("base_db", BASE_MUSIC_DB), passes to build_duck_expr()
+    ```
+    Missing any link silently drops base_db — gen_render_plan.py is the critical middle step.
+
+    **Invariants:**
+    - `duck_db` remains relative to `base_db` (multiplicative). Existing duck values need no update.
+    - Positive boost (+dB) is intentionally excluded (v1): base_db applied before mixing; upstream
+      clipping cannot be repaired by the downstream loudnorm (LUFS normalisation ≠ limiter).
+    - `_musicTrackVolumes` in the UI is NOT reset when Generate Review reruns; only resets on
+      episode change. `_musicCutClips` resets on episode change and is reloaded from disk.
+    - MusicPlan.v1.json `additionalProperties: false` — both new fields are explicitly in the schema.
+    - AssetManifest music_items `additionalProperties: true` — `base_db` written there needs no schema change.
 
 22. **ssml_narration skips stages 1, 2, 3, 8 — by design**
     These stages are unnecessary because:
