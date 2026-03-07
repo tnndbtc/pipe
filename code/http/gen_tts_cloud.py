@@ -1264,13 +1264,44 @@ def _normalize_ssml_for_cache(ssml: str) -> str:
     return normalized.strip()
 
 
+def _minify_ssml(ssml: str) -> str:
+    """Strip XML comments and collapse inter-tag whitespace before Azure API calls.
+
+    Per az.txt §Step 11 (Phase 4):
+    Produces the canonical SSML form used for both the Azure API call and the
+    cache key.  Reduces billed characters by ~28 % on user-authored narration
+    SSML with zero effect on synthesised audio output.
+
+    Rules (safe by XML spec + Azure TTS behaviour):
+      1. Remove <!-- ... --> comments entirely  (DOTALL: handles multi-line).
+      2. Collapse runs of whitespace between tags (>\\s+<) to '><'.
+      3. Strip leading/trailing whitespace from the full document.
+
+    NOT done (would risk audio changes):
+      - Whitespace inside text nodes (affects pronunciation / pausing)
+      - Attribute value changes
+      - Tag reordering or merging
+    """
+    # Rule 1: strip XML comments
+    s = re.sub(r'<!--.*?-->', '', ssml, flags=re.DOTALL)
+    # Rule 2: collapse inter-tag whitespace
+    s = re.sub(r'>\s+<', '><', s)
+    # Rule 3: trim
+    return s.strip()
+
+
 def _tts_cache_key(ssml: str, voice: str, locale: str) -> str:
     """Compute SHA256 cache key for a TTS request.
 
-    Key inputs (per az.txt §Step 5):
+    Key inputs (per az.txt §Step 5 + §Step 11):
       normalized_ssml + voice + locale + output_format + sample_rate + engine_version
+
+    Cache key is derived from the minified (canonical) form so that two SSML
+    inputs differing only in comments or whitespace — which produce identical
+    audio after _minify_ssml() — share a single cache entry.
     """
-    normalized = _normalize_ssml_for_cache(ssml)
+    canonical  = _minify_ssml(ssml)
+    normalized = _normalize_ssml_for_cache(canonical)
     payload = "\n".join([
         normalized,
         voice,
@@ -2485,6 +2516,7 @@ def _synthesise_rest(ssml: str, retries: int = 8) -> bytes:
     import urllib.request
     import urllib.error
 
+    ssml   = _minify_ssml(ssml)   # az.txt §Step 11: strip comments + whitespace
     key    = os.environ.get("AZURE_SPEECH_KEY", "")
     region = os.environ.get("AZURE_SPEECH_REGION", "")
     if not key or not region:
@@ -2528,6 +2560,7 @@ def synthesise(synthesizer, ssml: str) -> bytes:
     """
     import azure.cognitiveservices.speech as speechsdk
 
+    ssml   = _minify_ssml(ssml)   # az.txt §Step 11: strip comments + whitespace
     result = synthesizer.speak_ssml_async(ssml).get()
     if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
         return result.audio_data
