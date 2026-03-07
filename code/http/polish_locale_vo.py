@@ -5,14 +5,18 @@
 # Runs AFTER gen_tts_cloud.py [3/8] and BEFORE post_tts_analysis.py [4/8].
 #
 # Algorithm:
-#   1. Measure actual ZH and EN WAV durations directly from files.
+#   1. Measure actual locale and primary WAV durations directly from files.
 #   2. Flag lines with ratio = locale_dur / primary_dur outside [THRESHOLD, THRESHOLD_HIGH].
 #   3. Call Claude (sonnet) to rewrite flagged text to target_chars (locale-aware).
 #   4. Patch AssetManifest_merged.{locale}.json + AssetManifest_draft.{locale}.json
-#      with the revised text (so re-runs from Stage 10 also use corrected text).
+#      with the revised text (so re-runs from Stage 9 also use corrected text).
 #   5. Re-synthesize flagged items only via gen_tts_cloud.py --asset-id.
 #   6. Re-measure. Repeat up to MAX_ITERS times.
-#   7. Write observed chars/sec to prompts/tts_calibration.{locale}.json.
+#   7. Rate-adjustment fallback: for items still too short after MAX_ITERS, compute
+#      the azure_rate slowdown needed (capped at MAX_RATE_ADJUST%) and patch it
+#      per-item into tts_prompt.azure_rate, then re-synthesize those items once.
+#      Rate-adjusted items are excluded from calibration (non-standard rate skews cps).
+#   8. Write observed chars/sec to prompts/tts_calibration.{locale}.json.
 #
 # Usage:
 #   python polish_locale_vo.py \
@@ -40,7 +44,8 @@ THRESHOLD       = 0.90   # zh/en ratio below this → expand
 THRESHOLD_HIGH  = 1.10   # zh/en ratio above this → shorten
 MIN_CHARS       = 4
 SHORT_THRESHOLD = 1.5    # seconds
-MAX_ITERS       = 3
+MAX_ITERS       = 2
+MAX_RATE_ADJUST = 40     # max azure_rate slowdown (%) applied as per-item fallback
 GLOBAL_DEFAULTS = {"normal_cps": 3.2, "short_cps": 2.3}
 
 
@@ -263,6 +268,70 @@ def resynthesize_items(manifest_path: Path, item_ids: list[str]) -> None:
         )
 
 
+# ── Rate-adjustment fallback ──────────────────────────────────────────────────
+
+def apply_rate_adjustment(
+    manifest: dict,
+    manifest_path: Path,
+    draft: dict | None,
+    draft_locale_path: Path,
+    merged_idx: dict[str, dict],
+    draft_idx: dict[str, dict],
+    wav_locale: Path,
+    wav_primary: Path,
+) -> list[str]:
+    """Slow down per-item azure_rate for items still too short after text rewriting.
+
+    For each item with ratio < THRESHOLD, computes the rate reduction needed to
+    reach ratio ≈ 1.0, caps it at MAX_RATE_ADJUST%, and patches tts_prompt.azure_rate
+    in both merged and draft manifests.  Returns the list of item_ids patched.
+
+    Only applied to too-SHORT items (ratio < THRESHOLD).  Too-long items are left
+    as-is — speeding up voice degrades quality more than slowing down, and the
+    renderer can trim trailing silence.
+    """
+    rate_patched: list[str] = []
+
+    for item in manifest.get("vo_items", []):
+        iid         = item.get("item_id", "")
+        locale_dur  = wav_duration_sec(wav_locale  / f"{iid}.wav")
+        primary_dur = wav_duration_sec(wav_primary / f"{iid}.wav")
+        if not locale_dur or not primary_dur or primary_dur <= 0:
+            continue
+        ratio = locale_dur / primary_dur
+        if ratio >= THRESHOLD:
+            continue  # in range or too long — skip
+
+        # How much do we need to slow down?
+        # At rate -X%, new_duration = locale_dur / (1 - X/100)
+        # Target: new_duration / primary_dur ≈ 1.0  →  X = (1 - ratio) * 100
+        needed_pct = (1.0 - ratio) * 100.0
+        apply_pct  = min(needed_pct, MAX_RATE_ADJUST)
+        rate_str   = f"-{apply_pct:.0f}%"
+
+        achievable_ratio = ratio / (1.0 - apply_pct / 100.0)
+        status = "✓" if achievable_ratio >= THRESHOLD else f"~{achievable_ratio:.2f}"
+        print(f"    {iid:30s}  ratio={ratio:.3f}  need=-{needed_pct:.0f}%  "
+              f"apply={rate_str}  expected={achievable_ratio:.3f}  {status}")
+
+        # Patch tts_prompt.azure_rate in both manifests
+        if iid in merged_idx:
+            merged_idx[iid].setdefault("tts_prompt", {})["azure_rate"] = rate_str
+        if iid in draft_idx:
+            draft_idx[iid].setdefault("tts_prompt", {})["azure_rate"] = rate_str
+
+        rate_patched.append(iid)
+
+    if rate_patched:
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        if draft and draft_locale_path.exists():
+            draft_locale_path.write_text(
+                json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return rate_patched
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -428,6 +497,34 @@ def main() -> None:
         print(f"  re-synthesising {len(patched_ids)} item(s)…")
         resynthesize_items(manifest_path, patched_ids)
 
+    # ── Rate-adjustment fallback (after text-rewriting loop) ─────────────────
+    # Items still too short after MAX_ITERS text rewrites get their per-item
+    # azure_rate slowed down (capped at MAX_RATE_ADJUST%).  This is a one-shot
+    # pass — no iteration needed since the target rate is computed analytically.
+    still_short = []
+    for item in manifest.get("vo_items", []):
+        iid = item.get("item_id", "")
+        ld  = wav_duration_sec(wav_locale  / f"{iid}.wav")
+        pd  = wav_duration_sec(wav_primary / f"{iid}.wav")
+        if ld and pd and pd > 0 and (ld / pd) < THRESHOLD:
+            still_short.append(iid)
+
+    rate_adjusted_ids: set[str] = set()
+    if still_short:
+        print(f"\n  ── rate-adjustment fallback: {len(still_short)} item(s) still too short")
+        rate_patched = apply_rate_adjustment(
+            manifest, manifest_path,
+            draft, draft_locale_path,
+            merged_idx, draft_idx,
+            wav_locale, wav_primary,
+        )
+        if rate_patched:
+            rate_adjusted_ids = set(rate_patched)
+            print(f"  re-synthesising {len(rate_patched)} rate-adjusted item(s)…")
+            resynthesize_items(manifest_path, rate_patched)
+    else:
+        print(f"\n  ── rate-adjustment fallback: nothing to do (all items in ratio)")
+
     # ── Collect converged items for calibration ───────────────────────────────
     final_snapshot: dict[str, dict] = {}
     for item in manifest.get("vo_items", []):
@@ -442,18 +539,28 @@ def main() -> None:
                 "text":  item.get("text", ""),
             }
             if THRESHOLD <= ratio <= THRESHOLD_HIGH:
-                all_converged.append({
-                    "item_id":    iid,
-                    "final_text": item.get("text", ""),
-                    "locale_dur":  locale_dur,
-                    "primary_dur": primary_dur,
-                })
+                # Exclude rate-adjusted items from calibration: their cps reflects
+                # a non-standard rate and would skew the chars/sec estimate.
+                if iid not in rate_adjusted_ids:
+                    all_converged.append({
+                        "item_id":    iid,
+                        "final_text": item.get("text", ""),
+                        "locale_dur":  locale_dur,
+                        "primary_dur": primary_dur,
+                    })
                 representative_speaker = item.get("speaker_id", "narrator")
 
-    total = len(list(manifest.get("vo_items", [])))
+    total          = len(list(manifest.get("vo_items", [])))
+    n_rate_conv    = sum(
+        1 for iid in rate_adjusted_ids
+        if iid in final_snapshot and THRESHOLD <= final_snapshot[iid]["ratio"] <= THRESHOLD_HIGH
+    )
+    n_rate_partial = len(rate_adjusted_ids) - n_rate_conv
     print(f"  ✓ polish_locale_vo complete: "
-          f"{len(all_converged)}/{total} lines converged "
-          f"(ratio in [{THRESHOLD}, {THRESHOLD_HIGH}])")
+          f"{len(all_converged)}/{total} lines converged by text rewrite"
+          + (f", {n_rate_conv} by rate adjust" if n_rate_conv else "")
+          + (f", {n_rate_partial} still out after rate cap" if n_rate_partial else "")
+          + f"  (ratio in [{THRESHOLD}, {THRESHOLD_HIGH}])")
 
     # ── Write alignment report ────────────────────────────────────────────────
     flagged_ids = {iid for iid, s in initial_snapshot.items()
@@ -462,7 +569,7 @@ def main() -> None:
     for iid in sorted(flagged_ids, key=lambda x: initial_snapshot[x]["ratio"]):
         init  = initial_snapshot[iid]
         final = final_snapshot.get(iid, init)
-        al_lines.append({
+        entry: dict = {
             "item_id":      iid,
             "ratio_before": init["ratio"],
             "ratio_after":  final["ratio"],
@@ -471,7 +578,13 @@ def main() -> None:
             "text_before":  original_text.get(iid, init["text"]),
             "text_after":   final["text"],
             "rewritten":    iid in original_text,
-        })
+        }
+        if iid in rate_adjusted_ids:
+            # Record which rate was applied for debugging
+            tts = merged_idx.get(iid, {}).get("tts_prompt", {})
+            entry["rate_adjusted"] = True
+            entry["rate_applied"]  = tts.get("azure_rate", "?")
+        al_lines.append(entry)
     alignment = {
         "locale":              locale,
         "updated":             datetime.datetime.now().isoformat(timespec="seconds"),
