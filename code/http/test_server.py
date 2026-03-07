@@ -340,6 +340,14 @@ except Exception:
     _VO_POLISH_THRESHOLD      = 0.90  # fallback if module not yet on path
     _VO_POLISH_THRESHOLD_HIGH = 1.10
 
+# ── VO retune shared module
+try:
+    from vo_retune import retune_vo_items as _retune_vo_items
+    _RETUNE_AVAILABLE = True
+except ImportError:
+    _retune_vo_items  = None   # type: ignore
+    _RETUNE_AVAILABLE = False
+
 
 # ── Story-file helpers ─────────────────────────────────────────────────────────
 def _next_story_num() -> int:
@@ -1760,6 +1768,7 @@ HTML = r"""<!DOCTYPE html>
     <button class="tab"        data-tab="browse"   onclick="switchTab('browse')"  >📁 Browse</button>
     <button class="tab"        data-tab="media"    onclick="switchTab('media')"   >🖼 Media</button>
     <button class="tab"        data-tab="music"    onclick="switchTab('music')"   >🎵 Music</button>
+    <button class="tab"        data-tab="vo"       onclick="switchTab('vo')"      >🎙 VO</button>
   </nav>
 
   <div class="toggle-wrap" id="toggle-render"
@@ -2025,6 +2034,77 @@ placeholder="Enter your story here"></textarea>
   <div class="music-footer" id="music-footer" style="display:none">
     <span id="music-confirm-msg"></span>
     <button id="music-btn-confirm" onclick="musicConfirm()">✔ Confirm MusicPlan</button>
+  </div>
+</div>
+
+<!-- ── VO Retune panel ── -->
+<div id="panel-vo" style="display:none;flex-direction:column;flex:1;overflow:hidden;padding:16px 24px 20px;gap:10px">
+  <style>
+    .vo-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-bottom:10px;border-bottom:1px solid var(--border)}
+    .vo-toolbar select{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:0.82em}
+    .vo-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:0}
+    .vo-empty{color:var(--dim);font-size:0.85em;padding:20px 0}
+    .vo-scene-header{display:flex;align-items:center;gap:8px;padding:8px 4px 4px;border-top:1px solid var(--border);margin-top:6px}
+    .vo-scene-label{font-size:0.78em;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;flex:1}
+    .vo-scene-btn{font-size:0.72em;padding:3px 10px;background:#ffffff10;color:var(--dim);border:1px solid var(--border);border-radius:5px;cursor:pointer}
+    .vo-scene-btn:hover{background:#ffffff20;color:var(--text)}
+    .vo-item-row{display:flex;align-items:center;gap:6px;padding:4px 4px;border-radius:5px}
+    .vo-item-row:hover{background:#ffffff08}
+    .vo-item-id{font-size:0.72em;color:var(--dim);min-width:160px;font-family:monospace}
+    .vo-field{background:#ffffff0a;color:var(--text);border:1px solid transparent;border-radius:4px;padding:3px 6px;font-size:0.78em;font-family:monospace}
+    .vo-field:focus{border-color:var(--border);outline:none;background:var(--surface)}
+    .vo-text{flex:1;min-width:180px}
+    .vo-voice{width:150px}
+    .vo-style{width:110px}
+    .vo-rate,.vo-pitch{width:52px}
+    .vo-preview-btn{font-size:0.8em;padding:3px 7px;background:#ffffff10;color:var(--dim);border:1px solid var(--border);border-radius:5px;cursor:pointer;flex-shrink:0}
+    .vo-preview-btn:hover{background:#ffffff20;color:var(--text)}
+    .vo-preview-btn.playing{color:#4fc3f7;border-color:#4fc3f7}
+    .vo-degree{width:44px}
+    .vo-dur{font-size:0.75em;color:var(--dim);min-width:52px;text-align:right;font-family:monospace}
+    .vo-resynth-btn{font-size:0.8em;padding:3px 9px;background:#ffffff10;color:var(--dim);border:1px solid var(--border);border-radius:5px;cursor:pointer;flex-shrink:0}
+    .vo-resynth-btn:hover{background:#ffffff20;color:var(--text)}
+    .vo-resynth-btn:disabled{opacity:.4;cursor:default}
+    .vo-col-headers{display:flex;align-items:center;gap:6px;padding:2px 4px;font-size:0.68em;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+  </style>
+  <div class="vo-toolbar">
+    <span class="section-label" style="margin:0">Episode</span>
+    <select id="vo-ep-select" onchange="onVoEpChange()" style="min-width:200px">
+      <option value="">— select episode —</option>
+    </select>
+    <span class="section-label" style="margin:0 0 0 8px">Locale</span>
+    <select id="vo-locale-select" onchange="loadVoItems()">
+      <option value="">— select locale —</option>
+    </select>
+    <button class="vo-scene-btn" onclick="loadVoItems()" style="margin-left:4px">↺ Refresh</button>
+  </div>
+  <!-- downstream-rerun warning — shown after any VO retune succeeds -->
+  <div id="vo-retune-banner" style="display:none;align-items:center;gap:8px;
+       padding:7px 12px;background:#7c4f1220;border:1px solid #c0743050;
+       border-radius:6px;font-size:0.8em;color:#e8a87c">
+    <span>⚠</span>
+    <span>VO re-synthesized — downstream steps must re-run to update the video:</span>
+    <code style="background:#ffffff12;padding:1px 5px;border-radius:3px;font-size:0.9em">
+      [7] post_tts → [8] apply_music_plan → [10] gen_render_plan → [11] render_video
+    </code>
+    <button onclick="document.getElementById('vo-retune-banner').style.display='none'"
+            style="margin-left:auto;background:none;border:none;color:#e8a87c;cursor:pointer;font-size:1.1em">✕</button>
+  </div>
+  <!-- column headers -->
+  <div class="vo-col-headers" style="margin-top:2px">
+    <span style="min-width:160px">item_id</span>
+    <span style="flex:1;min-width:180px">text</span>
+    <span style="width:150px">voice</span>
+    <span style="width:110px">style</span>
+    <span style="width:52px">rate</span>
+    <span style="width:52px">pitch</span>
+    <span style="width:44px">deg</span>
+    <span style="min-width:52px;text-align:right">dur</span>
+    <span style="width:32px"></span>
+    <span style="width:46px"></span>
+  </div>
+  <div id="vo-body" class="vo-body">
+    <span class="vo-empty">Select an episode and locale to see VO items.</span>
   </div>
 </div>
 
@@ -2469,6 +2549,433 @@ placeholder="Enter your story here"></textarea>
     };
   }
 
+  // ── VO Retune panel ──────────────────────────────────────────────────────────
+
+  function populateVoEpSelect() {
+    const voSel = document.getElementById('vo-ep-select');
+    if (!voSel) return;
+    // Always repopulate so switching to VO tab after changing the Run-tab project
+    // picks up the new project list and auto-selects the current Run-tab episode.
+    const prevEpDir = voSel.value;
+    fetch('/list_projects')
+      .then(r => r.json())
+      .then(data => {
+        voSel.innerHTML = '<option value="">— select episode —</option>';
+        let autoTarget = null;   // epDir that matches Run tab's currentSlug/currentEpId
+        (data.projects || []).forEach(proj => {
+          (proj.episodes || []).forEach(ep => {
+            const epId  = ep.id;
+            const slug  = proj.slug;
+            const epDir = 'projects/' + slug + '/episodes/' + epId;
+            const o     = document.createElement('option');
+            o.value           = epDir;
+            o.textContent     = slug + ' / ' + epId;
+            o.dataset.slug    = slug;
+            o.dataset.epId    = epId;
+            voSel.appendChild(o);
+            if (currentSlug && currentEpId &&
+                slug === currentSlug && epId === currentEpId)
+              autoTarget = epDir;
+          });
+        });
+        // Priority: Run-tab project → previous selection → nothing
+        const target = autoTarget || prevEpDir;
+        if (target) {
+          voSel.value = target;
+          if (voSel.value) {
+            // Fire onVoEpChange whenever target differs from previous,
+            // or when locales haven't been loaded yet for this episode.
+            const locSel = document.getElementById('vo-locale-select');
+            if (target !== prevEpDir || locSel.options.length <= 1)
+              onVoEpChange();
+          }
+        }
+      })
+      .catch(() => {});
+  }
+
+  function onVoEpChange() {
+    const sel  = document.getElementById('vo-ep-select');
+    const epDir = sel.value;
+    const locSel = document.getElementById('vo-locale-select');
+    locSel.innerHTML = '<option value="">— select locale —</option>';
+    document.getElementById('vo-body').innerHTML =
+      '<span class="vo-empty">Select a locale.</span>';
+    if (!epDir) return;
+    fetch('/api/vo_locales?ep_dir=' + encodeURIComponent(epDir))
+      .then(r => r.json())
+      .then(data => {
+        (data.locales || []).forEach(loc => {
+          const o = document.createElement('option');
+          o.value = o.textContent = loc;
+          locSel.appendChild(o);
+        });
+        if (data.locales && data.locales.length > 0) {
+          locSel.value = data.locales[0];
+          loadVoItems();
+        }
+      })
+      .catch(() => {});
+  }
+
+  function loadVoItems() {
+    const epSel  = document.getElementById('vo-ep-select');
+    const locSel = document.getElementById('vo-locale-select');
+    const epDir  = epSel.value;
+    const locale = locSel.value;
+    const body   = document.getElementById('vo-body');
+    if (!epDir || !locale) return;
+    body.innerHTML = '<span class="vo-empty">Loading…</span>';
+    const opt    = epSel.options[epSel.selectedIndex];
+    const slug   = opt.dataset.slug   || '';
+    const epId   = opt.dataset.epId   || '';
+    fetch('/api/vo_items?ep_dir=' + encodeURIComponent(epDir) +
+          '&locale=' + encodeURIComponent(locale))
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          // Give a specific, actionable message when the merged manifest doesn't exist yet.
+          const isNotFound = data.error.toLowerCase().includes('not found') ||
+                             data.error.toLowerCase().includes('no such file');
+          if (isNotFound) {
+            body.innerHTML =
+              '<div style="color:var(--dim);font-size:0.85em;padding:20px 0;line-height:1.7">' +
+              '⚠ VO data not ready for this episode.<br>' +
+              'The VO tab requires <code>AssetManifest_merged.{locale}.json</code> and ' +
+              'WAV files in <code>assets/{locale}/audio/vo/</code>.<br><br>' +
+              'Run the following pipeline steps first:<br>' +
+              '&nbsp;&nbsp;<strong>[5] manifest_merge</strong> — merges shared + locale drafts<br>' +
+              '&nbsp;&nbsp;<strong>[6] gen_tts</strong> — synthesises VO WAV files<br><br>' +
+              'These run automatically as part of Stage 9 (Render) in the Run tab.' +
+              '</div>';
+          } else {
+            body.innerHTML = '<span class="vo-empty" style="color:#f88">Error: ' +
+                             escHtml(data.error) + '</span>';
+          }
+          return;
+        }
+        _renderVoItems(data.items || [], slug, epId, locale, data.voice_catalog || {});
+      })
+      .catch(e => {
+        body.innerHTML = '<span class="vo-empty" style="color:#f88">Failed: ' +
+                         escHtml(String(e)) + '</span>';
+      });
+  }
+
+  let _voVoiceCatalog = {};   // { voiceName: {styles, local_name, gender} } — set by _renderVoItems
+
+  function _renderVoItems(items, slug, epId, locale, voiceCatalog) {
+    _voVoiceCatalog = voiceCatalog || {};
+    const body = document.getElementById('vo-body');
+    if (!items.length) {
+      body.innerHTML = '<span class="vo-empty">No VO items found.</span>';
+      return;
+    }
+    // Group by scene in manifest order
+    const scenes = {};
+    const sceneOrder = [];
+    items.forEach(it => {
+      const sc = it.scene_id ||
+                 (it.item_id.match(/sc\d+/) || [''])[0] || 'unknown';
+      if (!scenes[sc]) { scenes[sc] = []; sceneOrder.push(sc); }
+      scenes[sc].push(it);
+    });
+    // Sort voices by local_name for the dropdown
+    const voiceNames = Object.keys(_voVoiceCatalog).sort((a, b) => {
+      const la = (_voVoiceCatalog[a].local_name || a).toLowerCase();
+      const lb = (_voVoiceCatalog[b].local_name || b).toLowerCase();
+      return la < lb ? -1 : la > lb ? 1 : 0;
+    });
+    let html = '';
+    sceneOrder.forEach(sc => {
+      const scJ = JSON.stringify(sc);
+      const slugJ = JSON.stringify(slug);
+      const epIdJ = JSON.stringify(epId);
+      const locJ  = JSON.stringify(locale);
+      html += `<div class="vo-scene-header">
+        <span class="vo-scene-label">${escHtml(sc)}</span>
+        <button class="vo-scene-btn"
+          onclick='_voResynthScene(${scJ},${slugJ},${epIdJ},${locJ})'>
+          ⟳ Re-generate</button></div>`;
+      scenes[sc].forEach(it => {
+        const tp  = it.tts_prompt || {};
+        const iid = it.item_id;
+        const iidE = escHtml(iid);
+        const iidJ = JSON.stringify(iid);
+        const dur  = it.duration_sec != null
+                     ? it.duration_sec.toFixed(2) + 's' : '—';
+        const currentVoice = tp.azure_voice || '';
+        const voiceEntry   = _voVoiceCatalog[currentVoice] || {};
+        const voiceStyles  = voiceEntry.styles || [];
+        const currentStyle = tp.azure_style || '';
+
+        // Helper: format a voice option label as "Local name (gender) — voice_name"
+        const fmtVoice = v => {
+          const e = _voVoiceCatalog[v];
+          if (!e) return v;
+          const parts = e.local_name ? `${e.local_name} (${e.gender || '?'}) \u2014 ${v}` : v;
+          return parts;
+        };
+
+        // Voice <select> options — sorted by local_name (voiceNames already sorted)
+        let vOpts = voiceNames.map(v =>
+          `<option value="${escHtml(v)}"${v===currentVoice?' selected':''}>${escHtml(fmtVoice(v))}</option>`
+        ).join('');
+        if (currentVoice && !voiceNames.includes(currentVoice))
+          vOpts = `<option value="${escHtml(currentVoice)}" selected>${escHtml(currentVoice)}</option>` + vOpts;
+
+        // Style <select> options
+        let sOpts = `<option value="">— none —</option>`;
+        sOpts += voiceStyles.map(s =>
+          `<option value="${escHtml(s)}"${s===currentStyle?' selected':''}>${escHtml(s)}</option>`
+        ).join('');
+        if (currentStyle && !voiceStyles.includes(currentStyle))
+          sOpts += `<option value="${escHtml(currentStyle)}" selected>${escHtml(currentStyle)}</option>`;
+
+        // Store original manifest values as data-orig-* so _voPreviewItem
+        // can detect whether the user has changed any param in the UI.
+        const origText   = escHtml(it.text||'');
+        const origVoice  = escHtml(tp.azure_voice||'');
+        const origStyle  = escHtml(tp.azure_style||'');
+        const origRate   = escHtml(tp.azure_rate||'0%');
+        const origPitch  = escHtml(tp.azure_pitch||'');
+        const origDegree = escHtml(String(tp.azure_style_degree??''));
+        const breakMs    = tp.azure_break_ms ?? 0;
+
+        html += `<div class="vo-item-row" id="vo-row-${iidE}" data-item-id="${iidE}"
+            data-orig-text="${origText}" data-orig-voice="${origVoice}"
+            data-orig-style="${origStyle}" data-orig-rate="${origRate}"
+            data-orig-pitch="${origPitch}" data-orig-degree="${origDegree}"
+            data-break-ms="${breakMs}">
+          <span class="vo-item-id">${iidE}</span>
+          <input  class="vo-field vo-text"   id="vo-text-${iidE}"   value="${origText}" title="text"/>
+          <select class="vo-field vo-voice"  id="vo-voice-${iidE}"
+                  onchange='_voVoiceChanged(${iidJ})'>${vOpts}</select>
+          <select class="vo-field vo-style"  id="vo-style-${iidE}">${sOpts}</select>
+          <input  class="vo-field vo-rate"   id="vo-rate-${iidE}"
+                  value="${origRate}" placeholder="rate" title="azure_rate"/>
+          <input  class="vo-field vo-pitch"  id="vo-pitch-${iidE}"
+                  value="${origPitch}" placeholder="pitch" title="azure_pitch"/>
+          <input  class="vo-field vo-degree" id="vo-degree-${iidE}"
+                  value="${origDegree}" placeholder="deg" title="azure_style_degree"/>
+          <span   class="vo-dur"             id="vo-dur-${iidE}" title="WAV duration">${escHtml(dur)}</span>
+          <button class="vo-preview-btn"     id="vo-preview-${iidE}" title="Preview current audio"
+                  onclick='_voPreviewItem(${iidJ},${slugJ},${epIdJ},${locJ})'>▶</button>
+          <button class="vo-resynth-btn"     id="vo-btn-${iidE}"
+                  onclick='_voResynthItem(${iidJ},${slugJ},${epIdJ},${locJ})'>Save</button>
+        </div>`;
+      });
+    });
+    body.innerHTML = html;
+  }
+
+  function _voVoiceChanged(itemId) {
+    const voice  = document.getElementById('vo-voice-' + itemId)?.value || '';
+    const sel    = document.getElementById('vo-style-' + itemId);
+    if (!sel) return;
+    const entry  = _voVoiceCatalog[voice] || {};
+    const styles = entry.styles || [];
+    const cur    = sel.value;
+    sel.innerHTML = '<option value="">— none —</option>' +
+      styles.map(s =>
+        `<option value="${escHtml(s)}"${s===cur?' selected':''}>${escHtml(s)}</option>`
+      ).join('');
+  }
+
+  // ── VO preview helpers ──────────────────────────────────────────────────────
+
+  // Play a URL (WAV or MP3) and manage the ▶/■ button state.
+  function _voPlayUrl(url, itemId, btn) {
+    const audio = new Audio(url);
+    window._voAudio   = audio;
+    window._voAudioId = itemId;
+    if (btn) { btn.textContent = '■'; btn.classList.add('playing'); btn.disabled = false; }
+    const reset = () => {
+      window._voAudio   = null;
+      window._voAudioId = null;
+      if (btn) { btn.textContent = '▶'; btn.classList.remove('playing'); btn.disabled = false; }
+    };
+    audio.onended = reset;
+    audio.onerror = reset;
+    audio.play().catch(reset);
+  }
+
+  async function _voPreviewItem(itemId, slug, epId, locale) {
+    const btn = document.getElementById('vo-preview-' + itemId);
+
+    // Toggle off if already playing this item
+    if (window._voAudio) {
+      window._voAudio.pause();
+      const prev = document.getElementById('vo-preview-' + (window._voAudioId || ''));
+      if (prev) { prev.textContent = '▶'; prev.classList.remove('playing'); prev.disabled = false; }
+      window._voAudio = null;
+      if (window._voAudioId === itemId) { window._voAudioId = null; return; }
+    }
+
+    // Read current UI values
+    const text   = (document.getElementById('vo-text-'   + itemId)?.value ?? '').trim();
+    const voice  = (document.getElementById('vo-voice-'  + itemId)?.value ?? '').trim();
+    const style  = (document.getElementById('vo-style-'  + itemId)?.value ?? '').trim();
+    const rate   = (document.getElementById('vo-rate-'   + itemId)?.value ?? '').trim() || '0%';
+    const pitch  = (document.getElementById('vo-pitch-'  + itemId)?.value ?? '').trim();
+    const degree = (document.getElementById('vo-degree-' + itemId)?.value ?? '').trim();
+
+    // Read original manifest values stored as data-orig-* on the row
+    const row      = document.getElementById('vo-row-' + itemId);
+    const breakMs  = parseInt(row?.dataset.breakMs  ?? '0', 10);
+    const origText   = row?.dataset.origText   ?? '';
+    const origVoice  = row?.dataset.origVoice  ?? '';
+    const origStyle  = row?.dataset.origStyle  ?? '';
+    const origRate   = row?.dataset.origRate   ?? '0%';
+    const origPitch  = row?.dataset.origPitch  ?? '';
+    const origDegree = row?.dataset.origDegree ?? '';
+
+    const paramsUnchanged = text === origText && voice === origVoice &&
+                            style === origStyle && rate === origRate &&
+                            pitch === origPitch && degree === origDegree;
+
+    if (paramsUnchanged) {
+      // Fast path — params match the saved manifest; existing WAV on disk is current.
+      const epDir = `projects/${slug}/episodes/${epId}`;
+      const url = `/api/vo_audio?ep_dir=${encodeURIComponent(epDir)}`
+                + `&locale=${encodeURIComponent(locale)}`
+                + `&item_id=${encodeURIComponent(itemId)}`;
+      _voPlayUrl(url, itemId, btn);
+      return;
+    }
+
+    // Slow path — params changed; call /api/preview_voice.
+    // Backend checks disk MP3 cache (covers index.json + presets.json clips)
+    // before hitting Azure TTS.
+    if (btn) { btn.textContent = '…'; btn.disabled = true; }
+    try {
+      // Derive azure_locale from voice name (e.g. "en-US-Andrew:Dragon..." → "en-US")
+      const azureLocale = voice.split('-').slice(0, 2).join('-');
+      const r = await fetch('/api/preview_voice', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          azure_voice:  voice,
+          azure_locale: azureLocale,
+          style:        style || null,
+          style_degree: parseFloat(degree) || 1.0,
+          rate:         rate  || '0%',
+          pitch:        pitch || '',
+          break_ms:     breakMs,
+          text:         text,
+        }),
+      });
+      const data = await r.json();
+      if (data.url) {
+        _voPlayUrl(data.url + '&t=' + Date.now(), itemId, btn);
+      } else {
+        const msg = data.error || 'preview failed';
+        if (btn) { btn.textContent = '▶'; btn.disabled = false; }
+        appendLine(`⚠ VO preview error (${itemId}): ${msg}`, 'err');
+      }
+    } catch (e) {
+      if (btn) { btn.textContent = '▶'; btn.disabled = false; }
+      appendLine(`⚠ VO preview error (${itemId}): ${e}`, 'err');
+    }
+  }
+
+  function _collectPatch(itemId) {
+    const g = id => (document.getElementById(id)?.value ?? '').trim();
+    const patch = { item_id: itemId };
+    const text   = g('vo-text-'   + itemId); if (text)   patch.text               = text;
+    const style  = g('vo-style-'  + itemId); if (style)  patch.azure_style        = style;
+    const rate   = g('vo-rate-'   + itemId); if (rate && rate !== '0%')
+                                                          patch.azure_rate         = rate;
+    const pitch  = g('vo-pitch-'  + itemId); if (pitch && pitch !== '0%')
+                                                          patch.azure_pitch        = pitch;
+    const deg    = g('vo-degree-' + itemId); if (deg)    patch.azure_style_degree = deg;
+    const voice  = g('vo-voice-'  + itemId); if (voice)  patch.azure_voice        = voice;
+    return patch;
+  }
+
+  function _voResynthItem(itemId, slug, epId, locale) {
+    _voSubmitRetune([_collectPatch(itemId)], slug, epId, locale);
+  }
+
+  function _voResynthScene(scene, slug, epId, locale) {
+    const rows  = document.querySelectorAll('.vo-item-row');
+    const items = [];
+    rows.forEach(row => {
+      const iid = row.dataset.itemId;
+      if (!iid) return;
+      const sc = (iid.match(/sc\d+/) || [''])[0];
+      if (sc === scene) items.push(_collectPatch(iid));
+    });
+    if (!items.length) return;
+    _voSubmitRetune(items, slug, epId, locale);
+  }
+
+  function _voSubmitRetune(items, slug, epId, locale) {
+    // Set loading state
+    items.forEach(it => {
+      const btn = document.getElementById('vo-btn-' + it.item_id);
+      const dur = document.getElementById('vo-dur-' + it.item_id);
+      if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+      if (dur) dur.textContent = '…';
+    });
+    fetch('/api/retune_vo', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ slug, ep_id: epId, locale,
+                                dry_run: false, backup: false, items }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        let anyOk = false;
+        (data.results || []).forEach(r => {
+          const btn = document.getElementById('vo-btn-' + r.item_id);
+          const dur = document.getElementById('vo-dur-' + r.item_id);
+          if (r.status === 'ok') {
+            anyOk = true;
+            if (btn) { btn.textContent = '✓'; btn.disabled = false;
+                       setTimeout(() => { if (btn) btn.textContent = 'Save'; }, 2500); }
+            if (dur) {
+              const after = r.after_duration_sec != null
+                            ? r.after_duration_sec.toFixed(2) + 's' : '—';
+              const warn  = r.duration_warn ? ' ⚠️' : '';
+              dur.textContent = after + warn;
+              dur.title = 'Before: ' + (r.before_duration_sec?.toFixed(2) ?? '?') +
+                          's → After: ' + (r.after_duration_sec?.toFixed(2) ?? '?') + 's';
+            }
+            // Sync data-orig-* so the next ▶ press takes the fast path (WAV on disk).
+            const row = document.getElementById('vo-row-' + r.item_id);
+            if (row) {
+              const g = id => document.getElementById(id)?.value ?? '';
+              row.dataset.origText   = g('vo-text-'   + r.item_id);
+              row.dataset.origVoice  = g('vo-voice-'  + r.item_id);
+              row.dataset.origStyle  = g('vo-style-'  + r.item_id);
+              row.dataset.origRate   = g('vo-rate-'   + r.item_id);
+              row.dataset.origPitch  = g('vo-pitch-'  + r.item_id);
+              row.dataset.origDegree = g('vo-degree-' + r.item_id);
+            }
+          } else {
+            if (btn) { btn.textContent = '✗'; btn.disabled = false;
+                       setTimeout(() => { if (btn) btn.textContent = 'Save'; }, 3000); }
+            if (dur) { dur.textContent = 'ERR'; dur.title = r.error || 'unknown error'; }
+            console.error('retune error', r.item_id, r.error);
+          }
+        });
+        // Show downstream-rerun banner whenever at least one item was re-synthesized.
+        if (anyOk) {
+          const banner = document.getElementById('vo-retune-banner');
+          if (banner) banner.style.display = 'flex';
+        }
+        if (data.error) console.error('retune_vo API error:', data.error);
+      })
+      .catch(e => {
+        items.forEach(it => {
+          const btn = document.getElementById('vo-btn-' + it.item_id);
+          if (btn) { btn.textContent = '✗'; btn.disabled = false; }
+        });
+        console.error('retune_vo fetch failed:', e);
+      });
+  }
+
   // ── Test / Production mode toggle ────────────────────────────────────────────
 
   function toggleRenderMode() {
@@ -2507,6 +3014,8 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('panel-pipeline').style.display = name === 'pipeline' ? 'flex' : 'none';
     document.getElementById('panel-media').style.display    = name === 'media'    ? 'flex' : 'none';
     document.getElementById('panel-music').style.display    = name === 'music'    ? 'flex' : 'none';
+    document.getElementById('panel-vo').style.display       = name === 'vo'       ? 'flex' : 'none';
+    if (name === 'vo') populateVoEpSelect();
 
     // ── Connection cleanup on tab switch ──
     // HTTP/1.1 allows only 6 concurrent connections per host.  Free up slots
@@ -7355,6 +7864,128 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        # ── VO Retune: serve existing WAV for preview (GET /api/vo_audio) ──────────
+        elif parsed.path == "/api/vo_audio":
+            params  = parse_qs(parsed.query)
+            ep_dir  = unquote_plus(params.get("ep_dir",  [""])[0]).strip()
+            locale  = unquote_plus(params.get("locale",  [""])[0]).strip()
+            item_id = unquote_plus(params.get("item_id", [""])[0]).strip()
+            if not ep_dir or not locale or not item_id or ".." in item_id:
+                self.send_response(400); self.end_headers(); return
+            full_ep = os.path.join(PIPE_DIR, ep_dir) \
+                      if not os.path.isabs(ep_dir) else ep_dir
+            wav_p = os.path.join(full_ep, "assets", locale, "audio", "vo",
+                                 item_id + ".wav")
+            if os.path.isfile(wav_p):
+                with open(wav_p, "rb") as _wf:
+                    data = _wf.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self.send_response(404)
+                _b = b'{"error":"wav not found"}'
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(_b)))
+                self.end_headers()
+                self.wfile.write(_b)
+            return
+
+        # ── VO Retune: available locales (GET /api/vo_locales?ep_dir=...) ──────────
+        elif parsed.path == "/api/vo_locales":
+            params = parse_qs(parsed.query)
+            ep_dir = unquote_plus(params.get("ep_dir", [""])[0]).strip()
+            locales = []
+            if ep_dir:
+                full_ep_dir = os.path.join(PIPE_DIR, ep_dir) \
+                              if not os.path.isabs(ep_dir) else ep_dir
+                if os.path.isdir(full_ep_dir):
+                    for fname in sorted(os.listdir(full_ep_dir)):
+                        m = re.match(r"AssetManifest_merged\.(.+)\.json$", fname)
+                        if m:
+                            locales.append(m.group(1))
+            body = json.dumps({"locales": locales}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── VO Retune: vo_items for locale (GET /api/vo_items?ep_dir=...&locale=...) ──
+        elif parsed.path == "/api/vo_items":
+            params = parse_qs(parsed.query)
+            ep_dir = unquote_plus(params.get("ep_dir", [""])[0]).strip()
+            locale = unquote_plus(params.get("locale", [""])[0]).strip()
+            if not ep_dir or not locale:
+                body = json.dumps({"error": "ep_dir and locale are required"}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                full_ep_dir = os.path.join(PIPE_DIR, ep_dir) \
+                              if not os.path.isabs(ep_dir) else ep_dir
+                mpath = os.path.join(full_ep_dir,
+                                     f"AssetManifest_merged.{locale}.json")
+                try:
+                    with open(mpath, encoding="utf-8") as fh:
+                        manifest = json.load(fh)
+                    items = manifest.get("vo_items", [])
+                    # Annotate each item with current WAV duration
+                    wav_dir = os.path.join(full_ep_dir, "assets", locale, "audio", "vo")
+                    for it in items:
+                        wav_p = os.path.join(wav_dir, it["item_id"] + ".wav")
+                        dur = None
+                        if os.path.isfile(wav_p):
+                            try:
+                                import wave as _wave
+                                with _wave.open(wav_p) as wf:
+                                    dur = round(wf.getnframes() / wf.getframerate(), 3)
+                            except Exception:
+                                pass
+                        it["duration_sec"] = dur
+                    # Build voice catalog from the full Azure TTS catalog so the
+                    # voice dropdown shows ALL available voices for this locale,
+                    # not just the one voice assigned in VoiceCast.json.
+                    # parse_azure_tts_styles() is cached after first call.
+                    # Catalog key: story locale ("zh-Hans", "en", etc.)
+                    _full_cat = parse_azure_tts_styles()
+                    # Map locale → catalog key (catalog uses "zh-Hans", "en", etc.)
+                    if locale.startswith("zh"):
+                        _cat_key = "zh-Hans"
+                    elif locale.startswith("en"):
+                        _cat_key = "en"
+                    else:
+                        _cat_key = locale
+                    # Convert list-of-VoiceEntry to {voiceName: {styles, local_name, gender}} for the UI
+                    voice_catalog = {
+                        e["voice"]: {
+                            "styles":     e.get("styles", []),
+                            "local_name": e.get("local_name", e["voice"]),
+                            "gender":     e.get("gender", ""),
+                        }
+                        for e in _full_cat.get(_cat_key, [])
+                        if e.get("voice")
+                    }
+                    body = json.dumps({"items": items, "voice_catalog": voice_catalog}).encode()
+                    self.send_response(200)
+                except FileNotFoundError:
+                    body = json.dumps({"error": f"Manifest not found: {mpath}"}).encode()
+                    self.send_response(404)
+                except Exception as exc:
+                    body = json.dumps({"error": str(exc)}).encode()
+                    self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.end_headers()
+                self.wfile.write(body)
+
         # Next available story_N number
         elif parsed.path == "/next_story_num":
             body = json.dumps({"num": _next_story_num()}).encode()
@@ -8502,6 +9133,66 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(resp)
 
+        # ── Selective VO retune  (POST /api/retune_vo) ──────────────────────────
+        elif self.path == "/api/retune_vo":
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                req     = json.loads(self.rfile.read(length))
+                slug    = req.get("slug",   "").strip()
+                ep_id   = req.get("ep_id",  "").strip()
+                locale  = req.get("locale", "").strip()
+                dry_run = bool(req.get("dry_run", False))
+                backup  = bool(req.get("backup",  False))
+                items   = req.get("items", [])
+
+                if not slug or not ep_id or not locale:
+                    raise ValueError("slug, ep_id, and locale are required")
+                if not isinstance(items, list) or not items:
+                    raise ValueError("items must be a non-empty list")
+                if not _RETUNE_AVAILABLE:
+                    raise RuntimeError("vo_retune module not available — check server logs")
+
+                ep_dir        = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                manifest_path = os.path.join(ep_dir,
+                                             f"AssetManifest_merged.{locale}.json")
+
+                # Build per-item patches from request items
+                # Each item: { item_id, text?, azure_style?, azure_rate?,
+                #              azure_pitch?, azure_style_degree?, azure_break_ms? }
+                PATCH_FIELDS = {"text","azure_voice","azure_style","azure_rate",
+                                "azure_pitch","azure_style_degree","azure_break_ms"}
+                per_item_patches = {}
+                item_ids         = []
+                for it in items:
+                    iid   = it.get("item_id", "").strip()
+                    if not iid:
+                        raise ValueError("Each item must have an item_id")
+                    item_ids.append(iid)
+                    patch = {k: v for k, v in it.items() if k in PATCH_FIELDS}
+                    if patch:
+                        per_item_patches[iid] = patch
+
+                results = _retune_vo_items(
+                    manifest_path    = manifest_path,
+                    locale           = locale,
+                    item_ids         = item_ids,
+                    per_item_patches = per_item_patches or None,
+                    dry_run          = dry_run,
+                    backup           = backup,
+                )
+                body = json.dumps({"results": results}).encode()
+                self.send_response(200)
+            except (ValueError, FileNotFoundError) as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # TTS preview — F0-throttled, disk-cached  (POST /api/preview_voice)
         elif self.path == "/api/preview_voice":
             tmp_path = None
@@ -9241,7 +9932,8 @@ class Handler(BaseHTTPRequestHandler):
 
                 ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
 
-                # Find the merged manifest — try primary locale first, then any
+                # Find the merged manifest — use PRIMARY_LOCALE from
+                # pipeline_vars.sh, then fall back to alphabetical first.
                 import glob as _glob_mod
                 merged_manifests = _glob_mod.glob(
                     os.path.join(ep_dir, "AssetManifest_merged.*.json"))
@@ -9249,7 +9941,25 @@ class Handler(BaseHTTPRequestHandler):
                     raise FileNotFoundError(
                         "No AssetManifest_merged.*.json found. "
                         "Run stages 10[1]–10[4] first.")
-                manifest_path = merged_manifests[0]
+                # Read PRIMARY_LOCALE from pipeline_vars.sh
+                _primary_locale = "en"  # default
+                _vars_file = os.path.join(ep_dir, "pipeline_vars.sh")
+                if os.path.isfile(_vars_file):
+                    import re as _re_mv
+                    with open(_vars_file, encoding="utf-8") as _vf:
+                        _vf_content = _vf.read()
+                    _m = _re_mv.search(
+                        r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                        _vf_content)
+                    if _m:
+                        _primary_locale = _m.group(1).strip()
+                # Try primary locale first, then fall back to first available
+                _primary_manifest = os.path.join(
+                    ep_dir, f"AssetManifest_merged.{_primary_locale}.json")
+                if os.path.isfile(_primary_manifest):
+                    manifest_path = _primary_manifest
+                else:
+                    manifest_path = sorted(merged_manifests)[0]
 
                 code_dir = os.path.join(PIPE_DIR, "code", "http")
                 cmd = ["python3", os.path.join(code_dir, "music_review_pack.py"),
