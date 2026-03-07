@@ -10,7 +10,7 @@
 #   1. Per-shot render → MKV intermediates (libx264 + pcm_s16le) in .shots/
 #   2. Concat intermediates with scene-boundary black frames
 #   3. Apply loudnorm (-16 LUFS, linear=true) + encode AAC → output.mp4
-#   4. Write sidecar output.srt (absolute timestamps)
+#   4. Write output.{locale}.srt (absolute timestamps) + output.subs.json sidecar
 #   5. Write render_output.json (stats + placeholder_count)
 #
 # Character compositing:
@@ -661,12 +661,14 @@ def ms_to_srt_ts(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def write_srt(shots: list[dict], srt_path: Path, fps: int) -> None:
+def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int) -> None:
     """
-    Write output.srt with cumulative absolute timestamps.
+    Write output.{locale}.srt with cumulative absolute timestamps and a parallel
+    output.subs.json sidecar keyed by line_id for cross-language SRT generation.
     Accounts for 1-frame black frames inserted at scene boundaries.
     """
     lines: list[str] = []
+    subs:  list[dict] = []
     seq        = 1
     offset_ms  = 0
     frame_ms   = round(1000 / fps)
@@ -678,12 +680,13 @@ def write_srt(shots: list[dict], srt_path: Path, fps: int) -> None:
                 continue
             abs_in  = offset_ms + vl["timeline_in_ms"]
             abs_out = offset_ms + vl["timeline_out_ms"]
-            lines += [
-                str(seq),
-                f"{ms_to_srt_ts(abs_in)} --> {ms_to_srt_ts(abs_out)}",
-                text,
-                "",
-            ]
+            timecode = f"{ms_to_srt_ts(abs_in)} --> {ms_to_srt_ts(abs_out)}"
+            lines += [str(seq), timecode, text, ""]
+            subs.append({
+                "line_id":  vl.get("line_id", ""),
+                "timecode": timecode,
+                "text":     text,
+            })
             seq += 1
 
         offset_ms += shot["duration_ms"]
@@ -694,6 +697,7 @@ def write_srt(shots: list[dict], srt_path: Path, fps: int) -> None:
                 offset_ms += frame_ms
 
     srt_path.write_text("\n".join(lines), encoding="utf-8")
+    subs_path.write_text(json.dumps(subs, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -871,10 +875,12 @@ def main() -> None:
     final_mp4 = output_dir / "output.mp4"
     concat_to_mp4(concat_list, final_mp4, profile)
 
-    # ── SRT ─────────────────────────────────────────────────────────────────
-    srt_path = output_dir / "output.srt"
-    write_srt(shots, srt_path, fps)
-    print(f"  SRT: {srt_path}")
+    # ── SRT + subtitle sidecar ───────────────────────────────────────────────
+    srt_path  = output_dir / f"output.{locale}.srt"
+    subs_path = output_dir / "output.subs.json"
+    write_srt(shots, srt_path, subs_path, fps)
+    print(f"  SRT:  {srt_path}")
+    print(f"  Subs: {subs_path}")
 
     # ── render_output.json ──────────────────────────────────────────────────
     render_output = {
@@ -885,6 +891,7 @@ def main() -> None:
         "locale":           locale,
         "output_video":     str(final_mp4),
         "output_srt":       str(srt_path),
+        "output_subs":      str(subs_path),
         "total_shots":      len(shots),
         "total_duration_ms": total_ms,
         "placeholder_count": placeholder_count,

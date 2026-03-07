@@ -5914,7 +5914,7 @@ placeholder="Enter your story here"></textarea>
       if (!r.ok || d.error) throw new Error(d.error || 'save failed');
       document.getElementById('music-confirm-msg').textContent =
         '✔ MusicPlan.json saved → ' + (d.path || 'assets/music/MusicPlan.json')
-        + '. Resume pipeline with Stage 10 to apply.';
+        + '. Resume pipeline with Stage 9 to apply.';
     } catch (err) {
       document.getElementById('music-confirm-msg').textContent = 'Error: ' + err.message;
     } finally {

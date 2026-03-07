@@ -293,6 +293,13 @@ run_stage_10() {
     fi
   done
 
+  # ── [11c] Cross-language SRT files (runs once after all locales) ──────
+  echo "  [11c] Generating cross-language SRT files…"
+  python3 "${code_dir}/gen_cross_srt.py" \
+    --ep-dir  "${EP_DIR}" \
+    --locales "${LOCALES:-en}" \
+    --primary "${PRIMARY_LOCALE:-en}" || true
+
   echo ""
   echo "✓ Stage 9 complete"
 }
