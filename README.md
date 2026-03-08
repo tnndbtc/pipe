@@ -121,9 +121,9 @@ Run via `./run.sh [story_file] [from_stage] [to_stage]`
 | 7     | haiku  | `canon.json` (updated)                         | World canon update                 |
 | 8     | sonnet | `Script.{locale}.json` + locale manifests      | Translation & adaptation           |
 | 9     | haiku  | `AssetManifest_final.json`, `RenderPlan.json`  | Finalise assets & render plan      |
-| 10    | —      | `renders/{locale}/output.mp4`                  | 7-step render (see below)          |
+| 9     | —      | `renders/{locale}/output.mp4`                  | 7-step render (see below)          |
 
-### Stage 10 substeps (per locale)
+### Stage 9 substeps (per locale)
 ```
 1. gen_music_clip.py    --manifest AssetManifest_draft.shared.json
 2. manifest_merge.py    --shared … --locale … (per locale)
@@ -363,7 +363,7 @@ Full design doc for the AI asset client script including:
 - Which manifest to send (`shared.json`), stripped payload rationale
 - Already-downloaded check logic
 - Complete script source code (~160 lines)
-- How test_server.py should invoke it in Stage 10
+- How test_server.py should invoke it in Stage 9
 
 ---
 

@@ -159,6 +159,42 @@
       "en_rate": "-5%",
       "normal_cps": 10.417,
       "normal_n": 56
+    },
+    {
+      "run_id": "ssml/s01e01",
+      "date": "2026-03-07",
+      "voice": "en-US-AndrewNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-YunjianNeural",
+      "en_style": "sports-commentary-excited",
+      "en_rate": "0%",
+      "normal_cps": 8.914,
+      "normal_n": 6
+    },
+    {
+      "run_id": "ssml/s01e01",
+      "date": "2026-03-07",
+      "voice": "en-US-AndrewNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-YunjianNeural",
+      "en_style": "sports-commentary-excited",
+      "en_rate": "0%",
+      "normal_cps": 10.391,
+      "normal_n": 7
+    },
+    {
+      "run_id": "ssml2/s01e01",
+      "date": "2026-03-07",
+      "voice": "en-GB-RyanNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "zh-CN-YunjianNeural",
+      "en_style": "sports-commentary-excited",
+      "en_rate": "0%",
+      "normal_cps": 8.717,
+      "normal_n": 4
     }
   ],
   "defaults": {

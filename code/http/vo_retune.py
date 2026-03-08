@@ -85,7 +85,7 @@ def load_retune_context(manifest_path: str, locale: str) -> dict:
     manifest  = json.loads(path.read_text(encoding="utf-8"))
     items_idx = {it["item_id"]: it for it in manifest.get("vo_items", [])}
 
-    # Locate draft manifest (for durable patching that survives Stage 10 re-runs)
+    # Locate draft manifest (for durable patching that survives Stage 9 re-runs)
     # Naming convention: AssetManifest_merged.{locale}.json
     #                 →  AssetManifest_draft.{locale}.json
     draft_path_str = str(path).replace("_merged.", "_draft.")
@@ -371,8 +371,8 @@ def _process_one_item(context: dict, item: dict, patch: dict, backup: bool) -> d
             _patch_item_in_manifest(draft_manifest, iid, patch)
 
         # Atomically write both manifests to disk
-        # _merged patch → enables immediate re-synthesis without a Stage 10 re-run
-        # _draft  patch → survives any future Stage 10 re-run (the durable one)
+        # _merged patch → enables immediate re-synthesis without a Stage 9 re-run
+        # _draft  patch → survives any future Stage 9 re-run (the durable one)
         _write_manifest_atomic(context["manifest_path"], context["manifest"])
         if draft_manifest and context.get("draft_path"):
             _write_manifest_atomic(context["draft_path"], draft_manifest)

@@ -58,10 +58,21 @@ import sys
 import tempfile
 import time
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# SSML namespace constants — keep in sync with ssml_preprocess.py
+_NS_SYNTHESIS = "http://www.w3.org/2001/10/synthesis"
+_NS_MSTTS     = "http://www.w3.org/2001/mstts"
+ET.register_namespace("",      _NS_SYNTHESIS)   # default ns
+ET.register_namespace("mstts", _NS_MSTTS)
+# Wrapper used when parsing ssml_inner fragments that use mstts: prefix
+_SSML_VOICE_OPEN = (
+    f'<voice xmlns="{_NS_SYNTHESIS}" xmlns:mstts="{_NS_MSTTS}">'
+)
 
 # =============================================================================
 # Paths
@@ -2915,6 +2926,218 @@ def _parse_ssml_inner_fragments(ssml_inner: str) -> list[dict]:
     return result
 
 
+def _parse_ssml_blocks(ssml_inner: str) -> list[tuple[str, int]]:
+    """Parse ssml_inner into per-block (block_xml, break_ms_after) tuples.
+
+    Each non-break direct child of <voice> is one block (typically one
+    <mstts:express-as> element).  The <break> immediately following a content
+    block is consumed and its duration attached as break_ms_after (0 if none).
+
+    Returns list of (block_xml, break_ms_after).
+    """
+    root = ET.fromstring(f"{_SSML_VOICE_OPEN}{ssml_inner}</voice>")
+    children = list(root)
+    blocks: list[tuple[str, int]] = []
+    i = 0
+    while i < len(children):
+        child = children[i]
+        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local != "break":
+            block_xml = ET.tostring(child, encoding="unicode", short_empty_elements=True)
+            break_ms = 0
+            if i + 1 < len(children):
+                nxt = children[i + 1]
+                nxt_local = nxt.tag.split("}")[-1] if "}" in nxt.tag else nxt.tag
+                if nxt_local == "break":
+                    t = nxt.get("time", "0ms")
+                    m = re.match(r"(\d+)\s*ms", t, re.IGNORECASE)
+                    break_ms = int(m.group(1)) if m else 0
+                    i += 1   # consume the break
+            blocks.append((block_xml, break_ms))
+        i += 1
+    return blocks
+
+
+def _run_ssml_narration_passthrough(
+    ssml_inner: str,
+    voice: str,
+    azure_lang: str,
+    sentence_frags: list[dict],
+    items: list[dict],
+    out_dir: Path,
+    cache_dir: Path,
+    synthesizer,
+    locale: str,
+    style: str | None,
+) -> tuple[list[dict], dict]:
+    """Per-block synthesis for multi-block SSML (Changes G + H).
+
+    Each <mstts:express-as> block in ssml_inner is submitted as a separate Azure
+    TTS call, producing a short block WAV (5-15 s, 1-4 sentences).  Silence-gap
+    alignment runs within each short block WAV — the regime it was designed for.
+    A missed boundary in one block corrupts at most that block's sentences; all
+    other blocks are unaffected.
+
+    §C3 RESOLVED: per-block synthesis (Option B) is the adopted architecture.
+    Full-WAV passthrough is not used.
+    """
+    t_start = time.time()
+
+    # ── GATE: count check MUST be first — before any I/O or API call ──────────
+    if len(sentence_frags) != len(items):
+        raise ValueError(
+            f"[passthrough] ssml_inner sentence count ({len(sentence_frags)}) != "
+            f"manifest items ({len(items)}).  Delete ssml_inner.xml and "
+            f"re-run ssml_preprocess before retrying TTS."
+        )
+
+    total = len(items)
+    print(f"\n[SSML-NARRATION] passthrough mode: {total} sentences  voice={voice}")
+    print(f"[SSML-NARRATION] locale={locale}")
+
+    # ── Parse ssml_inner into per-block (block_xml, break_ms_after) pairs ─────
+    blocks = _parse_ssml_blocks(ssml_inner)
+    print(f"[SSML-NARRATION] {len(blocks)} blocks parsed from ssml_inner")
+
+    # ── Synthesise each block as a separate Azure call ─────────────────────────
+    stat_api_calls   = 0
+    stat_cache_hits  = 0
+    total_ssml_chars = 0
+    block_wavs: list[tuple[bytes, int]] = []   # (wav_bytes, break_ms_after)
+
+    for block_idx, (block_xml, break_ms) in enumerate(blocks):
+        block_ssml = _minify_ssml(
+            f"<speak version='1.0' xml:lang='{azure_lang}'"
+            f" xmlns='http://www.w3.org/2001/10/synthesis'"
+            f" xmlns:mstts='http://www.w3.org/2001/mstts'>"
+            f"<voice name='{voice}'>{block_xml}</voice>"
+            f"</speak>"
+        )
+        ssml_chars = len(block_ssml)
+        total_ssml_chars += ssml_chars
+
+        cache_key = _tts_cache_key(block_ssml, voice, locale)
+        wav_bytes = _tts_cache_get(cache_dir, cache_key)
+        if wav_bytes is not None:
+            stat_cache_hits += 1
+            print(f"  [block {block_idx+1}/{len(blocks)}] cache HIT  "
+                  f"{cache_key[:16]}…  ({len(wav_bytes):,} bytes)")
+        else:
+            wav_bytes = synthesise(synthesizer, block_ssml)
+            print(f"  [block {block_idx+1}/{len(blocks)}] Azure TTS  "
+                  f"{len(wav_bytes):,} bytes  chars={ssml_chars}")
+            stat_api_calls += 1
+            _tts_cache_put(cache_dir, cache_key, wav_bytes, {
+                "voice":       voice,
+                "locale":      locale,
+                "char_count":  ssml_chars,
+                "multi_block": True,
+                "timestamp":   time.time(),
+            })
+        block_wavs.append((wav_bytes, break_ms))
+
+    # ── Align and slice per block (Change H) ───────────────────────────────────
+    # Sentence partitioning: for each block, count its sentences by running the
+    # same fragment parser used for the full ssml_inner.  This guarantees the
+    # partition cursor is stable and consistent with ssml_preprocess sentence counts.
+    frag_cursor       = 0
+    all_results: list[dict] = []
+    stat_align_silence       = 0
+    stat_align_proportional  = 0
+
+    for block_idx, (wav_bytes, _break_ms) in enumerate(block_wavs):
+        block_xml = blocks[block_idx][0]
+
+        # Count sentences in this block using the same parser as the full inner.
+        block_sents_parsed = _parse_ssml_inner_fragments(block_xml)
+        n = len(block_sents_parsed)
+        if n == 0:
+            log.warning("[passthrough] block %d has 0 sentences — skipping", block_idx + 1)
+            continue
+
+        blk_sfrags = sentence_frags[frag_cursor : frag_cursor + n]
+        blk_items  = items[frag_cursor : frag_cursor + n]
+        frag_cursor += n
+
+        chunk_dur = _pcm_duration_sec(_get_pcm_from_wav_bytes(wav_bytes))
+
+        # Build chunk dict for existing alignment helpers.
+        blk_chunk = {
+            "sentences": [
+                {
+                    "item_id":  blk_items[i]["item_id"],
+                    "text":     blk_sfrags[i]["text"],
+                    "pause_ms": blk_sfrags[i].get("pause_ms", 800),
+                }
+                for i in range(len(blk_items))
+            ]
+        }
+
+        # Path 1: silence-gap (short block WAV — operates in its designed regime).
+        aligned = _align_by_silence(wav_bytes, blk_chunk)
+        if aligned is not None:
+            aligned = _clamp_alignment(aligned, chunk_dur)
+            if not _validate_alignment(aligned, chunk_dur):
+                log.warning("[passthrough] block %d silence-gap invalid — proportional",
+                            block_idx + 1)
+                aligned = None
+            else:
+                stat_align_silence += n
+
+        # Path 2: proportional fallback (always succeeds).
+        if aligned is None:
+            aligned = _align_proportional(wav_bytes, blk_chunk)
+            aligned = _clamp_alignment(aligned, chunk_dur)
+            stat_align_proportional += n
+
+        print(f"  [block {block_idx+1}] align={'silence' if aligned and stat_align_silence > 0 else 'proportional'}"
+              f"  {n} sent  {chunk_dur:.1f}s")
+
+        slice_results = _write_sentence_wavs_from_chunk(
+            chunk_wav_bytes = wav_bytes,
+            offsets         = aligned,
+            out_dir         = out_dir,
+            voice           = voice,
+            style           = style,
+        )
+
+        # Augment with speaker/voice metadata.
+        item_meta = {it["item_id"]: it.get("vo", {}) for it in blk_items}
+        for r in slice_results:
+            vo = item_meta.get(r["item_id"], {})
+            r.update({
+                "speaker":    vo.get("speaker", "narrator"),
+                "voice":      voice,
+                "azure_lang": azure_lang,
+                "style":      style or "",
+            })
+        all_results.extend(slice_results)
+
+    # ── Summary ────────────────────────────────────────────────────────────────
+    wall_time = time.time() - t_start
+    ok = sum(1 for r in all_results if r.get("status") == "success")
+    print(f"\n[SSML-NARRATION] passthrough complete: {ok}/{total} OK  "
+          f"blocks={len(blocks)}  api={stat_api_calls}  cache={stat_cache_hits}  "
+          f"time={wall_time:.1f}s")
+    print(f"  align: silence={stat_align_silence}  proportional={stat_align_proportional}")
+
+    stats = {
+        "mode":              "ssml_narration_passthrough",
+        "items_total":       total,
+        "items_synthesized": ok,
+        "items_skipped":     total - ok,
+        "items_cache_hit":   stat_cache_hits,
+        "ssml_chars":        total_ssml_chars,
+        "api_calls":         stat_api_calls,
+        "cache_hits":        stat_cache_hits,
+        "chunks":            len(blocks),
+        "align_silence":     stat_align_silence,
+        "align_fallback":    stat_align_proportional,
+        "wall_time_sec":     round(wall_time, 1),
+    }
+    return all_results, stats
+
+
 def run_ssml_narration(
     ssml_inner_path: str,
     voice_cast_path: str,
@@ -2968,6 +3191,13 @@ def run_ssml_narration(
     rate      = vc_locale.get("azure_rate", "0%")
     pitch     = vc_locale.get("azure_pitch")
 
+    # Change F: detect multi-block mode.
+    # Primary signal: ssml_multi_block flag written by ssml_preprocess.py Change E.
+    # Fallback: content-sniff ssml_inner in case VoiceCast predates the flag.
+    multi_block = vc_locale.get("ssml_multi_block", False)
+    if not multi_block:
+        multi_block = "<mstts:express-as" in ssml_inner
+
     # --- Parse ssml_inner.xml into sentence fragments ---
     sentence_frags = _parse_ssml_inner_fragments(ssml_inner)
 
@@ -2979,6 +3209,23 @@ def run_ssml_narration(
     # --- Derive cache directory: assets/meta/tts_cache/ ---
     # out_dir is assets/{locale}/audio/vo — go up 3 levels to assets/
     cache_dir = out_dir.parent.parent.parent / "meta" / "tts_cache"
+
+    # Change G: multi-block passthrough — single full-episode Azure call.
+    # Branches before the chunk_alignment loop.  Count gate, synthesis, alignment,
+    # and WAV slicing are all handled inside the helper.
+    if multi_block:
+        return _run_ssml_narration_passthrough(
+            ssml_inner     = ssml_inner,
+            voice          = voice,
+            azure_lang     = azure_lang,
+            sentence_frags = sentence_frags,
+            items          = items,
+            out_dir        = out_dir,
+            cache_dir      = cache_dir,
+            synthesizer    = synthesizer,
+            locale         = locale,
+            style          = style,
+        )
 
     # --- Instrumentation counters (az.txt §Phase 1) ---
     stat_raw_chars      = sum(len(sentence_frags[i]["text"]) for i in range(total))

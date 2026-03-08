@@ -3,7 +3,7 @@
 # music_prepare_loops.py — Find best loopable segments in source music tracks
 # =============================================================================
 #
-# Runs AFTER gen_music_clip.py (Stage 10[1]). For each unique source music
+# Runs AFTER gen_music_clip.py (Stage 9[1/8]). For each unique source music
 # track used by an episode, analyzes the track with librosa to find the best
 # loopable segments (20-35s, low spectral flux, consistent RMS at boundaries).
 #

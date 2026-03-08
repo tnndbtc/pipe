@@ -155,7 +155,7 @@ export EPISODE_DIR="projects/.../episodes/s01e01"
 
 ---
 
-## PART 3 — WORKFLOW B: PIPELINE EXECUTION (run.sh Stages 0–10)
+## PART 3 — WORKFLOW B: PIPELINE EXECUTION (run.sh Stages 0–9)
 
 ### Entry point
 File: `run.sh`
@@ -1504,7 +1504,7 @@ Run through the relevant items after any modification:
 - [ ] Per-item loop order: snapshot → patch _merged + _draft (atomic) → resynth → commit-or-revert. Never patch-all-then-synthesize-all.
 - [ ] Manifest/WAV consistency invariant: on synthesis failure, manifest fields are restored from snapshot (atomic write) before continuing to next item
 - [ ] `_write_manifest_atomic()` writes to `{path}.tmp` then `os.replace()` — never writes directly to final path
-- [ ] Both manifests patched: `AssetManifest_merged.{locale}.json` (immediate use) AND `AssetManifest_draft.{locale}.json` (survives Stage 10 re-run)
+- [ ] Both manifests patched: `AssetManifest_merged.{locale}.json` (immediate use) AND `AssetManifest_draft.{locale}.json` (survives Stage 9 re-run)
 - [ ] Manifest backups use timestamp suffix `{path}.bak.{YYYYMMDD_HHMMSS}` — never overwritten
 - [ ] WAV backups use timestamp suffix `{wav}.bak.{YYYYMMDD_HHMMSS}` when `backup=True`
 - [ ] `retune_vo_log.jsonl` always appended (never truncated); `status` is `ok/partial/error`
@@ -1739,12 +1739,12 @@ Run through the relevant items after any modification:
 
 31. **VO Retune: both manifests patched, for different reasons**
     `retune_vo.py` and `/api/retune_vo` both patch `_merged` AND `_draft`:
-    - `_merged` patch → enables immediate re-synthesis without a Stage 10 re-run
+    - `_merged` patch → enables immediate re-synthesis without a Stage 9 re-run
       (gen_tts_cloud.py reads from `_merged` at synthesis time)
-    - `_draft` patch → survives any future Stage 10 re-run
-      (Stage 10[2/8] `manifest_merge.py` unconditionally re-creates `_merged` from `_draft`)
-    If only `_merged` is patched: retune works immediately but the next Stage 10 run
-    overwrites the patch. If only `_draft` is patched: retune is durable but a Stage 10
+    - `_draft` patch → survives any future Stage 9 re-run
+      (Stage 9[2/8] `manifest_merge.py` unconditionally re-creates `_merged` from `_draft`)
+    If only `_merged` is patched: retune works immediately but the next Stage 9 run
+    overwrites the patch. If only `_draft` is patched: retune is durable but a Stage 9
     re-run is required to pick it up. Patching both gives both properties.
 
 32. **VO Retune: duration drift is a user responsibility in v1**

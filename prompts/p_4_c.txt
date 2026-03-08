@@ -88,7 +88,11 @@ Print: `▶ [4/9] Stage 4-C — ShotList creative fill  …`
 
 ### Fields you MUST NOT change
 
-Do NOT modify any of these fields — they are pre-computed and locked:
+**Top-level fields** — copy verbatim from the scaffold, do not alter:
+  `schema_id`, `schema_version`, `shotlist_id`, `script_ref`,
+  `timing_lock_hash`, `total_duration_sec`
+
+**Per-shot fields** — pre-computed and locked in every shot object:
   `shot_id`, `scene_id`, `duration_sec`, `characters`, `timing_lock_hash`,
   `vo_item_ids`, `vo_speaker_id`, `vo_text`
 
@@ -123,12 +127,22 @@ Also run this VO completeness check and fix before writing if it fails:
 import json
 script   = json.load(open("projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json"))
 shotlist = json.load(open("projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json"))
-script_vo_count = sum(1 for s in script["scenes"] for a in s["actions"] if a["type"] == "dialogue")
-shotlist_vo_ids = [vid for shot in shotlist["shots"] for vid in shot["audio_intent"].get("vo_item_ids", [])]
-assert len(shotlist_vo_ids) == script_vo_count, (
-    f"VO count mismatch: ShotList has {len(shotlist_vo_ids)} IDs, "
-    f"Script has {script_vo_count} dialogue lines"
+# Count VO lines — support both Script formats:
+#   Format A (episodic/ssml_narration): scenes[].actions[].type == "dialogue"
+#   Format B (continuous_narration):    scenes[].dialogue[]
+script_vo_count = sum(
+    1 for s in script["scenes"]
+    for a in (s.get("actions") or s.get("dialogue") or [])
+    if isinstance(a, dict) and (a.get("type") == "dialogue" or "line" in a)
 )
+shotlist_vo_ids = [vid for shot in shotlist["shots"] for vid in shot["audio_intent"].get("vo_item_ids", [])]
+# For ssml_narration the scaffold already contains the correct vo_item_ids — skip count assert.
+story_format = "{{STORY_FORMAT}}"
+if story_format != "ssml_narration":
+    assert len(shotlist_vo_ids) == script_vo_count, (
+        f"VO count mismatch: ShotList has {len(shotlist_vo_ids)} IDs, "
+        f"Script has {script_vo_count} dialogue lines"
+    )
 assert len(shotlist_vo_ids) == len(set(shotlist_vo_ids)), "Duplicate vo_item_ids found"
 print(f"VO completeness: {len(shotlist_vo_ids)}/{script_vo_count} ✓")
 ```

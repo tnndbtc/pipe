@@ -211,7 +211,7 @@ def main() -> None:
         suffix = f", {errors} failed" if errors else ""
         print(f"\nDone: {ok}/{total} succeeded{suffix}.")
         if ok:
-            print("Re-run Stage 10 (render) to pick up the updated WAV files.")
+            print("Re-run Stage 9 (render) to pick up the updated WAV files.")
 
     sys.exit(1 if any_error else 0)
 

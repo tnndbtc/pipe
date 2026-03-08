@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "MusicPlan",
-  "description": "Human-edited music review overrides: loop selections per source track and per-shot ducking/continuity adjustments. Written during the music_review checkpoint (after Stage 10[4]). Controls both loop playback and per-shot audio mix parameters.",
+  "description": "Human-edited music review overrides: loop selections per source track and per-shot ducking/continuity adjustments. Written during the music_review checkpoint (after Stage 9[4/8]). Controls both loop playback and per-shot audio mix parameters.",
   "type": "object",
   "required": ["schema_id", "schema_version"],
   "additionalProperties": false,

@@ -48,7 +48,6 @@ MAX_ITERS       = 2
 MAX_RATE_ADJUST = 40     # max azure_rate slowdown (%) applied as per-item fallback
 GLOBAL_DEFAULTS = {"normal_cps": 3.2, "short_cps": 2.3}
 
-
 # ── WAV + text helpers ────────────────────────────────────────────────────────
 
 def wav_duration_sec(path: Path) -> float | None:

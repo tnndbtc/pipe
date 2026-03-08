@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -205,6 +206,20 @@ def parse_ssml(ssml_text: str) -> dict:
     voice_elem = _ve if _ve is not None else root.find(".//voice")
     voice_name = voice_elem.get("name", "") if voice_elem is not None else ""
 
+    # Change B: detect multi-block structure.
+    # Count non-break direct children of <voice>.  Any count > 1 is multi-block.
+    # <break> elements are excluded (they are pause markers, not content containers)
+    # so a single express-as block with surrounding breaks stays single-block.
+    # Broader than checking only express-as count: also catches one express-as +
+    # one sibling prosody, or multiple sibling prosody blocks.
+    multi_block = False
+    if voice_elem is not None:
+        non_break_direct = [
+            c for c in voice_elem
+            if (c.tag.split("}")[-1] if "}" in c.tag else c.tag) != "break"
+        ]
+        multi_block = len(non_break_direct) > 1
+
     # Find <mstts:express-as>
     express_elem = (
         root.find(f".//{_tag(NS_MSTTS, 'express-as')}")
@@ -231,36 +246,60 @@ def parse_ssml(ssml_text: str) -> dict:
     if inner_root is None:
         inner_root = root
 
-    # Collect text + break fragments from the inner content
-    fragments = list(_iter_text_and_breaks(inner_root))
+    if multi_block:
+        # Change D: fragments from full voice element (all 16+ blocks).
+        # _iter_text_and_breaks already walks recursively — no changes needed.
+        fragments = list(_iter_text_and_breaks(voice_elem))
 
-    # Build inner XML string: serialise inner_root children + text
-    inner_parts: list[str] = []
-    if inner_root.text:
-        inner_parts.append(inner_root.text)
-    for child in inner_root:
-        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-        if local == "break":
-            time_attr = child.get("time", "0ms")
-            inner_parts.append(f'<break time="{time_attr}"/>')
-        else:
-            # For any other child element, serialise it
-            inner_parts.append(
-                ET.tostring(child, encoding="unicode", short_empty_elements=True)
-            )
-        if child.tail:
-            inner_parts.append(child.tail)
-    inner_xml = "".join(inner_parts).strip()
+        # Change C: inner_xml from all voice children verbatim.
+        # §N1 wrapper approach: deepcopy all children into a temporary parent
+        # and call ET.tostring once so xmlns is declared once at the wrapper root
+        # instead of being repeated on each of the 16+ child elements.
+        # voice_elem is preserved intact (deepcopy does not modify it).
+        wrapper = ET.Element("voice")
+        for child in voice_elem:
+            wrapper.append(copy.deepcopy(child))
+        raw = ET.tostring(wrapper, encoding="unicode", short_empty_elements=True)
+        # Strip outer <voice ...>...</voice> tags — keep only the inner content.
+        inner_xml = raw[raw.index(">") + 1 : raw.rindex("</")].strip()
+
+    else:
+        # Change D: fragments from inner_root only (existing single-block path).
+        fragments = list(_iter_text_and_breaks(inner_root))
+
+        # Build inner XML string.
+        # Change A (tail duplication fix): ET.tostring already includes child.tail
+        # for non-break elements — do NOT append tail separately for those.
+        # <break> elements are serialised manually (no ET.tostring call), so
+        # their tail MUST be appended explicitly — that is correct and unchanged.
+        inner_parts: list[str] = []
+        if inner_root.text:
+            inner_parts.append(inner_root.text)
+        for child in inner_root:
+            local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if local == "break":
+                time_attr = child.get("time", "0ms")
+                inner_parts.append(f'<break time="{time_attr}"/>')
+                # tail appended manually — break is not serialised by ET.tostring
+                if child.tail:
+                    inner_parts.append(child.tail)
+            else:
+                # ET.tostring includes child.tail — do not append separately
+                inner_parts.append(
+                    ET.tostring(child, encoding="unicode", short_empty_elements=True)
+                )
+        inner_xml = "".join(inner_parts).strip()
 
     return {
-        "locale": locale,
-        "voice_name": voice_name,
-        "style": style,
+        "locale":       locale,
+        "voice_name":   voice_name,
+        "style":        style,
         "style_degree": style_degree,
-        "rate": rate_raw,
-        "pitch": pitch,
-        "fragments": fragments,
-        "inner_xml": inner_xml,
+        "rate":         rate_raw,
+        "pitch":        pitch,
+        "fragments":    fragments,
+        "inner_xml":    inner_xml,
+        "multi_block":  multi_block,   # Change B: True for multi-block SSML
     }
 
 
@@ -406,6 +445,11 @@ def build_voicecast_entry(parsed: dict) -> dict:
         locale_block["azure_style_degree"] = 1.3
 
     locale_block["azure_rate"] = rate_normalised
+
+    # Change E: flag multi-block episodes so gen_tts_cloud.py routes to the
+    # passthrough synthesis path instead of the chunk_alignment path.
+    if parsed.get("multi_block"):
+        locale_block["ssml_multi_block"] = True
 
     # Preserve the original numeric rate if it was converted
     if parsed["rate"] and not parsed["rate"].endswith("%"):
@@ -562,6 +606,7 @@ def main() -> int:
     log.info("Voice: %s", parsed["voice_name"] or "(none)")
     log.info("Style: %s  degree: %s", parsed["style"] or "(none)", parsed["style_degree"] or "(none)")
     log.info("Rate: %s  pitch: %s", parsed["rate"] or "(none)", parsed["pitch"] or "(none)")
+    log.info("Multi-block: %s", parsed["multi_block"])
 
     # 1. Script.json
     script = build_script(meta, parsed["fragments"], locale)

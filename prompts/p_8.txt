@@ -42,7 +42,9 @@ Episode dir     : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
 Project dir     : projects/{{PROJECT_SLUG}}/
 Story format    : {{STORY_FORMAT}}
 
-Read these files before writing anything:
+Read these files before writing anything
+(skip any file that does not exist — it is normal for some files to be absent
+for certain story formats, e.g. StoryPrompt.json is absent for ssml_narration):
   1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
   2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
   3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
@@ -69,10 +71,28 @@ Print: `▶ [8/9] Stage 8 — Produce locale variants  …`
 Story format: **{{STORY_FORMAT}}**
 
 If `STORY_FORMAT` is `ssml_narration`:
-  Skip ALL work and print:
-  `ℹ️  Stage 8: ssml_narration format — locale TTS is handled by gen_tts_cloud.py --ssml-narration. No manifest variants needed.`
-  `✓ [8/9] Stage 8 — Produce locale variants  done`
-  (then stop immediately — do NOT read or write any files)
+  The primary locale's VO is driven by SSML — there is no primary-locale Script to
+  regenerate.  However, **secondary locales still need translated AssetManifests**
+  so their TTS can be synthesised in the correct language.
+
+  For ssml_narration, do the following:
+  - Skip producing StoryPrompt.<locale>.json  (Stage 2 was skipped; file does not exist)
+  - Skip producing canon_diff.<locale>.json and canon.<locale>.json
+    (canon pipeline runs separately; do not touch those files)
+  - **For each secondary locale** (every locale that is NOT {{PRIMARY_LOCALE}}):
+    1. Read AssetManifest_draft.{{PRIMARY_LOCALE}}.json as the source of vo_items.
+    2. Translate every `text` field from the primary locale into the target locale,
+       following the FAITHFULNESS RULE and Duration Matching Rule below.
+    3. Apply the correct azure_voice / azure_style / azure_rate / azure_pitch /
+       azure_break_ms / azure_style_degree from VoiceCast.json for the target locale.
+    4. Write the result as AssetManifest_draft.<locale>.json
+       (same schema as the primary locale manifest, with `"locale": "<locale>"`).
+    5. Also translate Script.json (scenes[].dialogue[].line, scenes[].action_beats[],
+       scenes[].actions[].description, scenes[].location, scenes[].time_of_day)
+       and write Script.<locale>.json.  This ensures downstream tools have a
+       translated script reference.
+  - Print per-locale completion summary (same format as the normal path below).
+  - Then proceed to the final done-print and stop.
 
 If `STORY_FORMAT` is `continuous_narration` or `documentary`:
 - There are NO `character_packs` in this manifest. Do not attempt to translate or look up character pack entries.

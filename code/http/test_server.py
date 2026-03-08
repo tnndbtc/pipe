@@ -1832,7 +1832,7 @@ placeholder="Enter your story here"></textarea>
     </div>
   </div>
 
-  <!-- hidden: stage range always 0–10; split into 0+1–N handled in runPrompt() -->
+  <!-- hidden: stage range always 0–9 (internally 0–10); split into 0+1–N handled in runPrompt() -->
   <input type="hidden" id="prompt" value="0  10">
   <!-- ── Run options + buttons ── -->
   <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
@@ -1848,7 +1848,7 @@ placeholder="Enter your story here"></textarea>
     <label style="display:flex; align-items:center; gap:6px; cursor:pointer;
                   font-size:0.82em; font-family:var(--mono); color:var(--dim);
                   user-select:none;"
-           title="Delete cached WAVs, images, renders and manifests before each Stage 10 run — ensures a clean rebuild from scratch">
+           title="Delete cached WAVs, images, renders and manifests before each Stage 9 run — ensures a clean rebuild from scratch">
       <input type="checkbox" id="chk-purge-assets" onchange="togglePurgeMode()"
              style="width:14px; height:14px; cursor:pointer; accent-color:#e06c75;">
       🗑 Purge Cache
@@ -4458,11 +4458,12 @@ placeholder="Enter your story here"></textarea>
     }
     const stagesMap = status.llm_stages || {};
     const llmKeys = [
-      { n:0, key:'stage_0'  }, { n:1,  key:'stage_1'  }, { n:2,  key:'stage_2'  },
-      { n:3, key:'stage_3'  }, { n:4,  key:'stage_4'  }, { n:5,  key:'stage_5'  },
-      { n:6, key:'stage_6'  }, { n:7,  key:'stage_7'  }, { n:8,  key:'stage_8'  },
-      { n:10, key:'stage_10' },
+      { n:0,  display:0, key:'stage_0'  }, { n:1,  display:1, key:'stage_1'  }, { n:2,  display:2, key:'stage_2'  },
+      { n:3,  display:3, key:'stage_3'  }, { n:4,  display:4, key:'stage_4'  }, { n:5,  display:5, key:'stage_5'  },
+      { n:6,  display:6, key:'stage_6'  }, { n:7,  display:7, key:'stage_7'  }, { n:8,  display:8, key:'stage_8'  },
+      { n:10, display:9, key:'stage_10' },
     ];
+    const _nsMaxDisplay = llmKeys[llmKeys.length - 1].display;
     const stageLabels = {
       0:  'Cast voices & pipeline vars',
       1:  'Check story consistency',
@@ -4478,30 +4479,30 @@ placeholder="Enter your story here"></textarea>
     // Sequential done propagation (mirrors renderPipelineStatus)
     let maxDone = -1;
     llmKeys.forEach(({ n, key }) => { if ((stagesMap[key] || {}).done) maxDone = n; });
-    for (const { n, key } of llmKeys) {
+    for (const { n, display, key } of llmKeys) {
       const done = n <= maxDone || ((stagesMap[key] || {}).done === true);
       if (!done) {
-        // Stage 10 paused at [4b/8] music review checkpoint? (only when music is enabled)
+        // Stage 9 paused at [4b/8] music review checkpoint? (only when music is enabled)
         if (n === 10 && status.tts_done && !status.no_music && !status.music_plan_done) {
           return { state: 'action',
-                   msg: '🎵  Music review needed — open the Music tab, confirm the plan, then re-run Stage 10' };
+                   msg: '🎵  Music review needed — open the Music tab, confirm the plan, then re-run Stage 9' };
         }
-        // Stage 10 music confirmed (or music disabled) but render not yet done?
+        // Stage 9 music confirmed (or music disabled) but render not yet done?
         if (n === 10 && status.tts_done && (status.no_music || status.music_plan_done)) {
           return { state: 'action',
-                   msg: '▶  Re-run Stage 10  —  ' + (status.no_music ? 'no music' : 'music confirmed') + ', resuming from step [5/8] resolve assets → render' };
+                   msg: '▶  Re-run Stage 9  —  ' + (status.no_music ? 'no music' : 'music confirmed') + ', resuming from step [5/8] resolve assets → render' };
         }
         return { state: 'action',
-                 msg: '▶  Run ' + n + ' → 10  —  Stage ' + n + ': ' + (stageLabels[n] || '') };
+                 msg: '▶  Run ' + display + ' → ' + _nsMaxDisplay + '  —  Stage ' + display + ': ' + (stageLabels[n] || '') };
       }
     }
     return { state: 'done', msg: '✅  All stages complete — episode is ready.' };
   }
 
-  // Returns an alignment-based next-step if Stage 10 is done but VO is misaligned.
+  // Returns an alignment-based next-step if Stage 9 is done but VO is misaligned.
   function _alignmentNextStep() {
     if (!_lastAlignmentData || !_lastAlignmentData.locales) return null;
-    // Only relevant when Stage 10 is already complete
+    // Only relevant when Stage 9 is already complete
     if (!((( pipeStatus || {}).llm_stages || {}).stage_10 || {}).done) return null;
     const badLocs = _lastAlignmentData.locales.filter(
       loc => loc.total_lines > 0 && loc.flagged_count / loc.total_lines > 0.20
@@ -6312,6 +6313,11 @@ placeholder="Enter your story here"></textarea>
   }
 
   function renderPipelineStatus(status) {
+    // True while the Run tab has an active run.sh stream — Pipeline run buttons
+    // are disabled during this period to prevent startPipeStep() → /stop from
+    // accidentally SIGTERMing the background pipeline (exit code -15 bug).
+    const _runTabBusy = !!(es && es.readyState !== EventSource.CLOSED);
+
     // Store the auto-detected story file for loading story text into the textarea
     pipeStoryFile = status.story_file || null;
 
@@ -6355,17 +6361,20 @@ placeholder="Enter your story here"></textarea>
     body.appendChild(section);
 
     const llmDefs = [
-      { n:0,  label:'Stage 0  — Cast voices & write pipeline_vars.sh',         key:'stage_0'  },
-      { n:1,  label:'Stage 1  — Check story & world consistency',             key:'stage_1'  },
-      { n:2,  label:'Stage 2  — Write episode direction (StoryPrompt)',       key:'stage_2'  },
-      { n:3,  label:'Stage 3  — Write script & character dialogue',           key:'stage_3'  },
-      { n:4,  label:'Stage 4  — Break script into visual shots (ShotList)',   key:'stage_4'  },
-      { n:5,  label:'Stage 5  — List required assets (images, voice, music)', key:'stage_5'  },
-      { n:6,  label:'Stage 6  — Identify new story facts to record',          key:'stage_6'  },
-      { n:7,  label:'Stage 7  — Update story memory (world canon)',           key:'stage_7'  },
-      { n:8,  label:'Stage 8  — Translate & adapt for each language',         key:'stage_8'  },
-      { n:10, label:'Stage 10 — Merge assets & generate video (output.mp4)',  key:'stage_10' },
+      { n:0,  display:0, label:'Stage 0  — Cast voices & write pipeline_vars.sh',         key:'stage_0'  },
+      { n:1,  display:1, label:'Stage 1  — Check story & world consistency',             key:'stage_1'  },
+      { n:2,  display:2, label:'Stage 2  — Write episode direction (StoryPrompt)',       key:'stage_2'  },
+      { n:3,  display:3, label:'Stage 3  — Write script & character dialogue',           key:'stage_3'  },
+      { n:4,  display:4, label:'Stage 4  — Break script into visual shots (ShotList)',   key:'stage_4'  },
+      { n:5,  display:5, label:'Stage 5  — List required assets (images, voice, music)', key:'stage_5'  },
+      { n:6,  display:6, label:'Stage 6  — Identify new story facts to record',          key:'stage_6'  },
+      { n:7,  display:7, label:'Stage 7  — Update story memory (world canon)',           key:'stage_7'  },
+      { n:8,  display:8, label:'Stage 8  — Translate & adapt for each language',         key:'stage_8'  },
+      { n:10, display:9, label:'Stage 9  — Merge assets & generate video (output.mp4)',  key:'stage_10' },
     ];
+    // Auto-derived from the array — no hardcoded max needed.
+    const _maxDisplay = llmDefs[llmDefs.length - 1].display;
+    const _maxN       = llmDefs[llmDefs.length - 1].n;
 
     // ── Sequential done propagation ───────────────────────────────────────────
     // If stage N is done, all stages 0..N-1 are implicitly done too.
@@ -6398,7 +6407,7 @@ placeholder="Enter your story here"></textarea>
       });
     }
 
-    llmDefs.forEach(({ n, label, key }) => {
+    llmDefs.forEach(({ n, display, label, key }) => {
       const info    = stagesMap[key] || { done: false, artifacts: [] };
       const detail  = stageDetail[n] || '';
 
@@ -6427,13 +6436,14 @@ placeholder="Enter your story here"></textarea>
       expandBtn.textContent = '›';
       expandBtn.title = 'Show commands';
 
+      const _dis = _runTabBusy ? ' disabled title="Run tab pipeline is active"' : '';
       row.innerHTML =
         statusIcon(info.done) +
         '<span class="step-name">' + escHtml(label) + '</span>' +
         artHtml +
         '<span style="margin-left:auto;display:flex;gap:4px;flex-shrink:0">' +
-          '<button class="btn-pipe-run" onclick="runLlmRange(' + n + ',' + n + ')">Run ' + n + '</button>' +
-          (n < 10 ? '<button class="btn-pipe-run" onclick="runLlmRange(' + n + ',10)">Run ' + n + '→10</button>' : '') +
+          '<button class="btn-pipe-run"' + _dis + ' onclick="runLlmRange(' + n + ',' + n + ')">Run ' + display + '</button>' +
+          (n < _maxN ? '<button class="btn-pipe-run"' + _dis + ' onclick="runLlmRange(' + n + ',' + _maxN + ')">Run ' + display + '→' + _maxDisplay + '</button>' : '') +
         '</span>';
       row.prepend(expandBtn);
 
@@ -6442,7 +6452,7 @@ placeholder="Enter your story here"></textarea>
       detailEl.className = 'pipe-detail';
 
       if (n === 10) {
-        // Stage 10: numbered Run / Run→11 buttons matching the main stage button style
+        // Stage 9: numbered Run / Run→11 buttons matching the main stage button style
         const LOCALE_STEPS = [
           { num: 5,  step: 'manifest_merge',   label: '5 — merge',
             cmd: 'manifest_merge.py --shared AssetManifest_draft.shared.json --locale AssetManifest_draft.{locale}.json --out AssetManifest_merged.{locale}.json' },
@@ -6464,7 +6474,7 @@ placeholder="Enter your story here"></textarea>
         const locales        = status.locales || [];
         // stage10Running is kept for reference but no longer used to hard-clear ✓s.
         // Sub-step done state is sourced directly from the server (file-existence checks)
-        // so completed steps stay checked even while Stage 10 is still running.
+        // so completed steps stay checked even while Stage 9 is still running.
         const stage10Running = !!(pipeRunning && pipeRunning.from <= 10 && pipeRunning.to >= 10); // eslint-disable-line no-unused-vars
 
         function makeRunBtn(label, onclick) {
@@ -6473,6 +6483,7 @@ placeholder="Enter your story here"></textarea>
           b.style.cssText = 'font-size:0.72em;padding:2px 8px';
           b.textContent = label;
           b.onclick = onclick;
+          if (_runTabBusy) { b.disabled = true; b.title = 'Run tab pipeline is active'; }
           return b;
         }
 
@@ -7089,6 +7100,10 @@ placeholder="Enter your story here"></textarea>
         return;
       }
     }
+    // Guard: if the Run tab has an active pipeline stream (es open), do not fire
+    // /stop — that would SIGTERM the background run.sh mid-run (exit code -15).
+    // The user should click Stop first if they genuinely want to abort the run.
+    if (es && es.readyState !== EventSource.CLOSED) return;
     if (pipeStepEs) { pipeStepEs.close(); pipeStepEs = null; }
     fetch('/stop', { method: 'POST' }).catch(() => {});   // stop any running proc
 
@@ -7467,7 +7482,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             "artifacts": [],
         },
         "stage_9": {
-            # Stage 9 (p_9.txt) is permanently skipped — gen_render_plan.py in Stage 10
+            # Stage 9 (p_9.txt) is permanently skipped — gen_render_plan.py in Stage 9 render
             # handles this deterministically. Mark as done so the Pipeline tab shows ✓.
             "done": True,
             "artifacts": [],
@@ -7504,7 +7519,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             "render_video":    {"done": check(os.path.join(ep_dir, "renders", locale, "output.mp4"))},
         }
 
-    # Stage 10 is done when every locale has an output.mp4
+    # Stage 9 is done when every locale has an output.mp4
     ready_videos: list[str] = [
         loc for loc in locales
         if check(os.path.join(ep_dir, "renders", loc, "output.mp4"))
@@ -7522,7 +7537,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         if loc != "en" and check(os.path.join(ep_dir, "renders", loc, "youtube_dubbed.m4a"))
     ]
 
-    # Shared (locale-free) post-processing steps — steps 1–4 in the Stage 10 panel
+    # Shared (locale-free) post-processing steps — steps 1–4 in the Stage 9 panel
     def _any_files(d: str, ext: str) -> bool:
         return os.path.isdir(d) and any(f.endswith(ext) for f in os.listdir(d))
 
@@ -7534,11 +7549,11 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "gen_sfx":         {"done": _any_files(os.path.join(_assets_dir, "sfx"),    ".wav")},
     }
 
-    # Music plan checkpoint: [4b/8] in Stage 10 — pipeline pauses here until user confirms
+    # Music plan checkpoint: [4b/8] in Stage 9 — pipeline pauses here until user confirms
     _music_plan_path = os.path.join(_assets_dir, "music", "MusicPlan.json")
     music_plan_done = os.path.isfile(_music_plan_path)
 
-    # TTS done: at least one locale has WAV files (proxy for Stage 10 having started)
+    # TTS done: at least one locale has WAV files (proxy for Stage 9 having started)
     tts_done = any(
         (locale_steps.get(loc) or {}).get("gen_tts", {}).get("done", False)
         for loc in locales
@@ -8091,7 +8106,7 @@ class Handler(BaseHTTPRequestHandler):
                 render_profile = "preview_local"
             no_music     = params.get("no_music", ["0"])[0].strip() == "1"
 
-            # Sanitise: digits only, 0–10
+            # Sanitise: digits only, 0–10 (render stage is internally 10, displayed as Stage 9)
             from_stage = str(max(0, min(10, int(from_stage)))) if from_stage.isdigit() else "0"
             to_stage   = str(max(0, min(10, int(to_stage))))   if to_stage.isdigit()   else "10"
 
@@ -8769,7 +8784,7 @@ class Handler(BaseHTTPRequestHandler):
                         write_log("O", f"✓ {_step} [{_locale}]")
                     write_log("O", f"✓ [{_locale}] all locale steps complete")
 
-                write_log("O", "\n✓ Stage 10 — all steps complete")
+                write_log("O", "\n✓ Stage 9 — all steps complete")
                 _append_tts_usage_to_status_report(slug, ep_id, write_log)
                 write_log("D", "0")
 

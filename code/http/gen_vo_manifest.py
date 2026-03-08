@@ -479,6 +479,19 @@ def build_vo_item(
         text, azure_rate, effective_break_ms
     )
 
+    # --- Locale/script language mismatch warning ---
+    # CJK text in a non-CJK locale (e.g. Chinese in "en") means the Script.json
+    # line was never translated.  Warn loudly so the user can fix it in the VO tab.
+    _CJK_LOCALE_PREFIXES = {"zh", "ja", "ko"}
+    locale_root = locale.lower().split("-")[0]
+    if locale_root not in _CJK_LOCALE_PREFIXES and _is_cjk(text):
+        print(
+            f"  [WARN] {vid}: CJK text in non-CJK locale '{locale}' — "
+            f"translate this item in the VO tab before synthesis: "
+            f"{text[:50]!r}",
+            file=sys.stderr,
+        )
+
     # --- Assemble item ---
     item: dict = {
         "item_id": vid,

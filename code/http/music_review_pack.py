@@ -3,7 +3,7 @@
 # music_review_pack.py — Generate music review artifacts for human inspection
 # =============================================================================
 #
-# Runs AFTER post_tts_analysis.py (Stage 10[4]) when both music WAVs and VO
+# Runs AFTER post_tts_analysis.py (Stage 9[4/8]) when both music WAVs and VO
 # timing exist.  Produces three review artifacts:
 #
 #   1. timeline.txt   — human-readable shot timeline with music, VO, ducking
