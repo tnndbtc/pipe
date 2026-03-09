@@ -56,6 +56,8 @@
 import argparse
 import gc
 import json
+import re
+import time
 from pathlib import Path
 
 import torch
@@ -65,6 +67,7 @@ import torch
 # ---------------------------------------------------------------------------
 OUTPUT_DIR  = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_background_images"
+PROMPT_OUT_DIR = Path(__file__).resolve().parent / "gen_image_output"
 
 BACKGROUNDS = [
     {
@@ -136,6 +139,15 @@ ALL_MODEL_KEYS = list(MODELS.keys())
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def prompt_slug(prompt: str, max_len: int = 48) -> str:
+    """Derive a filesystem-safe slug from a prompt string."""
+    slug = re.sub(r"[^a-z0-9]+", "-", prompt.lower()).strip("-")
+    return slug[:max_len]
+
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 def parse_args():
@@ -153,6 +165,23 @@ def parse_args():
             "\n  all            Runs every model above in sequence for comparison."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--prompt", type=str, default=None,
+        help=(
+            "Generate a single image from this prompt, bypassing the manifest "
+            "and hardcoded background list. Output goes to gen_image_output/ "
+            "next to this script (override with --output or --output_dir)."
+        ),
+    )
+    parser.add_argument(
+        "--negative-prompt", dest="negative_prompt",
+        default="blurry, low quality, distorted",
+        help="Negative prompt for SDXL (ignored by FLUX). Default: 'blurry, low quality, distorted'",
+    )
+    parser.add_argument(
+        "--output", type=str, default=None,
+        help="Full output file path for --prompt mode (PNG). Overrides --output_dir.",
     )
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--width",  type=int, default=WIDTH)
@@ -278,6 +307,12 @@ def unload_pipeline(pipe):
 def generate_image(pipe, model_key: str, bg: dict, args, generator):
     """Run inference and return a PIL Image."""
     cfg = MODELS[model_key]
+    print(f"    prompt: {bg['prompt'][:100]}")
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    t0 = time.perf_counter()
+
     if cfg["family"] == "flux":
         result = pipe(
             prompt=bg["prompt"],
@@ -297,6 +332,14 @@ def generate_image(pipe, model_key: str, bg: dict, args, generator):
             guidance_scale=cfg["guidance"],
             generator=generator,
         )
+
+    elapsed = time.perf_counter() - t0
+    if torch.cuda.is_available():
+        peak_vram_gb = torch.cuda.max_memory_allocated() / 1024**3
+        print(f"    [PERF]  time={elapsed:.1f}s  peak_vram={peak_vram_gb:.2f} GB")
+    else:
+        print(f"    [PERF]  time={elapsed:.1f}s  (no CUDA device)")
+
     return result.images[0]
 
 
@@ -369,10 +412,16 @@ def run_model(model_key: str, backgrounds: list, out_dir: Path, args,
             continue
 
         try:
+            t_img     = time.perf_counter()
             generator = torch.Generator(device="cpu").manual_seed(args.seed)
             image     = generate_image(pipe, model_key, bg, args, generator)
             image.save(str(out_path), format="PNG")
             size      = out_path.stat().st_size
+            time_s    = time.perf_counter() - t_img
+            peak_vram_gb = (
+                torch.cuda.max_memory_allocated() / 1024**3
+                if torch.cuda.is_available() else 0.0
+            )
             print(f"    [OK] {size:,} bytes")
             results.append({
                 "asset_id": bg["asset_id"],
@@ -380,6 +429,8 @@ def run_model(model_key: str, backgrounds: list, out_dir: Path, args,
                 "output": str(out_path),
                 "size_bytes": size,
                 "status": "success",
+                "time_s": round(time_s, 1),
+                "peak_vram_gb": round(peak_vram_gb, 2),
             })
         except Exception as exc:
             print(f"    [ERROR] {exc}")
@@ -404,16 +455,34 @@ def run_model(model_key: str, backgrounds: list, out_dir: Path, args,
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    locale  = locale_from_manifest_path(args.manifest) if args.manifest else "en"
-    out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    backgrounds = BACKGROUNDS
-    if args.manifest:
-        backgrounds = load_from_manifest(args.manifest, args.asset_id)
-        if not backgrounds:
-            print("[WARN] No matching static backgrounds in manifest. Nothing to do.")
-            return
+    # --prompt mode: one-off generation, bypasses manifest/hardcoded list
+    if args.prompt:
+        if args.output:
+            out_path_override = Path(args.output)
+            out_dir    = out_path_override.parent
+            bg_output  = out_path_override.name
+        else:
+            out_dir   = Path(args.output_dir) if args.output_dir else PROMPT_OUT_DIR
+            bg_output = f"{prompt_slug(args.prompt)}.png"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        backgrounds = [{
+            "asset_id": "oneoff",
+            "prompt": args.prompt,
+            "negative_prompt": args.negative_prompt,
+            "color_mood": "neutral",
+            "output": bg_output,
+        }]
+    else:
+        locale  = locale_from_manifest_path(args.manifest) if args.manifest else "en"
+        out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
+        out_dir.mkdir(parents=True, exist_ok=True)
+        backgrounds = BACKGROUNDS
+        if args.manifest:
+            backgrounds = load_from_manifest(args.manifest, args.asset_id)
+            if not backgrounds:
+                print("[WARN] No matching static backgrounds in manifest. Nothing to do.")
+                return
 
     # Resolve which model keys to run
     if args.model == "all":
@@ -453,9 +522,11 @@ def main():
     print(f"SUMMARY — gen_background_images ({args.model})")
     print("=" * 60)
     for r in all_results:
-        label = "OK" if r["status"] == "success" else r["status"].upper()
-        model = r.get("model", "")
-        print(f"  [{label}]  [{model}]  {r['output']}  ({r['size_bytes']:,} bytes)")
+        label    = "OK" if r["status"] == "success" else r["status"].upper()
+        model    = r.get("model", "")
+        time_s   = f"  time={r['time_s']:.1f}s" if "time_s" in r else ""
+        vram     = f"  peak_vram={r['peak_vram_gb']:.2f} GB" if "peak_vram_gb" in r else ""
+        print(f"  [{label}]  [{model}]  {r['output']}  ({r['size_bytes']:,} bytes){time_s}{vram}")
     print(f"\n{ok_count}/{total} completed | {total_bytes:,} bytes total")
     print(f"Results: {results_path}")
 

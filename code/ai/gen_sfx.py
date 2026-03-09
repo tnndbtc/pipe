@@ -238,6 +238,18 @@ def parse_args():
         "--asset-id", type=str, default=None, dest="asset_id",
         help="Process only the sfx job matching this shot_id (requires --manifest).",
     )
+    parser.add_argument(
+        "--prompts", nargs="+", default=None, metavar="PROMPT",
+        help=(
+            "One or more text prompts to generate directly, bypassing the manifest "
+            "and hardcoded job list. Each prompt produces one WAV file. "
+            "Example: --prompts \"volcanic eruption\" \"distant thunder\""
+        ),
+    )
+    parser.add_argument(
+        "--prompts-duration", type=float, default=10.0, dest="prompts_duration",
+        help="Clip duration in seconds for --prompts jobs. (default: 10.0)",
+    )
     return parser.parse_args()
 
 
@@ -441,9 +453,14 @@ def main():
     out_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine job list: manifest sfx_items if present, else hardcoded
+    # Determine job list: --prompts > manifest sfx_items > hardcoded
     sfx_jobs = SFX_JOBS
-    if args.manifest:
+    if args.prompts:
+        sfx_jobs = [
+            {"shot_id": "oneoff", "duration": args.prompts_duration, "tags": args.prompts}
+        ]
+        print(f"[INFO] --prompts mode: {len(args.prompts)} prompt(s), duration={args.prompts_duration}s")
+    elif args.manifest:
         manifest_jobs = load_from_manifest(args.manifest, args.asset_id)
         if manifest_jobs is None:
             print("[INFO] No sfx_items section in manifest — using hardcoded SFX_JOBS.")

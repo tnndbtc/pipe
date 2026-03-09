@@ -67,7 +67,8 @@ import torch
 # ---------------------------------------------------------------------------
 # DEFAULTS — fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
-OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
+PROJECTS_ROOT = Path(__file__).resolve().parent.parent.parent / "projects"
+OUTPUT_DIR    = PROJECTS_ROOT / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_lipsync"
 
 LIPSYNC_JOBS = [
@@ -122,20 +123,100 @@ def parse_args():
             "    # Place checkpoint at: Wav2Lip/checkpoints/wav2lip_gan.pth\n"
             "    # (download link in the Wav2Lip repo README)\n"
             "    pip install -r Wav2Lip/requirements.txt\n"
-            "    python gen_lipsync.py --wav2lip_dir Wav2Lip\n\n"
+            "    python gen_lipsync.py --manifest ..\\AssetManifest_draft.json --wav2lip_dir Wav2Lip\n\n"
+            "  Quick test (ffmpeg passthrough, no Wav2Lip needed):\n"
+            "    python gen_lipsync.py --manifest ..\\AssetManifest_draft.json\n\n"
             "  UPGRADE: LatentSync 1.5 requires RTX 4080 16 GB+.\n"
             "  This script has no --model flag; Wav2Lip is the only supported model."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--output_dir", type=str, default=str(OUTPUT_DIR),
+    parser.add_argument("--output_dir", type=str, default=None,
                         help="Directory containing input videos/audio and output destination.")
+    parser.add_argument("--manifest", type=str, default=None,
+                        help="Path to AssetManifest JSON. When given, overrides hardcoded LIPSYNC_JOBS.")
+    parser.add_argument("--asset-id", type=str, default=None, dest="asset_id",
+                        help="Process only this character asset_id (requires --manifest).")
+    parser.add_argument("--anim-variant", type=str, default="slow-subtle", dest="anim_variant",
+                        help="Animation variant suffix to look for (default: slow-subtle). "
+                             "Matches files named {asset_id}-anim-{variant}.mp4.")
+    parser.add_argument("--tts-backend", type=str, default="kokoro", dest="tts_backend",
+                        help="TTS backend subfolder under assets/locale/ where WAVs live "
+                             "(default: kokoro). Matches gen_tts.py --tts_model output.")
     parser.add_argument("--wav2lip_dir", type=str, default="Wav2Lip",
                         help="Path to cloned Wav2Lip repo.")
     parser.add_argument("--checkpoint", type=str, default=WAV2LIP_CHECKPOINT,
                         help="Path to Wav2Lip checkpoint, relative to wav2lip_dir.")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-run even if output already exists.")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Manifest loader
+# ---------------------------------------------------------------------------
+def load_from_manifest(manifest_path: str, asset_id_filter, anim_variant: str, tts_backend: str) -> list[dict]:
+    """
+    Build lipsync jobs from AssetManifest JSON.
+    Pairs each vo_item (visual=true) with its speaker's character animation MP4.
+    """
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    char_map = {p["asset_id"]: p for p in manifest.get("character_packs", [])}
+
+    jobs = []
+    for vo in manifest.get("vo_items", []):
+        if not vo.get("visual", True):
+            continue
+        speaker = vo.get("speaker_id", "")
+        if asset_id_filter and speaker != asset_id_filter:
+            continue
+        if speaker not in char_map:
+            continue
+        item_id = vo["item_id"]
+        jobs.append({
+            "vo_item_id":       item_id,
+            "character_video":  f"{speaker}-anim-{anim_variant}.mp4",
+            "vo_audio":         f"audio/vo/{item_id}.wav",
+            "output":           f"{speaker}-lipsync-{item_id}.mp4",
+            "text":             vo.get("text", ""),
+        })
+    return jobs
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def locale_from_manifest_path(path: str) -> str:
+    """'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans', 'AssetManifest_draft.json' -> 'en'"""
+    stem = Path(path).stem
+    parts = stem.split('.')
+    return parts[-1] if len(parts) > 1 else 'en'
+
+
+def output_dir_from_manifest(manifest_path: str, locale: str) -> Path:
+    """Derive assets output dir from manifest's project_id + episode_id."""
+    with open(manifest_path, encoding="utf-8") as f:
+        m = json.load(f)
+    return PROJECTS_ROOT / m["project_id"] / "episodes" / m["episode_id"] / "assets" / locale
+
+
+def ensure_tts(manifest_path: str) -> None:
+    """Auto-run gen_tts.py when VO WAV files are missing."""
+    tts_script = Path(__file__).resolve().parent / "gen_tts.py"
+    if not tts_script.exists():
+        print(f"[AUTO-TTS] gen_tts.py not found — skipping.")
+        return
+    print(f"\n[AUTO-TTS] VO WAVs missing — running gen_tts.py...")
+    cmd = [sys.executable, str(tts_script)]
+    if manifest_path:
+        cmd += ["--manifest", manifest_path]
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print("[AUTO-TTS] gen_tts.py exited with errors — some WAVs may still be missing.")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -179,20 +260,34 @@ def _run_wav2lip(
 # ---------------------------------------------------------------------------
 # Strategy 2 — audio-merge passthrough (no face manipulation)
 # ---------------------------------------------------------------------------
+def _find_ffmpeg() -> str:
+    """Return ffmpeg executable path — system PATH first, imageio_ffmpeg bundle fallback."""
+    import shutil
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        pass
+    raise RuntimeError(
+        "ffmpeg not found. Install it (winget install Gyan.FFmpeg) or "
+        "pip install imageio[ffmpeg]."
+    )
+
+
 def _merge_audio_into_video(video_path: Path, audio_path: Path, out_path: Path):
     """
     Fallback: replace the video's audio track with the VO using ffmpeg.
     Frame content is unchanged — this validates pipeline I/O without
     requiring the Wav2Lip repo to be present.
+    Uses system ffmpeg if available, otherwise imageio_ffmpeg bundle.
     """
-    import shutil
-    if not shutil.which("ffmpeg"):
-        shutil.copy2(str(video_path), str(out_path))
-        print("  [WARN] ffmpeg not found — copied video without audio merge.")
-        return
+    ffmpeg_exe = _find_ffmpeg()
 
     cmd = [
-        "ffmpeg", "-y",
+        ffmpeg_exe, "-y",
         "-i", str(video_path),
         "-i", str(audio_path),
         "-c:v", "copy",
@@ -212,25 +307,42 @@ def _merge_audio_into_video(video_path: Path, audio_path: Path, out_path: Path):
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
-    out_dir = Path(args.output_dir)
+    locale = locale_from_manifest_path(args.manifest) if args.manifest else 'en'
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+    elif args.manifest:
+        out_dir = output_dir_from_manifest(args.manifest, locale)
+    else:
+        out_dir = OUTPUT_DIR / locale
     out_dir.mkdir(parents=True, exist_ok=True)
-    wav2lip_dir = Path(args.wav2lip_dir)
+    wav2lip_dir = Path(args.wav2lip_dir).resolve()
     checkpoint_path = wav2lip_dir / args.checkpoint
 
-    results = []
-    total = len(LIPSYNC_JOBS)
+    jobs = LIPSYNC_JOBS
+    if args.manifest:
+        jobs = load_from_manifest(args.manifest, args.asset_id, args.anim_variant, args.tts_backend)
+        if not jobs:
+            print("[WARN] No visual vo_items found in manifest. Nothing to do.")
+            return
 
-    for idx, job in enumerate(LIPSYNC_JOBS, start=1):
+    # Auto-TTS: run gen_tts.py if any VO WAVs are missing
+    if any(not (out_dir / job["vo_audio"]).exists() for job in jobs):
+        ensure_tts(args.manifest)
+
+    results = []
+    total = len(jobs)
+
+    for idx, job in enumerate(jobs, start=1):
         out_path = out_dir / job["output"]
         video_path = out_dir / job["character_video"]
         audio_path = out_dir / job["vo_audio"]
 
-        print(f"\n[{idx}/{total}] {job['vo_item_id']} → {job['output']}")
+        print(f"\n[{idx}/{total}] {job['vo_item_id']} -> {job['output']}")
         print(f"  Video: {video_path}")
         print(f"  Audio: {audio_path}")
         print(f"  Text:  \"{job['text'][:60]}{'...' if len(job['text'])>60 else ''}\"")
 
-        if out_path.exists():
+        if out_path.exists() and not args.force:
             print(f"  [SKIP] {job['output']} already exists")
             results.append({
                 "vo_item_id": job["vo_item_id"],
@@ -318,8 +430,11 @@ def main():
         json.dump(results, fh, indent=2)
 
     # Summary
+    wav2lip_count   = sum(1 for r in results if r.get("method") == "wav2lip")
+    passthrough_count = sum(1 for r in results if r.get("method") == "passthrough")
+    mode_label = "Wav2Lip" if wav2lip_count else "passthrough"
     print("\n" + "=" * 60)
-    print("SUMMARY — gen_lipsync  [Wav2Lip fallback]")
+    print(f"SUMMARY — gen_lipsync  [{mode_label}]")
     print("=" * 60)
     for r in results:
         tag = "OK" if r["status"] == "success" else r["status"].upper()
@@ -327,18 +442,22 @@ def main():
         print(f"  [{tag}]{method}  {r['output']}  ({r['size_bytes']:,} bytes)")
     ok_count = sum(1 for r in results if r["status"] in ("success", "skipped"))
     total_bytes = sum(r["size_bytes"] for r in results)
-    print(f"\n{ok_count}/{total} completed | {total_bytes:,} bytes total")
+    print(f"\n{ok_count}/{len(jobs)} completed | {total_bytes:,} bytes total")
+    if wav2lip_count:
+        print(f"Wav2Lip: {wav2lip_count} clips | Passthrough: {passthrough_count} clips")
     print(f"Manifest: {manifest_path}")
-    print()
-    print("SETUP — to enable real Wav2Lip lip-sync:")
-    print("  git clone https://github.com/Rudrabha/Wav2Lip")
-    print("  # Download wav2lip_gan.pth — see Wav2Lip repo README for link")
-    print("  # Place at: Wav2Lip/checkpoints/wav2lip_gan.pth")
-    print("  pip install -r Wav2Lip/requirements.txt")
-    print("  python gen_lipsync.py --wav2lip_dir Wav2Lip")
-    print()
-    print("UPGRADE — for LatentSync 1.5 quality (needs RTX 4080 16 GB+):")
-    print("  python placeholder_for_lipsync.py")
+
+    if not wav2lip_count:
+        print()
+        print("NOTE: All clips used audio-merge passthrough (lips do not move).")
+        print("  To enable real lip-sync, set up Wav2Lip:")
+        print("    git clone https://github.com/Rudrabha/Wav2Lip")
+        print("    # Download wav2lip_gan.pth — see Wav2Lip repo README")
+        print("    # Place at: Wav2Lip/checkpoints/wav2lip_gan.pth")
+        print("    python gen_lipsync.py --wav2lip_dir Wav2Lip --force")
+        print()
+        print("  UPGRADE — LatentSync 1.5 quality (needs RTX 4080 16 GB+):")
+        print("    python placeholder_for_lipsync.py")
 
 
 if __name__ == "__main__":
