@@ -1870,3 +1870,100 @@ Run through the relevant items after any modification:
     6. Removing `-update 1` from ffmpeg thumbnail extraction causes crashes on ffmpeg ≥ 6.
     7. Raising on thumbnail 403 `forbidden` aborts uploads for unverified channels.
     8. Using `|| null` instead of `?? null` for `thumbnail_source_sec` silently drops `0` as a valid timestamp.
+
+35. **Media server source metadata: .info.json sidecars + 🔗 link in VC editor**
+
+    ### Files involved
+    - `code/media/http/downloader.py` — captures API metadata at download time
+    - `code/media/http/scorer.py` — attaches `source` dict to each ranked result
+    - `code/media/http/server.py` — unpacks `(Path, dict)` tuples from downloader; passes `infos` dict to scorer
+    - `code/http/test_server.py` — renders 🔗 anchor on each media thumbnail
+
+    ### What was added
+    Every downloaded image/video now has a companion `<filename>.info.json` sidecar containing:
+      `source_site`, `asset_page_url`, `file_url`, `title`, `description`, `tags`,
+      `photographer`, `license_summary`, `license_url`, `width`, `height`
+
+    The sidecar is written once on first download and reused on cache hits (never overwritten).
+
+    ### Critical: asset_page_url vs file_url
+    - `file_url` = raw CDN URL (bytes only, e.g. `https://images.pexels.com/photos/…`)
+    - `asset_page_url` = rich metadata page (e.g. `https://www.pexels.com/photo/ancient-roman-temple-ruins-…-30204931/`)
+    The 🔗 link in the UI MUST open `asset_page_url`, NOT `file_url`.
+
+    ### Slug title extraction
+    `_slug_to_title(page_url)` parses the human-readable title from the URL path slug.
+    Only strips the trailing numeric ID segment if it is purely digits (digit guard):
+    ```python
+    parts = slug.rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        slug = parts[0]
+    ```
+    Without the digit guard, a non-numeric final segment (e.g. "italy") would be silently lost.
+
+    ### scorer.py — path-keyed lookup, NOT index-based
+    `scorer.py` sorts results by score descending before returning. Index `i` in the output
+    does NOT correspond to index `i` in the input path list.
+    The correct lookup is:
+    ```python
+    result_entry["source"] = infos.get(result_entry["path"])
+    ```
+    Never use `infos[i]` — it will attach the wrong metadata to most results.
+
+    ### Fallback for cached files
+    If `infos` is None (old callers or cached files from before this change), scorer reads
+    `<path>.info.json` from disk as a fallback so existing downloads also get metadata on
+    the next rescore.
+
+    ### server.py — only caller of fetch_images / fetch_videos
+    `fetch_images()` and `fetch_videos()` are called ONLY in `server.py _process_item()`.
+    `worker.py` does NOT call them — it handles distributed video scoring jobs only.
+    Return type changed from `list[Path]` to `list[tuple[Path, dict]]`.
+    server.py unpacks with:
+    ```python
+    img_paths = [p for p, _ in img_path_infos]
+    img_infos = {str(p): info for p, info in img_path_infos}
+    ```
+
+    ### VC editor 🔗 link
+    In `_mediaThumb()`: a `.media-src-link` anchor is appended to each thumbnail wrap.
+    - Hidden by default (`opacity: 0`), revealed on `.media-thumb:hover`
+    - `link.addEventListener('click', e => e.stopPropagation())` — prevents triggering `mediaSelect`
+    - `link.title` tooltip contains: title · photographer · WxH · source_site · license · tags
+
+    ### Regression risks
+    1. Using index-based `infos[i]` instead of `infos.get(r["path"])` attaches wrong metadata after sort.
+    2. Opening `file_url` instead of `asset_page_url` in the 🔗 link shows raw bytes, not the metadata page.
+    3. Unconditional `rsplit("-", 1)[0]` in `_slug_to_title` strips the last word from slugs without numeric IDs.
+    4. Writing the sidecar unconditionally (without `if not sidecar.exists()`) overwrites manually corrected sidecars.
+    5. Passing `worker.py` as the caller to update breaks the implementation — the real caller is `server.py`.
+
+36. **Music review defaults: duck_db and fade_sec tuning**
+
+    ### Files involved
+    - `code/http/music_review_pack.py` — global preview defaults
+    - `code/http/apply_music_plan.py` — per-item duck_db resolution at apply time
+
+    ### Changes
+    `music_review_pack.py`:
+      - `DEFAULT_DUCK_DB`  changed from `-12.0` → `-6.0`
+      - `DEFAULT_FADE_SEC` changed from `0.15`  → `0.8`
+
+    `apply_music_plan.py` — added `_resolve_duck_db(item)` with priority chain:
+      1. `item["duck_db"]` if explicitly set in MusicPlan.json shot_override
+      2. `DUCK_DB_BY_TYPE[item.get("track_type", "")]` if track_type is set
+      3. `DEFAULT_DUCK_DB` (-6.0) as global fallback
+
+    `DUCK_DB_BY_TYPE` constants:
+      `ambient/drone → -5.0`, `piano/soft → -7.0`, `orchestral/epic → -9.0`
+
+    ### Why
+    The original -12 dB duck was too aggressive for cinematic narration; 0.15s fade was too abrupt.
+    -6 dB preserves music presence under VO; 0.8s ramps feel more cinematic.
+
+    ### Regression risks
+    1. Changing only `DEFAULT_DUCK_DB` without adding `_resolve_duck_db()` leaves items without
+       explicit overrides still using old hardcoded values inside `apply_music_plan.py`.
+    2. `track_type` is NOT in MusicPlan.v1.json schema — the type-based lookup only fires if
+       the operator manually adds `track_type` to a shot_override. It silently falls back to
+       `DEFAULT_DUCK_DB` when absent, which is correct behaviour.
