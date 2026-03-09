@@ -87,7 +87,7 @@ Derive directly from ShotList.json:
   character_packs : one entry per unique character across all shots
   backgrounds     : one entry per unique background_id across all shots
 
-license_type for all entries: "proprietary_cleared"
+license_type for all entries: "commercial_reusable"
 
 #### Per character_pack and background entry — extra fields required
 
@@ -306,7 +306,7 @@ Never rename, abbreviate, or reformat them.
     "color_mood"  : "warm",
     "category"    : "buildings"
   },
-  "license_type"     : "proprietary_cleared",
+  "license_type"     : "commercial_reusable",
   "motion"           : null
 }
 ```
@@ -331,7 +331,7 @@ Required fields per entry:
                  (e.g. "stone scraping" → "stone scraping echoing in an
                  ancient stone chamber with distant torchlight ambience")
   duration_sec : copy from shot.duration_sec
-  license_type : "proprietary_cleared"
+  license_type : "commercial_reusable"
 
 Skip shots where sfx_item_ids is absent or [].
 
@@ -345,7 +345,7 @@ Required fields per entry:
   shot_id      : the shot's shot_id
   music_mood   : copy from shot.audio_intent.music_mood
   duration_sec : copy from shot.duration_sec
-  license_type : "proprietary_cleared"
+  license_type : "commercial_reusable"
 
 Optional timing fields per entry (author these with editorial intent):
   start_sec    : when music starts within the shot, in seconds — almost always 0.0
@@ -389,7 +389,7 @@ Required fields per entry:
   text         : the English dialogue text from Script.json — find the dialogue
                  action matching this vo_item_id's position within the scene
                  (do NOT use shot.audio_intent.vo_text — that is a summary)
-  license_type : "proprietary_cleared"
+  license_type : "commercial_reusable"
 
 **tts_prompt** per entry — set ALL fields below:
 ```json
