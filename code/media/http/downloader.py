@@ -370,6 +370,51 @@ def _pixabay_pick_video_url(hit: dict) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Preview URL picker helpers (Phase 1 — search/scoring resolution)
+# ---------------------------------------------------------------------------
+
+def _pexels_pick_preview_image_url(photo: dict) -> str | None:
+    """Pick a preview-resolution image URL (~1200px wide) from a Pexels photo object."""
+    src = photo.get("src") or {}
+    return src.get("medium") or src.get("small") or src.get("large")
+
+
+def _pexels_pick_preview_video_url(video: dict) -> tuple[str | None, int, int]:
+    """Pick a preview-resolution video URL (target ≤1280px wide) from a Pexels video object.
+
+    Rule (B3): largest width <= 1280; if none exists, smallest width > 1280.
+    Do NOT use "smallest >= 720" — that picks 1080p/4K when those are the only options.
+    Returns (url, width, height).
+    """
+    files = [f for f in (video.get("video_files") or [])
+             if (f.get("file_type") or "").lower() == "video/mp4" and f.get("link")]
+    files.sort(key=lambda f: f.get("width") or 0)
+    candidates = [f for f in files if (f.get("width") or 0) <= 1280]
+    if candidates:
+        f = candidates[-1]  # largest that still fits
+        return f["link"], f.get("width", 0), f.get("height", 0)
+    if files:
+        f = files[0]  # smallest above 1280 as last resort
+        return f["link"], f.get("width", 0), f.get("height", 0)
+    return None, 0, 0
+
+
+def _pixabay_pick_preview_image_url(hit: dict) -> str | None:
+    """Pick a preview-resolution image URL from a Pixabay hit object (~640px)."""
+    return hit.get("webformatURL") or hit.get("previewURL")
+
+
+def _pixabay_pick_preview_video_url(hit: dict) -> str | None:
+    """Pick a preview-resolution video URL (small tier) from a Pixabay hit object."""
+    vids = hit.get("videos") or {}
+    for tier in ("small", "medium", "large", "tiny"):
+        v = vids.get(tier) or {}
+        if v.get("url"):
+            return v["url"]
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -463,7 +508,8 @@ def fetch_images(
                         info = {
                             "source_site":     "pexels",
                             "asset_page_url":  ph.get("url", ""),
-                            "file_url":        url,
+                            "file_url":        url,  # original high-res URL (for render)
+                            "preview_url":     _pexels_pick_preview_image_url(ph),  # lower-res for download
                             "title":           ph.get("alt") or _slug_to_title(ph.get("url", "")),
                             "description":     ph.get("alt", ""),
                             "tags":            [],
@@ -478,7 +524,8 @@ def fetch_images(
                             saved.append((dest, info))
                         else:
                             try:
-                                _download_file(url, dest, headers={"Authorization": pexels_key})
+                                _download = info.get("preview_url") or url
+                                _download_file(_download, dest, headers={"Authorization": pexels_key})
                                 _write_info_sidecar(dest, info)
                                 saved.append((dest, info))
                             except Exception as exc:
@@ -512,7 +559,8 @@ def fetch_images(
                         info = {
                             "source_site":     "pixabay",
                             "asset_page_url":  hit.get("pageURL", ""),
-                            "file_url":        url,
+                            "file_url":        url,   # high-res (largeImageURL)
+                            "preview_url":     _pixabay_pick_preview_image_url(hit),
                             "title":           _slug_to_title(hit.get("pageURL", "")),
                             "description":     "",
                             "tags":            [t.strip() for t in hit.get("tags", "").split(",") if t.strip()],
@@ -527,7 +575,8 @@ def fetch_images(
                             saved.append((dest, info))
                         else:
                             try:
-                                _download_file(url, dest)
+                                _download = info.get("preview_url") or url
+                                _download_file(_download, dest)
                                 _write_info_sidecar(dest, info)
                                 saved.append((dest, info))
                             except Exception as exc:
@@ -612,10 +661,16 @@ def fetch_videos(
                         if not url:
                             continue
                         dest = src_dir / f"{uid}.mp4"
+                        preview_url_v, pw, ph_v = _pexels_pick_preview_video_url(vd)
                         info = {
                             "source_site":     "pexels",
                             "asset_page_url":  vd.get("url", ""),
-                            "file_url":        url,
+                            "file_url":        url,   # highest-res (from _pexels_pick_video_url)
+                            "preview_url":     preview_url_v,
+                            "preview_width":   pw,
+                            "preview_height":  ph_v,
+                            "video_files":     [{"width": f.get("width", 0), "height": f.get("height", 0), "url": f["link"]}
+                                                for f in (vd.get("video_files") or []) if f.get("link")],
                             "title":           _slug_to_title(vd.get("url", "")),
                             "description":     "",
                             "tags":            [],
@@ -630,7 +685,8 @@ def fetch_videos(
                             saved.append((dest, info))
                         else:
                             try:
-                                _download_file(url, dest)
+                                _download = info.get("preview_url") or url
+                                _download_file(_download, dest)
                                 _write_info_sidecar(dest, info)
                                 saved.append((dest, info))
                             except Exception as exc:
@@ -655,32 +711,32 @@ def fetch_videos(
                         if not url:
                             continue
                         dest = src_dir / f"{uid}.mp4"
-                        # Determine width/height from chosen tier
-                        chosen_tier = None
-                        for tier in ("large", "medium", "small", "tiny"):
-                            v = (hit.get("videos") or {}).get(tier) or {}
-                            if v.get("url"):
-                                chosen_tier = v
-                                break
+                        vids_data = hit.get("videos") or {}
                         info = {
                             "source_site":     "pixabay",
                             "asset_page_url":  hit.get("pageURL", ""),
-                            "file_url":        url,
+                            "file_url":        url,   # best tier (from _pixabay_pick_video_url)
+                            "preview_url":     _pixabay_pick_preview_video_url(hit),
+                            "video_files":     [{"tier": t, "width": (vids_data.get(t) or {}).get("width", 0),
+                                                  "url": (vids_data.get(t) or {}).get("url", "")}
+                                                for t in ("large", "medium", "small", "tiny")
+                                                if (vids_data.get(t) or {}).get("url")],
                             "title":           _slug_to_title(hit.get("pageURL", "")),
                             "description":     "",
                             "tags":            [t.strip() for t in hit.get("tags", "").split(",") if t.strip()],
                             "photographer":    hit.get("user", ""),
                             "license_summary": "Pixabay Content License",
                             "license_url":     "https://pixabay.com/service/license-summary/",
-                            "width":           (chosen_tier or {}).get("width", 0),
-                            "height":          (chosen_tier or {}).get("height", 0),
+                            "width":           (vids_data.get("large") or vids_data.get("medium") or {}).get("width", 0),
+                            "height":          (vids_data.get("large") or vids_data.get("medium") or {}).get("height", 0),
                         }
                         if dest.exists():
                             _write_info_sidecar(dest, info)
                             saved.append((dest, info))
                         else:
                             try:
-                                _download_file(url, dest)
+                                _download = info.get("preview_url") or url
+                                _download_file(_download, dest)
                                 _write_info_sidecar(dest, info)
                                 saved.append((dest, info))
                             except Exception as exc:

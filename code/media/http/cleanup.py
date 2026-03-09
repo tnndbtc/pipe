@@ -9,6 +9,22 @@ Scans:
 For each batch directory:
 - Reads created_at from batch_state.json (falls back to dir mtime)
 - Removes the directory if age > ttl_days
+
+Directory structure within a batch:
+    <batch_dir>/
+        <item_id>/
+            images/<source>/<uid>.jpg           ← preview (Phase 1, always downloaded)
+            images/<source>/<uid>.jpg.info.json ← metadata sidecar with file_url + preview_url
+            images/<source>/hires/<uid>.jpg     ← high-res (Phase 2, downloaded on demand)
+            videos/<source>/<uid>.mp4
+            videos/<source>/<uid>.mp4.info.json
+            videos/<source>/hires/<uid>.mp4     ← high-res video (Phase 2)
+
+When purging (age > ttl_days): shutil.rmtree() deletes the entire batch directory
+including all hires/ subdirectories — no extra handling needed.
+
+When a batch is retained: hires/ subdirectories are preserved alongside their
+parent preview files so that resolved manifests continue to reference valid paths.
 """
 
 from __future__ import annotations

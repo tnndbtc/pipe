@@ -37,9 +37,13 @@
 
 import argparse
 import json
+import logging
+import os
 import re
 import sys
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Repo root — two levels up from code/http/
 PIPE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -59,6 +63,97 @@ SPDX_MAP: dict[str, str] = {
     "CC0-1.0":             "CC0-1.0",
     "MIT":                 "MIT",
 }
+
+
+# ── High-res download helper ──────────────────────────────────────────────────
+
+def _ensure_hires(local_preview_path: Path, no_hires: bool = False) -> Path:
+    """Download the high-resolution version of a selected asset for render.
+
+    Downloads to hires/<uid>.ext alongside the preview file, using an atomic
+    .tmp → rename pattern. Falls back to preview path on any failure.
+
+    Args:
+        local_preview_path: Path to the downloaded preview file.
+        no_hires: If True, skip download and return preview path directly.
+
+    Returns:
+        Path to hires file if successfully downloaded, else local_preview_path.
+    """
+    import urllib.request as _ur
+    import json as _json
+
+    if no_hires:
+        return local_preview_path
+
+    # Read sidecar
+    sidecar = Path(str(local_preview_path) + ".info.json")
+    if not sidecar.exists():
+        log.warning("[hires] no sidecar for %s — using preview", local_preview_path.name)
+        return local_preview_path
+
+    try:
+        info = _json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.warning("[hires] cannot read sidecar %s: %s — using preview", sidecar, exc)
+        return local_preview_path
+
+    file_url = info.get("file_url", "")
+    if not file_url:
+        log.warning("[hires] no file_url in sidecar for %s — using preview", local_preview_path.name)
+        return local_preview_path
+
+    # For videos, pick highest-width entry from video_files[] if available
+    is_video = local_preview_path.suffix.lower() in {".mp4", ".mov", ".webm"}
+    hires_url = file_url
+    if is_video:
+        vf = info.get("video_files") or []
+        if vf:
+            best = max(vf, key=lambda f: f.get("width") or 0)
+            hires_url = best.get("url") or file_url
+
+    # Determine paths
+    hires_dir  = local_preview_path.parent / "hires"
+    hires_dest = hires_dir / local_preview_path.name
+    hires_tmp  = hires_dir / f"{local_preview_path.stem}.tmp{os.getpid()}{local_preview_path.suffix}"
+
+    # Validate existing hires file (M3)
+    if hires_dest.exists():
+        if hires_dest.stat().st_size == 0:
+            log.warning("[hires] existing hires file is empty, re-downloading: %s", hires_dest)
+            hires_dest.unlink()
+        else:
+            log.info("[hires] already present: %s", hires_dest)
+            return hires_dest
+
+    # Clean up stale .tmp from prior crash (B1)
+    if hires_tmp.exists():
+        hires_tmp.unlink()
+
+    # Choose download URL and log intent (M4)
+    asset_id = local_preview_path.stem
+    log.info("[hires] downloading %s → %s from %s", asset_id, hires_dest, hires_url)
+
+    try:
+        hires_dir.mkdir(parents=True, exist_ok=True)
+        # Download to tmp (B1 — atomic)
+        _ur.urlretrieve(hires_url, hires_tmp)
+        size = hires_tmp.stat().st_size
+        if size == 0:
+            raise ValueError("downloaded file is empty")
+        # Atomic rename
+        hires_tmp.rename(hires_dest)
+        log.info("[hires] complete: %s (%d bytes)", hires_dest, size)
+        return hires_dest
+    except Exception as exc:
+        # Clean up partial tmp (C2, C5)
+        if hires_tmp.exists():
+            try:
+                hires_tmp.unlink()
+            except Exception:
+                pass
+        log.warning("[hires] download failed for %s: %s — using preview", asset_id, exc)
+        return local_preview_path
 
 
 # ── File search ───────────────────────────────────────────────────────────────
@@ -300,9 +395,10 @@ def _load_selections(selections_path: Path) -> dict[str, dict]:
 # ── Main resolver ─────────────────────────────────────────────────────────────
 
 def resolve_all(
-    merged:     dict,
+    merged:      dict,
     assets_root: Path,
-    selections: dict | None = None,
+    selections:  dict | None = None,
+    no_hires:    bool = False,
 ) -> list[dict]:
     """
     Walk all asset types in the merged manifest and probe the filesystem.
@@ -310,6 +406,7 @@ def resolve_all(
     selections — optional dict loaded from selections.json by _load_selections().
                  When present, stock media chosen via the VC editor takes priority
                  over the regular filesystem scan for background assets.
+    no_hires   — when True, skip hires download and use preview paths directly.
 
     Returns a list of ResolvedAsset dicts (file:// or placeholder://).
     """
@@ -369,6 +466,7 @@ def resolve_all(
                         for seg_idx, seg in enumerate(shot_sel["segments"]):
                             abs_path = seg["abs_path"]
                             if abs_path.is_file():
+                                abs_path = _ensure_hires(abs_path, no_hires=no_hires)
                                 item = _resolved_stock(
                                     aid, abs_path,
                                     seg.get("media_type", "image"),
@@ -386,6 +484,7 @@ def resolve_all(
                         # v2: single item per shot
                         abs_path = shot_sel["abs_path"]
                         if abs_path.is_file():
+                            abs_path = _ensure_hires(abs_path, no_hires=no_hires)
                             item = _resolved_stock(
                                 aid, abs_path,
                                 shot_sel.get("media_type", "image"),
@@ -401,6 +500,7 @@ def resolve_all(
                 # Old format: single selection per background
                 abs_path = sel["abs_path"]
                 if abs_path.is_file():
+                    abs_path = _ensure_hires(abs_path, no_hires=no_hires)
                     items.append(_resolved_stock(
                         aid, abs_path,
                         sel.get("media_type", "image"),
@@ -520,6 +620,12 @@ File path conventions (relative to --assets-root):
         "--strict", action="store_true",
         help="Exit 1 if any asset is a placeholder (useful in CI).",
     )
+    p.add_argument(
+        "--no-hires-download",
+        action="store_true",
+        default=False,
+        help="Skip high-res download; use preview assets directly (for dry runs / offline use).",
+    )
     return p.parse_args()
 
 
@@ -585,7 +691,7 @@ def main() -> None:
     print("=" * 60)
 
     # Resolve
-    items = resolve_all(merged, assets_root, selections)
+    items = resolve_all(merged, assets_root, selections, no_hires=args.no_hires_download)
 
     # Build output document
     output = {
