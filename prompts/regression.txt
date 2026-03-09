@@ -1967,3 +1967,87 @@ Run through the relevant items after any modification:
     2. `track_type` is NOT in MusicPlan.v1.json schema — the type-based lookup only fires if
        the operator manually adds `track_type` to a shot_override. It silently falls back to
        `DEFAULT_DUCK_DB` when absent, which is correct behaviour.
+
+37. **Two-phase media download: preview for search, hires for render (media2.txt)**
+
+    ### Files involved
+    - `code/media/http/downloader.py` — preview URL pickers; preview_url/file_url split in sidecar
+    - `code/http/resolve_assets.py`   — `_ensure_hires()` helper; atomic hires download at render time
+    - `code/media/http/cleanup.py`    — documented hires/ subdirectory structure (no logic change)
+
+    ### Core idea
+    Phase 1 (search): download preview-resolution assets for CLIP scoring and VC editor display.
+    Phase 2 (render): download high-res of the SELECTED asset only, on demand, before stitching.
+    Disk saving: ~100 GB → ~5–10 GB per batch; +1–5 GB hires at render time.
+
+    ### downloader.py — four new preview URL pickers
+    `_pexels_pick_preview_image_url`   → src["medium"] (~1200px)
+    `_pexels_pick_preview_video_url`   → largest width ≤ 1280px; else smallest > 1280px
+    `_pixabay_pick_preview_image_url`  → webformatURL (~640px)
+    `_pixabay_pick_preview_video_url`  → "small" tier first
+
+    *** Video preview selection rule (B3): use "largest ≤ 1280, else smallest > 1280".
+        Do NOT use "smallest ≥ 720" — when only 1080p/4K are available that still picks
+        a huge file, giving no disk saving. ***
+
+    ### .info.json sidecar — new fields
+    All four download loops now write these additional fields:
+      "preview_url":    lower-res URL that was actually downloaded
+      "file_url":       original high-res CDN URL (reserved for render)
+    Pexels/Pixabay video loops also write:
+      "preview_width":  pixel width of the downloaded preview (Pexels video only)
+      "preview_height": pixel height of the downloaded preview (Pexels video only)
+      "video_files":    full resolution ladder [{width, height, url}, …] for hires selection
+
+    ### Strict preview_url / file_url separation (C1)
+    - downloader.py always downloads `preview_url` (falls back to `file_url` only if None)
+    - `file_url` is NEVER passed to `_download_file()` in downloader.py
+    - `file_url` is used ONLY by `_ensure_hires()` in resolve_assets.py at render time
+
+    ### resolve_assets.py — _ensure_hires()
+    Called for every selected asset before the file:// URI is written to AssetManifest.media.
+
+    Behaviour in order:
+      1. No sidecar → log warning, return preview path
+      2. hires_dest exists and size > 0 → log "already present", return hires_dest (M3)
+      3. hires_dest exists and size == 0 → delete, re-download (M3)
+      4. Clean up stale .tmp from prior crash (B1)
+      5. Determine hires URL: images → file_url; videos → highest-width entry in video_files[]
+      6. Download to PID-scoped .tmp path (C6), rename atomically to hires_dest (B1)
+      7. On failure → delete .tmp, log warning, return preview path (C2, C5)
+
+    ### Atomic download pattern (B1)
+    tmp path uses PID to prevent collision when two locale renders run in parallel (C6):
+      hires_tmp = hires_dir / f"{stem}.tmp{os.getpid()}{suffix}"
+    After successful download: hires_tmp.rename(hires_dest)  ← atomic on POSIX
+    On failure: hires_tmp.unlink() to leave no partial files.
+
+    ### Path layout — preview and hires NEVER share the same path (M1)
+    Preview:  <batch>/<item_id>/images/<source>/<uid>.jpg   (written by downloader)
+    Hires:    <batch>/<item_id>/images/<source>/hires/<uid>.jpg  (written by resolve_assets)
+
+    ### uid stability (B2)
+    uid is always derived from the provider's stable numeric asset ID:
+      pexels_img_{photo.id}, pexels_vid_{video.id}
+      pixabay_img_{hit.id},  pixabay_vid_{hit.id}
+    Never derived from search result order or query index.
+
+    ### --no-hires-download flag (M5)
+    Added to resolve_assets.py argparse. When set, _ensure_hires() returns the preview path
+    immediately without any network access. Useful for dry runs, offline testing, manifest
+    debugging.
+
+    ### Regression risks
+    1. Using "smallest ≥ 720" for preview video selection picks 1080p/4K when those are the
+       only files available — gives zero disk saving.
+    2. Passing file_url to _download_file() in downloader.py downloads full-res at search time,
+       defeating the entire two-phase design.
+    3. Non-atomic download (writing directly to hires_dest) leaves corrupt files on crash;
+       future runs treat them as valid because the path exists.
+    4. Using a shared .tmp name (not PID-scoped) causes two parallel locale renders to clobber
+       each other's scratch files.
+    5. Not checking hires_dest.stat().st_size == 0 silently reuses empty files from past crashes.
+    6. Rewriting _pexels_pick_video_url() or _pixabay_pick_video_url() breaks file_url
+       selection — these existing functions must NOT be modified; only new preview pickers added.
+    7. Skipping _ensure_hires() call at any of the three selection code paths (v3 segments,
+       v2 per-shot, old single-selection) leaves some shots rendered at preview quality.
