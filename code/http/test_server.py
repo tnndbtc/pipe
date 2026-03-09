@@ -29,6 +29,19 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote_plus
 import urllib.request as _urllib_req
 
+# ── YouTube category mapping (genre → category_id, no LLM needed) ─────────────
+_GENRE_TO_CATEGORY = {
+    "history":       "27",
+    "documentary":   "27",
+    "education":     "27",
+    "sports":        "17",
+    "news":          "25",
+    "entertainment": "24",
+    "comedy":        "23",
+    "narration":     "24",
+}
+_DEFAULT_CATEGORY = "24"
+
 PORT     = 8000
 PIPE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (pipe/)
 
@@ -1769,6 +1782,7 @@ HTML = r"""<!DOCTYPE html>
     <button class="tab"        data-tab="media"    onclick="switchTab('media')"   >🖼 Media</button>
     <button class="tab"        data-tab="music"    onclick="switchTab('music')"   >🎵 Music</button>
     <button class="tab"        data-tab="vo"       onclick="switchTab('vo')"      >🎙 VO</button>
+    <button class="tab"        data-tab="youtube"  onclick="switchTab('youtube')" >▶ YouTube</button>
   </nav>
 
   <div class="toggle-wrap" id="toggle-render"
@@ -2106,6 +2120,195 @@ placeholder="Enter your story here"></textarea>
   <div id="vo-body" class="vo-body">
     <span class="vo-empty">Select an episode and locale to see VO items.</span>
   </div>
+</div>
+
+<!-- ── YouTube panel ── -->
+<div id="panel-youtube" style="display:none;flex-direction:column;gap:12px;padding:16px;overflow-y:auto;height:calc(100vh - 60px)">
+
+  <!-- Header row -->
+  <div style="display:flex;align-items:center;gap:12px">
+    <div class="section-label" style="margin:0">▶ YouTube Upload</div>
+    <span id="yt-status-badge" style="font-size:0.8em;padding:3px 10px;border-radius:12px;background:#ffffff15;color:var(--dim)">No episode loaded</span>
+  </div>
+
+  <!-- Locale selector -->
+  <div style="display:flex;align-items:center;gap:8px">
+    <span style="color:var(--dim);font-size:0.82em">Locale</span>
+    <select id="yt-locale-sel" onchange="initYoutubeTab()" style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:0.85em">
+      <option value="en">en</option>
+      <option value="zh-Hans">zh-Hans</option>
+    </select>
+    <button onclick="initYoutubeTab()" style="background:#ffffff10;color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.76em;padding:5px 12px;cursor:pointer">↺ Refresh</button>
+  </div>
+
+  <!-- Metadata form (pre-filled from youtube.json) -->
+  <div id="yt-meta-form" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px;flex-direction:column;gap:10px">
+    <div style="font-size:0.85em;font-weight:600;color:var(--dim);margin-bottom:2px">METADATA (auto-saved to youtube.json)</div>
+
+    <div style="display:flex;align-items:baseline;gap:8px">
+      <label style="min-width:90px;font-size:0.82em;color:var(--dim)">Title</label>
+      <div style="flex:1;position:relative">
+        <input id="yt-title" type="text" maxlength="70"
+               oninput="ytFieldChange('title',this.value);ytUpdateCounter('yt-title-ctr',this.value.length,70)"
+               style="width:100%;background:#ffffff08;border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:0.9em;box-sizing:border-box">
+        <span id="yt-title-ctr" style="position:absolute;right:6px;top:6px;font-size:0.75em;color:var(--dim)">0/70</span>
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:baseline;gap:8px">
+      <label style="min-width:90px;font-size:0.82em;color:var(--dim)">Description</label>
+      <div style="flex:1;position:relative">
+        <textarea id="yt-desc" rows="4" maxlength="5000"
+                  oninput="ytFieldChange('description',this.value);ytUpdateCounter('yt-desc-ctr',this.value.length,5000)"
+                  style="width:100%;background:#ffffff08;border:1px solid var(--border);border-radius:5px;color:var(--text);padding:5px 8px;font-size:0.85em;resize:vertical;box-sizing:border-box"></textarea>
+        <span id="yt-desc-ctr" style="position:absolute;right:6px;bottom:6px;font-size:0.75em;color:var(--dim)">0/5000</span>
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:8px">
+      <label style="min-width:90px;font-size:0.82em;color:var(--dim)">Category</label>
+      <select id="yt-category" onchange="ytFieldChange('category_id',this.value)"
+              style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 8px;font-size:0.85em">
+        <option value="1">Film & Animation</option>
+        <option value="17">Sports</option>
+        <option value="22">People & Blogs</option>
+        <option value="24">Entertainment</option>
+        <option value="25">News & Politics</option>
+        <option value="27">Education</option>
+        <option value="28">Science & Technology</option>
+      </select>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:8px">
+      <label style="min-width:90px;font-size:0.82em;color:var(--dim)">Privacy</label>
+      <select id="yt-privacy" onchange="ytFieldChange('privacy',this.value)"
+              style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 8px;font-size:0.85em">
+        <option value="private">Private</option>
+        <option value="unlisted">Unlisted</option>
+        <option value="public">Public</option>
+      </select>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:8px">
+      <label style="min-width:90px;font-size:0.82em;color:var(--dim)">Made for Kids</label>
+      <select id="yt-mfk" onchange="ytFieldChange('made_for_kids',this.value==='true')"
+              style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 8px;font-size:0.85em">
+        <option value="false">No</option>
+        <option value="true">Yes</option>
+      </select>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:8px">
+      <label style="min-width:90px;font-size:0.82em;color:var(--dim)">Notify Subs</label>
+      <select id="yt-notify" onchange="ytFieldChange('notify_subscribers',this.value==='true')"
+              style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 8px;font-size:0.85em">
+        <option value="false">Off — no notification ever sent for this video</option>
+        <option value="true">On — notify subscribers when video goes public</option>
+      </select>
+      <span style="font-size:0.75em;color:var(--red)">⚠ permanent — cannot change after upload</span>
+    </div>
+  </div>
+
+  <!-- Generate section (shown when youtube.json is missing) -->
+  <div id="yt-generate-section" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center">
+    <div style="color:var(--dim);font-size:0.9em;margin-bottom:12px">
+      No <code>youtube.json</code> found for this locale.
+    </div>
+    <button id="yt-gen-btn" onclick="ytGenerate()"
+            style="background:#7c3aed;color:#fff;border:none;border-radius:7px;padding:10px 24px;cursor:pointer;font-size:0.95em;font-weight:600">
+      ✨ Generate youtube.json
+    </button>
+    <div id="yt-gen-error" style="display:none;margin-top:10px;color:#f87171;font-size:0.82em;text-align:left;background:#7f1d1d22;border-radius:5px;padding:8px 12px"></div>
+  </div>
+
+  <!-- Save button (shown after generate or when form is dirty) -->
+  <div id="yt-save-wrap" style="display:none">
+    <button id="yt-save-btn" onclick="ytSaveAll()"
+            style="background:#16a34a;color:#fff;border:none;border-radius:7px;padding:8px 20px;cursor:pointer;font-size:0.9em;font-weight:600">
+      💾 Save youtube.json
+    </button>
+    <span id="yt-save-badge" style="font-size:0.82em;color:var(--dim);margin-left:10px"></span>
+  </div>
+
+  <!-- Thumbnail section -->
+  <div id="yt-thumb-section" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px">
+    <div style="font-size:0.85em;font-weight:600;color:var(--dim);margin-bottom:10px">THUMBNAIL</div>
+
+    <!-- Video player for frame picking -->
+    <video id="yt-preview-video" controls preload="metadata"
+           style="width:100%;max-height:320px;background:#000;border-radius:6px;display:none">
+    </video>
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+      <button id="yt-use-frame-btn" onclick="ytUseFrame()"
+              style="display:none;background:#2563eb;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:0.85em">
+        Use this frame
+      </button>
+      <span id="yt-frame-sec" style="font-size:0.8em;color:var(--dim)"></span>
+    </div>
+
+    <!-- Preview box -->
+    <div id="yt-thumb-preview-wrap" style="margin-top:10px;display:none">
+      <div style="font-size:0.8em;color:var(--dim);margin-bottom:6px">Preview:</div>
+      <div style="display:flex;gap:12px;align-items:flex-start">
+        <img id="yt-thumb-img" style="max-width:280px;border-radius:5px;border:1px solid var(--border)"
+             alt="thumbnail preview">
+        <div style="font-size:0.8em;color:var(--dim);line-height:1.8">
+          <div id="yt-thumb-info"></div>
+          <button id="yt-save-thumb-btn" onclick="ytSaveThumbnail()"
+                  style="margin-top:8px;background:#16a34a;color:#fff;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.85em;display:none">
+            💾 Save as thumbnail
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom upload fallback -->
+    <div style="margin-top:12px">
+      <label style="font-size:0.8em;color:var(--dim);cursor:pointer">
+        <input type="file" id="yt-thumb-upload" accept="image/jpeg,image/png"
+               onchange="ytUploadCustomThumb(this)" style="display:none">
+        📁 Upload custom image instead
+      </label>
+    </div>
+  </div>
+
+  <!-- Subtitles info -->
+  <div id="yt-subs-section" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px">
+    <div style="font-size:0.85em;font-weight:600;color:var(--dim);margin-bottom:6px">SUBTITLES</div>
+    <div id="yt-subs-list" style="font-size:0.85em;line-height:1.8"></div>
+  </div>
+
+  <!-- Action buttons -->
+  <div id="yt-actions" style="display:none;gap:10px;flex-wrap:wrap;align-items:center">
+    <button id="yt-btn-validate" onclick="ytAction('validate')"
+            style="background:#7c3aed;color:#fff;border:none;border-radius:7px;padding:8px 18px;cursor:pointer;font-size:0.9em">
+      ✓ Validate
+    </button>
+    <button id="yt-btn-upload" onclick="ytAction('upload')"
+            style="background:#2563eb;color:#fff;border:none;border-radius:7px;padding:8px 18px;cursor:pointer;font-size:0.9em">
+      ⬆ Upload (Private)
+    </button>
+    <button id="yt-btn-publish" onclick="ytAction('publish')"
+            style="background:#16a34a;color:#fff;border:none;border-radius:7px;padding:8px 18px;cursor:pointer;font-size:0.9em">
+      🌐 Publish
+    </button>
+    <button id="yt-copy-review-btn" onclick="ytCopyReview()"
+            style="background:#ffffff10;color:var(--dim);border:1px solid var(--border);border-radius:7px;padding:8px 14px;cursor:pointer;font-size:0.85em;display:none">
+      📋 Copy Review Packet
+    </button>
+  </div>
+
+  <!-- Upload status / log -->
+  <div id="yt-log-wrap" style="display:none;background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:0.82em;min-height:120px;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">
+    <div id="yt-log"></div>
+  </div>
+
+  <!-- Post-upload checklist -->
+  <div id="yt-checklist" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px">
+    <div style="font-size:0.85em;font-weight:600;color:var(--dim);margin-bottom:10px">COMPLETE IN YOUTUBE STUDIO</div>
+    <div id="yt-checklist-body" style="font-size:0.85em;line-height:2"></div>
+  </div>
+
 </div>
 
 <!-- ── Pipeline panel ── -->
@@ -3015,7 +3218,9 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('panel-media').style.display    = name === 'media'    ? 'flex' : 'none';
     document.getElementById('panel-music').style.display    = name === 'music'    ? 'flex' : 'none';
     document.getElementById('panel-vo').style.display       = name === 'vo'       ? 'flex' : 'none';
-    if (name === 'vo') populateVoEpSelect();
+    document.getElementById('panel-youtube').style.display  = name === 'youtube'  ? 'flex' : 'none';
+    if (name === 'vo')      populateVoEpSelect();
+    if (name === 'youtube') initYoutubeTab();
 
     // ── Connection cleanup on tab switch ──
     // HTTP/1.1 allows only 6 concurrent connections per host.  Free up slots
@@ -6070,6 +6275,449 @@ placeholder="Enter your story here"></textarea>
   let pipeEpSlug    = null;
   let pipeEpId      = null;
   let pipeStatus    = null;
+  // ── YouTube tab ────────────────────────────────────────────────────────────
+
+  let _ytReviewData = null;  // last upload_review.json data
+  let _ytPendingSec = null;  // frame second waiting for [Save as thumbnail] confirmation
+
+  async function initYoutubeTab() {
+    const slug   = currentSlug;
+    const epId   = currentEpId;
+    const locale = document.getElementById('yt-locale-sel').value || 'en';
+    const badge  = document.getElementById('yt-status-badge');
+
+    if (!slug || !epId) {
+      badge.textContent = 'No episode loaded';
+      badge.style.background = '#ffffff15';
+      document.getElementById('yt-meta-form').style.display    = 'none';
+      document.getElementById('yt-thumb-section').style.display = 'none';
+      document.getElementById('yt-subs-section').style.display  = 'none';
+      document.getElementById('yt-actions').style.display       = 'none';
+      return;
+    }
+
+    badge.textContent = 'Loading…';
+    badge.style.background = '#ffffff15';
+
+    try {
+      const r = await fetch(`/api/youtube_status?slug=${encodeURIComponent(slug)}&ep_id=${encodeURIComponent(epId)}&locale=${encodeURIComponent(locale)}`);
+      const d = await r.json();
+
+      const ytMissing = d.error && !d.youtube;
+
+      // Show/hide generate section vs form
+      document.getElementById('yt-generate-section').style.display = ytMissing ? 'block' : 'none';
+      document.getElementById('yt-gen-error').style.display        = 'none';
+      document.getElementById('yt-save-wrap').style.display        = ytMissing ? 'none' : 'block';
+
+      if (ytMissing) {
+        badge.textContent = 'No youtube.json — click Generate';
+        badge.style.background = '#78350f';
+        document.getElementById('yt-meta-form').style.display     = 'none';
+        document.getElementById('yt-thumb-section').style.display = 'none';
+        document.getElementById('yt-subs-section').style.display  = 'none';
+        document.getElementById('yt-actions').style.display       = 'none';
+        return;
+      }
+
+      // Fill metadata form
+      const yt = d.youtube || {};
+      _ytFillForm(yt);
+      // Preserve all fields (including non-form ones) so ytSaveAll() doesn't lose them
+      window._ytDraft = Object.assign({}, yt);
+      document.getElementById('yt-meta-form').style.display    = 'flex';
+      document.getElementById('yt-thumb-section').style.display = 'block';
+      document.getElementById('yt-subs-section').style.display  = 'block';
+      document.getElementById('yt-actions').style.display       = 'flex';
+
+      // Upload state badge
+      const st = d.upload_state || {};
+      if (st.video_id) {
+        badge.textContent = `Uploaded: ${st.video_id}`;
+        badge.style.background = '#14532d';
+        _ytShowChecklist(st, yt);
+      } else {
+        badge.textContent = 'Ready to validate';
+        badge.style.background = '#1e3a5f';
+        document.getElementById('yt-checklist').style.display = 'none';
+      }
+
+      // Review data
+      _ytReviewData = d.review || null;
+      document.getElementById('yt-copy-review-btn').style.display =
+        _ytReviewData ? 'inline-block' : 'none';
+
+      // Subtitles
+      const subs = (yt.subtitles || []);
+      document.getElementById('yt-subs-list').innerHTML = subs.map(s =>
+        `<div>${s.exists !== false ? '✓' : '✗'} ${s.name || s.language}  <span style="color:var(--dim)">${s.file || ''}</span></div>`
+      ).join('') || '<span style="color:var(--dim)">No subtitles defined</span>';
+
+      // Video player for thumbnail seek
+      const vidEl = document.getElementById('yt-preview-video');
+      const vidSrc = `/api/episode_video?slug=${encodeURIComponent(slug)}&ep_id=${encodeURIComponent(epId)}&locale=${encodeURIComponent(locale)}`;
+      if (vidEl.dataset.src !== vidSrc) {
+        vidEl.src = vidSrc;
+        vidEl.dataset.src = vidSrc;
+        vidEl.style.display = 'block';
+        document.getElementById('yt-use-frame-btn').style.display = 'inline-block';
+        document.getElementById('yt-thumb-preview-wrap').style.display = 'none';
+      }
+
+      // Show existing thumbnail if present
+      if (yt.thumbnail) {
+        _ytShowThumb(`/api/yt_thumbnail?slug=${encodeURIComponent(slug)}&ep_id=${encodeURIComponent(epId)}&locale=${encodeURIComponent(locale)}`, yt.thumbnail_source_sec);
+      }
+
+    } catch(e) {
+      badge.textContent = 'Error: ' + e.message;
+      badge.style.background = '#7f1d1d';
+    }
+  }
+
+  function _ytFillForm(yt) {
+    const ti = document.getElementById('yt-title');
+    if (ti) { ti.value = yt.title || ''; ytUpdateCounter('yt-title-ctr', ti.value.length, 70); }
+    const de = document.getElementById('yt-desc');
+    if (de) { de.value = yt.description || ''; ytUpdateCounter('yt-desc-ctr', de.value.length, 5000); }
+    const cat = document.getElementById('yt-category');
+    if (cat) cat.value = String(yt.category_id || '24');
+    const prv = document.getElementById('yt-privacy');
+    if (prv) prv.value = yt.privacy || 'private';
+    const mfk = document.getElementById('yt-mfk');
+    if (mfk) mfk.value = yt.made_for_kids ? 'true' : 'false';
+    const ntf = document.getElementById('yt-notify');
+    if (ntf) ntf.value = yt.notify_subscribers ? 'true' : 'false';
+  }
+
+  function ytUpdateCounter(id, n, max) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = `${n}/${max}`;
+  }
+
+  // ── Generate youtube.json via Claude ────────────────────────────────────────
+  async function ytGenerate() {
+    const slug   = currentSlug; if (!slug) return;
+    const epId   = currentEpId; if (!epId) return;
+    const locale = document.getElementById('yt-locale-sel').value || 'en';
+    const btn    = document.getElementById('yt-gen-btn');
+    const errEl  = document.getElementById('yt-gen-error');
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Generating…';
+    errEl.style.display = 'none';
+
+    try {
+      const r = await fetch('/api/generate_youtube_json', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({slug, ep_id: epId, locale}),
+      });
+      const d = await r.json();
+
+      if (!d.ok) {
+        errEl.textContent = d.error || 'Unknown error';
+        if (d.raw) errEl.textContent += '\n\nRaw: ' + d.raw.slice(0, 300);
+        errEl.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = '✨ Generate youtube.json';
+        return;
+      }
+
+      // Draft received — fill form and switch to edit mode
+      const draft = d.draft;
+      _ytFillForm(draft);
+      document.getElementById('yt-generate-section').style.display = 'none';
+      document.getElementById('yt-meta-form').style.display        = 'flex';
+      document.getElementById('yt-thumb-section').style.display    = 'block';
+      document.getElementById('yt-subs-section').style.display     = 'block';
+      document.getElementById('yt-actions').style.display          = 'flex';
+      document.getElementById('yt-save-wrap').style.display        = 'block';
+      document.getElementById('yt-save-badge').textContent         = 'Draft — not saved yet';
+
+      // Fill subtitles list
+      if (draft.subtitles) {
+        document.getElementById('yt-subs-list').innerHTML = draft.subtitles.map(s =>
+          `<div>✓ ${s.name || s.language}  <span style="color:var(--dim)">${s.file}</span></div>`
+        ).join('');
+      }
+
+      // Show thumbnail_source_sec as suggested
+      if (draft.thumbnail_source_sec != null) {
+        document.getElementById('yt-frame-sec').textContent =
+          `Suggested frame: ${draft.thumbnail_source_sec.toFixed(1)}s — drag to adjust`;
+      }
+
+      // Keep draft in memory for save
+      window._ytDraft = draft;
+
+      const badge = document.getElementById('yt-status-badge');
+      badge.textContent = 'Draft generated — review and save';
+      badge.style.background = '#78350f';
+
+    } catch(e) {
+      errEl.textContent = 'Network error: ' + e.message;
+      errEl.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = '✨ Generate youtube.json';
+    }
+  }
+
+  // ── Save all fields to youtube.json ────────────────────────────────────────
+  async function ytSaveAll() {
+    const slug   = currentSlug; if (!slug) return;
+    const epId   = currentEpId; if (!epId) return;
+    const locale = document.getElementById('yt-locale-sel').value || 'en';
+    const btn    = document.getElementById('yt-save-btn');
+    const badge  = document.getElementById('yt-save-badge');
+
+    // Collect all form fields
+    const fields = {
+      title:               document.getElementById('yt-title')?.value    || '',
+      description:         document.getElementById('yt-desc')?.value     || '',
+      category_id:         document.getElementById('yt-category')?.value || '24',
+      privacy:             document.getElementById('yt-privacy')?.value  || 'private',
+      made_for_kids:       document.getElementById('yt-mfk')?.value === 'true',
+      notify_subscribers:  document.getElementById('yt-notify')?.value === 'true',
+      // tags come from draft (no tag chip editor yet)
+      tags:                (window._ytDraft || {}).tags || [],
+      // auto-populated fields from draft
+      upload_profile:      (window._ytDraft || {}).upload_profile || '',
+      channel_id:          (window._ytDraft || {}).channel_id     || '',
+      playlist_id:         (window._ytDraft || {}).playlist_id    || null,
+      video_language:      (window._ytDraft || {}).video_language || locale,
+      subtitles:           (window._ytDraft || {}).subtitles      || [],
+      thumbnail:           (window._ytDraft || {}).thumbnail      || `projects/${slug}/episodes/${epId}/renders/${locale}/thumbnail.jpg`,
+      thumbnail_source_sec:(window._ytDraft || {}).thumbnail_source_sec ?? null,
+      license:             'youtube',
+      embeddable:          true,
+      publish_at:          null,
+    };
+
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    badge.textContent = '';
+
+    try {
+      const r = await fetch('/api/youtube_save_all', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({slug, ep_id: epId, locale, fields}),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        badge.textContent = '✓ Saved';
+        btn.textContent = '💾 Save youtube.json';
+        btn.disabled = false;
+        // Reload tab to show full edit mode
+        setTimeout(() => initYoutubeTab(), 500);
+      } else {
+        badge.textContent = '✗ Error: ' + (d.error || 'unknown');
+        btn.disabled = false;
+        btn.textContent = '💾 Save youtube.json';
+      }
+    } catch(e) {
+      badge.textContent = '✗ ' + e.message;
+      btn.disabled = false;
+      btn.textContent = '💾 Save youtube.json';
+    }
+  }
+
+  let _ytSaveTimer = null;
+  function ytFieldChange(field, value) {
+    // Debounce auto-save to youtube.json
+    clearTimeout(_ytSaveTimer);
+    _ytSaveTimer = setTimeout(() => _ytSaveField(field, value), 600);
+  }
+
+  async function _ytSaveField(field, value) {
+    const slug   = currentSlug; if (!slug) return;
+    const epId   = currentEpId; if (!epId) return;
+    const locale = document.getElementById('yt-locale-sel').value || 'en';
+    try {
+      await fetch('/api/youtube_save_field', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({slug, ep_id: epId, locale, field, value}),
+      });
+    } catch(e) { console.warn('ytSaveField error:', e); }
+  }
+
+  // [Use this frame] → show preview only, no disk write yet (C23 fix)
+  async function ytUseFrame() {
+    const slug   = currentSlug; if (!slug) return;
+    const epId   = currentEpId; if (!epId) return;
+    const locale = document.getElementById('yt-locale-sel').value || 'en';
+    const vidEl  = document.getElementById('yt-preview-video');
+    const sec    = vidEl.currentTime;
+    _ytPendingSec = sec;
+
+    document.getElementById('yt-frame-sec').textContent = `Frame at ${sec.toFixed(2)}s`;
+
+    const imgEl = document.getElementById('yt-thumb-img');
+    imgEl.src = `/api/thumbnail_preview?slug=${encodeURIComponent(slug)}&ep_id=${encodeURIComponent(epId)}&locale=${encodeURIComponent(locale)}&sec=${sec}`;
+    imgEl.onerror = () => {
+      document.getElementById('yt-thumb-info').textContent = '✗ Frame extraction failed';
+    };
+    imgEl.onload = () => {
+      document.getElementById('yt-thumb-info').textContent = `${imgEl.naturalWidth}×${imgEl.naturalHeight}  (not yet saved)`;
+      document.getElementById('yt-save-thumb-btn').style.display = 'inline-block';
+    };
+    document.getElementById('yt-thumb-preview-wrap').style.display = 'block';
+    document.getElementById('yt-save-thumb-btn').style.display = 'none';
+    document.getElementById('yt-thumb-info').textContent = 'Extracting frame…';
+  }
+
+  // [Save as thumbnail] → explicit user confirmation, then disk write (C23 fix)
+  async function ytSaveThumbnail() {
+    if (_ytPendingSec === null) return;
+    const slug   = currentSlug; if (!slug) return;
+    const epId   = currentEpId; if (!epId) return;
+    const locale = document.getElementById('yt-locale-sel').value || 'en';
+    const btn    = document.getElementById('yt-save-thumb-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/set_thumbnail_sec', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({slug, ep_id: epId, locale, sec: _ytPendingSec}),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        document.getElementById('yt-thumb-info').textContent =
+          `✓ Saved: ${d.thumbnail_path}`;
+        btn.textContent = '✓ Saved';
+        _ytPendingSec = null;
+      } else {
+        document.getElementById('yt-thumb-info').textContent = '✗ Save failed: ' + (d.error || 'unknown');
+        btn.disabled = false; btn.textContent = '💾 Save as thumbnail';
+      }
+    } catch(e) {
+      document.getElementById('yt-thumb-info').textContent = '✗ Error: ' + e.message;
+      btn.disabled = false; btn.textContent = '💾 Save as thumbnail';
+    }
+  }
+
+  function _ytShowThumb(src, sec) {
+    const imgEl = document.getElementById('yt-thumb-img');
+    imgEl.src = src;
+    imgEl.onerror = () => {};
+    const info = sec != null ? `Frame at ${sec}s` : 'Custom thumbnail';
+    document.getElementById('yt-thumb-info').textContent = info;
+    document.getElementById('yt-thumb-preview-wrap').style.display = 'block';
+    document.getElementById('yt-save-thumb-btn').style.display = 'none';
+  }
+
+  async function ytUploadCustomThumb(input) {
+    if (!input.files || !input.files[0]) return;
+    const slug   = currentSlug; if (!slug) return;
+    const epId   = currentEpId; if (!epId) return;
+    const locale = document.getElementById('yt-locale-sel').value || 'en';
+    const fd = new FormData();
+    fd.append('file', input.files[0]);
+    fd.append('slug', slug);
+    fd.append('ep_id', epId);
+    fd.append('locale', locale);
+    try {
+      const r = await fetch('/api/upload_thumbnail_file', {method: 'POST', body: fd});
+      const d = await r.json();
+      if (d.ok) {
+        const imgEl = document.getElementById('yt-thumb-img');
+        imgEl.src = URL.createObjectURL(input.files[0]);
+        document.getElementById('yt-thumb-info').textContent = '✓ Custom thumbnail saved';
+        document.getElementById('yt-thumb-preview-wrap').style.display = 'block';
+        document.getElementById('yt-save-thumb-btn').style.display = 'none';
+      }
+    } catch(e) { alert('Upload failed: ' + e.message); }
+  }
+
+  async function ytAction(action) {
+    const slug   = currentSlug; if (!slug) { alert('No episode loaded'); return; }
+    const epId   = currentEpId; if (!epId) return;
+    const locale = document.getElementById('yt-locale-sel').value || 'en';
+
+    const logWrap = document.getElementById('yt-log-wrap');
+    const logEl   = document.getElementById('yt-log');
+
+    // Disable all action buttons while running
+    const actionBtns = ['yt-btn-validate','yt-btn-upload','yt-btn-publish'];
+    const labels = {'validate':'⏳ Validating…', 'upload':'⏳ Uploading…', 'publish':'⏳ Publishing…'};
+    actionBtns.forEach(id => {
+      const b = document.getElementById(id);
+      if (b) { b.disabled = true; b.style.opacity = '0.45'; b.style.cursor = 'not-allowed'; }
+    });
+    const activeBtn = document.getElementById(`yt-btn-${action}`);
+    if (activeBtn) activeBtn.textContent = labels[action] || '⏳ Running…';
+
+    logWrap.style.display = 'block';
+    logEl.textContent = `▶ ${action} started…\n`;
+    logWrap.scrollTop = 0;
+
+    try {
+      const r = await fetch('/api/youtube_action', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({slug, ep_id: epId, locale, action}),
+      });
+      const d = await r.json();
+      logEl.textContent += (d.output || d.error || JSON.stringify(d));
+      if (d.ok !== false) {
+        logEl.textContent += '\n\n✅ Done.';
+        initYoutubeTab();  // refresh status
+      } else {
+        logEl.textContent += '\n\n❌ Failed (see above).';
+      }
+    } catch(e) {
+      logEl.textContent += '\n\n❌ Error: ' + e.message;
+    }
+
+    // Re-enable buttons and restore labels
+    const origLabels = {'yt-btn-validate':'✓ Validate', 'yt-btn-upload':'⬆ Upload (Private)', 'yt-btn-publish':'🌐 Publish'};
+    actionBtns.forEach(id => {
+      const b = document.getElementById(id);
+      if (b) { b.disabled = false; b.style.opacity = ''; b.style.cursor = 'pointer'; b.textContent = origLabels[id]; }
+    });
+
+    logWrap.scrollTop = logWrap.scrollHeight;
+  }
+
+  function ytCopyReview() {
+    if (!_ytReviewData) return;
+    navigator.clipboard.writeText(JSON.stringify(_ytReviewData, null, 2))
+      .then(() => {
+        const btn = document.getElementById('yt-copy-review-btn');
+        btn.textContent = '✓ Copied!';
+        setTimeout(() => { btn.textContent = '📋 Copy Review Packet'; }, 2000);
+      });
+  }
+
+  function _ytShowChecklist(st, yt) {
+    const vid = st.video_id;
+    const lines = [
+      st.video_uploaded      ? '✅ Video uploaded (private)' : '⬜ Video not uploaded',
+      (st.captions_uploaded && Object.values(st.captions_uploaded).some(Boolean))
+        ? '✅ Subtitles: ' + Object.keys(st.captions_uploaded).filter(k => st.captions_uploaded[k]).join(', ')
+        : '⬜ Subtitles not uploaded',
+      st.thumbnail_uploaded  ? '✅ Thumbnail uploaded'        : '⬜ Thumbnail not uploaded',
+      st.playlist_added      ? '✅ Added to playlist'         : '⬜ Playlist not added yet',
+    ];
+
+    const studioBase = `https://studio.youtube.com/video/${vid}`;
+    const manualSteps = vid ? `
+      <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+        <div style="font-size:0.82em;font-weight:600;color:var(--dim);margin-bottom:4px">Complete in YouTube Studio:</div>
+        <div>☐ End screen &amp; Cards → <a href="${studioBase}/edit" target="_blank" style="color:#60a5fa">Open Editor ↗</a></div>
+        <div>☐ Subtitles (fine-tune) → <a href="${studioBase}/translations" target="_blank" style="color:#60a5fa">Open Translations ↗</a></div>
+        <div>☐ Dubbed audio → <a href="${studioBase}/dubbing" target="_blank" style="color:#60a5fa">Open Dubbing ↗</a></div>
+        <div>☐ Monetization → <a href="${studioBase}/monetization" target="_blank" style="color:#60a5fa">Open Monetization ↗</a></div>
+        <div>☐ Comments setting → <a href="${studioBase}/edit" target="_blank" style="color:#60a5fa">Details → More options ↗</a></div>
+      </div>` : '';
+
+    document.getElementById('yt-checklist-body').innerHTML =
+      lines.map(l => `<div>${l}</div>`).join('') + manualSteps;
+    document.getElementById('yt-checklist').style.display = 'block';
+  }
+
   let pipeStepEs    = null;
   let pipeStoryFile = null;   // auto-detected from pipeline_vars.*.sh
   let pipeRunning      = null;   // { from, to } while an llm range is running; null otherwise
@@ -6801,6 +7449,10 @@ placeholder="Enter your story here"></textarea>
     const slug = document.getElementById('run-project-sel').value;
     const epId = document.getElementById('run-episode-sel').value;
     if (slug && epId) loadEpisodeDetails(slug, epId);
+    // Refresh YouTube tab if it is currently visible
+    if (document.getElementById('panel-youtube').style.display !== 'none') {
+      initYoutubeTab();
+    }
   }
 
   // ── Prepare button ───────────────────────────────────────────────────────────
@@ -9151,6 +9803,213 @@ class Handler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
+        # ── YouTube: status (GET /api/youtube_status) ────────────────────────────
+        elif parsed.path == "/api/youtube_status":
+            params = parse_qs(parsed.query)
+            slug   = unquote_plus(params.get("slug",   [""])[0]).strip()
+            ep_id  = unquote_plus(params.get("ep_id",  [""])[0]).strip()
+            locale = unquote_plus(params.get("locale", ["en"])[0]).strip()
+
+            # Input validation
+            if not slug or not ep_id or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
+                    or not re.match(r'^s\d+e\d+$', ep_id) \
+                    or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                body = json.dumps({"error": "invalid parameters"}).encode()
+                self.send_response(400)
+            else:
+                try:
+                    render_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id, "renders", locale)
+                    yt_path    = os.path.join(render_dir, "youtube.json")
+                    st_path    = os.path.join(render_dir, "upload_state.json")
+                    rv_path    = os.path.join(render_dir, "upload_review.json")
+
+                    def _load_json(p):
+                        if not os.path.isfile(p):
+                            return None
+                        with open(p, encoding="utf-8") as _f:
+                            return json.load(_f)
+
+                    yt_data = _load_json(yt_path)
+                    st_data = _load_json(st_path) or {}
+                    rv_data = _load_json(rv_path)
+
+                    payload = {
+                        "youtube":      yt_data,
+                        "upload_state": st_data,
+                        "review":       rv_data,
+                        "render_dir":   os.path.relpath(render_dir, PIPE_DIR),
+                    }
+                    if not yt_data:
+                        payload["error"] = "youtube.json not found — render the episode first"
+                    body = json.dumps(payload).encode()
+                    self.send_response(200)
+                except Exception as exc:
+                    body = json.dumps({"error": str(exc)}).encode()
+                    self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── YouTube: serve existing thumbnail (GET /api/yt_thumbnail) ─────────
+        elif parsed.path == "/api/yt_thumbnail":
+            params = parse_qs(parsed.query)
+            slug   = unquote_plus(params.get("slug",   [""])[0]).strip()
+            ep_id  = unquote_plus(params.get("ep_id",  [""])[0]).strip()
+            locale = unquote_plus(params.get("locale", ["en"])[0]).strip()
+
+            if not slug or not ep_id \
+                    or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
+                    or not re.match(r'^s\d+e\d+$', ep_id) \
+                    or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                self.send_response(400); self.end_headers(); return
+
+            thumb_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                      "renders", locale, "thumbnail.jpg")
+            if not os.path.isfile(thumb_path):
+                self.send_response(404); self.end_headers(); return
+
+            with open(thumb_path, "rb") as _tf:
+                data = _tf.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(data)
+
+        # ── YouTube: stream video with Range support (GET /api/episode_video) ─
+        elif parsed.path == "/api/episode_video":
+            params = parse_qs(parsed.query)
+            slug   = unquote_plus(params.get("slug",   [""])[0]).strip()
+            ep_id  = unquote_plus(params.get("ep_id",  [""])[0]).strip()
+            locale = unquote_plus(params.get("locale", ["en"])[0]).strip()
+
+            # C26: validate path parameters
+            if not slug or not ep_id \
+                    or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
+                    or not re.match(r'^s\d+e\d+$', ep_id) \
+                    or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                self.send_response(400); self.end_headers(); return
+
+            mp4_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                    "renders", locale, "output.mp4")
+            # Safety: realpath check
+            mp4_real    = os.path.realpath(mp4_path)
+            proj_real   = os.path.realpath(os.path.join(PIPE_DIR, "projects"))
+            if not mp4_real.startswith(proj_real + os.sep):
+                self.send_response(403); self.end_headers(); return
+            if not os.path.isfile(mp4_path):
+                self.send_response(404); self.end_headers(); return
+
+            file_size    = os.path.getsize(mp4_path)
+            range_header = self.headers.get("Range")
+
+            if range_header:
+                # Parse Range: bytes=start-end
+                m = re.match(r"bytes=(\d+)-(\d*)", range_header)
+                if m:
+                    byte_start = int(m.group(1))
+                    byte_end   = int(m.group(2)) if m.group(2) else file_size - 1
+                else:
+                    byte_start = 0
+                    byte_end   = file_size - 1
+            else:
+                byte_start = 0
+                byte_end   = file_size - 1
+
+            byte_end     = min(byte_end, file_size - 1)
+            content_len  = byte_end - byte_start + 1
+
+            self.send_response(206 if range_header else 200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(content_len))
+            self.send_header("Accept-Ranges", "bytes")
+            if range_header:
+                self.send_header("Content-Range", f"bytes {byte_start}-{byte_end}/{file_size}")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            try:
+                with open(mp4_path, "rb") as vf:
+                    vf.seek(byte_start)
+                    remaining = content_len
+                    while remaining > 0:
+                        chunk = vf.read(min(262144, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        # ── YouTube: extract frame preview (GET /api/thumbnail_preview) ───────
+        elif parsed.path == "/api/thumbnail_preview":
+            params = parse_qs(parsed.query)
+            slug   = unquote_plus(params.get("slug",   [""])[0]).strip()
+            ep_id  = unquote_plus(params.get("ep_id",  [""])[0]).strip()
+            locale = unquote_plus(params.get("locale", ["en"])[0]).strip()
+            try:
+                sec = float(params.get("sec", ["0"])[0])
+            except ValueError:
+                self.send_response(400); self.end_headers(); return
+
+            # C26: validate path parameters
+            if not slug or not ep_id \
+                    or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
+                    or not re.match(r'^s\d+e\d+$', ep_id) \
+                    or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                self.send_response(400); self.end_headers(); return
+
+            mp4_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                    "renders", locale, "output.mp4")
+            if not os.path.isfile(mp4_path):
+                self.send_response(404); self.end_headers(); return
+
+            # C24: bounds-check sec via ffprobe
+            try:
+                probe_r = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_format",
+                     "-print_format", "json", mp4_path],
+                    capture_output=True, timeout=10,
+                )
+                probe_d  = json.loads(probe_r.stdout)
+                duration = float(probe_d.get("format", {}).get("duration", 0))
+                if sec < 0 or (duration > 0 and sec > duration):
+                    body = json.dumps({"error": f"sec {sec} out of range [0, {duration:.2f}]"}).encode()
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+            except Exception:
+                pass  # if ffprobe fails, proceed without bounds check
+
+            # Extract frame
+            result = subprocess.run([
+                "ffmpeg", "-y", "-ss", str(sec), "-i", mp4_path,
+                "-frames:v", "1", "-vf", "scale=1280:720",
+                "-f", "image2", "-vcodec", "mjpeg", "-",
+            ], capture_output=True, timeout=30)
+
+            # C25: check ffmpeg returncode and non-empty output
+            if result.returncode != 0 or not result.stdout:
+                err_msg = result.stderr.decode(errors="replace")[:500]
+                body = json.dumps({"error": f"ffmpeg failed: {err_msg}"}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(result.stdout)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(result.stdout)
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -9628,13 +10487,16 @@ class Handler(BaseHTTPRequestHandler):
                     tmp_path = tf.name
 
                 try:
+                    _haiku_env = os.environ.copy()
+                    _haiku_env.pop("CLAUDECODE", None)
                     result = subprocess.run(
                         ["claude", "-p",
                          "--model", "haiku",
                          "--dangerously-skip-permissions",
                          "--no-session-persistence",
                          tmp_path],
-                        capture_output=True, text=True, cwd=PIPE_DIR, timeout=30
+                        capture_output=True, text=True, cwd=PIPE_DIR, timeout=30,
+                        env=_haiku_env,
                     )
                     raw = result.stdout.strip()
                     # Strip markdown code fences if present
@@ -10195,6 +11057,517 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(resp)))
                 self.end_headers()
                 self.wfile.write(resp)
+
+        # ── YouTube: generate youtube.json draft via Claude ───────────────────────
+        elif self.path == "/api/generate_youtube_json":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                slug   = req.get("slug",   "").strip()
+                ep_id  = req.get("ep_id",  "").strip()
+                locale = req.get("locale", "en").strip()
+
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id required")
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                    raise ValueError("invalid slug or ep_id")
+
+                ep_dir     = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                render_dir = os.path.join(ep_dir, "renders", locale)
+
+                # ── Load episode files ────────────────────────────────────────
+                def _jload(p):
+                    if os.path.isfile(p):
+                        with open(p, encoding="utf-8") as f:
+                            return json.load(f)
+                    return None
+
+                script      = _jload(os.path.join(ep_dir, "Script.json")) or {}
+                shotlist    = _jload(os.path.join(ep_dir, "ShotList.json")) or {}
+                story_prompt= _jload(os.path.join(ep_dir, "StoryPrompt.json"))
+
+                # ── Collect narrator text (capped at 4000 chars) ──────────────
+                lines = []
+                for scene in script.get("scenes", []):
+                    for action in scene.get("actions", []):
+                        if action.get("type") == "dialogue" and action.get("line"):
+                            lines.append(action["line"])
+                total, truncated = 0, []
+                for line in lines:
+                    if total + len(line) > 4000:
+                        break
+                    truncated.append(line)
+                    total += len(line)
+
+                # ── Shot summaries ────────────────────────────────────────────
+                shots_data = shotlist.get("shots", [])
+                shot_cursor = 0.0
+                shot_summaries = []
+                for sh in shots_data:
+                    dur = sh.get("duration_sec", 0)
+                    shot_summaries.append({
+                        "emotional_tag": sh.get("emotional_tag", ""),
+                        "duration_sec":  dur,
+                        "start_sec":     round(shot_cursor, 2),
+                        "background":    sh.get("background_id", ""),
+                    })
+                    shot_cursor += dur
+
+                # ── category_id from genre (no LLM) ──────────────────────────
+                genre = script.get("genre", "").lower()
+                category_id = _GENRE_TO_CATEGORY.get(genre, _DEFAULT_CATEGORY)
+
+                # ── Subtitle scan ─────────────────────────────────────────────
+                subtitles = []
+                if os.path.isdir(render_dir):
+                    for fname in sorted(os.listdir(render_dir)):
+                        if not fname.endswith(".srt"):
+                            continue
+                        if ".en." in fname:
+                            subtitles.append({"file": f"renders/{locale}/{fname}",
+                                              "language": "en", "name": "English"})
+                        elif ".zh-Hans." in fname:
+                            subtitles.append({"file": f"renders/{locale}/{fname}",
+                                              "language": "zh-CN", "name": "Chinese Simplified"})
+
+                # ── Load profiles → upload_profile ────────────────────────────
+                profiles_path = os.path.expanduser("~/.config/pipe/youtube_profiles.json")
+                profiles = {}
+                if os.path.isfile(profiles_path):
+                    with open(profiles_path, encoding="utf-8") as f:
+                        profiles = json.load(f)
+                locale_to_profile = {v.get("locale", k): k for k, v in profiles.items()}
+                upload_profile = locale_to_profile.get(locale, locale)
+                profile_info   = profiles.get(upload_profile, {})
+
+                # ── Build Claude prompt ───────────────────────────────────────
+                ep_goal = None
+                if story_prompt:
+                    ep_goal = (story_prompt.get("episode_goal")
+                               or story_prompt.get("prompt_text", "")[:500])
+
+                output_lang = "English" if profile_info.get("locale", "en") == "en" \
+                              else "Chinese (Simplified)"
+
+                total_dur = shotlist.get("total_duration_sec", 0)
+
+                user_msg = json.dumps({
+                    "locale":             locale,
+                    "output_language":    output_lang,
+                    "episode_id":         ep_id,
+                    "genre":              genre,
+                    "total_duration_sec": total_dur,
+                    "script_title":       script.get("title", ""),
+                    "episode_goal":       ep_goal,
+                    "narrator_text":      truncated,
+                    "shots":              shot_summaries,
+                }, ensure_ascii=False)
+
+                system_prompt = (
+                    "You are a YouTube metadata expert. Generate upload metadata "
+                    "for a short narrative video episode. "
+                    "Output ONLY valid JSON with exactly these fields: "
+                    "title, description, tags, thumbnail_source_sec. "
+                    "No markdown, no explanation — raw JSON only.\n\n"
+                    "Constraints:\n"
+                    f"- title: ≤ 70 characters, in {output_lang}\n"
+                    "- description: first 2 lines are compelling hooks (shown in search results); "
+                    "hashtags ONLY in last paragraph; ≤ 5000 chars total; in {output_lang}\n"
+                    "- tags: 10-15 items, mix specific and broad terms\n"
+                    f"- thumbnail_source_sec: pick midpoint of shot with emotional_tag "
+                    f"'triumph', 'climax', or 'reveal'; must be within [0, {total_dur}]\n"
+                    "- Do NOT include category_id in the response"
+                ).format(output_lang=output_lang)
+
+                # ── Call Claude via CLI (same mechanism as run.sh pipeline) ──────
+                # Combine system instructions + user data into a single prompt file.
+                prompt_text = (
+                    system_prompt
+                    + "\n\n---\n\nEpisode data (JSON):\n\n"
+                    + user_msg
+                )
+                REQUIRED = {"title", "description", "tags", "thumbnail_source_sec"}
+
+                def _call_claude():
+                    import tempfile as _tf_yt
+                    _yt_env = os.environ.copy()
+                    _yt_env.pop("CLAUDECODE", None)  # prevent nested-session guard
+                    with _tf_yt.NamedTemporaryFile(
+                        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+                    ) as tf:
+                        tf.write(prompt_text)
+                        tmp_path = tf.name
+                    try:
+                        result = subprocess.run(
+                            ["claude", "-p",
+                             "--model", "sonnet",
+                             "--dangerously-skip-permissions",
+                             "--no-session-persistence",
+                             tmp_path],
+                            capture_output=True, text=True, cwd=PIPE_DIR, timeout=120,
+                            env=_yt_env,
+                        )
+                    finally:
+                        os.unlink(tmp_path)
+                    if result.returncode != 0 and not result.stdout.strip():
+                        raise RuntimeError(
+                            f"claude CLI failed (rc={result.returncode}): "
+                            f"{result.stderr.strip()[:300]}"
+                        )
+                    raw = result.stdout.strip()
+                    # Strip markdown fences
+                    raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.MULTILINE)
+                    raw = re.sub(r"\n?```$", "", raw, flags=re.MULTILINE)
+                    raw = raw.strip()
+                    # Extract JSON object even if claude wrapped it in explanation text
+                    start = raw.find('{')
+                    end   = raw.rfind('}')
+                    if start != -1 and end != -1 and end > start:
+                        raw = raw[start:end + 1]
+                    return raw
+
+                def _parse_claude(raw):
+                    """Parse JSON; on failure return (None, error_str)."""
+                    try:
+                        return json.loads(raw), None
+                    except json.JSONDecodeError as e:
+                        return None, str(e)
+
+                raw = _call_claude()
+                suggested, err = _parse_claude(raw)
+                if suggested is None:
+                    # Retry once with an explicit reminder (C28b)
+                    raw = _call_claude()
+                    suggested, err = _parse_claude(raw)
+                if suggested is None:
+                    resp = json.dumps({"ok": False,
+                                       "error": f"Claude returned invalid JSON: {err}",
+                                       "raw": raw}).encode("utf-8")
+                    self.send_response(422)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.end_headers()
+                    self.wfile.write(resp)
+                    return
+
+                # Check required fields (C28c)
+                missing = REQUIRED - set(suggested.keys())
+                if missing:
+                    resp = json.dumps({"ok": False,
+                                       "error": f"Missing fields: {sorted(missing)}"}).encode()
+                    self.send_response(422)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.end_headers()
+                    self.wfile.write(resp)
+                    return
+
+                # ── Assemble full draft ───────────────────────────────────────
+                draft = {
+                    "upload_profile":      upload_profile,
+                    "title":               suggested["title"],
+                    "description":         suggested["description"],
+                    "tags":                suggested.get("tags", []),
+                    "category_id":         category_id,
+                    "playlist_id":         profile_info.get("playlist_id"),
+                    "channel_id":          profile_info.get("channel_id"),
+                    "video_language":      locale if locale != "zh-Hans" else "zh-Hans",
+                    "privacy":             "private",
+                    "made_for_kids":       False,
+                    "thumbnail":           f"projects/{slug}/episodes/{ep_id}/renders/{locale}/thumbnail.jpg",
+                    "thumbnail_source_sec":suggested.get("thumbnail_source_sec"),
+                    "subtitles":           subtitles,
+                    "publish_at":          None,
+                    "notify_subscribers":  False,
+                    "license":             "youtube",
+                    "embeddable":          True,
+                }
+
+                resp = json.dumps({"ok": True, "draft": draft}, ensure_ascii=False).encode()
+                self.send_response(200)
+
+            except Exception as exc:
+                import traceback; traceback.print_exc()
+                resp = json.dumps({"ok": False, "error": str(exc)}).encode()
+                self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        # ── YouTube: write all fields to youtube.json ─────────────────────────
+        elif self.path == "/api/youtube_save_all":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                slug   = req.get("slug",   "").strip()
+                ep_id  = req.get("ep_id",  "").strip()
+                locale = req.get("locale", "en").strip()
+                fields = req.get("fields", {})
+
+                if not slug or not ep_id or not fields:
+                    raise ValueError("slug, ep_id, fields required")
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                    raise ValueError("invalid slug or ep_id")
+
+                render_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes",
+                                          ep_id, "renders", locale)
+                os.makedirs(render_dir, exist_ok=True)
+                yt_path = os.path.join(render_dir, "youtube.json")
+                with open(yt_path, "w", encoding="utf-8") as f:
+                    json.dump(fields, f, indent=2, ensure_ascii=False)
+
+                resp = json.dumps({"ok": True, "path": f"renders/{locale}/youtube.json"}).encode()
+                self.send_response(200)
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)}).encode()
+                self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        # ── YouTube: save a single field to youtube.json ─────────────────────────
+        elif self.path == "/api/youtube_save_field":
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                req     = json.loads(self.rfile.read(length))
+                slug    = req.get("slug",   "").strip()
+                ep_id   = req.get("ep_id",  "").strip()
+                locale  = req.get("locale", "en").strip()
+                field   = req.get("field",  "").strip()
+                value   = req.get("value")
+
+                if not slug or not ep_id or not field:
+                    raise ValueError("slug, ep_id, field required")
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                    raise ValueError("invalid slug or ep_id")
+
+                # Only allow known writable fields
+                _ALLOWED = {"title","description","tags","category_id","privacy",
+                            "made_for_kids","notify_subscribers","publish_at",
+                            "thumbnail_source_sec","playlist_id","license","embeddable"}
+                if field not in _ALLOWED:
+                    raise ValueError(f"field '{field}' is not editable")
+
+                yt_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                       "renders", locale, "youtube.json")
+                if not os.path.isfile(yt_path):
+                    raise FileNotFoundError("youtube.json not found")
+
+                with open(yt_path, encoding="utf-8") as f:
+                    yt = json.load(f)
+                yt[field] = value
+                with open(yt_path, "w", encoding="utf-8") as f:
+                    json.dump(yt, f, indent=2, ensure_ascii=False)
+
+                resp = json.dumps({"ok": True}).encode()
+                self.send_response(200)
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)}).encode()
+                self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        # ── YouTube: save confirmed thumbnail frame (POST /api/set_thumbnail_sec) ─
+        elif self.path == "/api/set_thumbnail_sec":
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                req     = json.loads(self.rfile.read(length))
+                slug    = req.get("slug",   "").strip()
+                ep_id   = req.get("ep_id",  "").strip()
+                locale  = req.get("locale", "en").strip()
+                sec     = float(req.get("sec", 0))
+
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id required")
+                # C26: validate path parameters
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                    raise ValueError("invalid slug or ep_id")
+                if locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                    raise ValueError("invalid locale")
+
+                render_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                          "renders", locale)
+                mp4_path   = os.path.join(render_dir, "output.mp4")
+                thumb_path = os.path.join(render_dir, "thumbnail.jpg")
+
+                if not os.path.isfile(mp4_path):
+                    raise FileNotFoundError("output.mp4 not found")
+
+                # C24: bounds-check sec via ffprobe
+                probe_r = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_format",
+                     "-print_format", "json", mp4_path],
+                    capture_output=True, timeout=10,
+                )
+                probe_d  = json.loads(probe_r.stdout) if probe_r.returncode == 0 else {}
+                duration = float(probe_d.get("format", {}).get("duration", 0))
+                if duration > 0 and (sec < 0 or sec > duration):
+                    raise ValueError(f"sec {sec} out of range [0, {duration:.2f}]")
+
+                # C25: check ffmpeg returncode
+                result = subprocess.run([
+                    "ffmpeg", "-y", "-ss", str(sec), "-i", mp4_path,
+                    "-frames:v", "1", "-vf", "scale=1280:720",
+                    "-update", "1", thumb_path,
+                ], capture_output=True, timeout=30)
+                if result.returncode != 0:
+                    raise RuntimeError(f"ffmpeg failed: {result.stderr.decode(errors='replace')[:300]}")
+
+                # Update youtube.json thumbnail_source_sec
+                yt_path = os.path.join(render_dir, "youtube.json")
+                if os.path.isfile(yt_path):
+                    with open(yt_path, encoding="utf-8") as f:
+                        yt = json.load(f)
+                    yt["thumbnail_source_sec"] = sec
+                    yt["thumbnail"] = f"projects/{slug}/episodes/{ep_id}/renders/{locale}/thumbnail.jpg"
+                    with open(yt_path, "w", encoding="utf-8") as f:
+                        json.dump(yt, f, indent=2, ensure_ascii=False)
+
+                resp = json.dumps({
+                    "ok": True,
+                    "thumbnail_path": f"projects/{slug}/episodes/{ep_id}/renders/{locale}/thumbnail.jpg",
+                    "sec": sec,
+                }).encode()
+                self.send_response(200)
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)}).encode()
+                self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        # ── YouTube: upload custom thumbnail image ─────────────────────────────
+        elif self.path == "/api/upload_thumbnail_file":
+            try:
+                import cgi as _cgi
+                ctype = self.headers.get("Content-Type", "")
+                if "multipart/form-data" not in ctype:
+                    raise ValueError("Expected multipart/form-data")
+                length = int(self.headers.get("Content-Length", 0))
+                raw    = self.rfile.read(length)
+
+                # Parse multipart manually (simple approach)
+                boundary = re.search(r"boundary=(.+)", ctype)
+                if not boundary:
+                    raise ValueError("No boundary in Content-Type")
+                bnd = boundary.group(1).strip().encode()
+
+                parts = raw.split(b"--" + bnd)
+                fields = {}
+                file_data = None
+                for part in parts:
+                    if b"Content-Disposition" not in part:
+                        continue
+                    header, _, body = part.partition(b"\r\n\r\n")
+                    body = body.rstrip(b"\r\n")
+                    name_m = re.search(rb'name="([^"]+)"', header)
+                    fname_m = re.search(rb'filename="([^"]+)"', header)
+                    if name_m:
+                        name = name_m.group(1).decode()
+                        if fname_m:
+                            file_data = body
+                        else:
+                            fields[name] = body.decode(errors="replace")
+
+                slug   = fields.get("slug", "").strip()
+                ep_id  = fields.get("ep_id", "").strip()
+                locale = fields.get("locale", "en").strip()
+
+                if not slug or not ep_id or file_data is None:
+                    raise ValueError("slug, ep_id, and file required")
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                    raise ValueError("invalid slug or ep_id")
+
+                render_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                          "renders", locale)
+                os.makedirs(render_dir, exist_ok=True)
+                thumb_path = os.path.join(render_dir, "thumbnail.jpg")
+                with open(thumb_path, "wb") as tf:
+                    tf.write(file_data)
+
+                # Null out thumbnail_source_sec in youtube.json
+                yt_path = os.path.join(render_dir, "youtube.json")
+                if os.path.isfile(yt_path):
+                    with open(yt_path, encoding="utf-8") as f:
+                        yt = json.load(f)
+                    yt["thumbnail_source_sec"] = None
+                    yt["thumbnail"] = f"projects/{slug}/episodes/{ep_id}/renders/{locale}/thumbnail.jpg"
+                    with open(yt_path, "w", encoding="utf-8") as f:
+                        json.dump(yt, f, indent=2, ensure_ascii=False)
+
+                resp = json.dumps({"ok": True, "path": f"projects/{slug}/episodes/{ep_id}/renders/{locale}/thumbnail.jpg"}).encode()
+                self.send_response(200)
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)}).encode()
+                self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        # ── YouTube: run pipeline action (POST /api/youtube_action) ──────────
+        elif self.path == "/api/youtube_action":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                slug   = req.get("slug",   "").strip()
+                ep_id  = req.get("ep_id",  "").strip()
+                locale = req.get("locale", "en").strip()
+                action = req.get("action", "").strip()
+
+                if not slug or not ep_id or not action:
+                    raise ValueError("slug, ep_id, action required")
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                    raise ValueError("invalid slug or ep_id")
+                if action not in ("validate", "upload", "publish"):
+                    raise ValueError(f"unknown action: {action!r}")
+
+                ep_dir_rel = f"projects/{slug}/episodes/{ep_id}"
+                script_map = {
+                    "validate": "code/deploy/youtube/prepare_upload.py",
+                    "upload":   "code/deploy/youtube/upload_private.py",
+                    "publish":  "code/deploy/youtube/publish_episode.py",
+                }
+                script = script_map[action]
+
+                cmd = [
+                    "python3",
+                    os.path.join(PIPE_DIR, script),
+                    ep_dir_rel,
+                    "--locale", locale,
+                ]
+                if action == "validate":
+                    cmd.append("--yes")  # non-interactive
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=PIPE_DIR,
+                    timeout=1800,  # 30-min max (upload can be slow)
+                )
+                output = result.stdout + ("\n\n--- stderr ---\n" + result.stderr if result.stderr.strip() else "")
+                resp = json.dumps({
+                    "ok":     result.returncode == 0,
+                    "rc":     result.returncode,
+                    "output": output,
+                }).encode()
+                self.send_response(200)
+            except subprocess.TimeoutExpired:
+                resp = json.dumps({"ok": False, "error": "timeout"}).encode()
+                self.send_response(200)
+            except Exception as exc:
+                resp = json.dumps({"ok": False, "error": str(exc)}).encode()
+                self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
 
         else:
             self.send_response(404)

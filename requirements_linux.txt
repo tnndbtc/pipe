@@ -57,6 +57,13 @@ soundfile>=0.12.0      # WAV writing (may already be installed)
 
 
 # ---------------------------------------------------------------------------
+# YouTube Data API v3 — OAuth token generation + upload pipeline
+# ---------------------------------------------------------------------------
+google-auth-oauthlib>=1.2.0    # OAuth 2.0 flow (InstalledAppFlow)
+google-api-python-client>=2.0  # YouTube Data API client
+
+
+# ---------------------------------------------------------------------------
 # Azure Neural TTS — cloud synthesis, no GPU required  (gen_tts_cloud.py)
 # ---------------------------------------------------------------------------
 azure-cognitiveservices-speech>=1.38.0
