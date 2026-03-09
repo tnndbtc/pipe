@@ -37,6 +37,11 @@ EP_DIR="${1:-}"
 FROM_STAGE="${2:-0}"
 TO_STAGE="${3:-10}"
 
+# Strip _c / _a / _b suffix for integer comparisons and seq (e.g. "5_c" → 5)
+FROM_BASE="${FROM_STAGE%%_*}"
+TO_BASE="${TO_STAGE%%_*}"
+FROM_SUFFIX="${FROM_STAGE#"$FROM_BASE"}"   # "_c" or ""
+
 # ── Validate inputs ────────────────────────────────────────────────────
 if [[ -z "$EP_DIR" ]]; then
   echo "✗ ERROR: ep_dir argument is required" >&2
@@ -401,7 +406,7 @@ fill_and_run() {
   # 3. Run claude with speed-optimised flags
   #    --append-system-prompt forces immediate execution with no confirmation prompts
   local exec_directive="You are an automated batch pipeline stage running with no human operator present. Execute the given task IMMEDIATELY and COMPLETELY. NEVER ask for confirmation, permission, or clarification. NEVER describe what you are about to do. NEVER offer choices or options. Complete every instruction from start to finish and then stop."
-  if claude -p \
+  if CLAUDE_CODE_MAX_OUTPUT_TOKENS=100000 claude -p \
        --model                        "$model" \
        --dangerously-skip-permissions         \
        --no-session-persistence               \
@@ -450,7 +455,7 @@ echo "  Loaded vars from $VARS_FILE"
 echo "  PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
 
 # ── Stage 0: read story, write pipeline_vars.sh ────────────────────────
-if [[ "$FROM_STAGE" -le 0 && "$TO_STAGE" -ge 0 ]]; then
+if [[ "$FROM_BASE" -le 0 && "$TO_BASE" -ge 0 ]]; then
   _s0_code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
   _s0_fmt="${STORY_FORMAT:-}"
   if [[ "$_s0_fmt" == "ssml_narration" ]]; then
@@ -496,7 +501,7 @@ code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
 
 # ── Stages 1–9 (LLM) ─────────────────────────────────────────────────
 for N in 1 2 3 4 5 6 7 8 9; do
-  if [[ "$N" -ge "$FROM_STAGE" && "$N" -le "$TO_STAGE" ]]; then
+  if [[ "$N" -ge "$FROM_BASE" && "$N" -le "$TO_BASE" ]]; then
 
     # Skip stages 1,2,3,9 for ssml_narration
     # Stage 8 still runs for ssml_narration: it translates secondary-locale manifests.
@@ -599,7 +604,12 @@ for N in 1 2 3 4 5 6 7 8 9; do
             "$_fmt4" == "illustrated_narration" || \
             "$_fmt4" == "documentary"           || \
             "$_fmt4" == "ssml_narration" ]]; then
-        python3 "${code_dir}/gen_shotlist_scaffold.py" "$EP_DIR"
+        # Skip scaffold generation when resuming at the _c sub-stage directly
+        if [[ "$N" -ne "$FROM_BASE" || -z "$FROM_SUFFIX" ]]; then
+          python3 "${code_dir}/gen_shotlist_scaffold.py" "$EP_DIR"
+        else
+          echo "  [4] Skipping scaffold generation (resuming at 4_c)"
+        fi
         fill_and_run "4_c"
         # Restore top-level pre-filled scalar fields the LLM may have dropped
         # (e.g. script_ref, schema_id, shotlist_id).  Shots array is untouched.
@@ -628,7 +638,12 @@ for N in 1 2 3 4 5 6 7 8 9; do
             "$_fmt5" == "documentary"           || \
             "$_fmt5" == "ssml_narration" ]]; then
         # Narration: deterministic scaffold → creative fill → locale VO manifests
-        python3 "${code_dir}/gen_manifest_structure.py" "$EP_DIR"
+        # Skip scaffold generation when resuming at the _c sub-stage directly
+        if [[ "$N" -ne "$FROM_BASE" || -z "$FROM_SUFFIX" ]]; then
+          python3 "${code_dir}/gen_manifest_structure.py" "$EP_DIR"
+        else
+          echo "  [5] Skipping scaffold generation (resuming at 5_c)"
+        fi
         fill_and_run "5_c"
         # FIX2: check for residual __FILL__ tokens in output (same-file pattern)
         python3 "${code_dir}/validate_scaffold.py" \
@@ -753,7 +768,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
 done
 
 # ── Stage 9: merge assets & render video ──────────────────────────────
-if [[ "$FROM_STAGE" -le 10 && "$TO_STAGE" -ge 10 ]]; then
+if [[ "$FROM_BASE" -le 10 && "$TO_BASE" -ge 10 ]]; then
   run_stage_10
 fi
 
@@ -765,7 +780,7 @@ echo "  Episode dir: ${EP_DIR}/"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 echo "Stage logs:"
-for N in $(seq "$FROM_STAGE" "$TO_STAGE"); do
+for N in $(seq "$FROM_BASE" "$TO_BASE"); do
   log="stage_logs/${PROJECT_SLUG:-unknown}.${EPISODE_ID:-unknown}.stage_${N}.log"
   if [[ -f "$log" ]]; then
     size=$(wc -c < "$log")

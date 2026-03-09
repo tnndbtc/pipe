@@ -356,6 +356,9 @@ def build_ssml(
       (period, exclamation mark, question mark) in the text.  Set to 0 for
       whispering style — breaks inside whispers sound robotic.
     """
+    # Normalise newlines → single space so Azure TTS doesn't insert pauses
+    text = re.sub(r'\s*\n+\s*', ' ', text).strip()
+
     escaped = (text
                .replace("&", "&amp;")
                .replace("<", "&lt;")
@@ -474,7 +477,7 @@ def build_episode_ssml(items: list[dict], locale: str) -> str:
 
     parts: list[str] = []
     for item in items:
-        text        = item["text"]
+        text        = re.sub(r'\s*\n+\s*', ' ', item["text"]).strip()
         voice       = item["voice"]
         rate        = item["rate"]
         style       = item["style"]
@@ -767,6 +770,8 @@ def build_ssml_minimal(
     - inner_only=True returns just the <voice> block without the <speak> wrapper,
       suitable for embedding in a multi-sentence chunk SSML.
     """
+    # Normalise newlines → single space so Azure TTS doesn't insert pauses
+    text = re.sub(r'\s*\n+\s*', ' ', text).strip()
     escaped = _xml_escape(text)
 
     # Explicit break injection — caller-controlled only, not default behaviour
@@ -933,7 +938,7 @@ def _build_chunk_ssml(chunk: dict) -> str:
 
     parts: list[str] = []
     for i, sent in enumerate(sentences):
-        escaped  = _xml_escape(sent["text"])
+        escaped  = _xml_escape(re.sub(r'\s*\n+\s*', ' ', sent["text"]).strip())
         is_last  = (i == len(sentences) - 1)
         pause_ms = sent.get("pause_ms", 0) if not is_last else 0
         if pause_ms > 0:

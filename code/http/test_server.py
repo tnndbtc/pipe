@@ -2682,9 +2682,10 @@ placeholder="Enter your story here"></textarea>
       queueLine(text, '');
 
       // ── Stage start  (run.sh banner:  "  STAGE N/10  —  label")
-      const startM = text.match(/^\s{2}STAGE (\d+)\/\d+\s+[—\-]{1,2}\s+(.+)/);
+      // (\d+[_\w]*) matches both plain stages (3) and sub-stages (4_c, 8_a, etc.)
+      const startM = text.match(/^\s{2}STAGE (\d+[_\w]*)\/\d+[_\w]*\s+[—\-]{1,2}\s+(.+)/);
       if (startM) {
-        const n     = parseInt(startM[1]);
+        const n     = parseInt(startM[1]);   // parseInt("4_c") → 4
         const label = startM[2].trim();
         stageStartMs[n] = Date.now();
         appendLine(`  ⏱  started  ${fmtNow()}`, 'ts');
@@ -2692,7 +2693,7 @@ placeholder="Enter your story here"></textarea>
       }
 
       // ── Stage complete  (run.sh:  "✓ Stage N complete  →  log: …")
-      const doneM = text.match(/^✓ Stage (\d+) complete/);
+      const doneM = text.match(/^✓ Stage (\d+[_\w]*) complete/);
       if (doneM) {
         const n = parseInt(doneM[1]);
         const elapsed = stageStartMs[n] != null
@@ -2700,6 +2701,9 @@ placeholder="Enter your story here"></textarea>
         appendLine(`  ⏱  finished ${fmtNow()}${elapsed}`, 'ts');
         markStageDone(n);
         insertReviewButtons(n);
+        // Keep Pipeline tab in sync even when run was started from the Run tab
+        _stagesDoneInCurrentRun.add(n);
+        if (pipeStatus) renderPipelineStatus(pipeStatus);
       }
 
       // ── Pick up PROJECT_SLUG / EPISODE_ID from run.sh "Loaded vars" line
@@ -3248,6 +3252,7 @@ placeholder="Enter your story here"></textarea>
     if (name === 'music')    initMusicTab();
     if (name === 'pipeline') {
       initPipelineTab();
+      refreshPipeline();   // immediate refresh on every switch so state is always current
       // Auto-refresh every 5 s while Pipeline tab is open
       if (!_pipePoller) {
         _pipePoller = setInterval(() => {
@@ -7487,6 +7492,7 @@ placeholder="Enter your story here"></textarea>
         const epEl = document.getElementById('info-ep-id');
         if (epEl) epEl.textContent = _preparedEpId;
         setRunBtnEnabled(true);
+        document.getElementById('save-new-ep-row').style.display = '';
       } else if (!_slug) {
         // Empty slug (e.g. SSML with no extractable title) — show info bar,
         // let user fill in Title (which auto-derives slug via onTitleInput)
@@ -7553,9 +7559,24 @@ placeholder="Enter your story here"></textarea>
 
   // ── Save metadata for a newly created episode (reads from #info-bar fields) ─
   async function saveNewEpMeta() {
-    if (!currentSlug || !currentEpId) return;
     const statusEl = document.getElementById('save-new-ep-status');
     const btnEl    = document.getElementById('btn-save-new-ep');
+    // If the episode hasn't been created yet (Save clicked before Run), create it now
+    if (!_episodeCreated) {
+      btnEl.disabled = true;
+      statusEl.textContent = 'Creating episode…';
+      statusEl.style.color = 'var(--dim)';
+      try {
+        await createEpisode();
+      } catch(e) {
+        statusEl.textContent = '✗ ' + e.message;
+        statusEl.style.color = '#e74c3c';
+        btnEl.disabled = false;
+        setTimeout(() => { statusEl.textContent = ''; }, 4000);
+        return;
+      }
+    }
+    if (!currentSlug || !currentEpId) return;
     const title    = document.getElementById('info-title').value.trim();
     const genre    = document.getElementById('info-genre').value.trim();
     const format   = document.getElementById('info-format-sel').value;
@@ -7822,12 +7843,12 @@ placeholder="Enter your story here"></textarea>
       const text = e.data;
       queueLine(text, '');
       // Stage progress (same patterns as runPrompt)
-      const startM = text.match(/^\s{2}STAGE (\d+)\/\d+\s+[—\-]{1,2}\s+(.+)/);
+      const startM = text.match(/^\s{2}STAGE (\d+[_\w]*)\/\d+[_\w]*\s+[—\-]{1,2}\s+(.+)/);
       if (startM) {
         stageStartMs[parseInt(startM[1])] = Date.now();
         updateStageProgress(parseInt(startM[1]), startM[2].trim());
       }
-      const doneM = text.match(/^✓ Stage (\d+) complete/);
+      const doneM = text.match(/^✓ Stage (\d+[_\w]*) complete/);
       if (doneM) {
         const n = parseInt(doneM[1]);
         const elapsed = stageStartMs[n] != null
@@ -8787,6 +8808,7 @@ class Handler(BaseHTTPRequestHandler):
             # Build subprocess environment
             run_env = os.environ.copy()
             run_env.pop("CLAUDECODE", None)   # prevent nested-session guard from firing
+            run_env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "100000"   # stages 3/4/5 produce large JSON
             if test_mode:
                 run_env["MODEL"] = "haiku"   # cheapest model for all stages
             run_env["RENDER_PROFILE"] = render_profile   # preview_local or high
@@ -10259,7 +10281,9 @@ class Handler(BaseHTTPRequestHandler):
                    or (is_new_to_index and not _is_canonical):
                     pdata = load_presets()
                     vp    = pdata["presets"].setdefault(azure_voice, [])
-                    if not any(p["hash"] == h for p in vp):
+                    if not any(p["style"] == (style or "") and p["style_degree"] == style_degree
+                                          and p["rate"] == rate and p["pitch"] == (pitch or "")
+                                          and p["break_ms"] == break_ms for p in vp):
                         new_preset = {
                             "name":         f"custom{max((int(p['name'].removeprefix('custom')) for p in vp if p['name'].startswith('custom') and p['name'].removeprefix('custom').isdigit()), default=0) + 1}",
                             "style":        style or "",

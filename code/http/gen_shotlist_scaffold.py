@@ -274,6 +274,35 @@ def merge_shots(shot_a: dict, shot_b: dict, effective_wpm: float) -> dict:
 # ---------------------------------------------------------------------------
 # Apply duration rules (split / merge)
 # ---------------------------------------------------------------------------
+def merge_to_budget(shots: list[dict], max_shots: int, effective_wpm: float) -> list[dict]:
+    """
+    Merge adjacent shots until len(shots) <= max_shots.
+
+    Priority: re-merge same-scene split pairs first (undoing the 45s split
+    rule), then merge shortest cross-scene adjacent pairs if still over budget.
+    This preserves paragraph boundaries as long as possible.
+    """
+    while len(shots) > max_shots:
+        # Prefer same-scene adjacent pairs (split undos) over cross-scene merges
+        same_scene = [
+            i for i in range(len(shots) - 1)
+            if shots[i]["scene_id"] == shots[i + 1]["scene_id"]
+        ]
+        if same_scene:
+            # Among same-scene pairs, pick smallest combined duration
+            best_i = min(same_scene,
+                         key=lambda i: shots[i]["duration_sec"] + shots[i + 1]["duration_sec"])
+        else:
+            # No same-scene pairs left — merge shortest cross-scene adjacent pair
+            best_i = min(
+                range(len(shots) - 1),
+                key=lambda i: shots[i]["duration_sec"] + shots[i + 1]["duration_sec"],
+            )
+        merged = merge_shots(shots[best_i], shots[best_i + 1], effective_wpm)
+        shots = shots[:best_i] + [merged] + shots[best_i + 2:]
+    return shots
+
+
 def apply_duration_rules(shots: list[dict], effective_wpm: float) -> list[dict]:
     """
     Enforce MAX_SHOT_DURATION_SEC and MIN_SHOT_DURATION_SEC on a list of shots.
@@ -347,11 +376,14 @@ def build_scaffold(
     episode_id:    str,
     script:        dict,
     effective_wpm: float,
+    max_shots:     int | None = None,
 ) -> dict:
     """
     Build the ShotList_scaffold.json document.
 
     One initial shot per Script.json scene; then split/merge rules applied.
+    If max_shots is set (from PARAGRAPH_COUNT in pipeline_vars.sh), a final
+    merge-to-budget pass enforces the cap.
     """
     scenes = script.get("scenes", [])
     vo_map = assign_vo_item_ids(scenes)
@@ -368,6 +400,10 @@ def build_scaffold(
 
     # Apply split/merge rules
     shots = apply_duration_rules(raw_shots, effective_wpm)
+
+    # Pass 3: enforce paragraph-count budget if provided
+    if max_shots and len(shots) > max_shots:
+        shots = merge_to_budget(shots, max_shots, effective_wpm)
 
     # Reindex shot ids sequentially within each scene after splits/merges
     shots = _reindex_shot_ids(shots, scenes)
@@ -478,9 +514,10 @@ def main() -> int:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
-    project_slug = pvars.get("PROJECT_SLUG", "")
-    episode_id   = pvars.get("EPISODE_ID", "")
-    story_format = pvars.get("STORY_FORMAT", "continuous_narration")
+    project_slug    = pvars.get("PROJECT_SLUG", "")
+    episode_id      = pvars.get("EPISODE_ID", "")
+    story_format    = pvars.get("STORY_FORMAT", "continuous_narration")
+    paragraph_count = int(pvars.get("PARAGRAPH_COUNT", 0)) or None
 
     if not project_slug or not episode_id:
         print("[ERROR] pipeline_vars.sh must export PROJECT_SLUG and EPISODE_ID",
@@ -488,8 +525,9 @@ def main() -> int:
         return 1
 
     print(f"▶ gen_shotlist_scaffold.py — {episode_id}")
-    print(f"  project  : {project_slug}")
-    print(f"  format   : {story_format}")
+    print(f"  project       : {project_slug}")
+    print(f"  format        : {story_format}")
+    print(f"  max_shots cap : {paragraph_count if paragraph_count else 'none (PARAGRAPH_COUNT not set)'}")
 
     # Load Script.json
     script_path = ep_dir / "Script.json"
@@ -520,7 +558,7 @@ def main() -> int:
     )
 
     # Build scaffold
-    scaffold = build_scaffold(project_slug, episode_id, script, effective_wpm)
+    scaffold = build_scaffold(project_slug, episode_id, script, effective_wpm, paragraph_count)
 
     # Verify VO completeness: every dialogue action must appear in exactly one shot
     all_vo_ids: list[str] = []
