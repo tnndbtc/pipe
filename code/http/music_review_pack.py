@@ -35,8 +35,8 @@ PIPE_DIR = Path(__file__).resolve().parent.parent.parent
 SAMPLE_RATE = 48000
 CHANNELS = 2
 BASE_MUSIC_DB = -6.0
-DEFAULT_DUCK_DB = -12.0
-DEFAULT_FADE_SEC = 0.15
+DEFAULT_DUCK_DB = -6.0
+DEFAULT_FADE_SEC = 0.8
 DEFAULT_PAUSE_SEC = 0.3    # inter-line pause (same as post_tts_analysis.py)
 
 

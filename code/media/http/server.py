@@ -503,6 +503,7 @@ async def _score_videos_distributed(
     vid_paths: list[Path],
     batch_dir: Path,
     cfg:       dict,
+    infos:     dict | None = None,
 ) -> list[dict]:
     """
     Enqueue video scoring tasks into the job queue and wait for workers
@@ -544,6 +545,13 @@ async def _score_videos_distributed(
 
     # Sort by score descending
     raw_results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+
+    # Attach source metadata from infos dict
+    if infos:
+        for r in raw_results:
+            source = infos.get(r.get("path", ""))
+            if source is not None:
+                r["source"] = source
 
     log.info("Distributed scoring complete: %d results for batch %s",
              len(raw_results), batch_id)
@@ -607,36 +615,44 @@ async def _run_batch(batch_id: str) -> None:
         store.update(batch_id, progress=f"downloading {item_id} ({done[0]+1}/{item_count})")
 
         try:
-            img_paths: list[Path] = []
-            vid_paths: list[Path] = []
+            img_path_infos: list[tuple] = []
+            vid_path_infos: list[tuple] = []
 
             async with _sem:
                 if prefer != "video":
-                    img_paths = await asyncio.to_thread(
+                    img_path_infos = await asyncio.to_thread(
                         downloader.fetch_images,
                         search_prompt, n_img, img_dir, API_KEYS, config, item,
                     )
                 if prefer != "image":
-                    vid_paths = await asyncio.to_thread(
+                    vid_path_infos = await asyncio.to_thread(
                         downloader.fetch_videos,
                         search_prompt, n_vid, vid_dir, API_KEYS, config, item,
                     )
+
+            img_paths = [p for p, _ in img_path_infos]
+            vid_paths = [p for p, _ in vid_path_infos]
+            img_infos = {str(p): info for p, info in img_path_infos}
+            vid_infos = {str(p): info for p, info in vid_path_infos}
 
             store.update(batch_id, progress=f"scoring {item_id} ({done[0]+1}/{item_count})")
 
             weights        = config.get("score_weights")
             images_ranked  = await asyncio.to_thread(
                 scorer.score_images, clip_model, item, img_paths, weights, config,
+                img_infos,
             )
 
             # Video scoring: distributed (job queue) or local fallback
             if _use_distributed and vid_paths:
                 videos_ranked = await _score_videos_distributed(
                     batch_id, item, vid_paths, batch_dir, config,
+                    vid_infos,
                 )
             else:
                 videos_ranked = await asyncio.to_thread(
                     scorer.score_videos, clip_model, item, vid_paths, batch_dir, weights, config,
+                    vid_infos,
                 )
 
             # Convert absolute paths → relative-to-batch_dir

@@ -17,8 +17,8 @@ Features
 
 Public API
 ----------
-fetch_images(search_prompt, n, output_dir, api_keys, cfg, item=None) → list[Path]
-fetch_videos(search_prompt, n, output_dir, api_keys, cfg, item=None) → list[Path]
+fetch_images(search_prompt, n, output_dir, api_keys, cfg, item=None) → list[tuple[Path, dict]]
+fetch_videos(search_prompt, n, output_dir, api_keys, cfg, item=None) → list[tuple[Path, dict]]
 
 output_dir layout (created by this module):
     output_dir/
@@ -28,6 +28,7 @@ output_dir layout (created by this module):
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import random
@@ -40,6 +41,28 @@ import requests
 log = logging.getLogger("downloader")
 
 _USER_AGENT = "media-fetcher/1.0 (+offline-pipeline)"
+
+
+def _slug_to_title(page_url: str) -> str:
+    """Extract human-readable title from Pexels/Pixabay page URL slug.
+    e.g. https://www.pexels.com/photo/ancient-roman-temple-ruins-in-pompeii-italy-30204931/
+         → "Ancient Roman Temple Ruins In Pompeii Italy"
+    """
+    slug = page_url.rstrip("/").split("/")[-1]
+    parts = slug.rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        slug = parts[0]
+    return slug.replace("-", " ").title()
+
+
+def _write_info_sidecar(path: Path, info: dict) -> None:
+    """Write metadata sidecar alongside a downloaded file. Skips if already exists."""
+    sidecar = Path(str(path) + ".info.json")
+    if not sidecar.exists():
+        try:
+            sidecar.write_text(json.dumps(info, ensure_ascii=False))
+        except Exception as exc:
+            log.warning("Could not write info sidecar %s: %s", sidecar, exc)
 _TIMEOUT    = 45  # seconds for API calls and downloads
 
 # In-process search-response cache: (source, media_type, query, per_page) → list[dict]
@@ -357,11 +380,11 @@ def fetch_images(
     api_keys:      dict,
     cfg:           dict,
     item:          dict | None = None,
-) -> list[Path]:
+) -> list[tuple[Path, dict]]:
     """
     Search and download up to n images into output_dir/<source>/.
-    Returns a list of saved Path objects (may be shorter than n × sources if
-    some downloads fail or the API returns fewer results).
+    Returns a list of (Path, info_dict) tuples (may be shorter than n × sources
+    if some downloads fail or the API returns fewer results).
 
     Already-downloaded files (by filename) are reused without re-downloading.
 
@@ -392,7 +415,7 @@ def fetch_images(
     # Collect all hits across queries; deduplicate by (source, file_id)
     # before trimming to n so that multi-query rotation actually widens coverage.
     seen_ids: set[str] = set()
-    saved: list[Path]  = []
+    saved: list[tuple[Path, dict]]  = []
 
     # Initialise thumbnail map on item so scorer.py thumbnail pass-1.5 can use it.
     # Maps str(local_dest_path) → thumbnail_url (smaller API-provided preview URL).
@@ -437,12 +460,27 @@ def fetch_images(
                             thumb = src.get("medium") or src.get("small") or src.get("tiny")
                             if thumb:
                                 item["_thumbnails"][str(dest)] = thumb
+                        info = {
+                            "source_site":     "pexels",
+                            "asset_page_url":  ph.get("url", ""),
+                            "file_url":        url,
+                            "title":           ph.get("alt") or _slug_to_title(ph.get("url", "")),
+                            "description":     ph.get("alt", ""),
+                            "tags":            [],
+                            "photographer":    ph.get("photographer", ""),
+                            "license_summary": "Pexels License",
+                            "license_url":     "https://www.pexels.com/license/",
+                            "width":           ph.get("width", 0),
+                            "height":          ph.get("height", 0),
+                        }
                         if dest.exists():
-                            saved.append(dest)
+                            _write_info_sidecar(dest, info)
+                            saved.append((dest, info))
                         else:
                             try:
                                 _download_file(url, dest, headers={"Authorization": pexels_key})
-                                saved.append(dest)
+                                _write_info_sidecar(dest, info)
+                                saved.append((dest, info))
                             except Exception as exc:
                                 log.warning("pexels img %s skip: %s", pid, exc)
                         _jitter(cfg, source)
@@ -471,12 +509,27 @@ def fetch_images(
                             thumb = hit.get("webformatURL") or hit.get("previewURL")
                             if thumb:
                                 item["_thumbnails"][str(dest)] = thumb
+                        info = {
+                            "source_site":     "pixabay",
+                            "asset_page_url":  hit.get("pageURL", ""),
+                            "file_url":        url,
+                            "title":           _slug_to_title(hit.get("pageURL", "")),
+                            "description":     "",
+                            "tags":            [t.strip() for t in hit.get("tags", "").split(",") if t.strip()],
+                            "photographer":    hit.get("user", ""),
+                            "license_summary": "Pixabay Content License",
+                            "license_url":     "https://pixabay.com/service/license-summary/",
+                            "width":           hit.get("imageWidth", 0),
+                            "height":          hit.get("imageHeight", 0),
+                        }
                         if dest.exists():
-                            saved.append(dest)
+                            _write_info_sidecar(dest, info)
+                            saved.append((dest, info))
                         else:
                             try:
                                 _download_file(url, dest)
-                                saved.append(dest)
+                                _write_info_sidecar(dest, info)
+                                saved.append((dest, info))
                             except Exception as exc:
                                 log.warning("pixabay img %s skip: %s", hid, exc)
                         _jitter(cfg, source)
@@ -495,10 +548,10 @@ def fetch_videos(
     api_keys:      dict,
     cfg:           dict,
     item:          dict | None = None,
-) -> list[Path]:
+) -> list[tuple[Path, dict]]:
     """
     Search and download up to n videos into output_dir/<source>/.
-    Returns a list of saved Path objects.
+    Returns a list of (Path, info_dict) tuples.
 
     Already-downloaded files are reused without re-downloading.
 
@@ -527,7 +580,7 @@ def fetch_videos(
     queries  = _get_queries(search_prompt, item, n)
 
     seen_ids: set[str] = set()
-    saved: list[Path]  = []
+    saved: list[tuple[Path, dict]]  = []
 
     for source in sources:
         src_dir = output_dir / source
@@ -559,12 +612,27 @@ def fetch_videos(
                         if not url:
                             continue
                         dest = src_dir / f"{uid}.mp4"
+                        info = {
+                            "source_site":     "pexels",
+                            "asset_page_url":  vd.get("url", ""),
+                            "file_url":        url,
+                            "title":           _slug_to_title(vd.get("url", "")),
+                            "description":     "",
+                            "tags":            [],
+                            "photographer":    (vd.get("user") or {}).get("name", ""),
+                            "license_summary": "Pexels License",
+                            "license_url":     "https://www.pexels.com/license/",
+                            "width":           vd.get("width", 0),
+                            "height":          vd.get("height", 0),
+                        }
                         if dest.exists():
-                            saved.append(dest)
+                            _write_info_sidecar(dest, info)
+                            saved.append((dest, info))
                         else:
                             try:
                                 _download_file(url, dest)
-                                saved.append(dest)
+                                _write_info_sidecar(dest, info)
+                                saved.append((dest, info))
                             except Exception as exc:
                                 log.warning("pexels vid %s skip: %s", vid, exc)
                         _jitter(cfg, source)
@@ -587,12 +655,34 @@ def fetch_videos(
                         if not url:
                             continue
                         dest = src_dir / f"{uid}.mp4"
+                        # Determine width/height from chosen tier
+                        chosen_tier = None
+                        for tier in ("large", "medium", "small", "tiny"):
+                            v = (hit.get("videos") or {}).get(tier) or {}
+                            if v.get("url"):
+                                chosen_tier = v
+                                break
+                        info = {
+                            "source_site":     "pixabay",
+                            "asset_page_url":  hit.get("pageURL", ""),
+                            "file_url":        url,
+                            "title":           _slug_to_title(hit.get("pageURL", "")),
+                            "description":     "",
+                            "tags":            [t.strip() for t in hit.get("tags", "").split(",") if t.strip()],
+                            "photographer":    hit.get("user", ""),
+                            "license_summary": "Pixabay Content License",
+                            "license_url":     "https://pixabay.com/service/license-summary/",
+                            "width":           (chosen_tier or {}).get("width", 0),
+                            "height":          (chosen_tier or {}).get("height", 0),
+                        }
                         if dest.exists():
-                            saved.append(dest)
+                            _write_info_sidecar(dest, info)
+                            saved.append((dest, info))
                         else:
                             try:
                                 _download_file(url, dest)
-                                saved.append(dest)
+                                _write_info_sidecar(dest, info)
+                                saved.append((dest, info))
                             except Exception as exc:
                                 log.warning("pixabay vid %s skip: %s", hid, exc)
                         _jitter(cfg, source)

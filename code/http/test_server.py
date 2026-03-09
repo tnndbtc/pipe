@@ -1085,6 +1085,14 @@ HTML = r"""<!DOCTYPE html>
     border-radius: 4px; padding: 2px 5px; font-family: var(--mono);
     pointer-events: none;
   }
+  .media-src-link {
+    position: absolute; bottom: 4px; right: 4px;
+    font-size: 0.75em; background: rgba(0,0,0,0.55);
+    border-radius: 3px; padding: 1px 4px;
+    color: #fff; text-decoration: none; z-index: 2;
+    opacity: 0; transition: opacity 0.15s;
+  }
+  .media-thumb:hover .media-src-link { opacity: 1; }
   .media-sel-badge {
     position: absolute; top: 4px; right: 4px;
     background: var(--gold); color: #0d0d10; font-size: 0.66em; font-weight: 700;
@@ -3710,6 +3718,25 @@ placeholder="Enter your story here"></textarea>
       wrap.appendChild(vid);
       // Lazy-load: IntersectionObserver sets src + preload when visible
       _mediaLazyObserver.observe(vid);
+    }
+
+    // Source metadata link — opens original asset page in new tab
+    if (entry.source && entry.source.asset_page_url) {
+      const src  = entry.source;
+      const WxH  = (src.width && src.height) ? src.width + '×' + src.height : '';
+      const tags  = (src.tags || []).slice(0, 5).join(', ');
+      const tip   = [src.title, src.photographer, WxH, src.source_site,
+                     src.license_summary, tags]
+                    .filter(Boolean).join(' · ');
+      const link  = document.createElement('a');
+      link.href        = src.asset_page_url;
+      link.target      = '_blank';
+      link.rel         = 'noopener noreferrer';
+      link.className   = 'media-src-link';
+      link.title       = tip;
+      link.textContent = '🔗';
+      link.addEventListener('click', function(e) { e.stopPropagation(); });
+      wrap.appendChild(link);
     }
 
     // Store original URL and duration as data attributes

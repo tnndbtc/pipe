@@ -672,6 +672,7 @@ def score_images(
     img_paths:  list[Path],
     weights:    dict | None = None,  # legacy param (reserved)
     config:     dict | None = None,
+    infos:      dict | None = None,
 ) -> list[dict]:
     """
     Score images by multi-dimensional CLIP similarity (or fallback to single
@@ -872,6 +873,21 @@ def score_images(
     if top_n > 0:
         results = _diversity_top_n(results, top_n, div_thresh)
 
+    # Attach source metadata to each result
+    for r in results:
+        source = None
+        if infos:
+            source = infos.get(r["path"])
+        if source is None:
+            sidecar = Path(str(r["path"]) + ".info.json")
+            if sidecar.exists():
+                try:
+                    source = json.loads(sidecar.read_text())
+                except Exception:
+                    pass
+        if source is not None:
+            r["source"] = source
+
     return results
 
 
@@ -1025,6 +1041,7 @@ def score_videos(
     batch_dir:  Path,
     weights:    dict | None = None,
     config:     dict | None = None,
+    infos:      dict | None = None,
 ) -> list[dict]:
     """
     Score videos: sample frames → multi-dim CLIP (or fallback) + calmness
@@ -1085,5 +1102,20 @@ def score_videos(
     top_n = cfg.get("top_n", 0)
     if top_n > 0:
         results = _diversity_top_n(results, top_n, div_thresh)
+
+    # Attach source metadata to each result
+    for r in results:
+        source = None
+        if infos:
+            source = infos.get(r["path"])
+        if source is None:
+            sidecar = Path(str(r["path"]) + ".info.json")
+            if sidecar.exists():
+                try:
+                    source = json.loads(sidecar.read_text())
+                except Exception:
+                    pass
+        if source is not None:
+            r["source"] = source
 
     return results

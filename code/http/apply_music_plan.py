@@ -33,6 +33,29 @@ PIPE_DIR = Path(__file__).resolve().parent.parent.parent
 SR = 48_000
 SUPPORTED_EXTS = {".mp3", ".wav", ".flac", ".ogg"}
 
+DEFAULT_DUCK_DB = -6.0
+
+DUCK_DB_BY_TYPE = {
+    "ambient":    -5.0,
+    "drone":      -5.0,
+    "piano":      -7.0,
+    "soft":       -7.0,
+    "orchestral": -9.0,
+    "epic":       -9.0,
+}
+
+
+def _resolve_duck_db(item: dict) -> float:
+    """Resolve duck_db for a music item.
+    Priority: explicit item duck_db > track_type lookup > global default.
+    """
+    if "duck_db" in item:
+        return float(item["duck_db"])
+    track_type = item.get("track_type", "")
+    if track_type in DUCK_DB_BY_TYPE:
+        return DUCK_DB_BY_TYPE[track_type]
+    return DEFAULT_DUCK_DB
+
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
 
@@ -558,20 +581,21 @@ def main():
                       "(user-cut clip not yet assigned to a shot?)", file=sys.stderr)
         print(f"  Applied clip_volumes to {applied} music_item(s).")
 
-    # ── Default duck_db to 0 (no ducking) for items without an explicit
-    #    override.  This matches the preview behaviour in music_review_pack.py
-    #    which defaults duck_db to 0.  The gen_music_clip.py values (-12, -15,
-    #    -18) are AI suggestions; the user's preview is the source of truth.
+    # ── Resolve duck_db for items without an explicit override.
+    #    Priority: explicit shot_override duck_db > track_type lookup > DEFAULT_DUCK_DB.
     overridden_ids = {o["item_id"] for o in shot_overrides if "duck_db" in o}
     duck_reset = 0
     for mi in manifest.get("music_items", []):
-        if mi["item_id"] not in overridden_ids and mi.get("duck_db", 0) != 0:
+        if mi["item_id"] not in overridden_ids:
+            resolved = _resolve_duck_db(mi)
             old = mi.get("duck_db")
-            mi["duck_db"] = 0.0
-            duck_reset += 1
-            print(f"  [DEFAULT] {mi['item_id']}: duck_db {old} → 0.0 (preview default)")
+            if old != resolved:
+                mi["duck_db"] = resolved
+                duck_reset += 1
+                print(f"  [DEFAULT] {mi['item_id']}: duck_db {old} → {resolved} "
+                      f"(track_type={mi.get('track_type', '') or 'default'})")
     if duck_reset:
-        print(f"  Reset duck_db to 0 for {duck_reset} item(s) without explicit override")
+        print(f"  Resolved duck_db for {duck_reset} item(s) without explicit override")
 
     if shot_overrides or duck_reset or track_volumes:
         save_manifest(manifest, manifest_path)
