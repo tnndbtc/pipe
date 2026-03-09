@@ -9645,33 +9645,6 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
-        # ── Media proxy: serve cached media files (GET /files/…) ────────────────
-        # The media server generates /files/<path> URLs (relative, no base_url).
-        # Browsers resolve them against the VC editor host which has no /files/
-        # route.  This proxy forwards them to the configured media server so
-        # thumbnails load without requiring base_url to be set.
-        elif parsed.path.startswith("/files/"):
-            _ms_url = os.environ.get("MEDIA_SERVER_URL",
-                          _vc_config.get("media", {}).get("default_server_url",
-                          "http://localhost:8200")).rstrip("/")
-            target = _ms_url + parsed.path
-            try:
-                with _urllib_req.urlopen(target, timeout=15) as _mresp:
-                    _mdata = _mresp.read()
-                    _mtype = _mresp.headers.get("Content-Type", "application/octet-stream")
-                self.send_response(200)
-                self.send_header("Content-Type", _mtype)
-                self.send_header("Content-Length", str(len(_mdata)))
-                self.end_headers()
-                self.wfile.write(_mdata)
-            except Exception as _mexc:
-                body = json.dumps({"error": str(_mexc)}).encode()
-                self.send_response(502)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
         # ── Media proxy: poll batch status (GET /api/media_batch_status) ────────
         elif parsed.path == "/api/media_batch_status":
             params     = parse_qs(parsed.query)
