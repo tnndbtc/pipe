@@ -3680,12 +3680,22 @@ placeholder="Enter your story here"></textarea>
       wrap.appendChild(durBadge);
     }
 
-    // Browsers cannot load file:// URLs from an http:// page.
-    // Route them through the VC editor's /api/serve_media_file proxy instead.
+    // Resolve the display URL based on transport type:
+    //   file://  → NFS transport: proxy through /api/serve_media_file (browsers can't load file://)
+    //   /files/  → HTTP transport, no base_url set: relative path lives on the MEDIA SERVER,
+    //              not the VC editor — prefix with the media server base URL so the browser
+    //              fetches directly from it.  Without this, img.src = "/files/..." resolves
+    //              against the VC editor host which has no /files/ route → 404 broken images.
+    //   http(s): → HTTP transport with base_url set: absolute URL, use as-is.
     const rawUrl    = entry.url || '';
-    const displayUrl = rawUrl.startsWith('file://')
-        ? '/api/serve_media_file?url=' + encodeURIComponent(rawUrl)
-        : rawUrl;
+    let displayUrl;
+    if (rawUrl.startsWith('file://')) {
+      displayUrl = '/api/serve_media_file?url=' + encodeURIComponent(rawUrl);
+    } else if (rawUrl.startsWith('/files/')) {
+      displayUrl = _mediaServerUrl() + rawUrl;
+    } else {
+      displayUrl = rawUrl;
+    }
 
     if (type === 'image') {
       const img    = document.createElement('img');
