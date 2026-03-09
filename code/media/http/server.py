@@ -585,12 +585,44 @@ async def _score_videos_distributed(
     # Sort by score descending
     raw_results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
 
-    # Attach source metadata from infos dict
-    if infos:
-        for r in raw_results:
-            source = infos.get(r.get("path", ""))
-            if source is not None:
-                r["source"] = source
+    # Attach source metadata from infos dict.
+    # Workers receive remapped paths (server_nfs_root → worker nfs_root), so
+    # r["path"] may differ from the infos keys (which use server_nfs_root).
+    # Strategy:
+    #   1. Direct lookup (works when worker and server share the same mount path)
+    #   2. Reverse-remap each registered worker's nfs_root → server_nfs_root
+    #   3. Disk fallback: read sidecar using the server-side path
+    _workers_nfs = [w.nfs_root for w in job_queue._workers.values()] if job_queue else []
+    for r in raw_results:
+        worker_path = r.get("path", "")
+        source = infos.get(worker_path) if infos else None
+
+        if source is None and infos:
+            # Try reverse-remapping worker path back to server path
+            for wnfs in _workers_nfs:
+                if worker_path.startswith(wnfs):
+                    server_path = job_queue.server_nfs_root + worker_path[len(wnfs):]
+                    source = infos.get(server_path)
+                    if source is not None:
+                        break
+
+        if source is None:
+            # Disk fallback: resolve to server-side path and read sidecar
+            server_path = worker_path
+            if not worker_path.startswith(job_queue.server_nfs_root if job_queue else ""):
+                for wnfs in _workers_nfs:
+                    if worker_path.startswith(wnfs):
+                        server_path = job_queue.server_nfs_root + worker_path[len(wnfs):]
+                        break
+            sidecar = Path(server_path + ".info.json")
+            if sidecar.exists():
+                try:
+                    source = json.loads(sidecar.read_text())
+                except Exception:
+                    pass
+
+        if source is not None:
+            r["source"] = source
 
     log.info("Distributed scoring complete: %d results for batch %s",
              len(raw_results), batch_id)
