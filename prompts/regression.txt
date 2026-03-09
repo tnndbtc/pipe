@@ -1796,3 +1796,77 @@ Run through the relevant items after any modification:
     - Stage 8 (locale variants): authored SSML is single-locale by nature
     Stages 4, 5, 6, 7, 9 still run — they handle visual asset generation, which is the core
     value-add of `ssml_narration` (cinematic visuals for pre-authored narration).
+
+34. **YouTube upload workflow (test_server.py YouTube tab + code/deploy/youtube/)**
+
+    ### Files involved
+    - `code/http/test_server.py` — YouTube tab UI + server endpoints
+    - `code/deploy/youtube/gen_tokens.py` — OAuth token generation
+    - `code/deploy/youtube/prepare_upload.py` — pre-upload validation + thumbnail extraction
+    - `code/deploy/youtube/upload_private.py` — upload video as private + captions + thumbnail + playlist
+    - `code/deploy/youtube/publish_episode.py` — set video public or schedule
+    - `~/.config/pipe/youtube_profiles.json` — per-channel OAuth profile registry
+
+    ### Web UI flow
+    1. User selects project + episode in Run tab, then switches to the YouTube tab (▶ YouTube nav button, `panel-youtube`).
+    2. Tab calls `GET /api/youtube_status`:
+       - `youtube.json` exists → load into form (`initYoutubeTab()` calls `_ytFillForm(yt)` AND sets `window._ytDraft = Object.assign({}, yt)`)
+       - `youtube.json` missing → show **[Generate youtube.json]** button
+    3. User clicks **[Generate youtube.json]** → `POST /api/generate_youtube_json`.
+       After success: fills form with draft AND sets `window._ytDraft = draft` (both paths required — see invariant #5 below).
+    4. User reviews / edits fields, then clicks **[Save youtube.json]** → `POST /api/youtube_save_all`.
+    5. Buttons **[Validate]**, **[Upload]**, **[Publish]** call `POST /api/youtube_action` with `action` field.
+       During action: all three buttons are disabled (greyed out, opacity 0.45) with spinner label; re-enabled after completion.
+
+    ### Server endpoints
+    - `POST /api/generate_youtube_json` — calls `claude -p sonnet` subprocess (NOT Anthropic SDK); returns `{ ok, draft }` or `{ ok: false, error }`.
+    - `POST /api/youtube_save_all` — writes `renders/{locale}/youtube.json`; returns `{ ok: true }`.
+    - `POST /api/youtube_action` — dispatches to validate / upload / publish; returns `{ ok, log }`.
+    - `GET /api/youtube_status` — returns `{ exists, data }` (reads `youtube.json` if present).
+    - `POST /api/set_thumbnail_sec` — runs ffmpeg to extract a frame and writes `renders/{locale}/thumbnail.jpg`.
+    - `GET /api/episode_video` — streams the rendered MP4 for in-browser preview.
+    - `GET /api/thumbnail_preview` — serves `thumbnail.jpg` for preview.
+
+    ### OAuth scopes (CRITICAL — affects all four deploy scripts)
+    All four scripts (`gen_tokens.py`, `prepare_upload.py`, `upload_private.py`, `publish_episode.py`) must declare **both** scopes:
+    ```python
+    SCOPES = [
+        "https://www.googleapis.com/auth/youtube",
+        "https://www.googleapis.com/auth/youtube.force-ssl",  # required for captions.insert
+    ]
+    ```
+    Using only `youtube` scope causes `captions.insert` to fail with HTTP 403 `insufficientPermissions`.
+    Tokens minted without `youtube.force-ssl` must be regenerated via `gen_tokens.py`.
+
+    ### Invariants
+    1. **`claude -p` subprocess, NOT Anthropic SDK** — `_call_claude()` in `test_server.py` spawns `claude -p sonnet` as a subprocess. Do NOT use `anthropic.Anthropic()` / `client.messages.create()` — the pipeline never sets `ANTHROPIC_API_KEY`.
+    2. **Unset `CLAUDECODE` before spawning `claude`** — `CLAUDECODE` env var triggers a nested-session guard error. Before every `subprocess.run(["claude", ...])` call, do `env = os.environ.copy(); env.pop("CLAUDECODE", None)` and pass `env=env`. This applies to both `_call_claude()` (YouTube draft) and `infer_story_meta` (haiku call).
+    3. **`import tempfile` name must not shadow outer scope** — if `do_POST` or any outer function already uses `import tempfile as _tempfile` at line N, Python marks `_tempfile` as a cell variable for the entire function. Any inner function that sees `_tempfile` before it is bound raises `NameError: cannot access free variable`. Fix: use a unique local alias (`import tempfile as _tf_yt`) inside nested helpers.
+    4. **Thumbnail path relative to `pipe_dir`** — `thumbnail` in `youtube.json` must be stored as `projects/{slug}/episodes/{ep_id}/renders/{locale}/thumbnail.jpg` (path from `pipe_dir`). Storing `renders/{locale}/thumbnail.jpg` (path from `ep_dir`) causes ffmpeg and `upload_private.py` to write/read from a non-existent directory under `pipe_dir`.
+    5. **`window._ytDraft` must be set on BOTH the generate path AND the load path** — `ytSaveAll()` merges form fields into `_ytDraft` before writing. If `_ytDraft` is never initialised (e.g. because `youtube.json` was loaded from disk but the assignment was missing), `ytSaveAll()` silently wipes non-form fields (`playlist_id`, `channel_id`, `subtitles`, etc.). Fix: in `initYoutubeTab()`, after `_ytFillForm(yt)` add `window._ytDraft = Object.assign({}, yt)`.
+    6. **`thumbnail_source_sec ?? null`, not `|| null`** — using `||` converts the value `0` to `null`. Use nullish coalescing (`??`) in `ytSaveAll()`.
+    7. **ffmpeg needs `-update 1` for single-JPEG output** — newer ffmpeg (6.x) requires `-update 1` when writing a single image to a plain file path (not a `%04d.jpg` sequence pattern). Missing this flag causes `ffmpeg: Output file #0 does not contain any stream`. Add to all ffmpeg calls that write a single JPEG: `prepare_upload.py _ffmpeg_extract_frame()` and `test_server.py /api/set_thumbnail_sec`.
+    8. **Thumbnail 403 `forbidden` is a warning, not a crash** — YouTube requires the channel to be phone-verified before custom thumbnails are allowed. If `thumbnails.set` returns HTTP 403 with `reason: "forbidden"`, catch it, print a warning (with link to https://www.youtube.com/verify), and continue to the playlist step. Do NOT raise — the rest of the upload (captions, playlist) must still complete.
+    9. **Robust JSON extraction from Claude response** — Claude may wrap JSON in explanation text (especially for non-English locales). Always extract via `raw[raw.find('{'):raw.rfind('}')+1]` rather than assuming the response starts and ends with `{`/`}`. Never truncate `raw` before extraction (e.g. `raw[:500]`) — truncation hides the actual JSON boundary.
+
+    ### youtube_profiles.json format
+    Each profile entry must contain a `"locale"` field so the locale→profile mapping is derived at runtime:
+    ```json
+    {
+      "en": { "locale": "en",      "token_path": "~/.config/pipe/token_en.json",
+              "channel_id": "UCxxx", "channel_name": "Stories", "playlist_id": "PLxxx" },
+      "zh": { "locale": "zh-Hans", "token_path": "~/.config/pipe/token_zh.json",
+              "channel_id": "UCyyy", "channel_name": "故事",    "playlist_id": "PLyyy" }
+    }
+    ```
+    The `locale` field is written by `gen_tokens.py` when the user provides the render locale after OAuth.
+
+    ### Regression risks
+    1. Removing `youtube.force-ssl` from any SCOPES list breaks `captions.insert` with 403.
+    2. Using the Anthropic SDK (instead of `claude -p` CLI) breaks generation when `ANTHROPIC_API_KEY` is not set.
+    3. Forgetting to pop `CLAUDECODE` before spawning `claude` breaks generation inside a running Claude Code session.
+    4. Storing `thumbnail` path relative to `ep_dir` (not `pipe_dir`) causes silent write failures.
+    5. Setting `window._ytDraft` only on generate (not on load) causes `ytSaveAll()` to wipe channel/playlist/subtitle metadata.
+    6. Removing `-update 1` from ffmpeg thumbnail extraction causes crashes on ffmpeg ≥ 6.
+    7. Raising on thumbnail 403 `forbidden` aborts uploads for unverified channels.
+    8. Using `|| null` instead of `?? null` for `thumbnail_source_sec` silently drops `0` as a valid timestamp.
