@@ -149,11 +149,25 @@ job_queue:    jq.JobQueue | None      = None
 # Per-item download semaphore — sum of max_concurrent across all configured sources
 _sem: asyncio.Semaphore | None = None
 
+# Serialises access to the single-batch job_queue when N batches run concurrently
+_jq_sem: asyncio.Semaphore | None = None
+
 
 def _make_semaphore() -> asyncio.Semaphore:
     rl    = config.get("rate_limits", {})
     total = sum(v.get("max_concurrent", 2) for v in rl.values()) or 4
     return asyncio.Semaphore(total)
+
+
+def _default_batch_workers() -> int:
+    """
+    Default number of concurrent batch workers.
+
+    Reserves one CPU for the local scoring worker process so it is never
+    starved by batch I/O.  Always returns at least 1.
+    """
+    cpus = os.cpu_count() or 2
+    return max(1, cpus - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +176,7 @@ def _make_semaphore() -> asyncio.Semaphore:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global clip_model, store, _sem, job_queue
+    global clip_model, store, _sem, _jq_sem, job_queue
 
     log.info("=== Media Server startup ===")
 
@@ -177,8 +191,12 @@ async def lifespan(app: FastAPI):
     store = bs.BatchStore(PROJECTS_ROOT)
     store.startup_scan()
 
-    # Per-item semaphore
+    # Per-item download semaphore
     _sem = _make_semaphore()
+
+    # Distributed job-queue serialisation semaphore (JobQueue is single-batch;
+    # concurrent batch workers must take turns using it)
+    _jq_sem = asyncio.Semaphore(1)
 
     # Job queue for distributed workers
     workers_cfg = config.get("workers", {})
@@ -189,15 +207,22 @@ async def lifespan(app: FastAPI):
     else:
         log.info("Distributed workers disabled — using local scoring only")
 
-    # Queue worker (single coroutine; batches are processed sequentially)
-    worker_task = asyncio.create_task(_queue_worker())
+    # Spawn N concurrent batch workers (default: cpu_count - 1, min 1).
+    # Each worker independently pulls from the shared batch_queue, so up to N
+    # batches can be processed in parallel without any code change to callers.
+    n_workers = config.get("max_concurrent_batches", _default_batch_workers())
+    n_workers = max(1, int(n_workers))
+    worker_tasks = [asyncio.create_task(_queue_worker()) for _ in range(n_workers)]
+    log.info("Started %d concurrent batch worker(s)  (max_concurrent_batches=%d)",
+             n_workers, n_workers)
 
     log.info("=== Media Server ready (transport=%s port=%s) ===",
              config.get("transport", "http"), config.get("port", 8200))
 
     yield
 
-    worker_task.cancel()
+    for t in worker_tasks:
+        t.cancel()
     log.info("=== Media Server shutdown ===")
 
 
@@ -389,10 +414,12 @@ async def serve_file(file_path: str):
 
 @app.get("/health")
 async def health():
+    n_workers = config.get("max_concurrent_batches", _default_batch_workers())
     return {
-        "status":     "ok",
-        "queue_len":  batch_queue.qsize(),
-        "transport":  config.get("transport", "http"),
+        "status":                 "ok",
+        "queue_len":              batch_queue.qsize(),
+        "transport":              config.get("transport", "http"),
+        "max_concurrent_batches": max(1, int(n_workers)),
         "config": {
             "candidates_per_source_image": config.get("candidates_per_source_image", 15),
             "candidates_per_source_video": config.get("candidates_per_source_video", 5),
@@ -478,10 +505,18 @@ async def list_workers():
 
 
 # ---------------------------------------------------------------------------
-# Queue worker — processes batches sequentially
+# Queue worker — N instances run concurrently; each pulls one batch at a time
 # ---------------------------------------------------------------------------
 
 async def _queue_worker() -> None:
+    """
+    Pull batches from batch_queue and run them.
+
+    N copies of this coroutine are started at startup (max_concurrent_batches),
+    giving true parallel batch execution bounded by the CPU budget.
+    Each instance is independent — no coordination needed between workers
+    because asyncio.Queue is inherently safe for multiple concurrent consumers.
+    """
     while True:
         batch_id = await batch_queue.get()
         try:
@@ -529,19 +564,23 @@ async def _score_videos_distributed(
     workers_cfg    = cfg.get("workers", {})
     timeout_seconds = workers_cfg.get("timeout_seconds", 120)
 
-    # Enqueue and wait
-    job_queue.enqueue(batch_id, tasks)
-    job_queue.start_reaper(timeout_seconds=timeout_seconds)
+    # Serialise access to the single-batch JobQueue.  When N batches run
+    # concurrently each one waits its turn here; remote scoring workers never
+    # see this — they continue to poll /next_job independently.
+    async with _jq_sem:
+        job_queue.enqueue(batch_id, tasks)
+        job_queue.start_reaper(timeout_seconds=timeout_seconds)
 
-    try:
-        log.info("Waiting for %d video scoring jobs (batch %s)…",
-                 len(tasks), batch_id)
-        await job_queue.wait_until_done()
-    finally:
-        job_queue.stop_reaper()
+        try:
+            log.info("Waiting for %d video scoring jobs (batch %s)…",
+                     len(tasks), batch_id)
+            await job_queue.wait_until_done()
+        finally:
+            job_queue.stop_reaper()
 
-    # Collect results
-    raw_results = job_queue.get_results()
+        # Collect results while still holding the lock (before next batch
+        # can call enqueue and reset the queue state)
+        raw_results = job_queue.get_results()
 
     # Sort by score descending
     raw_results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
