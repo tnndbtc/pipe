@@ -45,6 +45,10 @@ _DEFAULT_CATEGORY = "24"
 PORT     = 8000
 PIPE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (pipe/)
 
+# ── AI server connection (read once at startup from environment) ────────────────
+_AI_SERVER_URL = os.environ.get("AI_SERVER_URL", "http://192.168.86.27:8000").rstrip("/")
+_AI_SERVER_KEY = os.environ.get("AI_SERVER_KEY", "change-me")
+
 # ── VC editor config (config.json) ────────────────────────────────────────────
 _vc_config = {}
 _vc_config_path = os.path.join(os.path.dirname(__file__), "config.json")
@@ -3302,6 +3306,7 @@ placeholder="Enter your story here"></textarea>
   let _mediaShotDur = null;  // { shot_id: duration_sec } — flat lookup for shot durations
   let _mediaActiveShot = {}; // { itemId: shot_id } — which shot row is active (target) per card
   var _mediaPlayingVid = null; // currently playing video element (limit 1 active stream)
+  let _bgManifestData = {};    // { itemId: { ai_prompt, search_prompt, include_keywords, media_type, motion_level } }
 
   // Stop a video and release its HTTP connection (pause alone doesn't close it).
   function _mediaStopVid(vid) {
@@ -3442,6 +3447,163 @@ placeholder="Enter your story here"></textarea>
     } catch (_) { _mediaShotMap = null; _mediaShotDur = null; }
   }
 
+  // ── AI Generation Queue — persisted in localStorage per project/episode ──
+
+  // ── Inline AI Generation ─────────────────────────────────────────────────────
+  // localStorage key for in-flight jobs: survives page reload (B5)
+  function _aiGenPendingKey() {
+    return 'ai_gen_pending__' + (_mediaSlug||'') + '__' + (_mediaEpId||'');
+  }
+  function _aiGenPendingGet() {
+    try { return JSON.parse(localStorage.getItem(_aiGenPendingKey()) || '[]'); }
+    catch(e) { return []; }
+  }
+  function _aiGenPendingSave(arr) {
+    localStorage.setItem(_aiGenPendingKey(), JSON.stringify(arr));
+  }
+  function _aiGenPendingAdd(rec) {
+    const arr = _aiGenPendingGet().filter(function(r){ return r.bg_id !== rec.bg_id; });
+    arr.push(rec);
+    _aiGenPendingSave(arr);
+  }
+  function _aiGenPendingRemove(bgId) {
+    _aiGenPendingSave(_aiGenPendingGet().filter(function(r){ return r.bg_id !== bgId; }));
+  }
+
+  // Start inline generation for a background card
+  async function _aiGenStart(itemId) {
+    const btn    = document.getElementById('ai-gen-btn-' + itemId);
+    const ta     = document.getElementById('ai-gen-prompt-' + itemId);
+    const status = document.getElementById('ai-gen-status-' + itemId);
+    if (!btn || !ta) return;
+    const prompt = ta.value.trim();
+    if (!prompt) { if (status) status.textContent = 'Prompt is empty.'; return; }
+    btn.disabled = true;
+    if (status) { status.textContent = '\u23f3 Submitting\u2026'; status.style.color = '#888'; }
+
+    try {
+      const r = await fetch('/api/ai_generate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ slug: _mediaSlug, ep_id: _mediaEpId,
+                               bg_id: itemId, prompt: prompt }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || 'submit failed');
+      const { job_id, asset_id, timestamp_ms } = d;
+      _aiGenPendingAdd({ bg_id: itemId, job_id, asset_id, prompt,
+                         timestamp_ms, started_at: Date.now() });
+      if (status) status.textContent = '\u23f3 Generating\u2026 (job ' + job_id.slice(0,8) + ')';
+      _aiGenPoll(itemId, job_id, asset_id, prompt, timestamp_ms, 0);
+    } catch(err) {
+      if (status) { status.textContent = '\u274c ' + err.message; status.style.color = '#e06c75'; }
+      btn.disabled = false;
+    }
+  }
+
+  // Poll job status, then save image on completion
+  async function _aiGenPoll(itemId, jobId, assetId, prompt, tMs, elapsed) {
+    const btn    = document.getElementById('ai-gen-btn-' + itemId);
+    const status = document.getElementById('ai-gen-status-' + itemId);
+    const MAX_S  = 600;
+    if (elapsed > MAX_S) {
+      _aiGenPendingRemove(itemId);
+      if (status) { status.textContent = '\u274c Timed out after ' + MAX_S + 's'; status.style.color = '#e06c75'; }
+      if (btn) btn.disabled = false;
+      return;
+    }
+    try {
+      const r = await fetch('/api/ai_job_status?job_id=' + encodeURIComponent(jobId));
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      if (d.status === 'done') {
+        const filename = assetId + '.png';
+        if (status) status.textContent = '\u23f3 Saving image\u2026';
+        const r2 = await fetch('/api/ai_save_image', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ job_id: jobId, filename,
+                                 slug: _mediaSlug, ep_id: _mediaEpId,
+                                 bg_id: itemId, timestamp_ms: tMs }),
+        });
+        const d2 = await r2.json();
+        if (!r2.ok || d2.error) throw new Error(d2.error || 'save failed');
+        _aiGenPendingRemove(itemId);
+        const candidate = {
+          type:         'image',
+          source:       'ai',
+          url:          d2.url,
+          path:         d2.path,
+          score:        null,
+          prompt:       prompt,
+          created_at:   new Date().toISOString(),
+        };
+        _aiGenInjectResult(itemId, candidate);
+        if (status) { status.textContent = '\u2713 Done — image added below'; status.style.color = '#6a9a6a'; }
+        if (btn) btn.disabled = false;
+      } else if (d.status === 'failed') {
+        throw new Error('AI job failed: ' + (d.errors || []).join('; '));
+      } else {
+        // Still running — poll again in 2s
+        const secs = elapsed + 2;
+        if (status) status.textContent = '\u23f3 Generating\u2026 ' + secs + 's';
+        setTimeout(function() { _aiGenPoll(itemId, jobId, assetId, prompt, tMs, secs); }, 2000);
+      }
+    } catch(err) {
+      _aiGenPendingRemove(itemId);
+      if (status) { status.textContent = '\u274c ' + err.message; status.style.color = '#e06c75'; }
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // Inject a completed AI-generated candidate into the images section
+  function _aiGenInjectResult(itemId, candidate) {
+    if (!_mediaResults || !_mediaResults[itemId]) return;
+    const item = _mediaResults[itemId];
+    if (!item.images) item.images = [];
+    item.images.push(candidate);
+    // Append a single thumb to the existing image row (avoid full re-render)
+    const card = document.getElementById('media-card-' + itemId);
+    if (!card) return;
+    // Find or create the images thumb row
+    let imgRow = card.querySelector('.media-thumb-row');
+    if (!imgRow) {
+      // No images section yet — create it
+      const lbl = document.createElement('div');
+      lbl.className = 'media-section-label';
+      lbl.textContent = 'Images';
+      const shotSection = card.querySelector('.media-shot-section');
+      card.insertBefore(lbl, shotSection || null);
+      imgRow = document.createElement('div');
+      imgRow.className = 'media-thumb-row';
+      card.insertBefore(imgRow, shotSection || null);
+    }
+    const idx = item.images.length - 1;
+    const wrap = _mediaThumb(itemId, 'image', candidate, idx);
+    // AI badge
+    const aiBadge = document.createElement('span');
+    aiBadge.textContent = 'AI';
+    aiBadge.style.cssText = 'position:absolute;bottom:2px;left:2px;background:#1a4a1a;color:#6aba6a;font-size:9px;font-weight:bold;padding:1px 4px;border-radius:3px;pointer-events:none;';
+    wrap.style.position = 'relative';
+    wrap.appendChild(aiBadge);
+    imgRow.appendChild(wrap);
+  }
+
+  // On page load: resume any in-flight AI gen jobs (B5)
+  function _aiGenRestorePending() {
+    const pending = _aiGenPendingGet();
+    pending.forEach(function(rec) {
+      const elapsed = Math.round((Date.now() - rec.started_at) / 1000);
+      if (elapsed > 600) {
+        _aiGenPendingRemove(rec.bg_id);
+        return;
+      }
+      const status = document.getElementById('ai-gen-status-' + rec.bg_id);
+      if (status) { status.textContent = '\u23f3 Resuming\u2026'; }
+      _aiGenPoll(rec.bg_id, rec.job_id, rec.asset_id, rec.prompt, rec.timestamp_ms, elapsed);
+    });
+  }
+
   function _formatToContentProfile(fmt) {
     const map = {
       continuous_narration: 'documentary',
@@ -3487,8 +3649,17 @@ placeholder="Enter your story here"></textarea>
       return '<span style="color:#5a8a5a">' + '\u2588'.repeat(filled) + '\u2591'.repeat(20-filled) + '</span> ' + pct + '%';
     }
 
+    const fmtLabels = {
+      continuous_narration: 'Continuous Narration',
+      ssml_narration:       'SSML Narration',
+      sleep_story:          'Sleep Story',
+      default:              'Default',
+    };
+    const fmtLabel = fmtLabels[fmt] || fmt;
+
     const rows = [
-      ['Scoring profile',  '<strong style="color:#ccc">' + profile + '</strong>'],
+      ['Scoring profile',  '<strong style="color:#ccc">' + profile + '</strong>'
+        + (profile !== fmt ? ' <span style="color:#666;font-size:11px;">\u2190 from \u201c' + fmtLabel + '\u201d</span>' : '')],
       [''],
       ['\u2014 CLIP dimension weights \u2014', ''],
       ['Subjects (who/what)',        bar(w.subjects)],
@@ -3532,7 +3703,9 @@ placeholder="Enter your story here"></textarea>
     const prof  = document.getElementById('media-config-profile');
     if (panel && body && prof) {
       body.innerHTML = html;
-      prof.textContent = '(' + profile + ')';
+      prof.textContent = profile !== fmt
+        ? '(' + fmtLabel + ' \u2192 ' + profile + ')'
+        : '(' + profile + ')';
     }
     // Update existing-project panel
     const panelEx = document.getElementById('media-config-panel-existing');
@@ -3540,7 +3713,9 @@ placeholder="Enter your story here"></textarea>
     const profEx  = document.getElementById('media-config-profile-existing');
     if (panelEx && bodyEx && profEx) {
       bodyEx.innerHTML = html;
-      profEx.textContent = '(' + profile + ')';
+      profEx.textContent = profile !== fmt
+        ? '(' + fmtLabel + ' \u2192 ' + profile + ')'
+        : '(' + profile + ')';
     }
   }
 
@@ -3662,8 +3837,17 @@ placeholder="Enter your story here"></textarea>
     _mediaItemIds = Object.keys(items);
     _mediaSelections = {};
 
+    _bgManifestData = {};
     _mediaItemIds.forEach(itemId => {
       const item   = items[itemId];
+      // Store manifest fields for info panel
+      _bgManifestData[itemId] = {
+        ai_prompt:        item.ai_prompt || '',
+        search_prompt:    item.search_prompt || '',
+        include_keywords: (item.include_keywords || []).join(', '),
+        media_type:       (item.search_filters || {}).media_type || 'mixed',
+        motion_level:     item.motion_level || '',
+      };
       const card   = document.createElement('div');
       card.className = 'media-item-card';
       card.id = 'media-card-' + itemId;
@@ -3671,19 +3855,89 @@ placeholder="Enter your story here"></textarea>
       // Card header: show shot info when _mediaShotMap is available
       const hdr = document.createElement('div');
       hdr.className = 'media-item-header';
+      hdr.style.display = 'flex';
+      hdr.style.alignItems = 'center';
+      hdr.style.flexWrap = 'wrap';
       const shotIds = _mediaShotMap ? (_mediaShotMap[itemId] || []) : [];
+      const hdrLabel = document.createElement('span');
       if (shotIds.length > 0) {
-        hdr.textContent = itemId + ' \u2014 ' + shotIds.length + ' shot' + (shotIds.length > 1 ? 's' : '')
+        hdrLabel.textContent = itemId + ' \u2014 ' + shotIds.length + ' shot' + (shotIds.length > 1 ? 's' : '')
             + ': ' + shotIds.join(', ');
       } else {
-        hdr.textContent = itemId;
+        hdrLabel.textContent = itemId;
       }
+      hdr.appendChild(hdrLabel);
+
+
+      // Manifest info toggle button
+      const infoBtn = document.createElement('button');
+      infoBtn.textContent = '\uD83D\uDCCB';
+      infoBtn.title = 'Show manifest details';
+      infoBtn.style.cssText = 'margin-left:6px; padding:2px 7px; font-size:11px; cursor:pointer; background:#1a2a3a; border:1px solid #3a5a7a; border-radius:4px; color:#7a9aba; vertical-align:middle;';
+      (function(iid) {
+        infoBtn.onclick = function() {
+          const panel = document.getElementById('manifest-panel-' + iid);
+          if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        };
+      })(itemId);
+      hdr.appendChild(infoBtn);
+
       card.appendChild(hdr);
+
+      // Manifest detail panel (hidden by default)
+      const mdata = _bgManifestData[itemId];
+      const manifestPanel = document.createElement('div');
+      manifestPanel.id = 'manifest-panel-' + itemId;
+      manifestPanel.style.cssText = 'display:none; background:#111; padding:6px 12px; font-size:11px; color:#888; font-family:monospace; margin-top:2px; border-radius:4px;';
+      const aiPromptTrunc = mdata.ai_prompt.length > 120 ? mdata.ai_prompt.slice(0, 120) + '\u2026' : mdata.ai_prompt;
+      manifestPanel.innerHTML = '<b style="color:#6a8aaa">ai_prompt:</b> ' + aiPromptTrunc + '<br>'
+        + '<b style="color:#6a8aaa">search_prompt:</b> ' + mdata.search_prompt + '<br>'
+        + '<b style="color:#6a8aaa">include_keywords:</b> ' + mdata.include_keywords + '<br>'
+        + '<b style="color:#6a8aaa">media_type:</b> ' + mdata.media_type + ' &nbsp; <b style="color:#6a8aaa">motion_level:</b> ' + mdata.motion_level;
+      card.appendChild(manifestPanel);
 
       const prompt = document.createElement('div');
       prompt.className = 'media-item-prompt';
       prompt.textContent = item.search_prompt || '';
       card.appendChild(prompt);
+
+      // ── Inline AI Generate panel ──
+      const aiGenPanel = document.createElement('div');
+      aiGenPanel.id = 'ai-gen-panel-' + itemId;
+      aiGenPanel.style.cssText = 'display:none; background:#0d1a0d; border:1px solid #2a4a2a; border-radius:4px; padding:8px 10px; margin:4px 0 6px 0;';
+      const aiGenTA = document.createElement('textarea');
+      aiGenTA.id = 'ai-gen-prompt-' + itemId;
+      aiGenTA.rows = 3;
+      aiGenTA.value = mdata.ai_prompt;
+      aiGenTA.style.cssText = 'width:100%; box-sizing:border-box; background:#111; color:#ccc; border:1px solid #3a5a3a; border-radius:3px; font-size:11px; font-family:monospace; resize:vertical; padding:4px;';
+      aiGenPanel.appendChild(aiGenTA);
+      const aiGenRow = document.createElement('div');
+      aiGenRow.style.cssText = 'margin-top:5px; display:flex; align-items:center; gap:8px;';
+      const aiGenBtn = document.createElement('button');
+      aiGenBtn.id = 'ai-gen-btn-' + itemId;
+      aiGenBtn.textContent = '\u2728 Generate';
+      aiGenBtn.style.cssText = 'padding:3px 12px; font-size:12px; cursor:pointer; background:#1a3a1a; border:1px solid #4a7a4a; border-radius:4px; color:#8aba8a;';
+      (function(iid) { aiGenBtn.onclick = function() { _aiGenStart(iid); }; })(itemId);
+      aiGenRow.appendChild(aiGenBtn);
+      const aiGenStatus = document.createElement('span');
+      aiGenStatus.id = 'ai-gen-status-' + itemId;
+      aiGenStatus.style.cssText = 'font-size:11px; color:#888;';
+      aiGenRow.appendChild(aiGenStatus);
+      aiGenPanel.appendChild(aiGenRow);
+      card.appendChild(aiGenPanel);
+
+      // ── AI Generate toggle button (in header) ──
+      const aiGenToggleBtn = document.createElement('button');
+      aiGenToggleBtn.textContent = '\u2728 AI';
+      aiGenToggleBtn.title = 'Generate image with AI';
+      aiGenToggleBtn.style.cssText = 'margin-left:6px; padding:2px 7px; font-size:11px; cursor:pointer; background:#0d1a0d; border:1px solid #2a4a2a; border-radius:4px; color:#6a9a6a; vertical-align:middle;';
+      (function(iid) {
+        aiGenToggleBtn.onclick = function() {
+          const p = document.getElementById('ai-gen-panel-' + iid);
+          if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
+        };
+      })(itemId);
+      hdr.appendChild(aiGenToggleBtn);
 
       // Images section — lazy-scroll with pagination
       const imgs = item.images || [];
@@ -3853,6 +4107,15 @@ placeholder="Enter your story here"></textarea>
       wrap.appendChild(link);
     }
 
+    // AI badge for AI-generated images
+    if (entry.source === 'ai') {
+      wrap.style.position = 'relative';
+      const aiBadge = document.createElement('span');
+      aiBadge.textContent = 'AI';
+      aiBadge.style.cssText = 'position:absolute;bottom:2px;left:2px;background:#1a4a1a;color:#6aba6a;font-size:9px;font-weight:bold;padding:1px 4px;border-radius:3px;pointer-events:none;';
+      wrap.appendChild(aiBadge);
+    }
+
     // Store original URL and duration as data attributes
     wrap.dataset.url = entry.url || '';
     if (typeof entry.duration_sec === 'number') {
@@ -3866,34 +4129,42 @@ placeholder="Enter your story here"></textarea>
   function _mediaSegmentTotal(shotEntry) {
     if (!shotEntry || !shotEntry.segments) return 0;
     return shotEntry.segments.reduce(function(sum, seg) {
-      return sum + (seg.hold_sec || seg.duration_sec || 0);
+      if (seg.media_type === 'video') return sum + _resolveVideoDur(seg);
+      return sum + (seg.hold_sec || 0);
     }, 0);
   }
 
+  // ── Resolve effective duration for a video segment ──
+  // duration_override_sec (user input) takes priority over natural_duration_sec.
+  function _resolveVideoDur(seg) {
+    if (seg.duration_override_sec != null && seg.duration_override_sec > 0)
+      return seg.duration_override_sec;
+    return seg.natural_duration_sec || seg.duration_sec || 0;
+  }
+
   // ── Rebalance flexible segments to share the remaining gap equally ──
-  // "Fixed" = video with a duration_sec value.
-  // "Flexible" = image (or video without duration).
+  // "Fixed" = video (uses natural or override duration).
+  // "Flexible" = image (shares whatever time remains after videos).
   function _mediaRebalanceImages(shotId, segs) {
     var shotDur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
-    if (shotDur <= 0 || segs.length === 0) return;
+    if (segs.length === 0) return;
     var fixedTotal = 0;
     var flexIdxs = [];
     segs.forEach(function(seg, i) {
-      if (seg.media_type === 'video' && seg.duration_sec) {
-        fixedTotal += seg.duration_sec;
+      if (seg.media_type === 'video') {
+        var d = _resolveVideoDur(seg);
+        fixedTotal += d;
+        // Keep duration_sec in sync (for render pipeline)
+        seg.duration_sec = d;
       } else {
         flexIdxs.push(i);
       }
     });
-    var gap = Math.max(0, shotDur - fixedTotal);
+    var gap = shotDur > 0 ? Math.max(0, shotDur - fixedTotal) : 0;
     if (flexIdxs.length === 0) return;
-    var per = gap / flexIdxs.length;
+    var per = flexIdxs.length > 0 ? gap / flexIdxs.length : 0;
     flexIdxs.forEach(function(i) {
-      if (segs[i].media_type === 'image') {
-        segs[i].hold_sec = per;
-      } else {
-        segs[i].duration_sec = per;
-      }
+      segs[i].hold_sec = per;
     });
   }
 
@@ -3959,19 +4230,20 @@ placeholder="Enter your story here"></textarea>
       const filled = _mediaSegmentTotal({ segments: segs });
       const remaining = Math.max(0, shotDur - filled);
 
-      // Video: use probed duration (capped to remaining gap)
-      // Image: hold for remaining gap
-      const segDur = type === 'video'
-          ? Math.min(entry.duration_sec || remaining, remaining)
-          : remaining;
+      // Video: use full natural duration (user can override per-segment).
+      // Image: hold for remaining gap after videos.
+      const naturalDur = type === 'video' ? (entry.duration_sec || 0) : 0;
 
       segs.push({
-        media_type: type,
-        url: entry.url || '',
-        path: entry.path || '',
-        score: entry.score,
-        duration_sec: type === 'video' ? segDur : null,
-        hold_sec: type === 'image' ? segDur : null,
+        media_type:           type,
+        url:                  entry.url || '',
+        path:                 entry.path || '',
+        score:                entry.score,
+        natural_duration_sec: type === 'video' ? naturalDur : null,
+        duration_override_sec:null,   // null = use natural; user sets via input
+        duration_sec:         type === 'video' ? naturalDur : null,
+        hold_sec:             type === 'image' ? remaining : null,
+        source:               entry.source || null,
       });
 
       // Rebalance images to share the remaining gap equally
@@ -4030,29 +4302,84 @@ placeholder="Enter your story here"></textarea>
     if (barFill) barFill.style.width = pct.toFixed(1) + '%';
 
     // Render segment entries
+    const videoSum = segs.reduce(function(s, sg) {
+      return s + (sg.media_type === 'video' ? _resolveVideoDur(sg) : 0);
+    }, 0);
+    const videoOverflow = shotDur > 0 && videoSum > shotDur + 0.05;
     if (segContainer) {
       segContainer.innerHTML = '';
       segs.forEach(function(seg, idx) {
         const se = document.createElement('div');
         se.className = 'media-seg-entry';
         const fname = (seg.path || seg.url || '').split('/').pop() || 'media';
-        const dur = seg.hold_sec || seg.duration_sec || 0;
-        se.innerHTML = '<span class="seg-name">' + fname + '</span>'
-            + '<span class="seg-dur">' + dur.toFixed(1) + 's</span>'
-            + '<button class="media-seg-remove" onclick="mediaRemoveSegment(\''
-            + itemId + '\',\'' + shotId + '\',' + idx + ')">\u2715</button>';
+        if (seg.media_type === 'video') {
+          const natDur  = seg.natural_duration_sec || seg.duration_sec || 0;
+          const ovr     = seg.duration_override_sec;
+          const dispDur = _resolveVideoDur(seg);
+          const inp = document.createElement('input');
+          inp.type        = 'number';
+          inp.min         = '0.1';
+          inp.step        = '0.1';
+          inp.placeholder = natDur.toFixed(1);
+          inp.value       = (ovr != null && ovr > 0) ? ovr : '';
+          inp.title       = 'Override duration (s). Blank = natural ' + natDur.toFixed(1) + 's';
+          inp.style.cssText = 'width:54px;font-size:11px;background:#1a1a1a;color:#ccc;border:1px solid #444;border-radius:3px;padding:1px 3px;';
+          (function(iid, sid, i, s) {
+            inp.addEventListener('change', function() {
+              var v = parseFloat(this.value);
+              if (isNaN(v) || v <= 0) {
+                s.duration_override_sec = null;
+                s.duration_sec = s.natural_duration_sec || 0;
+                this.value = '';
+              } else {
+                s.duration_override_sec = v;
+                s.duration_sec = v;
+              }
+              _mediaRebalanceImages(sid, (_mediaSelections[iid].per_shot[sid] || {segments:[]}).segments);
+              _mediaRenderShotRow(iid, sid);
+            });
+          })(itemId, shotId, idx, seg);
+          se.appendChild(document.createTextNode('\uD83C\uDFA5 '));
+          const nameSpan = document.createElement('span');
+          nameSpan.className = 'seg-name';
+          nameSpan.textContent = fname;
+          se.appendChild(nameSpan);
+          se.appendChild(document.createTextNode('\u00a0'));
+          se.appendChild(inp);
+          const durSpan = document.createElement('span');
+          durSpan.className = 'seg-dur';
+          durSpan.textContent = dispDur.toFixed(1) + 's';
+          se.appendChild(durSpan);
+        } else {
+          const dur = seg.hold_sec || 0;
+          se.innerHTML = '<span class="seg-name">\uD83D\uDDBC\uFE0F ' + fname + '</span>'
+              + '<span class="seg-dur">' + dur.toFixed(1) + 's</span>';
+        }
+        const rmBtn = document.createElement('button');
+        rmBtn.className = 'media-seg-remove';
+        rmBtn.textContent = '\u2715';
+        rmBtn.onclick = (function(iid, sid, i) {
+          return function() { mediaRemoveSegment(iid, sid, i); };
+        })(itemId, shotId, idx);
+        se.appendChild(rmBtn);
         segContainer.appendChild(se);
       });
     }
 
-    // Gap indicator
-    const gap = Math.max(0, shotDur - filled);
+    // Gap / overflow indicator
+    const gap = shotDur > 0 ? shotDur - filled : 0;
     if (gapSpan) {
-      if (gap > 0.1) {
+      if (videoOverflow) {
+        gapSpan.textContent = '\u26a0 Videos exceed shot (' + videoSum.toFixed(1) + 's > ' + shotDur.toFixed(1) + 's)';
+        gapSpan.style.color = '#e06c75';
+        row.classList.remove('media-shot-filled');
+      } else if (gap > 0.1) {
         gapSpan.textContent = 'needs ' + gap.toFixed(1) + 's more';
+        gapSpan.style.color = '';
         row.classList.remove('media-shot-filled');
       } else {
         gapSpan.textContent = '\u2713 filled';
+        gapSpan.style.color = '';
         row.classList.add('media-shot-filled');
       }
     }
@@ -4421,6 +4748,7 @@ placeholder="Enter your story here"></textarea>
               + totalImg2 + ' images + ' + totalVid2 + ' videos'
               + elapsed2 + '.', false);
             _mediaRenderResults(_mediaResults);
+            _aiGenRestorePending();
             // Also restore saved selections on top of batch results
             await _mediaLoadSavedSelections();
             return;
@@ -7986,6 +8314,9 @@ placeholder="Enter your story here"></textarea>
             '&locale=' + encodeURIComponent(params.locale) +
             '&profile=' + profile +
             '&no_music=' + (noMusic ? '1' : '0');
+      if (params.asset_ids) {
+        url += '&asset_ids=' + encodeURIComponent(params.asset_ids);
+      }
     }
 
     pipeStepEs = new EventSource(url);
@@ -8589,7 +8920,8 @@ def _purge_episode_assets(slug: str, ep_id: str, locale: str = "") -> list[str]:
 
 def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
                     profile: str = "preview_local",
-                    no_music: bool = False) -> list | None:
+                    no_music: bool = False,
+                    payload: dict | None = None) -> list | None:
     """Build command list for a post-processing step."""
     ep_dir   = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
     code_dir = os.path.join(PIPE_DIR, "code", "http")
@@ -8609,11 +8941,15 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
             "--asset_type",  "characters",
         ]
     elif step == "gen_backgrounds":
-        return [
+        cmd = [
             "python3", os.path.join(code_dir, "fetch_ai_assets.py"),
             "--manifest",    ep("AssetManifest_draft.shared.json"),
             "--asset_type",  "backgrounds",
         ]
+        asset_ids = (payload or {}).get("asset_ids", "")
+        if asset_ids:
+            cmd += ["--asset-ids", asset_ids]
+        return cmd
     elif step == "gen_sfx":
         return [
             "python3", os.path.join(code_dir, "fetch_ai_assets.py"),
@@ -9345,8 +9681,9 @@ class Handler(BaseHTTPRequestHandler):
             slug     = unquote_plus(params.get("slug",     [""])[0]).strip()
             ep_id    = unquote_plus(params.get("ep_id",    [""])[0]).strip()
             locale   = unquote_plus(params.get("locale",   [""])[0]).strip()
-            profile  = unquote_plus(params.get("profile",  ["preview_local"])[0]).strip()
-            no_music = params.get("no_music", ["0"])[0].strip() == "1"
+            profile   = unquote_plus(params.get("profile",   ["preview_local"])[0]).strip()
+            no_music  = params.get("no_music", ["0"])[0].strip() == "1"
+            asset_ids = unquote_plus(params.get("asset_ids", [""])[0]).strip()
 
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -9355,7 +9692,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
-            cmd = _build_step_cmd(step, slug, ep_id, locale, profile, no_music)
+            _step_payload = {"asset_ids": asset_ids} if asset_ids else None
+            cmd = _build_step_cmd(step, slug, ep_id, locale, profile, no_music,
+                                  payload=_step_payload)
             if not cmd:
                 self.wfile.write(sse("error_line", f"Unknown step: {step!r}"))
                 self.wfile.write(sse("done", "1"))
@@ -9781,6 +10120,30 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     req  = _urllib_req.Request(url,
                                headers={"X-Api-Key": api_key})
+                    with _urllib_req.urlopen(req, timeout=10) as resp:
+                        body = resp.read()
+                    self.send_response(200)
+                except Exception as exc:
+                    body = json.dumps({"error": str(exc)}).encode()
+                    self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── AI Job Status: proxy to AI server (GET /api/ai_job_status) ────────────
+        elif parsed.path == "/api/ai_job_status":
+            params = parse_qs(parsed.query)
+            job_id = params.get("job_id", [""])[0].strip()
+            if not job_id:
+                body = json.dumps({"error": "job_id required"}).encode()
+                self.send_response(400)
+            else:
+                try:
+                    req = _urllib_req.Request(
+                        _AI_SERVER_URL + "/jobs/" + job_id,
+                        headers={"X-Api-Key": _AI_SERVER_KEY},
+                    )
                     with _urllib_req.urlopen(req, timeout=10) as resp:
                         body = resp.read()
                     self.send_response(200)
@@ -10907,6 +11270,102 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── AI Generate: submit single-shot inline generation job ──────────────
+        elif self.path == "/api/ai_generate":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                payload  = json.loads(self.rfile.read(length))
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                bg_id    = payload.get("bg_id", "").strip()
+                prompt   = payload.get("prompt", "").strip()
+                if not slug or not ep_id or not bg_id or not prompt:
+                    raise ValueError("slug, ep_id, bg_id, and prompt are required")
+                timestamp_ms = int(time.time() * 1000)
+                h = hashlib.sha1(prompt.encode()).hexdigest()[:8]
+                asset_id = f"{bg_id}-{h}-{timestamp_ms}"
+                synthetic_manifest = {
+                    "backgrounds": [{
+                        "asset_id":  asset_id,
+                        "ai_prompt": prompt,
+                        "motion":    None,
+                        "search_filters": {},
+                    }]
+                }
+                req_body = json.dumps({
+                    "manifest":    synthetic_manifest,
+                    "asset_types": ["backgrounds"],
+                    "asset_ids":   [asset_id],
+                }).encode()
+                req = _urllib_req.Request(
+                    _AI_SERVER_URL + "/jobs",
+                    data=req_body,
+                    headers={"Content-Type": "application/json",
+                             "X-Api-Key": _AI_SERVER_KEY},
+                    method="POST",
+                )
+                with _urllib_req.urlopen(req, timeout=15) as resp:
+                    ai_resp = json.loads(resp.read())
+                body = json.dumps({"job_id": ai_resp.get("job_id"),
+                                   "asset_id": asset_id,
+                                   "timestamp_ms": timestamp_ms}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── AI Save Image: fetch generated image from AI server → NFS share ──────
+        elif self.path == "/api/ai_save_image":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                payload  = json.loads(self.rfile.read(length))
+                job_id   = payload.get("job_id", "").strip()
+                filename = payload.get("filename", "").strip()
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                bg_id    = payload.get("bg_id", "").strip()
+                ts_ms    = payload.get("timestamp_ms", "")
+                if not all([job_id, filename, slug, ep_id, bg_id, ts_ms]):
+                    raise ValueError("job_id, filename, slug, ep_id, bg_id, timestamp_ms required")
+                # Fetch image bytes from AI server
+                req = _urllib_req.Request(
+                    _AI_SERVER_URL + f"/jobs/{job_id}/files/{filename}",
+                    headers={"X-Api-Key": _AI_SERVER_KEY},
+                )
+                with _urllib_req.urlopen(req, timeout=120) as resp:
+                    img_bytes = resp.read()
+                # Write to stable NFS path
+                dest_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                        "assets", "backgrounds", bg_id)
+                os.makedirs(dest_dir, exist_ok=True)
+                dest_file = f"ai_{ts_ms}.png"
+                dest_path = os.path.join(dest_dir, dest_file)
+                with open(dest_path, "wb") as fh:
+                    fh.write(img_bytes)
+                dest_url = "file://" + dest_path
+                body = json.dumps({"path": dest_path, "url": dest_url,
+                                   "filename": dest_file}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # ── Music: prepare loop candidates (POST /api/music_prepare_loops) ──────
         elif self.path == "/api/music_prepare_loops":
             try:
@@ -11766,6 +12225,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/diagnose_pipeline",
                   "/api/media_batches", "/api/media_batch_status",
                   "/api/media_batch", "/api/media_confirm",
+                  "/api/ai_job_status",
                   "/api/serve_media_file",
                   "/api/music_loop_candidates", "/api/music_timeline",
                   "/api/music_prepare_loops", "/api/music_review_pack",

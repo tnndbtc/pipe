@@ -267,6 +267,10 @@ def main() -> None:
             "shot_id for sfx). Optional."
         ),
     )
+    parser.add_argument(
+        "--asset-ids", dest="asset_ids", default=None,
+        help="Comma-separated list of asset_ids to process. Overrides --asset-id.",
+    )
     args = parser.parse_args()
 
     # 1. Load + validate manifest
@@ -277,7 +281,23 @@ def main() -> None:
         return
 
     # 2. Determine which ids are missing locally
-    missing = find_missing(manifest, args.asset_type, args.asset_id)
+    # Resolve the ID filter — --asset-ids takes priority over --asset-id
+    if args.asset_ids:
+        asset_ids_set = set(i.strip() for i in args.asset_ids.split(',') if i.strip())
+        # Pass None as asset_id_filter; we apply the set filter ourselves below
+        _raw_missing = find_missing(manifest, args.asset_type, None)
+        missing = [aid for aid in _raw_missing if aid in asset_ids_set]
+        # Warn about any requested IDs not present in the manifest
+        all_ids_in_manifest = set(get_all_ids(manifest, args.asset_type))
+        for rid in asset_ids_set:
+            if rid not in all_ids_in_manifest:
+                print(
+                    f"[WARN] id '{rid}' not found in manifest section "
+                    f"'{SECTION_KEY[args.asset_type]}'",
+                    file=sys.stderr,
+                )
+    else:
+        missing = find_missing(manifest, args.asset_type, args.asset_id)
     if not missing:
         print(f"[SKIP] All {args.asset_type} already downloaded. Nothing to do.")
         return

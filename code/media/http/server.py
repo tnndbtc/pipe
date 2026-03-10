@@ -342,13 +342,17 @@ async def get_batch(
         imgs = _add_urls(item.get("images_ranked", []), state, item_id)
         vids = _add_urls(item.get("videos_ranked", []), state, item_id)
         items_out[item_id] = {
-            "search_prompt": item.get("search_prompt", ""),
-            "status":        item.get("status", ""),
-            "error":         item.get("error"),
-            "total_images":  len(imgs),
-            "total_videos":  len(vids),
-            "images":        imgs,
-            "videos":        vids,
+            "ai_prompt":        item.get("ai_prompt", ""),
+            "search_prompt":    item.get("search_prompt", ""),
+            "include_keywords": item.get("include_keywords", []),
+            "motion_level":     item.get("motion_level", ""),
+            "search_filters":   item.get("search_filters", {}),
+            "status":           item.get("status", ""),
+            "error":            item.get("error"),
+            "total_images":     len(imgs),
+            "total_videos":     len(vids),
+            "images":           imgs,
+            "videos":           vids,
         }
 
     # Compute recommended sequence from .meta.json sidecars (best-effort)

@@ -291,7 +291,9 @@ def render_shot(
             seg_type = seg.get("media_type", "image")
 
             if seg_type == "video" and seg_path and seg_path.exists():
-                seg_dur = seg.get("duration_sec") or dur_sec
+                # duration_override_sec: user-specified trim (play first N seconds).
+                # Falls back to natural duration_sec, then full shot dur_sec.
+                seg_dur = seg.get("duration_override_sec") or seg.get("duration_sec") or dur_sec
                 # Don't loop — use natural duration, trim if needed
                 seg_idx = add_input([], str(seg_path))
                 filter_parts.append(

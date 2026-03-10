@@ -374,6 +374,8 @@ def _load_selections(selections_path: Path) -> dict[str, dict]:
                         if resolved:
                             resolved["duration_sec"] = seg.get("duration_sec")
                             resolved["hold_sec"]     = seg.get("hold_sec")
+                            resolved["duration_override_sec"] = seg.get("duration_override_sec")
+                            resolved["natural_duration_sec"]  = seg.get("natural_duration_sec")
                             resolved_segs.append(resolved)
                     if resolved_segs:
                         per_shot_resolved[shot_id] = {"segments": resolved_segs}
