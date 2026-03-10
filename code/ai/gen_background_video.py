@@ -2,7 +2,7 @@
 # gen_background_video.py
 # Generate short cinematic background video clips for shots that require
 # camera motion (pan, crane, zoom) in s01e01.
-# STATUS: VALIDATED-PENDING-GPU — pipeline code is correct but cogvideox-2b
+# STATUS: VALIDATED-PENDING-GPU -- pipeline code is correct but cogvideox-2b
 #         uses ~10.8 GB VRAM (spills to system RAM, produces blank output on
 #         RTX 4060 8 GB). ltx-video loads but produces static/no-movement clips.
 #         Re-validate on A100 40 GB via RunPod/Vast.ai, or use fal.ai API.
@@ -23,7 +23,7 @@
 #
 #   cogvideox-2b  THUDM/CogVideoX-2b
 #                 FP16 + CPU offload + VAE slicing/tiling, ~6 GB VRAM.
-#                 Native resolution 720×480 (3:2).  RTX 4060 8 GB. ✓
+#                 Native resolution 720x480 (3:2).  RTX 4060 8 GB. [ok]
 #
 #   cogvideox-5b  THUDM/CogVideoX-5b
 #                 FP16 + CPU offload + VAE slicing/tiling, ~12 GB VRAM.
@@ -32,7 +32,7 @@
 #
 #   ltx-video     Lightricks/LTX-Video
 #                 bfloat16 + CPU offload, ~6-8 GB VRAM.
-#                 Fast distilled model, 768×512 native.  RTX 4060 8 GB. ✓
+#                 Fast distilled model, 768x512 native.  RTX 4060 8 GB. [ok]
 #
 #   auto          Tries cogvideox-2b first, falls back to ltx-video on failure.
 #
@@ -59,7 +59,7 @@ from pathlib import Path
 import torch
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 OUTPUT_DIR  = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_background_video"
@@ -79,7 +79,7 @@ VIDEO_BACKGROUNDS = [
             "and the workers descending"
         ),
         "duration_sec": 6.0,
-        "num_frames":   49,   # 6s × 8fps + 1
+        "num_frames":   49,   # 6s x 8fps + 1
         "output":       "bg-desert-excavation-site-v1.mp4",
     },
     {
@@ -97,7 +97,7 @@ VIDEO_BACKGROUNDS = [
             "the full scale of the chamber and the glowing slab at its center"
         ),
         "duration_sec": 5.0,
-        "num_frames":   41,   # 5s × 8fps + 1
+        "num_frames":   41,   # 5s x 8fps + 1
         "output":       "bg-underground-chamber-v1.mp4",
     },
 ]
@@ -117,7 +117,7 @@ MODELS = {
         "family":   "cogvideox",
         "width":    720,
         "height":   480,
-        "notes":    "CogVideoX 2B, FP16 + CPU offload, ~6 GB VRAM. Native 720×480.",
+        "notes":    "CogVideoX 2B, FP16 + CPU offload, ~6 GB VRAM. Native 720x480.",
     },
     "cogvideox-5b": {
         "model_id": "THUDM/CogVideoX-5b",
@@ -135,7 +135,7 @@ MODELS = {
         "family":   "ltx",
         "width":    768,
         "height":   512,
-        "notes":    "LTX-Video, bfloat16 + CPU offload, ~6-8 GB VRAM. Native 768×512.",
+        "notes":    "LTX-Video, bfloat16 + CPU offload, ~6-8 GB VRAM. Native 768x512.",
     },
 }
 
@@ -159,9 +159,9 @@ def parse_args():
             "\n\n  auto           Tries cogvideox-2b, falls back to ltx-video on failure."
             "\n  all            Runs every model above in sequence for comparison."
             "\n\nNext test command (bg-karnak-hypostyle-hall, 4 sec, slow dolly between columns):\n\n"
-            "  Option 1 — ltx-video (lighter, try first on 8 GB):\n"
+            "  Option 1 -- ltx-video (lighter, try first on 8 GB):\n"
             "  python code\\ai\\gen_background_video.py --model ltx-video --manifest ..\\AssetManifest_draft.json --asset-id bg-karnak-hypostyle-hall --output_dir projects\\the-pharaoh-who-defied-death\\episodes\\s01e01\\assets\\en\n\n"
-            "  Option 2 — cogvideox-2b at reduced resolution (if ltx-video unavailable):\n"
+            "  Option 2 -- cogvideox-2b at reduced resolution (if ltx-video unavailable):\n"
             "  python code\\ai\\gen_background_video.py --model cogvideox-2b --manifest ..\\AssetManifest_draft.json --asset-id bg-karnak-hypostyle-hall --output_dir projects\\the-pharaoh-who-defied-death\\episodes\\s01e01\\assets\\en --width 480 --height 320 --num-frames 17"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -239,7 +239,7 @@ def load_cogvideox_pipeline(model_key: str):
     from diffusers import CogVideoXPipeline  # noqa: PLC0415
 
     cfg = MODELS[model_key]
-    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — FP16 + CPU offload...")
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) -- FP16 + CPU offload...")
     pipe = CogVideoXPipeline.from_pretrained(cfg["model_id"], torch_dtype=torch.float16)
     pipe.enable_model_cpu_offload()
     if hasattr(pipe, "enable_vae_slicing"):
@@ -255,7 +255,7 @@ def load_ltx_pipeline(model_key: str):
     from diffusers import LTXPipeline  # noqa: PLC0415
 
     cfg = MODELS[model_key]
-    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — bfloat16 + CPU offload...")
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) -- bfloat16 + CPU offload...")
     pipe = LTXPipeline.from_pretrained(cfg["model_id"], torch_dtype=torch.bfloat16)
     pipe.enable_model_cpu_offload()
     if hasattr(pipe, "enable_vae_slicing"):
@@ -298,7 +298,7 @@ def generate_video(pipe, model_key: str, job: dict, args) -> list:
     device     = "cuda" if torch.cuda.is_available() else "cpu"
     generator  = torch.Generator(device=device).manual_seed(args.seed)
 
-    print(f"    Inference: {width}×{height}  {num_frames} frames  {steps} steps  guidance={guidance}")
+    print(f"    Inference: {width}x{height}  {num_frames} frames  {steps} steps  guidance={guidance}")
 
     result = pipe(
         prompt=job["prompt"],
@@ -325,8 +325,8 @@ def locale_from_manifest_path(path: str) -> str:
 
 def output_filename(job: dict, model_key: str, multi_model: bool) -> str:
     """
-    Single model  → original filename unchanged  (bg-desert-excavation-site-v1.mp4)
-    All models    → model suffix inserted         (bg-desert-excavation-site-v1_cogvideox-2b.mp4)
+    Single model  -> original filename unchanged  (bg-desert-excavation-site-v1.mp4)
+    All models    -> model suffix inserted         (bg-desert-excavation-site-v1_cogvideox-2b.mp4)
     """
     if not multi_model:
         return job["output"]
@@ -372,10 +372,10 @@ def run_model(model_key: str, video_backgrounds: list, out_dir: Path, args,
         fname    = output_filename(job, model_key, multi_model)
         out_path = out_dir / fname
         steps    = args.steps if args.steps is not None else cfg["steps"]
-        print(f"\n  [{idx}/{total}] {job['asset_id']} → {fname}")
+        print(f"\n  [{idx}/{total}] {job['asset_id']} -> {fname}")
         print(f"    Motion  : {job['motion_description']}")
         print(f"    Duration: {job['duration_sec']}s  Frames: {job['num_frames']}  @ {args.fps} fps  Steps: {steps}")
-        print(f"    Res     : {cfg['width']}×{cfg['height']}")
+        print(f"    Res     : {cfg['width']}x{cfg['height']}")
 
         if out_path.exists() and not args.force:
             print(f"    [SKIP] already exists")
@@ -480,7 +480,7 @@ def main():
     ok_count    = sum(1 for r in all_results if r["status"] in ("success", "skipped"))
     total_bytes = sum(r["size_bytes"] for r in all_results)
     print("\n" + "=" * 60)
-    print(f"SUMMARY — gen_background_video ({args.model})")
+    print(f"SUMMARY -- gen_background_video ({args.model})")
     print("=" * 60)
     for r in all_results:
         label = "OK" if r["status"] == "success" else r["status"].upper()

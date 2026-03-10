@@ -1,10 +1,10 @@
 # =============================================================================
-# plan_assets.py  —  AI Asset Pipeline Orchestrator
+# plan_assets.py  --  AI Asset Pipeline Orchestrator
 #
 # Reads AssetManifest_draft.json and prints:
-#   • Which scripts are RUNNABLE on this machine (with exact commands)
-#   • Which scripts are BLOCKED (need a larger GPU)
-#   • For each script: models used, VRAM estimate, recommended GPU
+#   - Which scripts are RUNNABLE on this machine (with exact commands)
+#   - Which scripts are BLOCKED (need a larger GPU)
+#   - For each script: models used, VRAM estimate, recommended GPU
 #
 # Usage (from repo root):
 #   python code/ai/plan_assets.py                        # hardware report (default)
@@ -35,14 +35,14 @@ W = 76   # report line width
 # All 10 gen_*.py scripts fit on RTX 4060 8 GB with the listed model choices.
 #
 # Fields:
-#   name        — stage identifier (used with --only)
-#   script      — filename in the same directory as this file
-#   vram_gb     — peak VRAM estimate (0 = CPU-only)
-#   description — one-line description
-#   models      — list of {name, hf_id, precision}  (primary first, fallbacks after)
-#   rec_gpu     — minimum GPU to run comfortably
-#   check       — fn(manifest) -> bool: True if manifest has data for this stage
-#   manifest_fn — fn(manifest) -> list[str]: asset/item IDs from manifest
+#   name        -- stage identifier (used with --only)
+#   script      -- filename in the same directory as this file
+#   vram_gb     -- peak VRAM estimate (0 = CPU-only)
+#   description -- one-line description
+#   models      -- list of {name, hf_id, precision}  (primary first, fallbacks after)
+#   rec_gpu     -- minimum GPU to run comfortably
+#   check       -- fn(manifest) -> bool: True if manifest has data for this stage
+#   manifest_fn -- fn(manifest) -> list[str]: asset/item IDs from manifest
 # ---------------------------------------------------------------------------
 STAGES = [
     {
@@ -176,7 +176,7 @@ STAGES = [
         "models": [
             {"name": "Kokoro-82M",
              "hf_id": "hexgrad/Kokoro-82M",
-             "precision": "CPU-only, FP32  (82 M params — no GPU needed)"},
+             "precision": "CPU-only, FP32  (82 M params -- no GPU needed)"},
         ],
         "rec_gpu":     "CPU  (no GPU needed)",
         "check":       lambda m: bool(m.get("vo_items")),
@@ -214,7 +214,7 @@ STAGES = [
 
 # ---------------------------------------------------------------------------
 # BLOCKED SCRIPTS
-# placeholder_*.py files — quality-upgrade models that do NOT fit on 8 GB VRAM.
+# placeholder_*.py files -- quality-upgrade models that do NOT fit on 8 GB VRAM.
 # Run these on a larger GPU for higher-quality output.
 # ---------------------------------------------------------------------------
 BLOCKED_SCRIPTS = [
@@ -382,7 +382,7 @@ def print_hardware_report(
     elif vram_gb > 0:
         gpu_str = f"{vram_gb:.1f} GB VRAM detected"
     else:
-        gpu_str = "not detected  (torch.cuda unavailable — install torch with CUDA)"
+        gpu_str = "not detected  (torch.cuda unavailable -- install torch with CUDA)"
 
     # Asset counts
     chars        = manifest.get("character_packs", [])
@@ -412,8 +412,8 @@ def print_hardware_report(
 
     print(f"    VO lines    : {len(vo_items)}")
 
-    sfx_note   = str(len(sfx_items))   if sfx_items   else "0  (not in manifest — gen_sfx.py uses hardcoded defaults)"
-    music_note = str(len(music_items)) if music_items else "0  (not in manifest — gen_music.py uses hardcoded defaults)"
+    sfx_note   = str(len(sfx_items))   if sfx_items   else "0  (not in manifest -- gen_sfx.py uses hardcoded defaults)"
+    music_note = str(len(music_items)) if music_items else "0  (not in manifest -- gen_music.py uses hardcoded defaults)"
     print(f"    SFX items   : {sfx_note}")
     print(f"    Music items : {music_note}")
 
@@ -449,7 +449,7 @@ def print_hardware_report(
         elif has_data:
             print("          Assets    : (manifest matched but returned no IDs)")
         else:
-            print("          Assets    : (not in manifest — uses hardcoded defaults when run standalone)")
+            print("          Assets    : (not in manifest -- uses hardcoded defaults when run standalone)")
 
         # Models
         for j, mdl in enumerate(stage["models"]):
@@ -458,7 +458,7 @@ def print_hardware_report(
             print(f"                      HF       : {mdl['hf_id']}")
             print(f"                      Precision: {mdl['precision']}")
 
-        ok_tag = "  [OK — current GPU]" if vram_gb >= stage["vram_gb"] or stage["vram_gb"] == 0 else "  [verify — VRAM marginal]"
+        ok_tag = "  [OK -- current GPU]" if vram_gb >= stage["vram_gb"] or stage["vram_gb"] == 0 else "  [verify -- VRAM marginal]"
         print(f"          Rec GPU    : {stage['rec_gpu']}{ok_tag}")
         print(f"          Command    : {build_command_str(stage['script'], manifest_path, output_dir)}")
 
@@ -467,7 +467,7 @@ def print_hardware_report(
     # -----------------------------------------------------------------------
     print()
     print(rule())
-    print(f"BLOCKED ON THIS MACHINE  ({n_blocked} / {n_run + n_blocked} scripts)  —  need a larger GPU")
+    print(f"BLOCKED ON THIS MACHINE  ({n_blocked} / {n_run + n_blocked} scripts)  --  need a larger GPU")
     print(rule())
     print("  These are quality-upgrade models. The placeholder_*.py scripts print")
     print("  requirements info only; run the gen_*.py equivalent on the larger GPU.")
@@ -588,11 +588,11 @@ def main():
     plan = []
     for stage in active_stages:
         if not stage["check"](manifest):
-            print(f"\n[SKIP] {stage['script']}  — no matching data in manifest")
+            print(f"\n[SKIP] {stage['script']}  -- no matching data in manifest")
             continue
         if not args.ignore_vram and vram_gb > 0 and stage["vram_gb"] > vram_gb:
             print(
-                f"\n[SKIP] {stage['script']}  — VRAM insufficient "
+                f"\n[SKIP] {stage['script']}  -- VRAM insufficient "
                 f"({vram_gb:.1f} GB available, {stage['vram_gb']} GB required). "
                 f"Pass --ignore-vram to override."
             )

@@ -43,7 +43,7 @@
 #   FLUX: 4-bit bitsandbytes quantisation collapses transformer from ~24 GB
 #   to ~6 GB. enable_model_cpu_offload() streams text encoder + VAE to CPU.
 #   enable_vae_tiling() (not slicing) is used here because the landscape
-#   1280×720 latent is large — tiling processes spatial sub-regions of the
+#   1280x720 latent is large -- tiling processes spatial sub-regions of the
 #   latent grid independently, keeping decode VRAM flat at any resolution.
 #   SDXL: FP16 UNet ~5 GB. CPU offload + VAE tiling keeps peak VRAM ~4-5 GB.
 #   Between images: torch.cuda.empty_cache() + gc.collect() after every gen.
@@ -63,7 +63,7 @@ from pathlib import Path
 import torch
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 OUTPUT_DIR  = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_background_images"
@@ -96,7 +96,7 @@ BACKGROUNDS = [
     },
 ]
 
-# Landscape 16:9 — background plates behind characters
+# Landscape 16:9 -- background plates behind characters
 WIDTH  = 1280
 HEIGHT = 720
 
@@ -108,7 +108,7 @@ MODELS = {
     "flux-schnell": {
         "model_id": "black-forest-labs/FLUX.1-schnell",
         "steps":    4,
-        "guidance": 0.0,   # guidance-distilled — CFG unused
+        "guidance": 0.0,   # guidance-distilled -- CFG unused
         "family":   "flux",
         "notes":    "Fast distilled FLUX, 4-bit quant, ~6 GB VRAM",
     },
@@ -247,7 +247,7 @@ def load_flux_pipeline(model_key: str):
     from transformers import BitsAndBytesConfig
 
     cfg = MODELS[model_key]
-    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — 4-bit quant (transformer) + VAE tiling...")
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) -- 4-bit quant (transformer) + VAE tiling...")
     bnb_cfg = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
@@ -265,7 +265,7 @@ def load_flux_pipeline(model_key: str):
         torch_dtype=torch.bfloat16,
     )
     pipe.enable_model_cpu_offload()
-    pipe.enable_vae_tiling()   # tiling for 1280×720 latent, not slicing
+    pipe.enable_vae_tiling()   # tiling for 1280x720 latent, not slicing
     return pipe
 
 
@@ -274,7 +274,7 @@ def load_sdxl_pipeline(model_key: str):
     from diffusers import StableDiffusionXLPipeline
 
     cfg = MODELS[model_key]
-    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — FP16 + CPU offload + VAE tiling...")
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) -- FP16 + CPU offload + VAE tiling...")
     pipe = StableDiffusionXLPipeline.from_pretrained(
         cfg["model_id"],
         torch_dtype=torch.float16,
@@ -354,8 +354,8 @@ def locale_from_manifest_path(path: str) -> str:
 
 def output_filename(bg: dict, model_key: str, multi_model: bool) -> str:
     """
-    Single model  → original filename unchanged  (bg-karnak-inner-sanctuary-v1.png)
-    All models    → model suffix inserted         (bg-karnak-inner-sanctuary-v1_flux-schnell.png)
+    Single model  -> original filename unchanged  (bg-karnak-inner-sanctuary-v1.png)
+    All models    -> model suffix inserted         (bg-karnak-inner-sanctuary-v1_flux-schnell.png)
     """
     if not multi_model:
         return bg["output"]
@@ -398,7 +398,7 @@ def run_model(model_key: str, backgrounds: list, out_dir: Path, args,
     for idx, bg in enumerate(backgrounds, start=1):
         fname    = output_filename(bg, model_key, multi_model)
         out_path = out_dir / fname
-        print(f"\n  [{idx}/{total}] {bg['asset_id']} (mood: {bg['color_mood']}) → {fname}")
+        print(f"\n  [{idx}/{total}] {bg['asset_id']} (mood: {bg['color_mood']}) -> {fname}")
 
         if out_path.exists() and not args.force:
             print(f"    [SKIP] already exists")
@@ -519,7 +519,7 @@ def main():
     ok_count    = sum(1 for r in all_results if r["status"] in ("success", "skipped"))
     total_bytes = sum(r["size_bytes"] for r in all_results)
     print("\n" + "=" * 60)
-    print(f"SUMMARY — gen_background_images ({args.model})")
+    print(f"SUMMARY -- gen_background_images ({args.model})")
     print("=" * 60)
     for r in all_results:
         label    = "OK" if r["status"] == "success" else r["status"].upper()

@@ -25,7 +25,7 @@
 # ---------------------------------------------------------------------------
 # Memory-saving techniques:
 #   Wav2Lip is a small GAN (~500 MB total) that processes face crops
-#   frame-by-frame.  No diffusion loop — VRAM usage is trivially low.
+#   frame-by-frame.  No diffusion loop -- VRAM usage is trivially low.
 #
 #   Pipeline:
 #     1. Face detection on each video frame using a lightweight S3FD or
@@ -36,7 +36,7 @@
 #     4. Paste the generated crop back into the full frame.
 #     5. Reassemble frames + merge original audio track.
 #
-# SETUP REQUIREMENT — Wav2Lip repo:
+# SETUP REQUIREMENT -- Wav2Lip repo:
 #   git clone https://github.com/Rudrabha/Wav2Lip
 #   cd Wav2Lip
 #   # Download checkpoint (choose one):
@@ -65,7 +65,7 @@ from pathlib import Path
 import torch
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 PROJECTS_ROOT = Path(__file__).resolve().parent.parent.parent / "projects"
 OUTPUT_DIR    = PROJECTS_ROOT / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
@@ -100,7 +100,7 @@ LIPSYNC_JOBS = [
         "output": "char-khamun-lipsync-s03-002.mp4",
         "text": "What kind of tomb requires silence enforced by execution?",
     },
-    # Note: voice_of_gate (vo-s04-002) has visual=false — no lipsync needed.
+    # Note: voice_of_gate (vo-s04-002) has visual=false -- no lipsync needed.
 ]
 
 WAV2LIP_CHECKPOINT = "checkpoints/wav2lip_gan.pth"   # relative to wav2lip_dir
@@ -116,7 +116,7 @@ def parse_args():
             "Model used:\n\n"
             "  Wav2Lip-GAN   Rudrabha/Wav2Lip  (local repo clone required)\n"
             "                GAN-based lip-sync, ~500 MB checkpoint.\n"
-            "                Processes face crops frame-by-frame — minimal VRAM.\n"
+            "                Processes face crops frame-by-frame -- minimal VRAM.\n"
             "                Falls back to ffmpeg audio-merge if repo is not present.\n\n"
             "  SETUP:\n"
             "    git clone https://github.com/Rudrabha/Wav2Lip\n"
@@ -207,20 +207,20 @@ def ensure_tts(manifest_path: str) -> None:
     """Auto-run gen_tts.py when VO WAV files are missing."""
     tts_script = Path(__file__).resolve().parent / "gen_tts.py"
     if not tts_script.exists():
-        print(f"[AUTO-TTS] gen_tts.py not found — skipping.")
+        print(f"[AUTO-TTS] gen_tts.py not found -- skipping.")
         return
-    print(f"\n[AUTO-TTS] VO WAVs missing — running gen_tts.py...")
+    print(f"\n[AUTO-TTS] VO WAVs missing -- running gen_tts.py...")
     cmd = [sys.executable, str(tts_script)]
     if manifest_path:
         cmd += ["--manifest", manifest_path]
     result = subprocess.run(cmd)
     if result.returncode != 0:
-        print("[AUTO-TTS] gen_tts.py exited with errors — some WAVs may still be missing.")
+        print("[AUTO-TTS] gen_tts.py exited with errors -- some WAVs may still be missing.")
     print()
 
 
 # ---------------------------------------------------------------------------
-# Strategy 1 — subprocess calling Wav2Lip's official inference.py
+# Strategy 1 -- subprocess calling Wav2Lip's official inference.py
 # ---------------------------------------------------------------------------
 def _run_wav2lip(
     wav2lip_dir: Path,
@@ -249,7 +249,7 @@ def _run_wav2lip(
         "--face", str(video_path),
         "--audio", str(audio_path),
         "--outfile", str(out_path),
-        "--resize_factor", "1",        # no resizing — keep input resolution
+        "--resize_factor", "1",        # no resizing -- keep input resolution
         "--nosmooth",                   # skip temporal smoothing for speed
     ]
     print(f"  [CMD] Running Wav2Lip inference...")
@@ -258,10 +258,10 @@ def _run_wav2lip(
 
 
 # ---------------------------------------------------------------------------
-# Strategy 2 — audio-merge passthrough (no face manipulation)
+# Strategy 2 -- audio-merge passthrough (no face manipulation)
 # ---------------------------------------------------------------------------
 def _find_ffmpeg() -> str:
-    """Return ffmpeg executable path — system PATH first, imageio_ffmpeg bundle fallback."""
+    """Return ffmpeg executable path -- system PATH first, imageio_ffmpeg bundle fallback."""
     import shutil
     exe = shutil.which("ffmpeg")
     if exe:
@@ -280,7 +280,7 @@ def _find_ffmpeg() -> str:
 def _merge_audio_into_video(video_path: Path, audio_path: Path, out_path: Path):
     """
     Fallback: replace the video's audio track with the VO using ffmpeg.
-    Frame content is unchanged — this validates pipeline I/O without
+    Frame content is unchanged -- this validates pipeline I/O without
     requiring the Wav2Lip repo to be present.
     Uses system ffmpeg if available, otherwise imageio_ffmpeg bundle.
     """
@@ -390,7 +390,7 @@ def main():
                     method = "wav2lip"
                     print("  [OK] Wav2Lip inference succeeded.")
                 else:
-                    print("  [WARN] Wav2Lip failed — falling back to audio merge.")
+                    print("  [WARN] Wav2Lip failed -- falling back to audio merge.")
 
             # Strategy 2: audio-merge passthrough
             if not success:
@@ -434,7 +434,7 @@ def main():
     passthrough_count = sum(1 for r in results if r.get("method") == "passthrough")
     mode_label = "Wav2Lip" if wav2lip_count else "passthrough"
     print("\n" + "=" * 60)
-    print(f"SUMMARY — gen_lipsync  [{mode_label}]")
+    print(f"SUMMARY -- gen_lipsync  [{mode_label}]")
     print("=" * 60)
     for r in results:
         tag = "OK" if r["status"] == "success" else r["status"].upper()
@@ -452,11 +452,11 @@ def main():
         print("NOTE: All clips used audio-merge passthrough (lips do not move).")
         print("  To enable real lip-sync, set up Wav2Lip:")
         print("    git clone https://github.com/Rudrabha/Wav2Lip")
-        print("    # Download wav2lip_gan.pth — see Wav2Lip repo README")
+        print("    # Download wav2lip_gan.pth -- see Wav2Lip repo README")
         print("    # Place at: Wav2Lip/checkpoints/wav2lip_gan.pth")
         print("    python gen_lipsync.py --wav2lip_dir Wav2Lip --force")
         print()
-        print("  UPGRADE — LatentSync 1.5 quality (needs RTX 4080 16 GB+):")
+        print("  UPGRADE -- LatentSync 1.5 quality (needs RTX 4080 16 GB+):")
         print("    python placeholder_for_lipsync.py")
 
 

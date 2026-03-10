@@ -45,7 +45,7 @@
 #   vae_slicing() splits the VAE decode into row-by-row chunks.
 #   SDXL: FP16 UNet ~5 GB. CPU offload keeps peak VRAM ~4-5 GB.
 #   Between images: torch.cuda.empty_cache() + gc.collect() after every gen.
-#   Resolution 512×768 (below SDXL native 1024 px) reduces activation VRAM.
+#   Resolution 512x768 (below SDXL native 1024 px) reduces activation VRAM.
 # ---------------------------------------------------------------------------
 
 import argparse
@@ -57,7 +57,7 @@ from pathlib import Path
 import torch
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 OUTPUT_DIR  = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_character_images"
@@ -129,7 +129,7 @@ MODELS = {
     "flux-schnell": {
         "model_id": "black-forest-labs/FLUX.1-schnell",
         "steps":    4,
-        "guidance": 0.0,   # guidance-distilled — CFG unused
+        "guidance": 0.0,   # guidance-distilled -- CFG unused
         "family":   "flux",
         "notes":    "Fast distilled FLUX, 4-bit quant, ~6 GB VRAM",
     },
@@ -217,7 +217,7 @@ def parse_args():
         "--bg-hint", type=str, default=None, dest="bg_hint",
         help=(
             "Optional prompt suffix appended to every character prompt to guide "
-            "background style — makes rembg removal more reliable. "
+            "background style -- makes rembg removal more reliable. "
             "The original pipeline prompt is preserved; this is appended. "
             "Example: --bg-hint \"plain white studio background, solid backdrop, no scenery\""
         ),
@@ -238,7 +238,7 @@ def load_flux_pipeline(model_key: str):
     from transformers import BitsAndBytesConfig
 
     cfg     = MODELS[model_key]
-    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — 4-bit quant (transformer)...")
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) -- 4-bit quant (transformer)...")
     bnb_cfg = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.bfloat16,
@@ -265,7 +265,7 @@ def load_sdxl_pipeline(model_key: str):
     from diffusers import StableDiffusionXLPipeline
 
     cfg = MODELS[model_key]
-    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) — FP16 + CPU offload...")
+    print(f"[MODEL] Loading {model_key} ({cfg['model_id']}) -- FP16 + CPU offload...")
     pipe = StableDiffusionXLPipeline.from_pretrained(
         cfg["model_id"],
         torch_dtype=torch.float16,
@@ -352,8 +352,8 @@ def locale_from_manifest_path(path: str) -> str:
 
 def output_filename(char: dict, model_key: str, multi_model: bool) -> str:
     """
-    Single model  → original filename unchanged  (char-amunhotep-v1.png)
-    All models    → model suffix inserted         (char-amunhotep-v1_flux-schnell.png)
+    Single model  -> original filename unchanged  (char-amunhotep-v1.png)
+    All models    -> model suffix inserted         (char-amunhotep-v1_flux-schnell.png)
     """
     if not multi_model:
         return char["output"]
@@ -396,7 +396,7 @@ def run_model(model_key: str, characters: list, out_dir: Path, args,
     for idx, char in enumerate(characters, start=1):
         fname    = output_filename(char, model_key, multi_model)
         out_path = out_dir / fname
-        print(f"\n  [{idx}/{total}] {char['asset_id']} → {fname}")
+        print(f"\n  [{idx}/{total}] {char['asset_id']} -> {fname}")
 
         if out_path.exists() and not args.force:
             print(f"    [SKIP] already exists")
@@ -507,7 +507,7 @@ def main():
     ok_count    = sum(1 for r in all_results if r["status"] in ("success", "skipped"))
     total_bytes = sum(r["size_bytes"] for r in all_results)
     print("\n" + "=" * 60)
-    print(f"SUMMARY — gen_character_images ({args.model})")
+    print(f"SUMMARY -- gen_character_images ({args.model})")
     print("=" * 60)
     for r in all_results:
         label = "OK" if r["status"] == "success" else r["status"].upper()
@@ -539,7 +539,7 @@ def main():
             for idx, r in enumerate(to_matte, start=1):
                 input_path  = Path(r["output"])
                 output_path = input_path.with_name(input_path.stem + "-rgba.png")
-                print(f"\n  [{idx}/{len(to_matte)}] {input_path.name} → {output_path.name}")
+                print(f"\n  [{idx}/{len(to_matte)}] {input_path.name} -> {output_path.name}")
 
                 if output_path.exists() and not args.force:
                     print(f"    [SKIP] already exists")

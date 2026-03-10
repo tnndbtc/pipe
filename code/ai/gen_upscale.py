@@ -1,11 +1,11 @@
 # =============================================================================
 # gen_upscale.py
-# 2× upscale character RGBA PNGs using Real-ESRGAN x4plus so they hold
-# quality when composited over 1280×720 background plates.
-# Input:  char-*-rgba.png  (512×768, from gen_character_mattes.py)
-# Output: char-*-upscaled.png  (1024×1536, RGBA preserved)
+# 2x upscale character RGBA PNGs using Real-ESRGAN x4plus so they hold
+# quality when composited over 1280x720 background plates.
+# Input:  char-*-rgba.png  (512x768, from gen_character_mattes.py)
+# Output: char-*-upscaled.png  (1024x1536, RGBA preserved)
 # Run AFTER gen_character_mattes.py (or use --auto-matte via gen_upscale.py directly).
-# STATUS: VALIDATED — runs on RTX 4060 8 GB (~2 GB VRAM). Auto-runs
+# STATUS: VALIDATED -- runs on RTX 4060 8 GB (~2 GB VRAM). Auto-runs
 #         gen_character_mattes.py if RGBA inputs are missing.
 # =============================================================================
 #
@@ -16,7 +16,7 @@
 #   Pillow>=10.0.0
 #   numpy>=1.24.0,<2.0.0
 #   opencv-python>=4.9.0
-#   (weights downloaded directly from GitHub releases — no huggingface_hub needed)
+#   (weights downloaded directly from GitHub releases -- no huggingface_hub needed)
 #
 # NOTE: basicsr/realesrgan install can fail on newer environments.
 # If `pip install realesrgan basicsr` errors, try:
@@ -27,24 +27,24 @@
 # ---------------------------------------------------------------------------
 # Memory-saving techniques:
 #   Real-ESRGAN x4plus is a compact RRDB network (~67 MB weights).
-#   VRAM usage is ~2 GB — trivially fits on any GPU.
+#   VRAM usage is ~2 GB -- trivially fits on any GPU.
 #
 #   Techniques used:
 #     1. half=True: loads the model in FP16, halving weight VRAM.
-#     2. tile=512, tile_pad=10: processes large images in 512×512 spatial
+#     2. tile=512, tile_pad=10: processes large images in 512x512 spatial
 #        tiles. Without tiling, the intermediate feature maps for a large
 #        image can OOM. With tiling, VRAM is capped at ~2 GB regardless
 #        of image size.
-#     3. outscale=2: upsamples 4× then downsamples to 2× target, which
-#        produces better antialiasing than native 2× upscaling.
+#     3. outscale=2: upsamples 4x then downsamples to 2x target, which
+#        produces better antialiasing than native 2x upscaling.
 #     4. Alpha channel is handled separately: RGB and alpha are split,
 #        RGB is upscaled, alpha is bilinear-resized, then recombined.
 #        This preserves the crisp matte edges from RMBG-1.4.
 #     5. torch.cuda.empty_cache() + gc.collect() after each image.
 #     6. CPU fallback: tile=0 on CPU (full image, no tiling needed as
-#        there is no VRAM limit — just RAM).
+#        there is no VRAM limit -- just RAM).
 #
-# UPGRADE: Background images are already at 1280×720 target resolution.
+# UPGRADE: Background images are already at 1280x720 target resolution.
 #   Uncomment the background entries in UPSCALE_TARGETS below if they
 #   appear soft after generation.
 # ---------------------------------------------------------------------------
@@ -60,18 +60,18 @@ import torch
 from PIL import Image
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_upscale"
 
 UPSCALE_TARGETS = [
-    # Characters — input is the RGBA PNG from gen_character_mattes.py
+    # Characters -- input is the RGBA PNG from gen_character_mattes.py
     {
         "asset_id": "char-ramesses_ka-v1",
         "input":    "char-ramesses_ka-v1-rgba.png",
         "output":   "char-ramesses_ka-v1-upscaled.png",
-        "scale":    2,   # 512×768 → 1024×1536
+        "scale":    2,   # 512x768 -> 1024x1536
     },
     {
         "asset_id": "char-amunhotep-v1",
@@ -97,13 +97,13 @@ UPSCALE_TARGETS = [
         "output":   "char-prisoner-v1-upscaled.png",
         "scale":    2,
     },
-    # Backgrounds — uncomment if generated images appear soft.
-    # Already at 1280×720 target resolution; only upscale if needed.
+    # Backgrounds -- uncomment if generated images appear soft.
+    # Already at 1280x720 target resolution; only upscale if needed.
     # {
     #     "asset_id": "bg-karnak-inner-sanctuary-v1",
     #     "input":    "bg-karnak-inner-sanctuary-v1.png",
     #     "output":   "bg-karnak-inner-sanctuary-v1-upscaled.png",
-    #     "scale":    2,   # 1280×720 → 2560×1440, renderer downscales back
+    #     "scale":    2,   # 1280x720 -> 2560x1440, renderer downscales back
     # },
     # {
     #     "asset_id": "bg-temple-forbidden-archives-v1",
@@ -126,15 +126,15 @@ REALESRGAN_CACHE_DIR   = Path(__file__).resolve().parent.parent.parent / ".cache
 # ---------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Upscale character RGBA PNGs 2× using Real-ESRGAN x4plus.",
+        description="Upscale character RGBA PNGs 2x using Real-ESRGAN x4plus.",
         epilog=(
             "Model used:\n\n"
             "  Real-ESRGAN x4plus    xinntao/Real-ESRGAN  (RealESRGAN_x4plus.pth)\n"
             "                        RRDB network, ~67 MB weights, ~2 GB VRAM.\n"
             "                        tile=512 (default) caps VRAM at ~2 GB for any image size.\n"
-            "                        outscale=2: runs 4× model then downsamples to 2× for\n"
-            "                        better antialiasing vs a native 2× model.\n"
-            "                        Alpha channel preserved (split → upscale RGB → resize alpha).\n\n"
+            "                        outscale=2: runs 4x model then downsamples to 2x for\n"
+            "                        better antialiasing vs a native 2x model.\n"
+            "                        Alpha channel preserved (split -> upscale RGB -> resize alpha).\n\n"
             "  This script has no --model flag; Real-ESRGAN x4plus is the only supported model."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -237,7 +237,7 @@ def upscale_image(upsampler, input_path: Path, output_path: Path, target_scale: 
     has_alpha = img.mode == "RGBA"
 
     if has_alpha:
-        # Split RGB and alpha — upscale RGB, resize alpha bilinearly
+        # Split RGB and alpha -- upscale RGB, resize alpha bilinearly
         r, g, b, a = img.split()
         rgb_img = Image.merge("RGB", (r, g, b))
         alpha_np = np.array(a)
@@ -248,9 +248,9 @@ def upscale_image(upsampler, input_path: Path, output_path: Path, target_scale: 
     # Convert to BGR numpy array (OpenCV convention used by RealESRGAN)
     rgb_bgr = cv2.cvtColor(np.array(rgb_img), cv2.COLOR_RGB2BGR)
 
-    # Run Real-ESRGAN at 4× then downscale to target_scale (e.g. 2×)
-    # outscale=2 means the returned image is 2× the input, using a 4×
-    # internal model for better quality than a native 2× model would give.
+    # Run Real-ESRGAN at 4x then downscale to target_scale (e.g. 2x)
+    # outscale=2 means the returned image is 2x the input, using a 4x
+    # internal model for better quality than a native 2x model would give.
     output_bgr, _ = upsampler.enhance(rgb_bgr, outscale=target_scale)
 
     # Convert back to RGB PIL Image
@@ -284,16 +284,16 @@ def ensure_mattes(manifest_path, output_dir: Path) -> None:
 
     mattes_script = Path(__file__).resolve().parent / "gen_character_mattes.py"
     if not mattes_script.exists():
-        print(f"[AUTO-MATTE] gen_character_mattes.py not found at {mattes_script} — skipping.")
+        print(f"[AUTO-MATTE] gen_character_mattes.py not found at {mattes_script} -- skipping.")
         return
 
-    print("\n[AUTO-MATTE] RGBA inputs missing — running gen_character_mattes.py first...")
+    print("\n[AUTO-MATTE] RGBA inputs missing -- running gen_character_mattes.py first...")
     cmd = [sys.executable, str(mattes_script), "--output_dir", str(output_dir)]
     if manifest_path:
         cmd += ["--manifest", manifest_path]
     result = subprocess.run(cmd)
     if result.returncode != 0:
-        print("[AUTO-MATTE] gen_character_mattes.py exited with errors — some inputs may still be missing.")
+        print("[AUTO-MATTE] gen_character_mattes.py exited with errors -- some inputs may still be missing.")
     print()
 
 
@@ -335,7 +335,7 @@ def main():
     for idx, target in enumerate(upscale_targets, start=1):
         input_path  = out_dir / target["input"]
         output_path = out_dir / target["output"]
-        print(f"\n[{idx}/{total}] Upscaling {target['asset_id']} ({target['scale']}×)...")
+        print(f"\n[{idx}/{total}] Upscaling {target['asset_id']} ({target['scale']}x)...")
 
         if output_path.exists() and not args.force:
             print(f"  [SKIP] {target['output']} already exists")
@@ -363,13 +363,13 @@ def main():
             # Report input dimensions
             with Image.open(str(input_path)) as probe:
                 iw, ih = probe.size
-            print(f"  Input:  {iw}×{ih} px  ({input_path.stat().st_size:,} bytes)")
+            print(f"  Input:  {iw}x{ih} px  ({input_path.stat().st_size:,} bytes)")
 
             size = upscale_image(upsampler, input_path, output_path, target["scale"])
 
             with Image.open(str(output_path)) as probe:
                 ow, oh = probe.size
-            print(f"  Output: {ow}×{oh} px  ({size:,} bytes)")
+            print(f"  Output: {ow}x{oh} px  ({size:,} bytes)")
             print(f"  [OK] {output_path}")
             results.append({
                 "asset_id": target["asset_id"],
@@ -404,11 +404,11 @@ def main():
 
     # Summary
     print("\n" + "=" * 60)
-    print("SUMMARY — gen_upscale")
+    print("SUMMARY -- gen_upscale")
     print("=" * 60)
     for r in results:
         tag = "OK" if r["status"] == "success" else r["status"].upper()
-        dims = f"  {r.get('input_size','?')} → {r.get('output_size','?')}" if r["status"] == "success" else ""
+        dims = f"  {r.get('input_size','?')} -> {r.get('output_size','?')}" if r["status"] == "success" else ""
         print(f"  [{tag}]{dims}  {r['output']}  ({r['size_bytes']:,} bytes)")
     ok_count = sum(1 for r in results if r["status"] in ("success", "skipped"))
     total_bytes = sum(r["size_bytes"] for r in results)

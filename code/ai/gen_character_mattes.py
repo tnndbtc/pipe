@@ -3,32 +3,32 @@
 # Remove backgrounds from character portrait PNGs, producing RGBA images
 # with transparent backgrounds ready for compositing over background plates.
 # Run AFTER gen_character_images.py.
-# STATUS: VALIDATED — script works, but RGBA outputs already exist in assets.
+# STATUS: VALIDATED -- script works, but RGBA outputs already exist in assets.
 #         No need to re-run unless character images are regenerated.
 # =============================================================================
 #
 # requirements.txt (pip install before running):
 #   rembg>=2.0.50
 #   Pillow>=10.0.0
-#   torch>=2.1.0       (optional — used only for GPU cache management)
+#   torch>=2.1.0       (optional -- used only for GPU cache management)
 #
 # ---------------------------------------------------------------------------
 # Hardware Target: NVIDIA RTX 4060 8 GB VRAM
 # ---------------------------------------------------------------------------
 # Memory-saving techniques:
 #   RMBG-1.4 is a lightweight BiRefNet segmentation model (~175 MB weights).
-#   VRAM usage is ~1-2 GB — the model trivially fits on any GPU.
+#   VRAM usage is ~1-2 GB -- the model trivially fits on any GPU.
 #
 #   Techniques used:
-#     1. torch.no_grad() during inference — no gradient graph stored.
-#     2. Input resized to 1024×1024 for inference, then mask is resized
+#     1. torch.no_grad() during inference -- no gradient graph stored.
+#     2. Input resized to 1024x1024 for inference, then mask is resized
 #        back to the original image dimensions before applying as alpha.
 #     3. torch.cuda.empty_cache() + gc.collect() after each image.
 #     4. CPU fallback: if CUDA is unavailable, the model runs on CPU at
 #        ~2-5 seconds per image (still acceptable for prototype runs).
 #
 # NOTE: briaai/RMBG-1.4 requires trust_remote_code=True.
-#   The model code is loaded directly from HuggingFace — review the
+#   The model code is loaded directly from HuggingFace -- review the
 #   model card at https://huggingface.co/briaai/RMBG-1.4 before running.
 #   No licence login required (non-commercial research licence).
 #
@@ -47,7 +47,7 @@ import torch
 from PIL import Image
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_character_mattes"
@@ -80,7 +80,7 @@ CHARACTERS = [
     },
 ]
 
-RMBG_MODEL = "u2net_human_seg"   # rembg model — optimised for human subject isolation
+RMBG_MODEL = "u2net_human_seg"   # rembg model -- optimised for human subject isolation
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--threshold", type=float, default=0.5,
-        help="Mask binarisation threshold (0.0–1.0). Lower = keep more of image."
+        help="Mask binarisation threshold (0.0-1.0). Lower = keep more of image."
     )
     parser.add_argument(
         "--manifest", type=str, default=None,
@@ -139,7 +139,7 @@ def load_from_manifest(manifest_path: str, asset_id_filter):
 # Model loader
 # ---------------------------------------------------------------------------
 def load_rmbg(device: str):
-    """Load rembg session (u2net_human_seg — optimised for human portraits)."""
+    """Load rembg session (u2net_human_seg -- optimised for human portraits)."""
     from rembg import new_session
 
     print(f"[MODEL] Loading rembg ({RMBG_MODEL})...")
@@ -270,7 +270,7 @@ def main():
 
     # Summary
     print("\n" + "=" * 60)
-    print("SUMMARY — gen_character_mattes")
+    print("SUMMARY -- gen_character_mattes")
     print("=" * 60)
     for r in results:
         tag = "OK" if r["status"] == "success" else r["status"].upper()
@@ -280,7 +280,7 @@ def main():
     print(f"\n{ok_count}/{total} completed | {total_bytes:,} bytes total")
     print(f"Manifest: {manifest_path}")
     print()
-    print("NEXT STEP: run gen_upscale.py to 2× upscale the RGBA PNGs.")
+    print("NEXT STEP: run gen_upscale.py to 2x upscale the RGBA PNGs.")
     print("NOTE: animated MP4 matting (char-*-anim.mp4) is Phase 2.")
 
 

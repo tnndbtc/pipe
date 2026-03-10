@@ -5,7 +5,7 @@
 # =============================================================================
 #
 # requirements.txt (pip install before running):
-#   audiocraft>=1.3.0        # Meta AudioCraft — includes MusicGen
+#   audiocraft>=1.3.0        # Meta AudioCraft -- includes MusicGen
 #   torch>=2.1.0
 #   torchaudio>=2.1.0
 #   soundfile>=0.12.0
@@ -38,7 +38,7 @@ from pathlib import Path
 import torch
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_music"
@@ -147,7 +147,7 @@ def load_from_manifest(manifest_path: str, asset_id_filter):
         manifest = json.load(f)
     music_items = manifest.get("music_items")
     if music_items is None:
-        return None  # section absent — caller falls back to hardcoded
+        return None  # section absent -- caller falls back to hardcoded
     if asset_id_filter:
         music_items = [j for j in music_items if j.get("shot_id") == asset_id_filter]
     return music_items
@@ -162,7 +162,7 @@ def load_musicgen(size: str, device: str):
 
     model_id = MUSICGEN_MEDIUM if size == "medium" else MUSICGEN_SMALL
     print(f"[MODEL] Loading MusicGen {size} ({model_id})...")
-    # AudioCraft models don't support .to(device) — pass device to get_pretrained()
+    # AudioCraft models don't support .to(device) -- pass device to get_pretrained()
     model = MusicGen.get_pretrained(model_id, device=device)
     print(f"[MODEL] MusicGen {size} ready.")
     return model
@@ -196,7 +196,7 @@ def main():
     if args.manifest:
         manifest_jobs = load_from_manifest(args.manifest, args.asset_id)
         if manifest_jobs is None:
-            print("[INFO] No music_items section in manifest — using hardcoded MUSIC_JOBS.")
+            print("[INFO] No music_items section in manifest -- using hardcoded MUSIC_JOBS.")
         elif not manifest_jobs:
             print("[WARN] music_items section is empty (or no match for --asset-id). Nothing to do.")
             return
@@ -269,7 +269,7 @@ def main():
 
     # Summary
     print("\n" + "=" * 60)
-    print("SUMMARY — gen_music")
+    print("SUMMARY -- gen_music")
     print("=" * 60)
     for r in results:
         tag = "OK" if r["status"] == "success" else r["status"].upper()
@@ -282,7 +282,7 @@ def main():
 
 if __name__ == "__main__":
     # -------------------------------------------------------------------------
-    # DISABLED — music is being created manually for now.
+    # DISABLED -- music is being created manually for now.
     # To re-enable, remove this block and uncomment the main() call below.
     # -------------------------------------------------------------------------
     raise SystemExit(

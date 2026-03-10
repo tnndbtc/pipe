@@ -3,12 +3,12 @@
 # Generate short sound-effect audio clips from text descriptions.
 # STATUS: VALIDATED
 # Supports two backends selected via --backend:
-#   audiogen       — Meta AudioGen (default, MIT licence, 4–8 GB VRAM)
-#   stable_audio_2 — Stability AI Stable Audio 2.0 (>=16 GB VRAM recommended)
+#   audiogen       -- Meta AudioGen (default, MIT licence, 4-8 GB VRAM)
+#   stable_audio_2 -- Stability AI Stable Audio 2.0 (>=16 GB VRAM recommended)
 # =============================================================================
 #
 # requirements.txt (pip install before running):
-#   audiocraft>=1.3.0        # Meta AudioCraft — includes AudioGen
+#   audiocraft>=1.3.0        # Meta AudioCraft -- includes AudioGen
 #   torch>=2.1.0
 #   torchaudio>=2.1.0
 #   soundfile>=0.12.0
@@ -18,8 +18,8 @@
 #
 # ---------------------------------------------------------------------------
 # Hardware targets:
-#   audiogen       — NVIDIA RTX 4060 8 GB VRAM (medium), 4 GB (small)
-#   stable_audio_2 — REQUIRES RTX 4090 OR BETTER (>=16 GB VRAM)
+#   audiogen       -- NVIDIA RTX 4060 8 GB VRAM (medium), 4 GB (small)
+#   stable_audio_2 -- REQUIRES RTX 4090 OR BETTER (>=16 GB VRAM)
 #                    RTX 4060 (8 GB) is insufficient for this backend.
 #                    Uses torch.float16 on CUDA automatically.
 # ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@
 #       memory overhead.
 #     - torch.cuda.empty_cache() + gc.collect() after each generation.
 #     - If the GPU is insufficient, set DEVICE = "cpu" via --device flag;
-#       AudioGen runs on CPU at roughly 0.3× real-time.
+#       AudioGen runs on CPU at roughly 0.3x real-time.
 #
 # NOTE: AudioCraft models are downloaded automatically from HuggingFace
 #   (facebook/audiogen-medium or facebook/audiogen-small, MIT licence).
@@ -50,7 +50,7 @@ from pathlib import Path
 import torch
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_sfx"
@@ -161,7 +161,7 @@ def load_from_manifest(manifest_path: str, asset_id_filter):
         manifest = json.load(f)
     sfx_items = manifest.get("sfx_items")
     if sfx_items is None:
-        return None  # section absent — caller falls back to hardcoded
+        return None  # section absent -- caller falls back to hardcoded
     if asset_id_filter:
         sfx_items = [j for j in sfx_items if j.get("shot_id") == asset_id_filter]
     return sfx_items
@@ -272,7 +272,7 @@ def load_audiogen(preference: str, device: str):
         model.set_generation_params(duration=1.0)
         model.generate(["test"])
         torch.cuda.empty_cache()
-        print("[MODEL] AudioGen medium fits — using medium.")
+        print("[MODEL] AudioGen medium fits -- using medium.")
         return model
     except (RuntimeError, torch.cuda.OutOfMemoryError) as exc:
         print(f"[WARN] AudioGen medium OOM ({exc}). Falling back to small.")
@@ -322,8 +322,8 @@ def _iter_sfx_tags(sfx_jobs, default_duration: float = 10.0):
     """
     Yield (shot_id, tag, duration_sec) for every clip to generate.
     Handles both formats:
-      hardcoded SFX_JOBS — {shot_id, duration, tags: [...]}
-      manifest sfx_items — {shot_id, tag, duration_sec}
+      hardcoded SFX_JOBS -- {shot_id, duration, tags: [...]}
+      manifest sfx_items -- {shot_id, tag, duration_sec}
     """
     for job in sfx_jobs:
         shot_id  = job.get("shot_id", "unknown")
@@ -348,7 +348,7 @@ def run_audiogen(sfx_jobs: list, out_dir: Path, model, args) -> list[dict]:
     for counter, (shot_id, tag, duration) in enumerate(all_tags, start=1):
         filename = build_output_filename(shot_id, tag)
         out_path = out_dir / filename
-        print(f"\n[{counter}/{total}] {shot_id} — \"{tag}\"")
+        print(f"\n[{counter}/{total}] {shot_id} -- \"{tag}\"")
 
         if out_path.exists():
             print(f"  [SKIP] {filename} already exists")
@@ -400,7 +400,7 @@ def run_stable_audio_2(sfx_jobs: list, out_dir: Path, pipe, args) -> list[dict]:
     for counter, (shot_id, tag, duration) in enumerate(all_tags, start=1):
         filename = build_output_filename(shot_id, tag)
         out_path = out_dir / filename
-        print(f"\n[{counter}/{total}] {shot_id} — \"{tag}\"")
+        print(f"\n[{counter}/{total}] {shot_id} -- \"{tag}\"")
         print(f"  steps={args.steps}  guidance={args.guidance}  duration={duration}s")
 
         if out_path.exists():
@@ -463,7 +463,7 @@ def main():
     elif args.manifest:
         manifest_jobs = load_from_manifest(args.manifest, args.asset_id)
         if manifest_jobs is None:
-            print("[INFO] No sfx_items section in manifest — using hardcoded SFX_JOBS.")
+            print("[INFO] No sfx_items section in manifest -- using hardcoded SFX_JOBS.")
         elif not manifest_jobs:
             print("[WARN] sfx_items section is empty (or no match for --asset-id). Nothing to do.")
             return
@@ -498,7 +498,7 @@ def main():
     ok_count    = sum(1 for r in results if r["status"] in ("success", "skipped"))
     total_bytes = sum(r["size_bytes"] for r in results)
     print("\n" + "=" * 60)
-    print(f"SUMMARY — gen_sfx ({args.backend})")
+    print(f"SUMMARY -- gen_sfx ({args.backend})")
     print("=" * 60)
     for r in results:
         label = "OK" if r["status"] == "success" else r["status"].upper()

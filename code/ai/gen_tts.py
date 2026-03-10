@@ -25,10 +25,10 @@
 # ---------------------------------------------------------------------------
 # Backend comparison:
 #
-#   kokoro  — 82 M params, CPU-only, very fast, good English/Chinese.
+#   kokoro  -- 82 M params, CPU-only, very fast, good English/Chinese.
 #             No VRAM required.
 #
-#   xtts    — XTTS v2 (~1.8 GB VRAM on GPU, runs on CPU too).
+#   xtts    -- XTTS v2 (~1.8 GB VRAM on GPU, runs on CPU too).
 #             Multilingual, voice-cloning from a short reference WAV.
 #             Reference WAVs are auto-generated from Kokoro on first run
 #             and cached in code/models/reference_voices/.
@@ -36,9 +36,9 @@
 #             NOTE: XTTS v2 does not support speed control; prosody is
 #             model-driven and typically more expressive than Kokoro.
 #
-#   melo    — MeloTTS (~200 MB), lightweight, good Chinese/English,
-#             multiple accent options (EN-US, EN-BR, EN-AU, ZH, JP, KR …).
-#             Supports speed control. ~200 MB — trivially fits in VRAM.
+#   melo    -- MeloTTS (~200 MB), lightweight, good Chinese/English,
+#             multiple accent options (EN-US, EN-BR, EN-AU, ZH, JP, KR ...).
+#             Supports speed control. ~200 MB -- trivially fits in VRAM.
 #
 # Output structure:
 #   assets/{locale}/{backend}/vo-*.wav
@@ -48,10 +48,10 @@
 #        assets/zh-Hans/kokoro/vo-s01-001.wav
 #
 # Model cache locations:
-#   XTTS v2  — default Coqui TTS cache  (Windows: %LOCALAPPDATA%\tts\)
-#   MeloTTS  — default HuggingFace cache  (~/.cache/huggingface/)
-#   Kokoro   — default HuggingFace cache  (~/.cache/huggingface/)
-#   XTTS reference WAVs — code/models/reference_voices/
+#   XTTS v2  -- default Coqui TTS cache  (Windows: %LOCALAPPDATA%\tts\)
+#   MeloTTS  -- default HuggingFace cache  (~/.cache/huggingface/)
+#   Kokoro   -- default HuggingFace cache  (~/.cache/huggingface/)
+#   XTTS reference WAVs -- code/models/reference_voices/
 # ---------------------------------------------------------------------------
 
 import argparse
@@ -66,7 +66,7 @@ import soundfile as sf
 import torch
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 PROJECTS_ROOT = Path(__file__).resolve().parent.parent.parent / "projects"
 MODELS_DIR    = Path(__file__).resolve().parent.parent / "models"
@@ -98,7 +98,7 @@ VO_ITEMS = [
         "speed": 0.8,
         "text": (
             "It does not speak of prayers, my king. It describes a mechanism. "
-            "A gate beneath the sand — capable of holding the Ka and Ba beyond the reach of death."
+            "A gate beneath the sand -- capable of holding the Ka and Ba beyond the reach of death."
         ),
         "emotion_note": "grave, deeply troubled",
     },
@@ -173,12 +173,12 @@ VO_ITEMS = [
         "speed": 0.75,
         # speed=0.75 gives a heavier, more supernatural cadence
         "text": "Who dares open the Gate again?",
-        "emotion_note": "ancient, commanding, cold — visual=false, VO only",
+        "emotion_note": "ancient, commanding, cold -- visual=false, VO only",
     },
     {
         "item_id": "vo-s04-003", "speaker": "amunhotep", "voice": "bm_george",
         "speed": 1.2,
-        "text": "My king — do not—",
+        "text": "My king -- do not--",
         "emotion_note": "desperate terror",
     },
     {
@@ -285,7 +285,7 @@ XTTS_LANG_MAP = {
     "i":     "it",
 }
 
-# Speaker gender — used to pick the gender-default reference WAV
+# Speaker gender -- used to pick the gender-default reference WAV
 XTTS_SPEAKER_GENDER = {
     "amunhotep":     "male",
     "ramesses_ka":   "male",
@@ -309,7 +309,7 @@ XTTS_REF_KOKORO_LANG = {
     "ja":    "j",
 }
 
-# Text to synthesise when creating a reference WAV — should be ~6–10 seconds
+# Text to synthesise when creating a reference WAV -- should be ~6-10 seconds
 XTTS_REF_SAMPLE_TEXT = {
     "en": (
         "This is a reference voice sample for speech synthesis. "
@@ -342,7 +342,7 @@ MELO_LANG_MAP = {
 }
 
 # speaker_id -> MeloTTS English accent string (used when melo_lang == "EN")
-# NOTE: MeloTTS EN is single-speaker — accent variants differ in accent only, not gender or voice.
+# NOTE: MeloTTS EN is single-speaker -- accent variants differ in accent only, not gender or voice.
 # All EN speakers will sound like the same female voice. Use Kokoro/XTTS for gender differentiation.
 MELO_ACCENT_MAP = {
     "amunhotep":     "EN-US",
@@ -364,7 +364,7 @@ def resolve_voice_from_style(voice_style: str, rules=None) -> tuple:
     Returns (kokoro_voice_id, match_reason).
     Falls back to 'bm_george' if nothing matches.
 
-    rules: list of (set_of_keywords, voice_id) — uses VOICE_STYLE_RULES if None.
+    rules: list of (set_of_keywords, voice_id) -- uses VOICE_STYLE_RULES if None.
     """
     effective_rules = rules if rules is not None else VOICE_STYLE_RULES
     lower = voice_style.lower()
@@ -384,11 +384,11 @@ def load_voice_profiles(path: str) -> dict:
     Load a voice-profiles JSON file and return a normalised profiles dict.
 
     Supported JSON keys (all optional):
-      description          — human-readable label, logged only
-      speaker_voice_map    — { speaker_id: kokoro_voice_id, ... }
-      speaker_speed_overrides — { speaker_id: float, ... }
-      locale_lang_map      — { locale_string: kokoro_lang_code, ... }
-      voice_style_rules    — [ { "keywords": [...], "voice": "..." }, ... ]
+      description          -- human-readable label, logged only
+      speaker_voice_map    -- { speaker_id: kokoro_voice_id, ... }
+      speaker_speed_overrides -- { speaker_id: float, ... }
+      locale_lang_map      -- { locale_string: kokoro_lang_code, ... }
+      voice_style_rules    -- [ { "keywords": [...], "voice": "..." }, ... ]
 
     The returned dict is merged on top of the built-in defaults at resolution
     time; keys present in the file win, missing keys fall back to built-ins.
@@ -503,7 +503,7 @@ def load_from_manifest(manifest_path: str, asset_id_filter, voice_profiles: dict
         pace        = tts.get("pace", "normal")
         locale      = tts.get("locale", "en")
 
-        # --- locale -> lang_code (resolve first — needed for voice defaults) --
+        # --- locale -> lang_code (resolve first -- needed for voice defaults) --
         locale_key = locale.lower()
         lang_code  = eff_locale_map.get(locale_key) or eff_locale_map.get(locale, "en-us")
 
@@ -606,10 +606,10 @@ def write_license_sidecar(wav_path: Path, model_name: str) -> None:
     Saved at: {wav_path.parent}/licenses/{wav_path.stem}.license.json
 
     Fields:
-      spdx_id             — "CC0" (AI-generated audio has no copyright owner)
-      attribution_required — false (CC0 requires none)
-      text                — human-readable provenance string
-      generator_model     — structured model/voice identifier for future resolvers
+      spdx_id             -- "CC0" (AI-generated audio has no copyright owner)
+      attribution_required -- false (CC0 requires none)
+      text                -- human-readable provenance string
+      generator_model     -- structured model/voice identifier for future resolvers
     """
     licenses_dir = wav_path.parent / "licenses"
     licenses_dir.mkdir(parents=True, exist_ok=True)
@@ -744,15 +744,15 @@ def ensure_xtts_ref_wav(speaker: str, xtts_lang: str) -> "Path | None":
     Return path to a reference WAV for XTTS voice cloning.
 
     Search priority:
-      1. code/models/reference_voices/{speaker}_{xtts_lang}.wav  — language-specific, user-placed
-      2. code/models/reference_voices/{speaker}.wav              — speaker default, user-placed
-      3. code/models/reference_voices/default_{gender}_{xtts_lang}.wav  — auto-generated lang default
-      4. code/models/reference_voices/default_{gender}.wav              — legacy fallback
+      1. code/models/reference_voices/{speaker}_{xtts_lang}.wav  -- language-specific, user-placed
+      2. code/models/reference_voices/{speaker}.wav              -- speaker default, user-placed
+      3. code/models/reference_voices/default_{gender}_{xtts_lang}.wav  -- auto-generated lang default
+      4. code/models/reference_voices/default_{gender}.wav              -- legacy fallback
       5. Auto-generate default_{gender}_{xtts_lang}.wav from Kokoro using native voices.
       6. Return None if auto-generation fails (XTTS will skip that item).
 
     For Chinese: auto-generates from zm_yunxi (male) / zf_xiaobei (female).
-    To provide custom voices, place 6–12 second mono WAVs in code/models/reference_voices/.
+    To provide custom voices, place 6-12 second mono WAVs in code/models/reference_voices/.
     """
     ref_dir = MODELS_DIR / "reference_voices"
     ref_dir.mkdir(parents=True, exist_ok=True)
@@ -798,7 +798,7 @@ def ensure_xtts_ref_wav(speaker: str, xtts_lang: str) -> "Path | None":
         return gender_lang_ref
     except Exception as exc:
         print(f"  [WARN] Reference WAV auto-generation failed: {exc}")
-        print(f"  [HINT] Place a 6–12 s WAV at: {gender_lang_ref}")
+        print(f"  [HINT] Place a 6-12 s WAV at: {gender_lang_ref}")
         return None
 
 
@@ -832,7 +832,7 @@ def run_xtts_backend(items: list, out_dir: Path) -> list:
         print(f"  Speaker    : {vo['speaker']}")
         print(f"  XTTS lang  : {xtts_lang}  (from lang_code={lang_code})")
         print(f"  Emotion    : {vo.get('emotion') or '(not set)'}")
-        print(f"  Speed note : not supported by XTTS v2 — uses model prosody")
+        print(f"  Speed note : not supported by XTTS v2 -- uses model prosody")
         print(f"  Text       : \"{vo['text'][:70]}{'...' if len(vo['text']) > 70 else ''}\"")
 
 
@@ -920,7 +920,7 @@ def run_melo_backend(items: list, out_dir: Path) -> list:
         lang_code = item.get("lang_code", "en-us")
         melo_lang = MELO_LANG_MAP.get(lang_code)
         if melo_lang is None:
-            print(f"  [WARN] {item['item_id']}: lang_code={lang_code} not supported by MeloTTS — skipping.")
+            print(f"  [WARN] {item['item_id']}: lang_code={lang_code} not supported by MeloTTS -- skipping.")
             unsupported.append({
                 "item_id": item["item_id"], "speaker": item["speaker"],
                 "output": str(out_dir / f"{item['item_id']}.wav"),
@@ -934,7 +934,7 @@ def run_melo_backend(items: list, out_dir: Path) -> list:
     # Only ZH is multi-speaker; all others produce the same voice regardless of speaker/gender.
     MELO_SINGLE_SPEAKER_LANGS = {"EN", "ZH", "JP", "KR", "FR", "ES"}
     for lang in set(lang_groups.keys()) & MELO_SINGLE_SPEAKER_LANGS:
-        print(f"  [WARN] MeloTTS {lang} is single-speaker — all characters will sound identical "
+        print(f"  [WARN] MeloTTS {lang} is single-speaker -- all characters will sound identical "
               f"(same female voice). Use Kokoro or XTTS for gender/voice differentiation.")
 
     results = list(unsupported)
@@ -1055,7 +1055,7 @@ def main():
             args.voices = str(auto_voices)
             print(f"[VOICES] Auto-detected: {auto_voices.name}  (locale={locale})")
         else:
-            print(f"[VOICES] No voices_{locale}.json found — using built-in lang defaults.")
+            print(f"[VOICES] No voices_{locale}.json found -- using built-in lang defaults.")
 
     # Load voice profiles from --voices file (optional)
     voice_profiles = None

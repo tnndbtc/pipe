@@ -5,7 +5,7 @@
 #
 #   svd           Stable Video Diffusion XT (default, recommended)
 #                 stabilityai/stable-video-diffusion-img2vid-xt
-#                 True img2vid — smooth, no flickering. ~7-8 GB VRAM.
+#                 True img2vid -- smooth, no flickering. ~7-8 GB VRAM.
 #
 #   animatediff   AnimateDiff v1-5-3 + SD1.5
 #                 guoyww/animatediff-motion-adapter-v1-5-3
@@ -35,23 +35,23 @@
 # SVD-specific:
 #   4. decode_chunk_size=4: VAE decodes 4 frames at a time instead of all 25,
 #      keeping peak decode VRAM within 8 GB.
-#   5. 512×512 resolution: SVD trained at 1024×576 but runs fine at 512×512
+#   5. 512x512 resolution: SVD trained at 1024x576 but runs fine at 512x512
 #      and stays safely within 8 GB.
 #
 # AnimateDiff-specific:
-#   6. 16 frames maximum: temporal attention scales with T², so ≤16 is
+#   6. 16 frames maximum: temporal attention scales with T^2, so <=16 is
 #      essential for 8 GB budget.
 # ---------------------------------------------------------------------------
 #
 # =============================================================================
-# MODEL REFERENCE — Image-to-Video with Text Prompt Support
+# MODEL REFERENCE -- Image-to-Video with Text Prompt Support
 # =============================================================================
 # The manifest file contains detailed action descriptions (e.g. "high priest
 # scrubbing forearm in horror, then binding arm with linen cloth"). Neither
 # SVD nor AnimateDiff can faithfully execute these directives. The models below
 # CAN follow image + text-prompt action descriptions. Listed for future upgrade.
 #
-# KEY:  ✓ = supports image + text prompt → video
+# KEY:  [ok] = supports image + text prompt -> video
 #       VRAM figures are for fp16 inference without quantization unless noted.
 # -----------------------------------------------------------------------------
 #
@@ -59,42 +59,42 @@
 #
 # CogVideoX-5B-I2V
 #   Repo    : THUDM/CogVideoX-5b-I2V  (HuggingFace)
-#   Input   : image + text prompt → video
+#   Input   : image + text prompt -> video
 #   Frames  : up to 49 frames (~6 sec at 8 fps)
 #   VRAM    : ~24 GB fp16  |  ~16 GB with int8 quantization
-#   GPU     : RTX 4090 (24 GB) — minimum for fp16
-#             RTX 3090 (24 GB) — works with int8
-#             A100 40 GB       — comfortable
+#   GPU     : RTX 4090 (24 GB) -- minimum for fp16
+#             RTX 3090 (24 GB) -- works with int8
+#             A100 40 GB       -- comfortable
 #   Notes   : Best local option for following specific action descriptions.
 #             Diffusers pipeline: CogVideoXImageToVideoPipeline
 #             pip install diffusers>=0.30.0 transformers accelerate
 #
 # Wan2.1-I2V-14B
 #   Repo    : Wan-AI/Wan2.1-I2V-14B  (HuggingFace)
-#   Input   : image + text prompt → video
+#   Input   : image + text prompt -> video
 #   Frames  : up to 81 frames (~5 sec at 16 fps)
 #   VRAM    : ~48 GB fp16  |  ~24 GB with int8 quantization
-#   GPU     : RTX 6000 Ada (48 GB) — minimum for fp16
-#             A100 80 GB            — recommended
-#             2× A100 40 GB         — works with model sharding
+#   GPU     : RTX 6000 Ada (48 GB) -- minimum for fp16
+#             A100 80 GB            -- recommended
+#             2x A100 40 GB         -- works with model sharding
 #   Notes   : Highest quality local model for directed character action.
 #             Diffusers pipeline: WanImageToVideoPipeline
 #             pip install diffusers>=0.32.0
 #
-# DynamiCrafter (image + text → video)
+# DynamiCrafter (image + text -> video)
 #   Repo    : Doubiiu/DynamiCrafter_1024  (HuggingFace)
-#   Input   : image + text prompt → video
+#   Input   : image + text prompt -> video
 #   Frames  : 16 frames
 #   VRAM    : ~16 GB fp16  |  ~10 GB with fp8
-#   GPU     : RTX 4080 (16 GB) — minimum
-#             RTX 3090 / 4090 (24 GB) — comfortable
+#   GPU     : RTX 4080 (16 GB) -- minimum
+#             RTX 3090 / 4090 (24 GB) -- comfortable
 #   Notes   : Older model, reasonable prompt following, lower quality than
 #             CogVideoX. No native diffusers pipeline; uses custom inference.
 #             GitHub: Doubiiu/DynamiCrafter
 #
 # I2VGen-XL
 #   Repo    : ali-vilab/i2vgen-xl  (HuggingFace)
-#   Input   : image + text prompt → video
+#   Input   : image + text prompt -> video
 #   Frames  : 16 frames
 #   VRAM    : ~18 GB fp16
 #   GPU     : RTX 4090 (24 GB)  |  A100 40 GB
@@ -106,81 +106,81 @@
 #
 # Kling 1.6 / 2.0  (Kuaishou)
 #   API     : https://klingai.com  /  https://kling.kuaishou.com
-#   Input   : image + text prompt → video
+#   Input   : image + text prompt -> video
 #   Frames  : up to 5 sec or 10 sec
-#   VRAM    : cloud — no local GPU needed
+#   VRAM    : cloud -- no local GPU needed
 #   Notes   : Best-in-class prompt following for specific character actions.
 #             Paid API. Python SDK available.
 #
 # RunwayML Gen-3 Alpha / Turbo
 #   API     : https://runwayml.com
-#   Input   : image + text prompt → video
-#   VRAM    : cloud — no local GPU needed
+#   Input   : image + text prompt -> video
+#   VRAM    : cloud -- no local GPU needed
 #   Notes   : Strong prompt adherence, good motion quality. Paid API.
 #             Python SDK: pip install runwayml
 #
 # Pika 2.2
 #   API     : https://pika.art
-#   Input   : image + text prompt → video
-#   VRAM    : cloud — no local GPU needed
+#   Input   : image + text prompt -> video
+#   VRAM    : cloud -- no local GPU needed
 #   Notes   : Good for cinematic portrait animation. Paid API.
 #
 # Luma Dream Machine
 #   API     : https://lumalabs.ai/dream-machine
-#   Input   : image + text prompt → video
-#   VRAM    : cloud — no local GPU needed
+#   Input   : image + text prompt -> video
+#   VRAM    : cloud -- no local GPU needed
 #   Notes   : Paid API. Smooth output, decent prompt following.
 #
 # --- CURRENT SCRIPT LIMITATIONS ----------------------------------------------
 #
 # RTX 4060 8 GB: only SVD and AnimateDiff fit in VRAM.
-#   SVD         — smooth motion, ignores text prompt entirely.
-#   AnimateDiff — reads text prompt but produces flickering workaround output.
+#   SVD         -- smooth motion, ignores text prompt entirely.
+#   AnimateDiff -- reads text prompt but produces flickering workaround output.
 #
 # Minimum GPU to run CogVideoX-5B-I2V (smallest viable local model):
 #   RTX 4090 24 GB  or  RTX 3090 24 GB (with int8 quantization)
 #
 # --- UPGRADE PLAN (revisit later) --------------------------------------------
 #
-# OPTION A — Rent a GPU, run Wan2.1-I2V-14B locally for ~$1-2 per test session
+# OPTION A -- Rent a GPU, run Wan2.1-I2V-14B locally for ~$1-2 per test session
 #
 #   Model    : Wan-AI/Wan2.1-I2V-14B  (free download from HuggingFace)
 #   License  : Accept on HuggingFace model page before downloading.
 #              Free for research/personal use. Check terms for commercial use.
 #   Download : huggingface-cli download Wan-AI/Wan2.1-I2V-14B
-#              (~28 GB, counts toward rental time — download takes ~10-15 min)
+#              (~28 GB, counts toward rental time -- download takes ~10-15 min)
 #
 #   GPU rental platforms:
-#     Vast.ai      https://vast.ai       — cheapest, spot marketplace
-#     RunPod       https://runpod.io     — easy UI, good for first-timers
-#     Lambda Labs  https://lambdalabs.com — clean, datacenter grade
-#     Paperspace   https://paperspace.com — Jupyter-friendly
+#     Vast.ai      https://vast.ai       -- cheapest, spot marketplace
+#     RunPod       https://runpod.io     -- easy UI, good for first-timers
+#     Lambda Labs  https://lambdalabs.com -- clean, datacenter grade
+#     Paperspace   https://paperspace.com -- Jupyter-friendly
 #
 #   Minimum GPU:
-#     A100 40 GB  — int8 quantized (~24 GB active VRAM), ~$0.50-1.50/hr spot
-#     A100 80 GB  — fp16 full precision,                  ~$2-3/hr
-#     RTX 6000 Ada 48 GB — fp16 comfortable,              ~$0.80-1.50/hr
+#     A100 40 GB  -- int8 quantized (~24 GB active VRAM), ~$0.50-1.50/hr spot
+#     A100 80 GB  -- fp16 full precision,                  ~$2-3/hr
+#     RTX 6000 Ada 48 GB -- fp16 comfortable,              ~$0.80-1.50/hr
 #
 #   Estimated cost for 5-experiment test session (amunhotep):
 #     ~15 min setup + download + ~25 min inference = ~45-60 min total
-#     A100 40 GB spot at $1/hr → ~$0.75-$1.00 for the whole session
+#     A100 40 GB spot at $1/hr -> ~$0.75-$1.00 for the whole session
 #
 #   Diffusers pipeline : WanImageToVideoPipeline
 #   Install            : pip install diffusers>=0.32.0
 #
-# OPTION B — Use fal.ai API (no GPU rental, pay per video)
+# OPTION B -- Use fal.ai API (no GPU rental, pay per video)
 #
 #   Platform : https://fal.ai
 #   Model    : Search "wan" on https://fal.ai/models to find Wan2.1/2.2 I2V
-#              endpoint. Verify model ID before coding — it changes.
+#              endpoint. Verify model ID before coding -- it changes.
 #   Pricing  : Check model page for rate (per output-second or GPU-second).
-#              Wan 2.2 @ 480p was quoted at ~$0.04/sec — verify current rate.
+#              Wan 2.2 @ 480p was quoted at ~$0.04/sec -- verify current rate.
 #              Confirm whether "/sec" means output video seconds or GPU seconds.
 #   Install  : pip install fal-client
 #   Auth     : Set FAL_KEY environment variable with your API key
 #   Upload   : Use fal_client.upload_file() to get a public URL for your PNG
 #              (fal.ai cannot read local files directly)
-#   Free credits on signup — enough to run a few test clips before paying.
+#   Free credits on signup -- enough to run a few test clips before paying.
 #
 #   General call pattern (verify exact parameter names on model page):
 #     import fal_client
@@ -205,7 +205,7 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# DEFAULTS — fully populated; script runs with no CLI flags.
+# DEFAULTS -- fully populated; script runs with no CLI flags.
 # ---------------------------------------------------------------------------
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects" / "the-pharaoh-who-defied-death" / "episodes" / "s01e01" / "assets"
 SCRIPT_NAME = "gen_character_animation"
@@ -291,7 +291,7 @@ SVD_DECODE_CHUNK = 4         # decode N frames at a time to stay within 8 GB
 SVD_WIDTH = 512
 SVD_HEIGHT = 512
 
-# motion_type → motion_bucket_id (0=still, 255=maximum motion)
+# motion_type -> motion_bucket_id (0=still, 255=maximum motion)
 MOTION_TYPE_BUCKET: dict[str, int] = {
     "idle":    60,    # subtle breathing / micro-movement
     "gesture": 110,   # arm/hand movement
@@ -301,7 +301,7 @@ MOTION_TYPE_BUCKET: dict[str, int] = {
 }
 
 # ---------------------------------------------------------------------------
-# Motion LoRAs — camera-movement LoRAs from guoyww (Apache 2.0)
+# Motion LoRAs -- camera-movement LoRAs from guoyww (Apache 2.0)
 # These add cinematic motion on top of static portraits.
 # ---------------------------------------------------------------------------
 # All LoRA repos live under guoyww/animatediff-motion-lora-<name>
@@ -316,7 +316,7 @@ MOTION_LORA_IDS: dict[str, str] = {
     "roll-ccw":             "guoyww/animatediff-motion-lora-rolling-anticlockwise",
 }
 
-# motion_type → LoRA name (used when --motion-lora auto)
+# motion_type -> LoRA name (used when --motion-lora auto)
 MOTION_TYPE_LORA: dict[str, str] = {
     "walk":    "zoom-in",    # dolly-in simulates forward movement
     "run":     "zoom-in",
@@ -337,12 +337,12 @@ def parse_args():
             "Models (--model):\n\n"
             "  svd           stabilityai/stable-video-diffusion-img2vid-xt\n"
             "                True img2vid. Smooth output, no flickering.\n"
-            "                FP16 + CPU offload, ~7-8 GB VRAM. 512×512.\n"
+            "                FP16 + CPU offload, ~7-8 GB VRAM. 512x512.\n"
             "                Does not use --strength, --motion-lora, or --guidance-scale.\n\n"
             "  animatediff   guoyww/animatediff-motion-adapter-v1-5-3\n"
             "                + runwayml/stable-diffusion-v1-5\n"
             "                AnimateDiffVideoToVideoPipeline (img2vid).\n"
-            "                FP16 + CPU offload, ~3-4 GB VRAM. 512×512.\n"
+            "                FP16 + CPU offload, ~3-4 GB VRAM. 512x512.\n"
             "                Use --strength 0.3-0.5 to reduce flickering.\n"
             "\n"
             "Next test command:\n\n"
@@ -537,9 +537,9 @@ def load_motion_loras(pipe, lora_names: list[str]) -> None:
 def resolve_lora_name(motion_lora_arg: str, motion_type: str) -> str | None:
     """
     Return the LoRA short-name to use for this clip, or None if disabled.
-    - 'none'    → None (skip LoRA)
-    - 'auto'    → look up MOTION_TYPE_LORA for motion_type; None if not mapped
-    - anything else → use as-is (validated by parse_args choices)
+    - 'none'    -> None (skip LoRA)
+    - 'auto'    -> look up MOTION_TYPE_LORA for motion_type; None if not mapped
+    - anything else -> use as-is (validated by parse_args choices)
     """
     if motion_lora_arg == "none":
         return None
@@ -561,12 +561,12 @@ def load_and_resize_image(image_path: Path, width: int, height: int = None):
     target_ratio = width / height
     src_ratio = w / h
     if src_ratio > target_ratio:
-        # image is wider than target — crop sides
+        # image is wider than target -- crop sides
         new_w = int(h * target_ratio)
         left = (w - new_w) // 2
         img = img.crop((left, 0, left + new_w, h))
     else:
-        # image is taller than target — crop top/bottom
+        # image is taller than target -- crop top/bottom
         new_h = int(w / target_ratio)
         top = (h - new_h) // 2
         img = img.crop((0, top, w, top + new_h))
@@ -655,7 +655,7 @@ def generate_svd_animation(
             orig_w, orig_h = tmp.size
         svd_w, svd_h = compute_svd_size(orig_w, orig_h, max_side=max(SVD_WIDTH, SVD_HEIGHT))
         image = load_and_resize_image(img_path, svd_w, svd_h)
-        print(f"  [SVD] input {orig_w}×{orig_h} → output {svd_w}×{svd_h}")
+        print(f"  [SVD] input {orig_w}x{orig_h} -> output {svd_w}x{svd_h}")
     else:
         print(f"  [WARN] Input image not found: {img_path}. Using grey init.")
         svd_w, svd_h = SVD_WIDTH, SVD_HEIGHT
@@ -686,7 +686,7 @@ def generate_svd_animation(
 # ---------------------------------------------------------------------------
 # Animation plan printer
 # ---------------------------------------------------------------------------
-_PROMPT_MIN_WORDS = 6  # fewer words → flag as unclear
+_PROMPT_MIN_WORDS = 6  # fewer words -> flag as unclear
 
 def _prompt_clarity(motion_desc: str) -> tuple[bool, str]:
     """
@@ -697,14 +697,14 @@ def _prompt_clarity(motion_desc: str) -> tuple[bool, str]:
         return False, "no motion description in manifest"
     words = motion_desc.split()
     if len(words) < _PROMPT_MIN_WORDS:
-        return False, f"description too short ({len(words)} words, need ≥{_PROMPT_MIN_WORDS})"
+        return False, f"description too short ({len(words)} words, need >={_PROMPT_MIN_WORDS})"
     return True, ""
 
 
 def print_animation_plan(animations: list, args) -> None:
     """
     Print, for every clip, what motion description was read from the manifest
-    and what inference parameters will be used — before any model is loaded.
+    and what inference parameters will be used -- before any model is loaded.
     """
     W = 70
     print("\n" + "=" * W)
@@ -739,7 +739,7 @@ def print_animation_plan(animations: list, args) -> None:
             for l in lines[1:]:
                 print(indent + l)
         else:
-            print(f"    motion_desc  : [NOT CLEAR — {reason}]")
+            print(f"    motion_desc  : [NOT CLEAR -- {reason}]")
             print(f"                   Add a detailed 'description' to this character's")
             print(f"                   motion block in the manifest to improve results.")
 
@@ -752,7 +752,7 @@ def print_animation_plan(animations: list, args) -> None:
             )
             print(f"    --- SVD parameters ---")
             print(f"    frames         : {SVD_NUM_FRAMES}  (SVD-XT fixed)")
-            print(f"    motion_bucket  : {bucket}  (0=still → 255=max motion)")
+            print(f"    motion_bucket  : {bucket}  (0=still -> 255=max motion)")
             print(f"    fps_id         : {args.fps_id}  (lower=faster apparent motion)")
             print(f"    noise_aug      : {args.noise_aug}")
             print(f"    NOTE: SVD does not use the text prompt.")
@@ -768,7 +768,7 @@ def print_animation_plan(animations: list, args) -> None:
             if is_clear:
                 print(f"    NOTE: prompt IS used by AnimateDiff (text guides the motion).")
             else:
-                print(f"    NOTE: prompt will be generic — improve manifest description")
+                print(f"    NOTE: prompt will be generic -- improve manifest description")
                 print(f"          for better directed motion.")
 
         print(f"    output         : {anim['output']}")
@@ -803,7 +803,7 @@ def run_params_experiments(params_path: str, pipe, input_dir: Path, out_dir: Pat
         raise SystemExit("[ERROR] params file must have 'asset_id' or 'asset_ids'.")
 
     if model != "svd":
-        raise SystemExit(f"[ERROR] params file model='{model}' — only 'svd' is supported in --params mode.")
+        raise SystemExit(f"[ERROR] params file model='{model}' -- only 'svd' is supported in --params mode.")
 
     total_jobs = len(asset_ids) * len(experiments)
     print("\n" + "=" * 70)
@@ -1014,7 +1014,7 @@ def main():
 
     # Summary
     print("\n" + "=" * 60)
-    print("SUMMARY — gen_character_animation")
+    print("SUMMARY -- gen_character_animation")
     print("=" * 60)
     for r in results:
         tag = "OK" if r["status"] == "success" else r["status"].upper()
