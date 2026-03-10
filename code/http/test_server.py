@@ -3589,6 +3589,31 @@ placeholder="Enter your story here"></textarea>
     imgRow.appendChild(wrap);
   }
 
+  // Load previously saved AI-generated images from disk and inject into cards
+  async function _aiLoadSavedImages() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    try {
+      const r = await fetch('/api/ai_images?slug=' + encodeURIComponent(_mediaSlug)
+                            + '&ep_id=' + encodeURIComponent(_mediaEpId));
+      if (!r.ok) return;
+      const data = await r.json();
+      for (const [bgId, files] of Object.entries(data)) {
+        if (!_mediaResults || !_mediaResults[bgId]) continue;
+        const existing = _mediaResults[bgId].images || [];
+        for (const f of files) {
+          // Skip if already injected (same url)
+          if (existing.some(function(e) { return e.url === f.url; })) continue;
+          const candidate = {
+            type: 'image', source: 'ai',
+            url: f.url, path: f.path,
+            score: null, filename: f.filename,
+          };
+          _aiGenInjectResult(bgId, candidate);
+        }
+      }
+    } catch(e) {}
+  }
+
   // On page load: resume any in-flight AI gen jobs (B5)
   function _aiGenRestorePending() {
     const pending = _aiGenPendingGet();
@@ -3786,6 +3811,7 @@ placeholder="Enter your story here"></textarea>
         _mediaRecommendedSeq = d.recommended_sequence || null;
         await _mediaLoadShotMap();
         _mediaRenderResults(_mediaResults);
+        await _aiLoadSavedImages();
       } else if (d.status === 'failed') {
         clearInterval(_mediaPollTimer); _mediaPollTimer = null;
         _mediaSetStatus('Batch failed: ' + (d.error || 'unknown'), false);
@@ -4748,6 +4774,7 @@ placeholder="Enter your story here"></textarea>
               + totalImg2 + ' images + ' + totalVid2 + ' videos'
               + elapsed2 + '.', false);
             _mediaRenderResults(_mediaResults);
+            await _aiLoadSavedImages();
             _aiGenRestorePending();
             // Also restore saved selections on top of batch results
             await _mediaLoadSavedSelections();
@@ -10131,6 +10158,41 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        # ── AI Images: list saved AI-generated images for an episode ────────────
+        elif parsed.path == "/api/ai_images":
+            params  = parse_qs(parsed.query)
+            slug    = params.get("slug",  [""])[0].strip()
+            ep_id   = params.get("ep_id", [""])[0].strip()
+            if not slug or not ep_id:
+                body = json.dumps({"error": "slug and ep_id required"}).encode()
+                self.send_response(400)
+            else:
+                bg_root = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                       "assets", "backgrounds")
+                result = {}
+                if os.path.isdir(bg_root):
+                    for bg_id in sorted(os.listdir(bg_root)):
+                        bg_dir = os.path.join(bg_root, bg_id)
+                        if not os.path.isdir(bg_dir):
+                            continue
+                        ai_files = sorted(
+                            f for f in os.listdir(bg_dir)
+                            if f.startswith("ai_") and f.endswith(".png")
+                        )
+                        if ai_files:
+                            result[bg_id] = [
+                                {"filename": f,
+                                 "path":     os.path.join(bg_dir, f),
+                                 "url":      "file://" + os.path.join(bg_dir, f)}
+                                for f in ai_files
+                            ]
+                body = json.dumps(result).encode()
+                self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # ── AI Job Status: proxy to AI server (GET /api/ai_job_status) ────────────
         elif parsed.path == "/api/ai_job_status":
             params = parse_qs(parsed.query)
@@ -12225,7 +12287,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/diagnose_pipeline",
                   "/api/media_batches", "/api/media_batch_status",
                   "/api/media_batch", "/api/media_confirm",
-                  "/api/ai_job_status",
+                  "/api/ai_images", "/api/ai_job_status",
                   "/api/serve_media_file",
                   "/api/music_loop_candidates", "/api/music_timeline",
                   "/api/music_prepare_loops", "/api/music_review_pack",
