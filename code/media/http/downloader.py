@@ -28,19 +28,719 @@ output_dir layout (created by this module):
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import math
 import random
+import re
+import threading
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 import requests
 
 log = logging.getLogger("downloader")
 
 _USER_AGENT = "media-fetcher/1.0 (+offline-pipeline)"
+
+# ---------------------------------------------------------------------------
+# License gate — RULE 1 + RULE 2
+# ---------------------------------------------------------------------------
+
+ACCEPTED_LICENSES: frozenset = frozenset({"CC0", "Public Domain", "CC BY", "PDM"})
+ACCEPTED_PREFIXES: tuple = (
+    "CC0", "Public Domain",
+    "CC BY 1", "CC BY 2", "CC BY 3", "CC BY 4",
+)
+
+def is_license_acceptable(license_summary: str) -> bool:
+    """Central gate: return True only for commercially safe, derivative-friendly licenses."""
+    if not license_summary:
+        return False
+    s = license_summary.strip()
+    if s in ACCEPTED_LICENSES:
+        return True
+    if any(s.startswith(p) for p in ACCEPTED_PREFIXES):
+        return True
+    return False
+
+
+ALLOWLIST_COLLECTIONS: frozenset = frozenset({
+    "nasa", "metropolitanmuseumofart", "smithsonian",
+})
+
+DOWNLOAD_ALLOWLIST: list = [
+    "images.pexels.com", "videos.pexels.com", "cdn.pixabay.com",
+    "upload.wikimedia.org", "*.wikimedia.org",
+    "archive.org", "ia*.us.archive.org", "ia*.archive.org",
+    "api.europeana.eu", "europeanastatic.eu", "*.europeana.eu",
+    "live.staticflickr.com", "farm*.staticflickr.com",
+    "cdn.openverse.engineering", "api.openverse.org",
+    "cdn.freesound.org", "freesound.org",
+    "*.openverse.engineering",
+]
+
+def _check_download_allowlist(url: str) -> bool:
+    try:
+        hostname = urlparse(url).hostname or ""
+        return any(fnmatch.fnmatch(hostname, p) for p in DOWNLOAD_ALLOWLIST)
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# License normalizers
+# ---------------------------------------------------------------------------
+
+def _normalize_collections(raw) -> list:
+    if isinstance(raw, list):
+        return [c.lower().strip() for c in raw]
+    if raw:
+        return [str(raw).lower().strip()]
+    return []
+
+
+def _normalize_license(licenseurl: str, collections: list) -> str:
+    """Normalize an Internet Archive licenseurl + collections list to a short license string."""
+    CC_MAP = {
+        "creativecommons.org/publicdomain/zero":  "CC0",
+        "creativecommons.org/licenses/by/":        "CC BY",
+        "creativecommons.org/licenses/by-sa/":     "",
+        "creativecommons.org/licenses/by-nd/":     "",
+        "creativecommons.org/licenses/by-nc/":     "",
+        "creativecommons.org/licenses/by-nc-sa/":  "",
+        "creativecommons.org/licenses/by-nc-nd/":  "",
+        "creativecommons.org/publicdomain/mark/":  "Public Domain",
+    }
+    if licenseurl:
+        lu = licenseurl.lower()
+        for pattern, short in CC_MAP.items():
+            if pattern in lu:
+                if not short:
+                    return ""
+                if short in ("CC0", "Public Domain"):
+                    return short
+                version = re.search(r"/(\d+\.\d+)/?", licenseurl)
+                return f"{short} {version.group(1)}" if version else short
+    if any(c in ALLOWLIST_COLLECTIONS for c in collections):
+        return "Public Domain"
+    return ""
+
+
+def _normalize_openverse_license(result: dict) -> str:
+    lic = (result.get("license") or "").lower()
+    version = result.get("license_version") or ""
+    LICENSE_DISPLAY = {
+        "cc0": "CC0", "pdm": "Public Domain",
+        "by": "CC BY", "by-sa": "CC BY-SA", "by-nd": "CC BY-ND",
+        "by-nc": "CC BY-NC", "by-nc-sa": "CC BY-NC-SA", "by-nc-nd": "CC BY-NC-ND",
+    }
+    short = LICENSE_DISPLAY.get(lic, lic.upper())
+    if version and short not in {"CC0", "Public Domain"}:
+        return f"{short} {version}"
+    return short
+
+
+def _normalize_europeana_license(rights_uri: str) -> str:
+    uri = (rights_uri or "").lower()
+    if "publicdomain/zero" in uri:    return "CC0"
+    if "publicdomain/mark" in uri:    return "Public Domain"
+    if "/licenses/by/4" in uri:       return "CC BY 4.0"
+    if "/licenses/by/3" in uri:       return "CC BY 3.0"
+    if "/licenses/by/2" in uri:       return "CC BY 2.0"
+    if "/licenses/by/1" in uri:       return "CC BY 1.0"
+    if "/licenses/by-sa/" in uri:     return ""
+    if "/licenses/by-nd/" in uri:     return ""
+    if "/licenses/by-nc" in uri:      return ""
+    if "rightsstatements.org" in uri: return ""
+    return ""
+
+
+def _normalize_wikimedia_license(short_name: str) -> str:
+    s = short_name.strip()
+    if s.lower() in {"public domain", "pd"}: return "Public Domain"
+    if s.lower() in {"cc0", "cc 0"}:         return "CC0"
+    return s
+
+
+def _normalize_freesound_license(lic: str) -> str:
+    if lic == "Creative Commons 0":        return "CC0"
+    if lic == "Attribution":               return "CC BY"
+    if lic == "Attribution NonCommercial": return ""
+    return ""
+
+
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text).strip()
+
+
+def _normalize_creator(creator) -> str:
+    if isinstance(creator, list): return ", ".join(str(c) for c in creator)
+    return str(creator) if creator else ""
+
+
+def _normalize_subject(subject) -> list:
+    if isinstance(subject, list): return [str(s) for s in subject]
+    s = str(subject) if subject else ""
+    if ";" in s: return [x.strip() for x in s.split(";") if x.strip()]
+    if "|" in s: return [x.strip() for x in s.split("|") if x.strip()]
+    return [s] if s else []
+
+
+def _normalize_url_for_dedup(url: str) -> str:
+    if not url: return ""
+    try:
+        p = urlparse(url.lower())
+        return urlunparse((p.scheme, p.netloc, p.path.rstrip("/"), "", "", ""))
+    except Exception:
+        return url.lower().rstrip("/")
+
+
+# ---------------------------------------------------------------------------
+# Openverse OAuth2 token management
+# ---------------------------------------------------------------------------
+
+_openverse_token: dict = {"token": "", "expires_at": 0.0}
+_openverse_lock = threading.Lock()
+
+
+def _get_openverse_token(api_keys: dict) -> str:
+    """Get a valid Openverse Bearer token, refreshing proactively if near expiry."""
+    client_id = api_keys.get("openverse_client_id", "")
+    client_secret = api_keys.get("openverse_client_secret", "")
+    if not client_id or not client_secret:
+        return ""
+    with _openverse_lock:
+        now = time.monotonic()
+        if _openverse_token["token"] and now < _openverse_token["expires_at"]:
+            return _openverse_token["token"]
+        try:
+            r = requests.post(
+                "https://api.openverse.org/v1/auth_tokens/token/",
+                data={"client_id": client_id, "client_secret": client_secret,
+                      "grant_type": "client_credentials"},
+                headers={"User-Agent": _USER_AGENT},
+                timeout=_TIMEOUT,
+            )
+            r.raise_for_status()
+            data = r.json()
+            token = data["access_token"]
+            expires_in = int(data.get("expires_in", 86400))
+            _openverse_token["token"] = token
+            _openverse_token["expires_at"] = now + expires_in - 60
+            log.info("Openverse token refreshed; expires in %ds", expires_in)
+            return token
+        except Exception as exc:
+            log.warning("Openverse token refresh failed: %s", exc)
+            return ""
+
+
+# ---------------------------------------------------------------------------
+# New source: Openverse images
+# ---------------------------------------------------------------------------
+
+def _source_search_openverse_images(
+    api_keys: dict, query: str, per_page: int, backoff: list, extra_params: dict | None = None,
+) -> list:
+    key = ("openverse", "image", query, per_page, tuple(sorted((extra_params or {}).items())))
+    if key in _search_cache: return _search_cache[key]
+
+    token = _get_openverse_token(api_keys)
+    headers: dict = {"User-Agent": _USER_AGENT}
+    if token: headers["Authorization"] = f"Bearer {token}"
+
+    # Unauthenticated Openverse requests are limited to page_size=20
+    max_page = 500 if token else 20
+    params: dict = {"q": query, "license": "cc0,by",
+                    "page_size": min(per_page, max_page), "filter_dead": "true", "extension": "jpg,png"}
+    if extra_params: params.update(extra_params)
+
+    def call():
+        r = requests.get("https://api.openverse.org/v1/images/",
+                         headers=headers, params=params, timeout=_TIMEOUT)
+        r.raise_for_status()
+        return r.json().get("results", [])
+
+    log.info("Openverse search images q=%r per_page=%d", query, per_page)
+    try: results = _with_backoff(call, backoff)
+    except Exception as exc:
+        log.warning("Openverse search failed: %s", exc)
+        _search_cache[key] = []; return []
+
+    candidates = []
+    for result in results:
+        license_summary = _normalize_openverse_license(result)
+        if not is_license_acceptable(license_summary): continue
+        source_id = result.get("id", "")
+        title = result.get("title") or ""
+        author = result.get("creator") or ""
+        attr_required = result.get("license") not in {"cc0", "pdm"}
+        attr_text = result.get("attribution") or (
+            f'"{title}" by {author} / openverse / {license_summary}' if author
+            else f'"{title}" / openverse / {license_summary}')
+        candidates.append({
+            "source_site": "openverse", "source_id": source_id,
+            "asset_page_url": result.get("foreign_landing_url", ""),
+            "file_url": result.get("url", ""),
+            "preview_url": result.get("thumbnail", ""),
+            "title": title, "description": "",
+            "tags": [t["name"] for t in result.get("tags", []) if isinstance(t, dict)],
+            "photographer": author, "license_summary": license_summary,
+            "license_url": result.get("license_url", ""),
+            "query_used": query,
+            "width": result.get("width") or 0, "height": result.get("height") or 0,
+            "attribution_required": attr_required, "attribution_text": attr_text,
+            "provider": result.get("provider", ""),
+        })
+    _search_cache[key] = candidates
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# New source: Wikimedia Commons images
+# ---------------------------------------------------------------------------
+
+def _source_search_wikimedia_images(
+    api_keys: dict, query: str, per_page: int, backoff: list, extra_params: dict | None = None,
+) -> list:
+    key = ("wikimedia", "image", query, per_page, tuple(sorted((extra_params or {}).items())))
+    if key in _search_cache: return _search_cache[key]
+
+    token = api_keys.get("wikimedia_api_token", "")
+    headers: dict = {"User-Agent": _USER_AGENT}
+    if token: headers["Authorization"] = f"Bearer {token}"
+
+    params: dict = {
+        "action": "query", "generator": "search", "gsrnamespace": 6,
+        "gsrsearch": query, "gsrlimit": min(per_page, 50),
+        "prop": "imageinfo",
+        "iiprop": "url|size|dimensions|extmetadata|mime|mediatype",
+        "iiurlwidth": 600, "format": "json",
+    }
+    if extra_params: params.update(extra_params)
+
+    def call():
+        r = requests.get("https://commons.wikimedia.org/w/api.php",
+                         headers=headers, params=params, timeout=_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+    log.info("Wikimedia search images q=%r per_page=%d", query, per_page)
+    try: data = _with_backoff(call, backoff)
+    except Exception as exc:
+        log.warning("Wikimedia search failed: %s", exc)
+        _search_cache[key] = []; return []
+
+    pages = (data.get("query") or {}).get("pages", {})
+    ACCEPTED_MIMES = {"image/jpeg", "image/png", "image/gif"}
+    candidates = []
+
+    for page in pages.values():
+        ii_list = page.get("imageinfo") or []
+        if not ii_list: continue
+        ii = ii_list[0]
+        if ii.get("mime", "") not in ACCEPTED_MIMES: continue
+
+        meta = ii.get("extmetadata", {})
+        title = page.get("title", "").replace("File:", "", 1).strip()
+        author = _strip_html((meta.get("Artist") or {}).get("value", ""))
+        license_short_raw = (meta.get("LicenseShortName") or {}).get("value", "")
+        license_summary = _normalize_wikimedia_license(license_short_raw)
+        if not is_license_acceptable(license_summary): continue
+
+        license_url = (meta.get("LicenseUrl") or {}).get("value", "")
+        categories_raw = (meta.get("Categories") or {}).get("value", "")
+        tags = [c.strip() for c in categories_raw.split("|") if c.strip()]
+        asset_page = ii.get("descriptionurl", "")
+        source_id = page.get("title", "")
+        attr_required = (meta.get("AttributionRequired") or {}).get("value", "").lower() == "true"
+        attr_text = (f'"{title}" by {author} / Wikimedia Commons / {license_summary}' if author
+                     else f'"{title}" / Wikimedia Commons / {license_summary}')
+
+        candidates.append({
+            "source_site": "wikimedia", "source_id": source_id,
+            "asset_page_url": asset_page,
+            "file_url": ii.get("url", ""),
+            "preview_url": ii.get("thumburl") or ii.get("url", ""),
+            "title": title, "description": "", "tags": tags,
+            "photographer": author, "license_summary": license_summary,
+            "license_url": license_url, "query_used": query,
+            "width": ii.get("width", 0), "height": ii.get("height", 0),
+            "attribution_required": attr_required, "attribution_text": attr_text,
+        })
+    _search_cache[key] = candidates
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# New source: Europeana images
+# ---------------------------------------------------------------------------
+
+def _source_search_europeana_images(
+    api_keys: dict, query: str, per_page: int, backoff: list, extra_params: dict | None = None,
+) -> list:
+    europeana_key = api_keys.get("europeana", "")
+    if not europeana_key:
+        log.debug("Europeana API key not configured; skipping")
+        return []
+
+    key = ("europeana", "image", query, per_page, tuple(sorted((extra_params or {}).items())))
+    if key in _search_cache: return _search_cache[key]
+
+    params: dict = {
+        "wskey": europeana_key, "query": query, "qf": "TYPE:IMAGE",
+        "reusability": "open", "media": "true", "thumbnail": "true",
+        "rows": min(per_page, 100), "cursor": "*", "profile": "rich",
+    }
+    if extra_params: params.update(extra_params)
+
+    def call():
+        r = requests.get("https://api.europeana.eu/record/v2/search.json",
+                         headers={"User-Agent": _USER_AGENT}, params=params, timeout=_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+    log.info("Europeana search images q=%r per_page=%d", query, per_page)
+    try: data = _with_backoff(call, backoff)
+    except Exception as exc:
+        log.warning("Europeana search failed: %s", exc)
+        _search_cache[key] = []; return []
+
+    items = data.get("items") or []
+    candidates = []
+    for item in items:
+        if item.get("previewNoDistribute"): continue
+        url = (item.get("edmIsShownBy") or [""])[0]
+        if not url: continue
+        rights_uri = (item.get("rights") or [""])[0]
+        license_summary = _normalize_europeana_license(rights_uri)
+        if not is_license_acceptable(license_summary): continue
+
+        preview_url = (item.get("edmPreview") or [""])[0]
+        title = (item.get("title") or [""])[0]
+        author = ", ".join(item.get("dcCreator") or [])
+        provider = (item.get("dataProvider") or [""])[0]
+        guid = item.get("guid", "")
+        source_id = item.get("id", "")
+        attr_required = license_summary not in {"CC0", "Public Domain"}
+        attr_text = (f'"{title}" by {author} / {provider} / {license_summary}' if author
+                     else f'"{title}" / {provider} / {license_summary}')
+
+        candidates.append({
+            "source_site": "europeana", "source_id": source_id,
+            "asset_page_url": guid,
+            "file_url": url, "preview_url": preview_url,
+            "title": title, "description": "", "tags": [],
+            "photographer": author, "license_summary": license_summary,
+            "license_url": rights_uri, "query_used": query,
+            "width": 0, "height": 0,
+            "attribution_required": attr_required, "attribution_text": attr_text,
+            "provider": provider,
+        })
+    _search_cache[key] = candidates
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# New source: Internet Archive images
+# ---------------------------------------------------------------------------
+
+def _source_search_archive_images(
+    api_keys: dict, query: str, per_page: int, backoff: list, extra_params: dict | None = None,
+) -> list:
+    key = ("archive", "image", query, per_page, tuple(sorted((extra_params or {}).items())))
+    if key in _search_cache: return _search_cache[key]
+
+    scrape_q = f"mediatype:image AND ({query}) AND licenseurl:(*creativecommons*)"
+    params = {"q": scrape_q,
+              "fields": "identifier,title,creator,subject,licenseurl,date,mediatype,collection",
+              "count": max(100, min(per_page, 100))}  # Archive scrape API minimum is 100
+    headers = {"User-Agent": _USER_AGENT}
+
+    def call_scrape():
+        r = requests.get("https://archive.org/services/search/v1/scrape",
+                         headers=headers, params=params, timeout=_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+    log.info("Archive search images q=%r count=%d", query, per_page)
+    try: scrape_data = _with_backoff(call_scrape, backoff)
+    except Exception as exc:
+        log.warning("Archive scrape failed: %s", exc)
+        _search_cache[key] = []; return []
+
+    ACCEPTED_FORMATS = {"JPEG", "PNG", "GIF"}
+    candidates = []
+
+    for item in (scrape_data.get("items") or [])[:per_page]:
+        identifier = item.get("identifier", "")
+        if not identifier: continue
+        try:
+            meta_r = requests.get(f"https://archive.org/metadata/{identifier}",
+                                   headers=headers, timeout=_TIMEOUT)
+            meta_r.raise_for_status()
+            meta_data = meta_r.json()
+        except Exception as exc:
+            log.debug("Archive metadata %s: %s", identifier, exc); continue
+
+        metadata = meta_data.get("metadata", {})
+        files = meta_data.get("files", [])
+        cands_f = [f for f in files if f.get("format") in ACCEPTED_FORMATS]
+        originals = [f for f in cands_f if f.get("source") == "original"]
+        chosen = originals[0] if originals else (cands_f[0] if cands_f else None)
+        if not chosen: continue
+
+        license_raw = metadata.get("licenseurl", "") or metadata.get("license", "")
+        collections = _normalize_collections(metadata.get("collection", []))
+        license_summary = _normalize_license(license_raw, collections)
+        if not is_license_acceptable(license_summary): continue
+
+        title = str(metadata.get("title") or identifier)
+        author = _normalize_creator(metadata.get("creator", ""))
+        attr_required = license_summary not in {"CC0", "Public Domain"}
+        attr_text = (f'"{title}" by {author} / archive.org / {license_summary}' if author
+                     else f'"{title}" / archive.org / {license_summary}')
+
+        candidates.append({
+            "source_site": "archive", "source_id": identifier,
+            "asset_page_url": f"https://archive.org/details/{identifier}",
+            "file_url": f"https://archive.org/download/{identifier}/{chosen['name']}",
+            "preview_url": f"https://archive.org/services/img/{identifier}",
+            "title": title, "description": "",
+            "tags": _normalize_subject(metadata.get("subject", "")),
+            "photographer": author, "license_summary": license_summary,
+            "license_url": license_raw, "query_used": query,
+            "width": int(chosen.get("width", 0) or 0),
+            "height": int(chosen.get("height", 0) or 0),
+            "attribution_required": attr_required, "attribution_text": attr_text,
+        })
+        time.sleep(random.uniform(0.2, 0.5))
+
+    _search_cache[key] = candidates
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# New source: Internet Archive videos
+# ---------------------------------------------------------------------------
+
+def _source_search_archive_videos(
+    api_keys: dict, query: str, per_page: int, backoff: list, extra_params: dict | None = None,
+) -> list:
+    key = ("archive", "video", query, per_page, tuple(sorted((extra_params or {}).items())))
+    if key in _search_cache: return _search_cache[key]
+
+    scrape_q = f"mediatype:movies AND ({query}) AND licenseurl:(*creativecommons*)"
+    params = {"q": scrape_q,
+              "fields": "identifier,title,creator,subject,licenseurl,date,mediatype,collection",
+              "count": max(100, min(per_page, 100))}  # Archive scrape API minimum is 100
+    headers = {"User-Agent": _USER_AGENT}
+
+    def call_scrape():
+        r = requests.get("https://archive.org/services/search/v1/scrape",
+                         headers=headers, params=params, timeout=_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+    log.info("Archive search videos q=%r count=%d", query, per_page)
+    try: scrape_data = _with_backoff(call_scrape, backoff)
+    except Exception as exc:
+        log.warning("Archive scrape videos failed: %s", exc)
+        _search_cache[key] = []; return []
+
+    VIDEO_FMT_PRIORITY = ["h.264", "MPEG4", "512Kb MPEG4", "H.264 IA"]
+    candidates = []
+
+    for item in (scrape_data.get("items") or [])[:per_page]:
+        identifier = item.get("identifier", "")
+        if not identifier: continue
+        try:
+            meta_r = requests.get(f"https://archive.org/metadata/{identifier}",
+                                   headers=headers, timeout=_TIMEOUT)
+            meta_r.raise_for_status()
+            meta_data = meta_r.json()
+        except Exception as exc:
+            log.debug("Archive video metadata %s: %s", identifier, exc); continue
+
+        metadata = meta_data.get("metadata", {})
+        files = meta_data.get("files", [])
+        chosen = None
+        for fmt in VIDEO_FMT_PRIORITY:
+            found = [f for f in files if f.get("format") == fmt]
+            if found: chosen = found[0]; break
+        if not chosen:
+            chosen = next((f for f in files if str(f.get("name","")).endswith(".mp4")), None)
+        if not chosen: continue
+
+        license_raw = metadata.get("licenseurl", "") or metadata.get("license", "")
+        collections = _normalize_collections(metadata.get("collection", []))
+        license_summary = _normalize_license(license_raw, collections)
+        if not is_license_acceptable(license_summary): continue
+
+        title = str(metadata.get("title") or identifier)
+        author = _normalize_creator(metadata.get("creator", ""))
+        attr_required = license_summary not in {"CC0", "Public Domain"}
+        attr_text = (f'"{title}" by {author} / archive.org / {license_summary}' if author
+                     else f'"{title}" / archive.org / {license_summary}')
+
+        candidates.append({
+            "source_site": "archive", "source_id": identifier,
+            "asset_page_url": f"https://archive.org/details/{identifier}",
+            "file_url": f"https://archive.org/download/{identifier}/{chosen['name']}",
+            "preview_url": f"https://archive.org/services/img/{identifier}",
+            "title": title, "description": "",
+            "tags": _normalize_subject(metadata.get("subject", "")),
+            "photographer": author, "license_summary": license_summary,
+            "license_url": license_raw, "query_used": query,
+            "width": int(chosen.get("width", 0) or 0),
+            "height": int(chosen.get("height", 0) or 0),
+            "duration_sec": float(chosen.get("length", 0) or 0),
+            "attribution_required": attr_required, "attribution_text": attr_text,
+        })
+        time.sleep(random.uniform(0.2, 0.5))
+
+    _search_cache[key] = candidates
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# SFX search — Freesound + Openverse Audio
+# ---------------------------------------------------------------------------
+
+def fetch_sfx(
+    query: str,
+    duration_sec: float,
+    api_keys: dict,
+    cfg: dict,
+) -> list:
+    """
+    Search Freesound and Openverse Audio for sound effects.
+    Returns deduplicated list of candidate dicts.
+    """
+    backoff = cfg.get("backoff_seconds", [5, 15, 45])
+    sfx_limits = cfg.get("sfx_source_limits", {})
+    max_dur = max(duration_sec * 2, 15)
+
+    results: list = []
+
+    # --- Freesound ---
+    freesound_key = api_keys.get("freesound", "")
+    fs_limit = (sfx_limits.get("freesound") or {}).get("candidates_sfx", 20)
+    if freesound_key and fs_limit > 0:
+        try:
+            lic_filter = 'license:("Creative Commons 0" OR "Attribution")'
+            dur_filter = f"duration:[0 TO {max_dur:.1f}]"
+            fs_params = {
+                "token": freesound_key,
+                "query": query,
+                "filter": f"{lic_filter} {dur_filter}",
+                "sort": "score",
+                "fields": "id,name,duration,license,previews,tags,username,avg_rating,num_downloads,type,images,url,channels,loopable,single_event",
+                "page_size": min(fs_limit, 150),
+            }
+            r = requests.get("https://freesound.org/apiv2/search/text/",
+                             params=fs_params, headers={"User-Agent": _USER_AGENT}, timeout=_TIMEOUT)
+            r.raise_for_status()
+            for result in r.json().get("results", []):
+                lic = _normalize_freesound_license(result.get("license", ""))
+                if not is_license_acceptable(lic): continue
+                sound_id = str(result.get("id", ""))
+                username = result.get("username", "")
+                name = result.get("name", "")
+                asset_page = result.get("url") or f"https://freesound.org/people/{username}/sounds/{sound_id}/"
+                previews = result.get("previews") or {}
+                preview_url = previews.get("preview-hq-mp3") or previews.get("preview-lq-mp3", "")
+                waveform_img = (result.get("images") or {}).get("waveform_m", "")
+                results.append({
+                    "source_site": "freesound", "source_id": sound_id,
+                    "preview_url": preview_url,
+                    "duration_sec": float(result.get("duration", 0)),
+                    "title": name,
+                    "tags": result.get("tags", []),
+                    "license_summary": lic,
+                    "license_url": f"https://creativecommons.org/licenses/{'zero/1.0' if lic == 'CC0' else 'by/4.0'}/",
+                    "attribution_text": f'"{name}" by {username} / freesound.org / {lic}',
+                    "author": username,
+                    "rating": float(result.get("avg_rating", 0)),
+                    "downloads": int(result.get("num_downloads", 0)),
+                    "waveform_img": waveform_img,
+                    "asset_page_url": asset_page,
+                    "attribution_required": lic != "CC0",
+                    "loopable": result.get("loopable", False),
+                    "channels": result.get("channels", 2),
+                })
+        except Exception as exc:
+            log.warning("Freesound search q=%r failed: %s", query, exc)
+
+    # --- Openverse Audio ---
+    ov_limit = (sfx_limits.get("openverse_audio") or {}).get("candidates_sfx", 10)
+    if ov_limit > 0:
+        try:
+            token = _get_openverse_token(api_keys)
+            if duration_sec < 30:    dur_bucket = "short"
+            elif duration_sec < 120: dur_bucket = "medium"
+            else:                    dur_bucket = "long"
+            ov_headers: dict = {"User-Agent": _USER_AGENT}
+            if token: ov_headers["Authorization"] = f"Bearer {token}"
+            ov_max_page = 500 if token else 20  # anon limit is 20
+            ov_params = {
+                "q": query, "license": "cc0,by",
+                "duration": dur_bucket, "source": "freesound,wikimedia_audio",
+                "page_size": min(ov_limit, ov_max_page),
+            }
+            r = requests.get("https://api.openverse.org/v1/audio/",
+                             params=ov_params, headers=ov_headers, timeout=_TIMEOUT)
+            r.raise_for_status()
+            for result in r.json().get("results", []):
+                lic = _normalize_openverse_license(result)
+                if not is_license_acceptable(lic): continue
+                source_id = result.get("id", "")
+                title = result.get("title") or ""
+                author = result.get("creator") or ""
+                preview_url = result.get("url", "")
+                asset_page = result.get("foreign_landing_url", "")
+                attribution_text = result.get("attribution") or (
+                    f'"{title}" by {author} / openverse_audio / {lic}' if author
+                    else f'"{title}" / openverse_audio / {lic}')
+                results.append({
+                    "source_site": "openverse_audio", "source_id": source_id,
+                    "preview_url": preview_url,
+                    "duration_sec": float(result.get("duration", 0)) / 1000.0,
+                    "title": title,
+                    "tags": [t["name"] for t in result.get("tags", []) if isinstance(t, dict)],
+                    "license_summary": lic,
+                    "license_url": result.get("license_url", ""),
+                    "attribution_text": attribution_text,
+                    "author": author, "rating": 0.0, "downloads": 0,
+                    "waveform_img": result.get("waveform", ""),
+                    "asset_page_url": asset_page,
+                    "attribution_required": lic != "CC0",
+                    "provider": result.get("provider", ""),
+                })
+        except Exception as exc:
+            log.warning("Openverse audio search q=%r failed: %s", query, exc)
+
+    # 3-pass dedup
+    seen_source_ids: set = set()
+    seen_landing_urls: set = set()
+    seen_fallback: set = set()
+    deduped = []
+    for c in results:
+        sid = (c["source_site"], c["source_id"])
+        if c["source_id"] and sid in seen_source_ids: continue
+        if c["source_id"]: seen_source_ids.add(sid)
+        norm_page = _normalize_url_for_dedup(c.get("asset_page_url", ""))
+        if norm_page and norm_page in seen_landing_urls: continue
+        if norm_page: seen_landing_urls.add(norm_page)
+        fb = (c["title"].lower()[:50], round(c.get("duration_sec", 0), 1))
+        if not c["source_id"] and not norm_page:
+            if fb in seen_fallback: continue
+            seen_fallback.add(fb)
+        deduped.append(c)
+    return deduped
 
 
 def _slug_to_title(page_url: str) -> str:
@@ -82,6 +782,8 @@ def _get(url: str, headers: Optional[dict] = None, **kwargs) -> requests.Respons
 
 def _download_file(url: str, dest: Path, headers: Optional[dict] = None) -> None:
     """Stream-download url → dest using an atomic .part rename."""
+    if not _check_download_allowlist(url):
+        raise ValueError(f"SSRF protection: download URL not in allowlist: {url[:120]}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     r = _get(url, headers=headers, stream=True)
     r.raise_for_status()
@@ -626,6 +1328,138 @@ def fetch_images(
                                 log.warning("pixabay img %s skip: %s", hid, exc)
                         _jitter(cfg, source)
 
+                elif source == "openverse":
+                    n_src = cfg.get("source_limits", {}).get("openverse", {}).get(
+                        "candidates_images", per_page_pexels)
+                    candidates = _source_search_openverse_images(
+                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                    )
+                    for c in candidates[:per_q]:
+                        sid = c.get("source_id", "")
+                        uid = f"openverse_img_{sid}"
+                        if uid in seen_ids: continue
+                        seen_ids.add(uid)
+                        url = c["file_url"]
+                        if not url: continue
+                        ext = Path(url.split("?")[0]).suffix or ".jpg"
+                        if ext.lower() not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
+                        dest = src_dir / f"{uid}{ext}"
+                        if item is not None:
+                            thumb = c.get("preview_url", "")
+                            if thumb: item["_thumbnails"][str(dest)] = thumb
+                        info = {**c, "file_url": url, "preview_url": c.get("preview_url", "")}
+                        if dest.exists():
+                            _write_info_sidecar(dest, info)
+                            saved.append((dest, info))
+                        else:
+                            try:
+                                dl_url = c.get("preview_url") or url
+                                _download_file(dl_url, dest)
+                                _write_info_sidecar(dest, info)
+                                saved.append((dest, info))
+                            except Exception as exc2:
+                                log.warning("openverse img %s skip: %s", sid, exc2)
+                        _jitter(cfg, source)
+
+                elif source == "wikimedia":
+                    n_src = cfg.get("source_limits", {}).get("wikimedia", {}).get(
+                        "candidates_images", per_page_pexels)
+                    candidates = _source_search_wikimedia_images(
+                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                    )
+                    for c in candidates[:per_q]:
+                        sid = c.get("source_id", "")
+                        uid = f"wikimedia_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
+                        if uid in seen_ids: continue
+                        seen_ids.add(uid)
+                        url = c["file_url"]
+                        if not url: continue
+                        mime = c.get("mime", "image/jpeg")
+                        ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif"}.get(mime, ".jpg")
+                        dest = src_dir / f"{uid}{ext}"
+                        if item is not None:
+                            thumb = c.get("preview_url", "")
+                            if thumb: item["_thumbnails"][str(dest)] = thumb
+                        info = {**c}
+                        if dest.exists():
+                            _write_info_sidecar(dest, info)
+                            saved.append((dest, info))
+                        else:
+                            try:
+                                dl_url = c.get("preview_url") or url
+                                _download_file(dl_url, dest)
+                                _write_info_sidecar(dest, info)
+                                saved.append((dest, info))
+                            except Exception as exc2:
+                                log.warning("wikimedia img %s skip: %s", sid[:50], exc2)
+                        _jitter(cfg, source)
+
+                elif source == "europeana":
+                    n_src = cfg.get("source_limits", {}).get("europeana", {}).get(
+                        "candidates_images", per_page_pexels)
+                    candidates = _source_search_europeana_images(
+                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                    )
+                    for c in candidates[:per_q]:
+                        sid = c.get("source_id", "")
+                        uid = f"europeana_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
+                        if uid in seen_ids: continue
+                        seen_ids.add(uid)
+                        url = c["file_url"]
+                        if not url: continue
+                        ext = Path(url.split("?")[0]).suffix.lower()
+                        if ext not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
+                        dest = src_dir / f"{uid}{ext}"
+                        if item is not None:
+                            thumb = c.get("preview_url", "")
+                            if thumb: item["_thumbnails"][str(dest)] = thumb
+                        info = {**c}
+                        if dest.exists():
+                            _write_info_sidecar(dest, info)
+                            saved.append((dest, info))
+                        else:
+                            try:
+                                dl_url = c.get("preview_url") or url
+                                _download_file(dl_url, dest)
+                                _write_info_sidecar(dest, info)
+                                saved.append((dest, info))
+                            except Exception as exc2:
+                                log.warning("europeana img %s skip: %s", sid[:50], exc2)
+                        _jitter(cfg, source)
+
+                elif source == "archive":
+                    n_src = cfg.get("source_limits", {}).get("archive", {}).get(
+                        "candidates_images", per_page_pexels)
+                    candidates = _source_search_archive_images(
+                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                    )
+                    for c in candidates[:per_q]:
+                        sid = c.get("source_id", "")
+                        uid = f"archive_img_{sid}"
+                        if uid in seen_ids: continue
+                        seen_ids.add(uid)
+                        url = c["file_url"]
+                        if not url: continue
+                        ext = Path(url.split("?")[0]).suffix.lower()
+                        if ext not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
+                        dest = src_dir / f"{uid}{ext}"
+                        if item is not None:
+                            thumb = c.get("preview_url", "")
+                            if thumb: item["_thumbnails"][str(dest)] = thumb
+                        info = {**c}
+                        if dest.exists():
+                            _write_info_sidecar(dest, info)
+                            saved.append((dest, info))
+                        else:
+                            try:
+                                dl_url = c.get("preview_url") or url
+                                _download_file(dl_url, dest)
+                                _write_info_sidecar(dest, info)
+                                saved.append((dest, info))
+                            except Exception as exc2:
+                                log.warning("archive img %s skip: %s", sid, exc2)
+                        _jitter(cfg, source)
+
             except Exception as exc:
                 log.warning("fetch_images %s q=%r failed: %s", source, query, exc)
 
@@ -806,6 +1640,35 @@ def fetch_videos(
                                 saved.append((dest, info))
                             except Exception as exc:
                                 log.warning("pixabay vid %s skip: %s", hid, exc)
+                        _jitter(cfg, source)
+
+                elif source == "archive":
+                    n_src = cfg.get("source_limits", {}).get("archive", {}).get(
+                        "candidates_videos", per_page_pexels)
+                    candidates = _source_search_archive_videos(
+                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                    )
+                    for c in candidates[:per_q]:
+                        sid = c.get("source_id", "")
+                        uid = f"archive_vid_{sid}"
+                        if uid in seen_ids: continue
+                        seen_ids.add(uid)
+                        url = c["file_url"]
+                        if not url: continue
+                        dest = src_dir / f"{uid}.mp4"
+                        info = {**c,
+                                "video_files": [{"url": url, "width": c.get("width",0), "height": c.get("height",0)}]}
+                        if dest.exists():
+                            _write_info_sidecar(dest, info)
+                            saved.append((dest, info))
+                        else:
+                            try:
+                                dl_url = c.get("preview_url") or url
+                                _download_file(dl_url, dest)
+                                _write_info_sidecar(dest, info)
+                                saved.append((dest, info))
+                            except Exception as exc2:
+                                log.warning("archive vid %s skip: %s", sid, exc2)
                         _jitter(cfg, source)
 
             except Exception as exc:

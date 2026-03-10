@@ -102,9 +102,28 @@ def _load_api_keys() -> tuple[str, dict[str, str]]:
       PEXELS_API_KEY       — required when 'pexels' is listed in config sources
       PIXABAY_API_KEY      — required when 'pixabay' is listed in config sources
 
-    Prints a clear ERROR message and exits if any required key is missing.
+    Optional variables (log warning if missing but do NOT exit):
+      WIKIMEDIA_API_TOKEN  — optional; raises quota from 500/hr to 5,000/hr
+      OPENVERSE_CLIENT_ID  — optional but strongly recommended
+      OPENVERSE_CLIENT_SECRET — optional but strongly recommended
+      EUROPEANA_API_KEY    — required when 'europeana' is in sources
+      FREESOUND_API_KEY    — required for SFX tab freesound source
+
+    Prints a clear ERROR message and exits if any REQUIRED key is missing.
     Returns (server_api_key, {source: key, ...}).
     """
+    # Sources that are strictly required (missing = server exits)
+    REQUIRED_SOURCES = {"pexels", "pixabay"}
+    # Sources that are optional (missing = warn + skip, do not exit)
+    OPTIONAL_SOURCES = {"wikimedia", "archive", "openverse", "europeana"}
+    # Special optional keys (not tied to a source name directly)
+    OPTIONAL_EXTRA = {
+        "WIKIMEDIA_API_TOKEN":     "wikimedia_api_token",
+        "OPENVERSE_CLIENT_ID":     "openverse_client_id",
+        "OPENVERSE_CLIENT_SECRET": "openverse_client_secret",
+        "FREESOUND_API_KEY":       "freesound",
+    }
+
     errors: list[str] = []
 
     server_key = os.environ.get("MEDIA_API_KEY", "").strip()
@@ -112,12 +131,26 @@ def _load_api_keys() -> tuple[str, dict[str, str]]:
         errors.append("MEDIA_API_KEY         (server auth key — sent as X-Api-Key header)")
 
     source_keys: dict[str, str] = {}
+
     for source in config.get("sources", []):
         env_name = f"{source.upper()}_API_KEY"
         val = os.environ.get(env_name, "").strip()
         if not val:
-            errors.append(f"{env_name:<22}({source} search API key)")
+            if source in REQUIRED_SOURCES:
+                errors.append(f"{env_name:<22}({source} search API key)")
+            elif source not in OPTIONAL_SOURCES:
+                # Unknown source — treat as required to surface config errors
+                errors.append(f"{env_name:<22}({source} search API key)")
+            else:
+                log.warning("Optional API key %s not set — %s source will be skipped", env_name, source)
         source_keys[source] = val
+
+    # Load optional extras (not in sources list but needed for certain features)
+    for env_name, key_name in OPTIONAL_EXTRA.items():
+        val = os.environ.get(env_name, "").strip()
+        if not val:
+            log.debug("Optional env var %s not set", env_name)
+        source_keys[key_name] = val
 
     if errors:
         print("", file=sys.stderr)
@@ -128,7 +161,8 @@ def _load_api_keys() -> tuple[str, dict[str, str]]:
         print("Set them before starting the server, e.g.:", file=sys.stderr)
         print("  export MEDIA_API_KEY=your-secret-key", file=sys.stderr)
         for source in config.get("sources", []):
-            print(f"  export {source.upper()}_API_KEY=your-{source}-key", file=sys.stderr)
+            if source in REQUIRED_SOURCES:
+                print(f"  export {source.upper()}_API_KEY=your-{source}-key", file=sys.stderr)
         print("", file=sys.stderr)
         sys.exit(1)
 
@@ -433,6 +467,148 @@ async def health():
             "cache_ttl_days":              config.get("cache_ttl_days", 7),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /sfx_search — search Freesound + Openverse Audio for SFX candidates
+# ---------------------------------------------------------------------------
+
+class SfxSearchRequest(BaseModel):
+    query:        str
+    duration_sec: float = 5.0
+
+
+@app.post("/sfx_search")
+async def sfx_search(body: SfxSearchRequest, _: None = Depends(require_auth)):
+    """Search Freesound + Openverse Audio for SFX candidates."""
+    try:
+        candidates = await asyncio.to_thread(
+            downloader.fetch_sfx,
+            body.query,
+            body.duration_sec,
+            API_KEYS,
+            config,
+        )
+        return {"candidates": candidates, "count": len(candidates)}
+    except Exception as exc:
+        log.exception("sfx_search failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# POST /sfx_save — download + save an SFX candidate to project-local storage
+# ---------------------------------------------------------------------------
+
+class SfxSaveRequest(BaseModel):
+    project:       str
+    episode_id:    str
+    item_id:       str
+    preview_url:   str
+    source_site:   str
+    attribution:   dict | None = None
+
+
+@app.post("/sfx_save")
+async def sfx_save(body: SfxSaveRequest, _: None = Depends(require_auth)):
+    """Download and save an SFX file to project-local storage."""
+    import fnmatch as _fnmatch
+    import hashlib as _hashlib
+    from urllib.parse import urlparse as _urlparse
+
+    # SSRF protection: validate hostname against allowlist
+    SFX_DOWNLOAD_ALLOWLIST = [
+        "cdn.freesound.org", "freesound.org",
+        "*.openverse.engineering", "cdn.openverse.engineering",
+        "*.wikimedia.org",
+    ]
+    try:
+        hostname = _urlparse(body.preview_url).hostname or ""
+        if not any(_fnmatch.fnmatch(hostname, p) for p in SFX_DOWNLOAD_ALLOWLIST):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Download rejected: hostname '{hostname}' not in SFX allowlist",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid URL: {exc}")
+
+    # File size guard
+    max_bytes = config.get("sfx_max_download_bytes", 20 * 1024 * 1024)
+    try:
+        head_r = await asyncio.to_thread(
+            lambda: __import__("requests").head(body.preview_url, timeout=10,
+                                                headers={"User-Agent": "PipedMediaServer/1.0"})
+        )
+        cl = head_r.headers.get("Content-Length")
+        if cl and int(cl) > max_bytes:
+            raise HTTPException(status_code=400,
+                                detail=f"File too large: {cl} bytes > {max_bytes}")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # HEAD failed; proceed with streaming guard
+
+    # Determine save path
+    ep_dir = (PROJECTS_ROOT / body.project / "episodes" / body.episode_id).resolve()
+    sfx_dir = ep_dir / "assets" / "sfx"
+    sfx_dir.mkdir(parents=True, exist_ok=True)
+
+    url_hash = _hashlib.md5(body.preview_url.encode()).hexdigest()[:8]
+    dest = sfx_dir / f"{body.item_id}.mp3"
+
+    # Download
+    def _do_download():
+        import requests as _req
+        r = _req.get(body.preview_url,
+                     headers={"User-Agent": "PipedMediaServer/1.0"},
+                     stream=True, timeout=45)
+        r.raise_for_status()
+        total = 0
+        tmp = dest.with_suffix(".part")
+        with tmp.open("wb") as fh:
+            for chunk in r.iter_content(65536):
+                if chunk:
+                    total += len(chunk)
+                    if total > max_bytes:
+                        tmp.unlink(missing_ok=True)
+                        raise ValueError(f"Download exceeded {max_bytes} bytes")
+                    fh.write(chunk)
+        tmp.replace(dest)
+
+    try:
+        await asyncio.to_thread(_do_download)
+    except Exception as exc:
+        log.exception("sfx_save download failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Write attribution sidecar
+    import json as _json, datetime as _dt
+    sidecar = dest.with_suffix(".info.json")
+    info = {
+        "source_site":      body.source_site,
+        "source_id":        (body.attribution or {}).get("source_id", ""),
+        "author":           (body.attribution or {}).get("author", ""),
+        "license_summary":  (body.attribution or {}).get("license_summary", ""),
+        "license_url":      (body.attribution or {}).get("license_url", ""),
+        "asset_page_url":   (body.attribution or {}).get("asset_page_url", ""),
+        "attribution_text": (body.attribution or {}).get("attribution_text", ""),
+        "original_format":  "mp3",
+        "saved_at":         _dt.datetime.utcnow().isoformat() + "Z",
+    }
+    sidecar.write_text(_json.dumps(info, ensure_ascii=False))
+
+    transport = config.get("transport", "http")
+    file_mount_root = config.get("file_mount_root", "").rstrip("/")
+    rel = str(dest.relative_to(PROJECTS_ROOT))
+
+    if transport == "file" and file_mount_root:
+        url = f"file://{file_mount_root}/{rel}"
+    else:
+        base_url = config.get("base_url", "").rstrip("/")
+        url = f"{base_url}/files/{rel}" if base_url else f"/files/{rel}"
+
+    return {"local_path": str(dest), "url": url, "status": "ok"}
 
 
 # ---------------------------------------------------------------------------

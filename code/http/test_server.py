@@ -1792,6 +1792,7 @@ HTML = r"""<!DOCTYPE html>
     <button class="tab"        data-tab="pipeline" onclick="switchTab('pipeline')">🎬 Pipeline</button>
     <button class="tab"        data-tab="browse"   onclick="switchTab('browse')"  >📁 Browse</button>
     <button class="tab"        data-tab="media"    onclick="switchTab('media')"   >🖼 Media</button>
+    <button class="tab"        data-tab="sfx"      onclick="switchTab('sfx')"     >🔊 SFX</button>
     <button class="tab"        data-tab="music"    onclick="switchTab('music')"   >🎵 Music</button>
     <button class="tab"        data-tab="vo"       onclick="switchTab('vo')"      >🎙 VO</button>
     <button class="tab"        data-tab="youtube"  onclick="switchTab('youtube')" >▶ YouTube</button>
@@ -2040,6 +2041,60 @@ placeholder="Enter your story here"></textarea>
     <button id="media-btn-reset"     onclick="mediaReset()">↺ Reset</button>
     <button id="media-btn-apply-seq" onclick="mediaApplyRecommended()" style="display:none">⚡ Apply Recommended Sequence</button>
     <button id="media-btn-confirm"   onclick="mediaConfirm()">✔ Confirm Selections</button>
+  </div>
+</div>
+
+<!-- ── SFX panel ── -->
+<div id="panel-sfx" style="display:none;flex-direction:column;flex:1;overflow:hidden;padding:16px 24px 20px;gap:12px">
+  <style>
+    .sfx-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-bottom:10px;border-bottom:1px solid var(--border)}
+    .sfx-toolbar select{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:0.82em}
+    .sfx-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
+    .sfx-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
+    .sfx-card-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+    .sfx-card-id{font-size:0.78em;font-weight:700;color:var(--accent);font-family:monospace}
+    .sfx-card-tag{font-size:0.85em;color:var(--text);flex:1}
+    .sfx-card-dur{font-size:0.78em;color:var(--dim)}
+    .sfx-cand-list{display:flex;flex-direction:column;gap:4px}
+    .sfx-cand-row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;border:1px solid transparent;transition:background 0.15s}
+    .sfx-cand-row:hover{background:#ffffff08}
+    .sfx-cand-row.selected{border-color:var(--accent);background:#ffffff10}
+    .sfx-cand-waveform{width:48px;height:28px;object-fit:cover;border-radius:3px;flex-shrink:0;background:#ffffff10}
+    .sfx-cand-title{flex:1;font-size:0.83em;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .sfx-cand-meta{font-size:0.76em;color:var(--dim);white-space:nowrap;flex-shrink:0}
+    .sfx-play-btn{background:none;border:none;color:var(--accent);cursor:pointer;font-size:1em;padding:0 2px;flex-shrink:0}
+    .sfx-play-btn:hover{color:var(--text)}
+    .sfx-link-btn{background:none;border:none;color:var(--dim);cursor:pointer;font-size:0.85em;padding:0 2px;text-decoration:none;flex-shrink:0}
+    .sfx-link-btn:hover{color:var(--text)}
+    .sfx-status-bar{font-size:0.82em;color:var(--dim);padding:4px 0}
+    .sfx-footer{display:flex;align-items:center;gap:10px;padding-top:10px;border-top:1px solid var(--border)}
+    .sfx-empty{color:var(--dim);font-size:0.85em;padding:12px 0}
+  </style>
+
+  <!-- toolbar -->
+  <div class="sfx-toolbar">
+    <div class="section-label" style="margin-bottom:0">SFX Search</div>
+    <select id="sfx-ep-select" onchange="onSfxEpChange()">
+      <option value="">— select episode —</option>
+    </select>
+    <input id="sfx-server-url" type="text" class="media-cfg-input"
+           placeholder="Media server URL  e.g. http://localhost:8200"
+           value="{{MEDIA_SERVER_URL}}" />
+    <button id="sfx-btn-search" onclick="sfxSearchAll()" disabled>🔍 Search All SFX</button>
+    <span id="sfx-count-label" style="font-size:0.82em;color:var(--dim)"></span>
+  </div>
+
+  <!-- status bar -->
+  <div class="sfx-status-bar" id="sfx-status-bar">Select an episode to begin.</div>
+
+  <!-- results body -->
+  <div class="sfx-body" id="sfx-body"></div>
+
+  <!-- footer -->
+  <div class="sfx-footer" id="sfx-footer" style="display:none">
+    <span id="sfx-confirm-msg" style="font-size:0.83em;color:var(--dim);flex:1"></span>
+    <button onclick="sfxSaveAll()">💾 Save SFX Selections</button>
+    <button onclick="sfxReset()" style="background:transparent;border:1px solid var(--border);color:var(--dim)">↺ Reset</button>
   </div>
 </div>
 
@@ -3241,9 +3296,11 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('panel-browse').style.display   = name === 'browse'   ? 'flex' : 'none';
     document.getElementById('panel-pipeline').style.display = name === 'pipeline' ? 'flex' : 'none';
     document.getElementById('panel-media').style.display    = name === 'media'    ? 'flex' : 'none';
+    document.getElementById('panel-sfx').style.display      = name === 'sfx'      ? 'flex' : 'none';
     document.getElementById('panel-music').style.display    = name === 'music'    ? 'flex' : 'none';
     document.getElementById('panel-vo').style.display       = name === 'vo'       ? 'flex' : 'none';
     document.getElementById('panel-youtube').style.display  = name === 'youtube'  ? 'flex' : 'none';
+    if (name === 'sfx')     sfxInit();
     if (name === 'vo')      populateVoEpSelect();
     if (name === 'youtube') initYoutubeTab();
 
@@ -3288,6 +3345,286 @@ placeholder="Enter your story here"></textarea>
       // Leaving Pipeline tab — stop auto-refresh
       if (_pipePoller) { clearInterval(_pipePoller); _pipePoller = null; }
     }
+  }
+
+  // ── SFX tab ─────────────────────────────────────────────────────────────────
+
+  let _sfxSlug    = '';
+  let _sfxEpId    = '';
+  let _sfxItems   = [];
+  let _sfxResults = {};   // { item_id: { item, candidates[] } }
+  let _sfxSelected= {};   // { item_id: index }
+  let _sfxAudioEl = null;
+  let _sfxPlayingUrl = null;
+  let _sfxPlayGen = 0;
+
+  function sfxInit() {
+    // Populate episode select from Run tab slug/epId if set
+    const slugEl = document.getElementById('slug');
+    const epEl   = document.getElementById('episode_id');
+    if (slugEl && epEl && slugEl.value && epEl.value) {
+      _sfxSlug = slugEl.value.trim();
+      _sfxEpId = epEl.value.trim();
+      const sel = document.getElementById('sfx-ep-select');
+      let found = false;
+      for (let i = 0; i < sel.options.length; i++) {
+        const v = sel.options[i].value;
+        if (v === _sfxSlug + '/' + _sfxEpId) { sel.selectedIndex = i; found = true; break; }
+      }
+      if (!found) {
+        const opt = document.createElement('option');
+        opt.value = _sfxSlug + '/' + _sfxEpId;
+        opt.textContent = _sfxSlug + ' / ' + _sfxEpId;
+        sel.appendChild(opt);
+        sel.value = opt.value;
+      }
+      document.getElementById('sfx-btn-search').disabled = false;
+    }
+    // Restore selected from sessionStorage
+    const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
+    if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
+  }
+
+  function onSfxEpChange() {
+    const val = document.getElementById('sfx-ep-select').value;
+    if (!val) return;
+    const parts = val.split('/');
+    _sfxSlug = parts[0]; _sfxEpId = parts.slice(1).join('/');
+    document.getElementById('sfx-btn-search').disabled = false;
+    document.getElementById('sfx-status-bar').textContent = 'Episode selected. Click Search All SFX.';
+  }
+
+  async function sfxSearchAll() {
+    if (!_sfxSlug || !_sfxEpId) {
+      document.getElementById('sfx-status-bar').textContent = 'Select an episode first.';
+      return;
+    }
+    document.getElementById('sfx-btn-search').disabled = true;
+    document.getElementById('sfx-status-bar').textContent = 'Loading manifest\u2026';
+    document.getElementById('sfx-body').innerHTML = '';
+    document.getElementById('sfx-footer').style.display = 'none';
+    _sfxItems = []; _sfxResults = {};
+
+    // Load manifest to get sfx_items
+    try {
+      const manifestUrl = '/api/manifest?slug=' + encodeURIComponent(_sfxSlug) + '&ep_id=' + encodeURIComponent(_sfxEpId);
+      const mresp = await fetch(manifestUrl);
+      if (!mresp.ok) throw new Error('manifest: ' + mresp.status);
+      const manifest = await mresp.json();
+      _sfxItems = manifest.sfx || manifest.sfx_items || [];
+    } catch(e) {
+      document.getElementById('sfx-status-bar').textContent = 'Failed to load manifest: ' + e.message;
+      document.getElementById('sfx-btn-search').disabled = false;
+      return;
+    }
+
+    if (!_sfxItems.length) {
+      document.getElementById('sfx-status-bar').textContent = 'No SFX items found in manifest.';
+      document.getElementById('sfx-btn-search').disabled = false;
+      return;
+    }
+
+    document.getElementById('sfx-status-bar').textContent = 'Searching ' + _sfxItems.length + ' SFX items\u2026';
+    const serverUrl = (document.getElementById('sfx-server-url').value || 'http://localhost:8200').trim();
+    const apiKey = '{{MEDIA_API_KEY}}';
+
+    let done = 0;
+    const MAX_CONCURRENT = 3;
+    const sem = { count: 0 };
+
+    const searchOne = async (item) => {
+      // Check sessionStorage cache first
+      const cacheKey = 'sfx_cache__' + _sfxSlug + '__' + _sfxEpId + '__' + item.item_id;
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          if (Date.now() - parsed.fetched_at < 30 * 60 * 1000) {
+            _sfxResults[item.item_id] = { item, candidates: parsed.candidates };
+            done++;
+            sfxRenderCard(item, parsed.candidates);
+            document.getElementById('sfx-status-bar').textContent = 'Searched ' + done + '/' + _sfxItems.length + '\u2026';
+            return;
+          }
+        } catch(e) {}
+      }
+
+      try {
+        const r = await fetch('/api/sfx_search', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            slug: _sfxSlug, ep_id: _sfxEpId, item_id: item.item_id,
+            query: item.tag || item.description || '',
+            duration_sec: item.duration_sec || 5,
+            server_url: serverUrl, api_key: apiKey,
+          })
+        });
+        const data = r.ok ? await r.json() : { candidates: [] };
+        const candidates = data.candidates || [];
+        _sfxResults[item.item_id] = { item, candidates };
+        try {
+          sessionStorage.setItem(cacheKey, JSON.stringify({ candidates, fetched_at: Date.now() }));
+        } catch(e) {}
+      } catch(e) {
+        _sfxResults[item.item_id] = { item, candidates: [] };
+      }
+      done++;
+      sfxRenderCard(item, (_sfxResults[item.item_id] || {}).candidates || []);
+      document.getElementById('sfx-status-bar').textContent = 'Searched ' + done + '/' + _sfxItems.length + '\u2026';
+    };
+
+    // Search with concurrency limit
+    const queue = [..._sfxItems];
+    const workers = Array.from({length: Math.min(MAX_CONCURRENT, queue.length)}, async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        if (item) await searchOne(item);
+      }
+    });
+    await Promise.all(workers);
+
+    document.getElementById('sfx-status-bar').textContent = 'Done \u2014 ' + _sfxItems.length + ' items.';
+    document.getElementById('sfx-footer').style.display = 'flex';
+    sfxUpdateCountLabel();
+    document.getElementById('sfx-btn-search').disabled = false;
+  }
+
+  function sfxRenderCard(item, candidates) {
+    const body = document.getElementById('sfx-body');
+    const itemId = item.item_id || item.asset_id || '';
+    let card = document.getElementById('sfx-card-' + itemId);
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'sfx-card';
+      card.id = 'sfx-card-' + itemId;
+      body.appendChild(card);
+    }
+    const selIdx = _sfxSelected[itemId];
+    const tag = item.tag || item.description || itemId;
+    const dur = (item.duration_sec || 0).toFixed(1);
+
+    let rows = '';
+    if (!candidates.length) {
+      rows = '<div class="sfx-empty">No results found.</div>';
+    } else {
+      candidates.forEach((c, idx) => {
+        const isSel = selIdx === idx;
+        const stars = c.rating > 0 ? '\u2605' + c.rating.toFixed(1) : '';
+        const dls   = c.downloads > 1000 ? '\u2193' + Math.round(c.downloads/1000) + 'K' : (c.downloads ? '\u2193' + c.downloads : '');
+        const lic   = c.license_summary || '';
+        const src   = c.source_site || '';
+        const dur2  = (c.duration_sec || 0).toFixed(1) + 's';
+        const waveUrl = c.waveform_img || '';
+        const waveHtml = waveUrl
+          ? '<img class="sfx-cand-waveform" src="' + waveUrl + '" alt="waveform">'
+          : '<div class="sfx-cand-waveform"></div>';
+        const linkUrl = c.asset_page_url || '#';
+        rows += `<div class="sfx-cand-row${isSel ? ' selected' : ''}"
+                      onclick="sfxSelectCandidate('${itemId}', ${idx})"
+                      title="${(c.attribution_text||'').replace(/"/g,'&quot;')}">
+          ${waveHtml}
+          <button class="sfx-play-btn" onclick="sfxPlay(event, '${c.preview_url||''}', this)" title="Preview">\u25b6</button>
+          <span class="sfx-cand-title">${c.title || '(untitled)'}</span>
+          <span class="sfx-cand-meta">${dur2}${stars?' '+stars:''}${dls?' '+dls:''}${lic?' '+lic:''}${src?' '+src:''}</span>
+          <a class="sfx-link-btn" href="${linkUrl}" target="_blank" title="Open source page" onclick="event.stopPropagation()">\u2197</a>
+        </div>`;
+      });
+    }
+
+    card.innerHTML = `
+      <div class="sfx-card-header">
+        <span class="sfx-card-id">\ud83d\udd0a ${itemId}</span>
+        <span class="sfx-card-tag">${tag}</span>
+        <span class="sfx-card-dur">Target: ${dur}s</span>
+      </div>
+      <div class="sfx-cand-list">${rows}</div>
+    `;
+  }
+
+  function sfxSelectCandidate(itemId, idx) {
+    if (_sfxSelected[itemId] === idx) {
+      delete _sfxSelected[itemId];
+    } else {
+      _sfxSelected[itemId] = idx;
+    }
+    try { sessionStorage.setItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId, JSON.stringify(_sfxSelected)); } catch(e) {}
+    const res = _sfxResults[itemId];
+    if (res) sfxRenderCard(res.item, res.candidates);
+    sfxUpdateCountLabel();
+  }
+
+  function sfxUpdateCountLabel() {
+    const total = _sfxItems.length;
+    const sel   = Object.keys(_sfxSelected).length;
+    document.getElementById('sfx-count-label').textContent = sel + '/' + total + ' selected';
+  }
+
+  function sfxPlay(event, url, btn) {
+    event.stopPropagation();
+    if (!url) return;
+    const myGen = ++_sfxPlayGen;
+    if (!_sfxAudioEl) {
+      _sfxAudioEl = new Audio();
+      _sfxAudioEl.addEventListener('ended', () => { _sfxPlayingUrl = null; });
+    }
+    if (_sfxPlayingUrl === url) {
+      _sfxAudioEl.pause(); _sfxPlayingUrl = null; return;
+    }
+    _sfxAudioEl.pause();
+    _sfxAudioEl.src = url;
+    _sfxPlayingUrl = url;
+    _sfxAudioEl.play().then(() => {
+      if (_sfxPlayGen !== myGen) _sfxAudioEl.pause();
+    }).catch(e => { _sfxPlayingUrl = null; });
+  }
+
+  async function sfxSaveAll() {
+    const keys = Object.keys(_sfxSelected);
+    if (!keys.length) { alert('No SFX selected.'); return; }
+    document.getElementById('sfx-confirm-msg').textContent = 'Saving\u2026';
+    let saved = 0, failed = 0;
+    for (const itemId of keys) {
+      const idx = _sfxSelected[itemId];
+      const res = _sfxResults[itemId];
+      if (!res) continue;
+      const cand = res.candidates[idx];
+      if (!cand) continue;
+      try {
+        const serverUrl = (document.getElementById('sfx-server-url').value || 'http://localhost:8200').trim();
+        const r = await fetch('/api/sfx_save', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            slug: _sfxSlug, ep_id: _sfxEpId, item_id: itemId,
+            server_url: serverUrl,
+            preview_url: cand.preview_url, source_site: cand.source_site,
+            attribution: {
+              source_id: cand.source_id || '',
+              author: cand.author || '',
+              license_summary: cand.license_summary || '',
+              license_url: cand.license_url || '',
+              asset_page_url: cand.asset_page_url || '',
+              attribution_text: cand.attribution_text || '',
+            }
+          })
+        });
+        if (r.ok) saved++; else { failed++; console.warn('sfx_save failed', itemId, await r.text()); }
+      } catch(e) { failed++; }
+    }
+    document.getElementById('sfx-confirm-msg').textContent =
+      saved + ' saved' + (failed ? ', ' + failed + ' failed' : '') + '.';
+  }
+
+  function sfxReset() {
+    _sfxSelected = {};
+    try { sessionStorage.removeItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId); } catch(e) {}
+    Object.keys(_sfxResults).forEach(id => {
+      const res = _sfxResults[id];
+      if (res) sfxRenderCard(res.item, res.candidates);
+    });
+    sfxUpdateCountLabel();
+    document.getElementById('sfx-confirm-msg').textContent = '';
   }
 
   // ── Media tab ────────────────────────────────────────────────────────────────
@@ -10105,6 +10442,16 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        # ── SFX: search candidates (POST /api/sfx_search via GET for simplicity) ─
+        elif parsed.path == "/api/sfx_search":
+            # This is a GET-based proxy, but sfx_search is POST-based — redirect handled in do_POST
+            body = json.dumps({"error": "Use POST /api/sfx_search"}).encode()
+            self.send_response(405)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # ── Media proxy: list batches for episode (GET /api/media_batches) ──────
         elif parsed.path == "/api/media_batches":
             params     = parse_qs(parsed.query)
@@ -11280,6 +11627,90 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── SFX: search candidates (POST /api/sfx_search) ────────────────────
+        elif self.path == "/api/sfx_search":
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length))
+                query        = payload.get("query", "").strip()
+                duration_sec = float(payload.get("duration_sec", 5.0))
+                server_url   = (payload.get("server_url") or "http://localhost:8200").rstrip("/")
+                api_key      = os.environ.get("MEDIA_API_KEY", "")
+                if not query:
+                    raise ValueError("query is required")
+
+                req_body = json.dumps({"query": query, "duration_sec": duration_sec}).encode()
+                req = _urllib_req.Request(
+                    server_url + "/sfx_search",
+                    data=req_body,
+                    headers={"X-Api-Key": api_key,
+                             "Content-Type": "application/json",
+                             "Content-Length": str(len(req_body))},
+                    method="POST",
+                )
+                with _urllib_req.urlopen(req, timeout=30) as resp:
+                    body = resp.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            except Exception as exc:
+                body = json.dumps({"error": str(exc), "candidates": []}).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── SFX: save a selected sound (POST /api/sfx_save) ──────────────────
+        elif self.path == "/api/sfx_save":
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length))
+                slug        = payload.get("slug", "").strip()
+                ep_id       = payload.get("ep_id", "").strip()
+                server_url  = (payload.get("server_url") or "http://localhost:8200").rstrip("/")
+                api_key     = os.environ.get("MEDIA_API_KEY", "")
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                if not payload.get("preview_url"):
+                    raise ValueError("preview_url is required")
+
+                # Forward to media server's /sfx_save endpoint
+                req_body = json.dumps({
+                    "project":     slug,
+                    "episode_id":  ep_id,
+                    "item_id":     payload.get("item_id", ""),
+                    "preview_url": payload.get("preview_url", ""),
+                    "source_site": payload.get("source_site", ""),
+                    "attribution": payload.get("attribution"),
+                }).encode()
+                req = _urllib_req.Request(
+                    server_url + "/sfx_save",
+                    data=req_body,
+                    headers={"X-Api-Key": api_key,
+                             "Content-Type": "application/json",
+                             "Content-Length": str(len(req_body))},
+                    method="POST",
+                )
+                with _urllib_req.urlopen(req, timeout=60) as resp:
+                    body = resp.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # ── Media: write selections.json (POST /api/media_confirm) ───────────
         elif self.path == "/api/media_confirm":
             try:
@@ -12287,6 +12718,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/diagnose_pipeline",
                   "/api/media_batches", "/api/media_batch_status",
                   "/api/media_batch", "/api/media_confirm",
+                  "/api/sfx_search", "/api/sfx_save",
                   "/api/ai_images", "/api/ai_job_status",
                   "/api/serve_media_file",
                   "/api/music_loop_candidates", "/api/music_timeline",

@@ -3,10 +3,17 @@
 
   "_comment_keys": [
     "API KEYS — never stored here. Set as environment variables before starting:",
-    "  export MEDIA_API_KEY=<server auth key>   # required — used in X-Api-Key header",
-    "  export PEXELS_API_KEY=<pexels key>       # required when 'pexels' is in sources",
-    "  export PIXABAY_API_KEY=<pixabay key>     # required when 'pixabay' is in sources",
-    "The server will print ERROR and exit at startup if any required key is missing."
+    "  export MEDIA_API_KEY=<server auth key>           # required — X-Api-Key header",
+    "  export PEXELS_API_KEY=<pexels key>               # required when 'pexels' in sources",
+    "  export PIXABAY_API_KEY=<pixabay key>             # required when 'pixabay' in sources",
+    "  export WIKIMEDIA_API_TOKEN=<token>               # OPTIONAL — raises Commons quota to 5K/hr",
+    "  export OPENVERSE_CLIENT_ID=<client_id>           # OPTIONAL but recommended (free OAuth2)",
+    "  export OPENVERSE_CLIENT_SECRET=<client_secret>   # OPTIONAL but recommended",
+    "  export EUROPEANA_API_KEY=<key>                   # required when 'europeana' in sources",
+    "  export FREESOUND_API_KEY=<key>                   # required for SFX tab freesound source",
+    "  # Internet Archive: no key needed.",
+    "  # Openverse: anonymous works but is rate-limited. Register free OAuth2 app (2 min).",
+    "The server will print ERROR and exit at startup if any REQUIRED key is missing."
   ],
 
   "host":          "0.0.0.0",
@@ -14,32 +21,10 @@
 
   "_comment_transport": [
     "TRANSPORT MODES",
-    "",
-    "http (default) — media server streams files via GET /files/{path}.",
-    "  base_url: public URL of this server, e.g. http://192.168.1.10:8200",
-    "            leave empty to return relative /files/… paths.",
-    "  file_mount_root: unused in http mode.",
-    "",
-    "file (NFS/shared mount) — files are on a shared filesystem visible to",
-    "  both the media server and the VC editor / pipeline runner machine.",
-    "  No HTTP file serving is needed; all tools read directly via file://.",
-    "",
-    "  projects_root  : path to the shared directory AS SEEN FROM THIS SERVER.",
-    "                   e.g. /mnt/nfs/projects  or  /srv/shared/projects",
-    "  file_mount_root: same shared directory AS SEEN FROM THE VC EDITOR machine.",
-    "                   e.g. /mnt/nfs/projects  (identical if same mount point)",
-    "                        /Volumes/nfs/projects  (macOS example)",
-    "  The server saves downloads to projects_root; the returned file:// URLs",
-    "  use file_mount_root so the VC editor and resolve_assets.py can open",
-    "  the files directly without any HTTP round-trip.",
-    "",
-    "  This deployment:",
-    "    NFS server (media server) : 192.168.86.33  — data lives at /data/shared",
-    "    NFS client (VC editor)    : 192.168.86.40  — mounted at /mnt/shared",
-    "    projects_root  : /data/shared      (server-side path, files are written here)",
-    "    file_mount_root: /mnt/shared       (client-side path, file:// URLs use this)",
-    "    transport      : file",
-    "    base_url       : (empty)"
+    "file (NFS/shared mount) — files are on a shared filesystem.",
+    "  projects_root  : path to shared dir AS SEEN FROM THIS SERVER.",
+    "  file_mount_root: same dir AS SEEN FROM THE VC EDITOR machine.",
+    "  The server saves downloads to projects_root; returned file:// URLs use file_mount_root."
   ],
 
   "base_url":      "",
@@ -50,7 +35,39 @@
   "candidates_per_source_video": 30,
   "max_candidates_per_item":     60,
 
-  "sources":          ["pexels", "pixabay"],
+  "_comment_sources": [
+    "Safe default sources — RULE 9. Only sources with proven pipelines enabled.",
+    "archive intentionally omitted from default until PD allowlist is tested end-to-end.",
+    "loc and picryl disabled: loc=free-text rights unsafe, picryl=API defunct."
+  ],
+  "sources": ["pexels", "pixabay", "openverse", "wikimedia", "europeana"],
+
+  "source_limits": {
+    "_comment": [
+      "Per-source candidate counts. Controls how many raw candidates each library fetches.",
+      "Set candidates_images or candidates_videos to 0 to disable that media type for a source."
+    ],
+    "pexels":    { "candidates_images": 30, "candidates_videos": 30 },
+    "pixabay":   { "candidates_images": 30, "candidates_videos": 30 },
+    "openverse": { "candidates_images": 50, "candidates_videos": 0  },
+    "wikimedia": { "candidates_images": 20, "candidates_videos": 0  },
+    "europeana": { "candidates_images": 30, "candidates_videos": 0  },
+    "archive":   { "candidates_images": 20, "candidates_videos": 15 }
+  },
+
+  "sfx_source_limits": {
+    "_comment": [
+      "Per-source candidate counts for the SFX tab.",
+      "candidates_sfx = max sounds fetched per sfx_item per source.",
+      "Set to 0 to disable a source for SFX search."
+    ],
+    "freesound":       { "candidates_sfx": 20 },
+    "openverse_audio": { "candidates_sfx": 10 }
+  },
+
+  "max_download_bytes_image": 52428800,
+  "max_download_bytes_video": 2147483648,
+  "sfx_max_download_bytes":   20971520,
 
   "clip_model":      "ViT-B-32",
   "clip_pretrained": "laion2b_s34b_b79k",
@@ -59,8 +76,18 @@
   "file_mount_root": "/mnt/shared",
 
   "rate_limits": {
-    "pexels":  { "max_concurrent": 2, "delay_ms_min": 200, "delay_ms_max": 600 },
-    "pixabay": { "max_concurrent": 2, "delay_ms_min": 300, "delay_ms_max": 600 }
+    "pexels":    { "max_concurrent": 2, "delay_ms_min": 200, "delay_ms_max": 600 },
+    "pixabay":   { "max_concurrent": 2, "delay_ms_min": 300, "delay_ms_max": 600 },
+    "wikimedia": { "max_concurrent": 3, "delay_ms_min": 100, "delay_ms_max": 300,
+                   "_comment": "Set WIKIMEDIA_API_TOKEN env var to get 5,000 req/hr quota (vs 500 anon)." },
+    "archive":   { "max_concurrent": 3, "delay_ms_min": 200, "delay_ms_max": 500,
+                   "_comment": "Each Archive item requires a separate metadata call. Keep delay_ms_min >= 200." },
+    "openverse": { "max_concurrent": 4, "delay_ms_min":  50, "delay_ms_max": 200,
+                   "_comment": "Set OPENVERSE_CLIENT_ID + OPENVERSE_CLIENT_SECRET for standard tier." },
+    "europeana": { "max_concurrent": 3, "delay_ms_min": 150, "delay_ms_max": 400,
+                   "_comment": "Set EUROPEANA_API_KEY env var. 10K calls/day with registered free key." },
+    "freesound": { "max_concurrent": 3, "delay_ms_min": 200, "delay_ms_max": 500,
+                   "_comment": "60 req/min, 2000/day. Set FREESOUND_API_KEY env var." }
   },
   "retry_on_429":    true,
   "backoff_seconds": [5, 15, 45],
