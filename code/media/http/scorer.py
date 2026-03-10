@@ -586,7 +586,8 @@ def _dedup_phash(results: list[dict], threshold: int) -> list[dict]:
             if dist < threshold:
                 # results is score-descending, so i is higher-scored → drop j
                 kept[j] = False
-                results[j]["score_detail"]["phash_flagged"] = True
+                if "score_detail" in results[j]:
+                    results[j]["score_detail"]["phash_flagged"] = True
 
     return [r for i, r in enumerate(results) if kept[i]]
 
@@ -932,7 +933,7 @@ def score_images(
             "mean_luma":    mean_luma,
             "rms_contrast": rms_contrast,
             "person_score": person_score,
-            "phash_flagged": person_flagged,  # will be updated by dedup pass
+            "phash_flagged": False,  # will be updated by dedup pass (person_flagged is in person_score)
         }
 
         # Final combined score (B1: calmness is now a soft penalty, not part of primary score)
@@ -1033,8 +1034,6 @@ def score_single_video(
     ai_prompt   = item.get("ai_prompt") or item.get("search_prompt", "")
     hints       = _resolve_hints(item)
     dim_weights = _resolve_weights(item, cfg)
-    calm_thresh = _video_calmness_threshold(item, cfg)
-
     # Legacy weight fallback
     w       = cfg.get("score_weights") or {"clip": 0.75, "calmness": 0.25}
     clip_w  = float(w.get("clip",     0.75))

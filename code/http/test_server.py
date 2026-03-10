@@ -1919,6 +1919,10 @@ placeholder="Enter your story here"></textarea>
         <span id="badge-format" class="info-badge" style="display:none"></span>
       </div>
       <div id="format-hint" class="format-hint"></div>
+      <div id="media-config-panel" style="margin-top:10px; padding:10px 14px; background:#1e2a1e; border:1px solid #3a5a3a; border-radius:6px; font-size:12px; color:#aaa; line-height:1.7;">
+        <div style="font-weight:600; color:#8bc48b; margin-bottom:6px;">Media Search Config <span id="media-config-profile" style="color:#6a9a6a; font-weight:normal;"></span></div>
+        <div id="media-config-body"></div>
+      </div>
     </div>
     <div class="locale-row">
       <span class="info-label" style="color:var(--dim)">Locales</span>
@@ -1953,6 +1957,10 @@ placeholder="Enter your story here"></textarea>
         <option value="monologue"             disabled title="Not yet validated">Monologue / First-Person</option>
         <option value="ssml_narration">SSML Narration (authored)</option>
       </select>
+    </div>
+    <div id="media-config-panel-existing" style="margin-top:10px; padding:10px 14px; background:#1e2a1e; border:1px solid #3a5a3a; border-radius:6px; font-size:12px; color:#aaa; line-height:1.7;">
+      <div style="font-weight:600; color:#8bc48b; margin-bottom:6px;">Media Search Config <span id="media-config-profile-existing" style="color:#6a9a6a; font-weight:normal;"></span></div>
+      <div id="media-config-body-existing"></div>
     </div>
     <div class="locale-row">
       <span class="info-label" style="color:var(--dim)">Locales</span>
@@ -2620,6 +2628,7 @@ placeholder="Enter your story here"></textarea>
   window.addEventListener('DOMContentLoaded', async () => {
     await refreshNextNum();
     loadRunProjects();
+    _updateMediaConfigPanel(_selectedFormat);
   });
 
   // ── Run ─────────────────────────────────────────────────────────────────────
@@ -3440,6 +3449,99 @@ placeholder="Enter your story here"></textarea>
       sleep_story:          'sleep_story',
     };
     return map[fmt] || 'default';
+  }
+
+  function _updateMediaConfigPanel(fmt) {
+    const profile = _formatToContentProfile(fmt);
+
+    // Per-profile CLIP dimension weights (mirrors config.json scoring_profiles)
+    const profileWeights = {
+      documentary: {subjects:0.45, environment:0.20, style:0.15, motion:0.15, technical:0.05},
+      sleep_story: {subjects:0.20, environment:0.40, style:0.25, motion:0.05, technical:0.10},
+      action:      {subjects:0.35, environment:0.15, style:0.20, motion:0.25, technical:0.05},
+      default:     {subjects:0.40, environment:0.25, style:0.20, motion:0.10, technical:0.05},
+    };
+
+    // Per-profile image calmness threshold (None = disabled)
+    const imageCalmness = {
+      documentary: 'disabled \u2014 ruins/historical photos are not penalised for texture',
+      sleep_story: '0.55 \u2014 images below this calmness score receive a soft penalty',
+      action:      'disabled',
+      default:     'disabled',
+    };
+
+    // Per-profile video calmness
+    const videoCalmness = {
+      documentary: 'soft penalty (motion_level driven) \u2014 does not hard-reject any video',
+      sleep_story: 'soft penalty (motion_level driven) \u2014 calm videos preferred',
+      action:      'disabled \u2014 high-motion videos welcome',
+      default:     'soft penalty (motion_level driven)',
+    };
+
+    const w = profileWeights[profile] || profileWeights.default;
+
+    // Render weight bar: fill proportional to weight value
+    function bar(val) {
+      const pct = Math.round(val * 100);
+      const filled = Math.round(pct / 5);  // max 20 chars at 5% each
+      return '<span style="color:#5a8a5a">' + '\u2588'.repeat(filled) + '\u2591'.repeat(20-filled) + '</span> ' + pct + '%';
+    }
+
+    const rows = [
+      ['Scoring profile',  '<strong style="color:#ccc">' + profile + '</strong>'],
+      [''],
+      ['\u2014 CLIP dimension weights \u2014', ''],
+      ['Subjects (who/what)',        bar(w.subjects)],
+      ['Environment (where/setting)',bar(w.environment)],
+      ['Style (look/feel)',          bar(w.style)],
+      ['Motion (movement)',          bar(w.motion)],
+      ['Technical (quality)',        bar(w.technical)],
+      [''],
+      ['\u2014 Calmness filtering \u2014', ''],
+      ['Image calmness',   imageCalmness[profile] || 'disabled'],
+      ['Video calmness',   videoCalmness[profile] || 'soft penalty'],
+      [''],
+      ['\u2014 Query strategy \u2014', ''],
+      ['Budget rule',      'First query: 50% of candidates \u00b7 Remaining queries share the rest'],
+      ['Location inject',  'include_keywords location terms prefixed into every query'],
+      [''],
+      ['\u2014 Candidate counts \u2014', ''],
+      ['Images per source','30 candidates fetched \u00b7 top results ranked by CLIP'],
+      ['Videos per source','30 candidates fetched \u00b7 top results ranked by CLIP'],
+      ['Sources',          'Pexels + Pixabay'],
+    ];
+
+    let html = '<table style="border-collapse:collapse; width:100%;">';
+    for (const row of rows) {
+      if (row.length === 1 || (row[0] === '' && row.length === 2 && row[1] === '')) {
+        html += '<tr><td colspan="2" style="padding:4px 0 2px 0;"></td></tr>';
+      } else if (row[1] === '') {
+        html += '<tr><td colspan="2" style="padding:2px 0; color:#6a8a6a; font-size:11px; text-transform:uppercase; letter-spacing:0.05em;">' + row[0] + '</td></tr>';
+      } else {
+        html += '<tr>' +
+          '<td style="padding:1px 12px 1px 0; color:#888; white-space:nowrap; vertical-align:top;">' + row[0] + '</td>' +
+          '<td style="padding:1px 0; color:#bbb; font-family:monospace;">' + row[1] + '</td>' +
+          '</tr>';
+      }
+    }
+    html += '</table>';
+
+    // Update new-project panel
+    const panel = document.getElementById('media-config-panel');
+    const body  = document.getElementById('media-config-body');
+    const prof  = document.getElementById('media-config-profile');
+    if (panel && body && prof) {
+      body.innerHTML = html;
+      prof.textContent = '(' + profile + ')';
+    }
+    // Update existing-project panel
+    const panelEx = document.getElementById('media-config-panel-existing');
+    const bodyEx  = document.getElementById('media-config-body-existing');
+    const profEx  = document.getElementById('media-config-profile-existing');
+    if (panelEx && bodyEx && profEx) {
+      bodyEx.innerHTML = html;
+      profEx.textContent = '(' + profile + ')';
+    }
   }
 
   // ── Start a new search batch ──
@@ -6929,6 +7031,7 @@ placeholder="Enter your story here"></textarea>
       _selectedFormat = fmt;
       document.getElementById('info-format-sel-existing').value = fmt;
       updateFormatHint(fmt, 'format-hint-existing');
+      _updateMediaConfigPanel(fmt);
     }
     if (meta.locales_str) {
       const locs = meta.locales_str.split(',').map(l => l.trim());
@@ -7520,6 +7623,7 @@ placeholder="Enter your story here"></textarea>
       if (d.error && !d.title) throw new Error(d.error);
       _preparedMeta = d;
       _selectedFormat = d.story_format || 'continuous_narration';
+      _updateMediaConfigPanel(_selectedFormat);
       applyPreparedMeta(d);
       document.getElementById('info-bar').classList.add('visible');
       // For new projects: fetch next episode ID and show Create Episode button
@@ -7667,6 +7771,7 @@ placeholder="Enter your story here"></textarea>
     const fsel = document.getElementById('info-format-sel');
     fsel.value = _selectedFormat;
     updateFormatHint(_selectedFormat, 'format-hint');
+    _updateMediaConfigPanel(_selectedFormat);
     // Auto-select project in dropdown if it already exists on disk
     if (d.slug_exists && slug) {
       loadRunProjects().then(() => {
@@ -7726,10 +7831,12 @@ placeholder="Enter your story here"></textarea>
   function onFormatChange() {
     _selectedFormat = document.getElementById('info-format-sel').value;
     updateFormatHint(_selectedFormat, 'format-hint');
+    _updateMediaConfigPanel(_selectedFormat);
   }
   function onFormatChangeExisting() {
     _selectedFormat = document.getElementById('info-format-sel-existing').value;
     updateFormatHint(_selectedFormat, 'format-hint-existing');
+    _updateMediaConfigPanel(_selectedFormat);
   }
   function updateFormatHint(fmt, hintId) {
     const hints = {

@@ -127,13 +127,20 @@ def _jitter(cfg: dict, source: str) -> None:
 # Query rotation helper
 # ---------------------------------------------------------------------------
 
-def _get_queries(search_prompt: str, item: dict | None, n: int) -> list[tuple[str, int]]:
+def _get_queries(
+    search_prompt:   str,
+    item:            dict | None,
+    n:               int,
+    inject_location: bool = True,
+) -> list[tuple[str, int]]:
     """
     Returns a list of (query, per_query_n) tuples.
 
     B3: Location-specific include_keywords (capitalised words longer than 3 chars)
         are injected as a prefix into each query where the term is not already present.
-        This ensures manifest intent (e.g. "Pompeii") is enforced in every API call.
+        Only applied when inject_location=True (images only).
+        Disabled for video queries — stock video sites have almost no location-tagged
+        footage for rare historical subjects; injecting narrows the pool to 0.
 
     C2: First query gets 50% of budget; remaining queries share the rest equally.
         The first query in search_queries is the most specific by convention.
@@ -143,18 +150,17 @@ def _get_queries(search_prompt: str, item: dict | None, n: int) -> list[tuple[st
     if item:
         queries = list(item.get("search_queries") or [])
         if queries:
-            # B3: build location prefix from include_keywords
-            kws = item.get("include_keywords") or []
-            location_terms = [kw for kw in kws
-                              if kw and kw[0].isupper() and len(kw) > 3]
-            prefix = location_terms[0] if location_terms else ""
-
-            # Inject prefix into each query where not already present
-            if prefix:
-                queries = [
-                    q if prefix.lower() in q.lower() else f"{prefix} {q}"
-                    for q in queries
-                ]
+            # B3: inject location prefix for images only
+            if inject_location:
+                kws = item.get("include_keywords") or []
+                location_terms = [kw for kw in kws
+                                  if kw and kw[0].isupper() and len(kw) > 3]
+                prefix = location_terms[0] if location_terms else ""
+                if prefix:
+                    queries = [
+                        q if prefix.lower() in q.lower() else f"{prefix} {q}"
+                        for q in queries
+                    ]
 
             # C2: first query gets 50%, remaining queries share the rest
             first_n = max(1, n // 2)
@@ -168,11 +174,12 @@ def _get_queries(search_prompt: str, item: dict | None, n: int) -> list[tuple[st
             result += [(q, rest_n) for q in queries[1:]]
             return result
 
-        # Fallback with location prefix if no search_queries
-        kws = item.get("include_keywords") or []
-        loc = next((kw for kw in kws if kw and kw[0].isupper() and len(kw) > 3), "")
-        if loc and loc.lower() not in search_prompt.lower():
-            search_prompt = f"{loc} {search_prompt}"
+        # Fallback: apply location prefix to search_prompt for images only
+        if inject_location:
+            kws = item.get("include_keywords") or []
+            loc = next((kw for kw in kws if kw and kw[0].isupper() and len(kw) > 3), "")
+            if loc and loc.lower() not in search_prompt.lower():
+                search_prompt = f"{loc} {search_prompt}"
 
     return [(search_prompt, n)]
 
@@ -662,7 +669,17 @@ def fetch_videos(
 
     backoff  = cfg.get("backoff_seconds", [5, 15, 45])
     sources  = cfg.get("sources", ["pexels", "pixabay"])
-    queries  = _get_queries(search_prompt, item, n)
+    # B3 for videos: do NOT inject location into regular queries.
+    # Pexels returns 5000+ loosely-matched results for any query — location prefix
+    # adds no signal there. Pixabay uses strict tag matching — location-only query
+    # is added per-source below (Pixabay only) to capture all location-tagged videos.
+    queries  = _get_queries(search_prompt, item, n, inject_location=False)
+
+    # Extract location term for Pixabay-only location query
+    _loc_term = ""
+    if item:
+        kws = item.get("include_keywords") or []
+        _loc_term = next((kw for kw in kws if kw and kw[0].isupper() and len(kw) > 3), "")
 
     seen_ids: set[str] = set()
     saved: list[tuple[Path, dict]]  = []
@@ -674,7 +691,17 @@ def fetch_videos(
         # Source-specific filter overrides from the manifest item
         source_filters = _get_source_filters(item, source)
 
-        for query, per_q in queries:
+        # Pixabay only: prepend a location-only query (e.g. "Pompeii") so all
+        # location-tagged videos are captured. Pixabay has strict tag matching and
+        # typically returns <20 results for specific location terms — all valuable.
+        # Pexels is NOT given this query — it returns 5000+ loosely-matched results
+        # for any location term, adding noise rather than signal.
+        source_queries = queries
+        if source == "pixabay" and _loc_term:
+            loc_n = min(20, max(5, n // 4))
+            source_queries = [(_loc_term, loc_n)] + list(queries)
+
+        for query, per_q in source_queries:
             per_page_pexels  = max(per_q, 10)
             per_page_pixabay = max(per_q, 20)
 

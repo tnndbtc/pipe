@@ -2051,3 +2051,179 @@ Run through the relevant items after any modification:
        selection — these existing functions must NOT be modified; only new preview pickers added.
     7. Skipping _ensure_hires() call at any of the three selection code paths (v3 segments,
        v2 per-shot, old single-selection) leaves some shots rendered at preview quality.
+
+---
+
+## Media Search Scoring — Root Causes & Fixes (search.txt)
+
+Source: search.txt (fully implemented design document).
+
+### Pipeline flow
+`AssetManifest_draft.shared.json` backgrounds[] → POST /batches (media server port 8200) →
+downloader.py fetches from Pexels + Pixabay → scorer.py ranks → results stored in batch_state.json.
+
+Each background item carries: `search_prompt`, `search_queries` (4 queries), `ai_prompt`,
+`scoring_hints`, `include_keywords`, `exclude_keywords`, `cinematic_role`, `motion_level`,
+`lighting`, `search_filters`, `source_filters`.
+
+### P0 — Calmness as hard gate destroys image scoring (CRITICAL)
+
+`score_images()` applies `_calmness_single()` as a **pre-filter hard gate**:
+  - Images below the threshold are rejected BEFORE CLIP runs → score forced to 0.
+  - `_calmness_single()` = `1.0 - (Laplacian_variance / 500.0)` — measures image TEXTURE DENSITY,
+    not motion. High Laplacian variance = fine grain, sharp architectural detail.
+  - Archaeological/ruins photos (stone masonry, mosaics, plaster casts) have lap_var 500–2000
+    → calmness ≈ 0.0 → rejected as "too busy". Blurry unrelated images pass.
+  - Measured on pompeii batch b_60980966: 86% of images rejected before CLIP ran.
+    For some backgrounds, 0 of 30 images reached CLIP → results sorted arbitrarily → wrong images top.
+
+Fix: calmness must be a **soft score penalty**, not a hard gate, for images.
+  ```python
+  # score_images() — replace hard gate with penalty
+  calmness_penalty = max(0.0, calm_target - calm) * motion_weight
+  final_score = clip_total - calmness_penalty   # never blocks CLIP from running
+  ```
+  Hard gating is acceptable ONLY when candidate pool > 200 AND the filter is semantically
+  grounded AND the content_profile explicitly opts in.
+
+### P0b — Image calmness threshold must be separate from video calmness threshold
+
+`_calmness_single()` (images) measures sharpness/texture. `_calmness_from_frames()` (videos)
+measures temporal motion between frames. These are fundamentally different metrics.
+Using the same `motion_level → MOTION_LEVEL_CALM_THRESHOLD` table for both is wrong for
+documentary/archaeological content.
+
+Fix: split into two independent per-content-profile controls:
+  ```python
+  def _image_calmness_threshold(item, cfg) -> float | None: ...
+  def _video_calmness_threshold(item, cfg) -> float | None: ...
+  ```
+  Add `image_calmness_threshold` and `video_calmness_threshold` to each scoring_profiles entry:
+  ```json
+  "default":     { "image_calmness_threshold": 0.05,  "video_calmness_threshold": null },
+  "sleep_story": { "image_calmness_threshold": 0.55,  "video_calmness_threshold": 0.65 },
+  "documentary": { "image_calmness_threshold": 0.0,   "video_calmness_threshold": null },
+  "action":      { "image_calmness_threshold": 0.0,   "video_calmness_threshold": null }
+  ```
+  `null` = use existing `motion_level` table (current behavior preserved for videos).
+  `0.0` = disabled (nothing rejected).
+
+Lenient fallback table `IMAGE_MOTION_LEVEL_CALM_THRESHOLD` when no profile threshold:
+  `"none"→0.30, "very_low"→0.20, "low"→0.05, "medium"→None, "high"→None`
+
+### P1 — include_keywords never injected into queries
+
+`include_keywords` (e.g. `["Pompeii","ruins","ancient"]`) is defined in the manifest but
+NEVER used in query construction or CLIP scoring. Location-specific keywords that should
+force API keyword matching are silently ignored → generic results (Serbia ruins instead of Pompeii).
+
+Fix in `downloader.py _get_queries()`:
+  Prepend the most specific keyword (proper noun / location) to every query:
+  ```python
+  prefix = " ".join(kw for kw in include_keywords if kw.istitle())  # e.g. "Pompeii"
+  queries = [(prefix + " " + q if prefix else q, n) for q, n in queries]
+  ```
+  Optional boost: after CLIP scoring, raise score +0.05 per matched include_keyword found
+  in result's `.info.json` title or tags.
+
+### P2 — Query rotation dilutes budget with weak queries
+
+4 queries × ceil(30/4) = 8 results each. If 2 of 4 queries are too broad, ~16 slots
+are wasted on non-specific content. Fewer strong, location-anchored queries outperform
+many varied weak ones.
+
+Better policy: weight budget toward the most specific query (first query gets 50%):
+  ```python
+  # Instead of uniform ceil(n/len(queries)):
+  first_n = n // 2
+  rest_n  = n - first_n
+  # distribute rest_n evenly across remaining queries
+  ```
+  Or: allow per-query weights in manifest: `"search_queries": [{"q": "...", "weight": 2}, ...]`
+
+### P3 — search_filters.media_type is never read
+
+Every manifest item has `search_filters.media_type = "photo"` but server.py reads:
+  `prefer = item.get("prefer", "both")` — `"prefer"` is never set → always defaults to `"both"`.
+  → Videos are always searched even when manifest explicitly says photo-only.
+  → 30 videos × 22 backgrounds = 660 wasteful video downloads per batch.
+
+Fix in `server.py _process_item()`:
+  ```python
+  sf = item.get("search_filters") or {}
+  mt = sf.get("media_type") or item.get("prefer", "both")
+  prefer = {"photo": "image", "video": "video"}.get(mt, "both")
+  ```
+  Already partially fixed: `_process_item()` now reads `sf["media_type"]` and maps
+  `"photo"→"image"`. Verify this mapping is in place and not regressed.
+
+### P4 — min_width/min_height in search_filters not passed to Pixabay API
+
+`search_filters.min_width/min_height` are defined in the manifest but never forwarded to
+Pixabay's `min_width`/`min_height` API params. Only works if manually set in
+`source_filters.pixabay` (which manifests don't do).
+
+Fix in `server.py _process_item()`:
+  ```python
+  sf = item.get("search_filters") or {}
+  if sf.get("min_width") and "pixabay" not in (item.get("source_filters") or {}):
+      item.setdefault("source_filters", {})["pixabay"] = {
+          "min_width":  sf.get("min_width"),
+          "min_height": sf.get("min_height"),
+      }
+  ```
+  Pexels has no pixel-exact API param; rely on sidecar `info["width"]` check post-download.
+
+### P5 — exclude_keywords must be soft score penalty, not hard filter
+
+`exclude_keywords` (e.g. `["people","tourist","modern","car"]`) are not currently enforced
+at all. Plan was to hard-filter results where title/tags match. Hard rejection is too
+aggressive — a ruins photo with one incidental tourist in the background may be the best
+available asset and must not be discarded.
+
+Fix: soft penalty after CLIP scoring:
+  ```python
+  score_penalty = -0.05 per matched exclude_keyword in title/tags
+  # Applied after clip_total, before final sort. Never forces score to 0.0.
+  ```
+  Exception: high HOG person_score (> 0.5) warrants a harder penalty (-0.15) because
+  CLIP itself will score person-dominated images poorly for background prompts.
+
+### Architectural principles
+
+**Metadata is a support signal, not a relevance gate.**
+  Primary:   CLIP visual + text embedding (semantic relevance)
+  Support:   title/tag keyword boost/penalty (include/exclude_keywords)
+  Structural: width/height from sidecar (technical minimum, not relevance)
+  Identity:  asset_page_url (human review via 🔗 link, never affects scoring)
+  Never: reject or accept based solely on title/tag match.
+
+**CLIP must see the full relevant pool.**
+  Heuristics (calmness, tag filters) must not destroy the candidate pool before
+  semantic scoring. A weak heuristic defeating a strong model collapses ranking quality.
+  Hard gates are acceptable only when: (a) semantically grounded, (b) large pool, (c) opt-in.
+
+**Platform limitation: Pexels/Pixabay are tag matchers, not semantic engines.**
+  They rank by keyword match + popularity + recency, not visual semantics.
+  "Roman archaeological interior" matches any interior regardless of location.
+  Fix: force the location name into every query (P1 above); accept CLIP re-ranks by content;
+  accept that some slots need AI-generation fallback.
+
+**CLIP prompt quality matters.**
+  Include both EVENT and LOCATION in ai_prompt:
+  ✓ "pyroclastic surge rushing down Vesuvius toward ancient Pompeii"
+  ✗ "massive clouds of superheated gas rushing down the mountain"
+
+### Regression risks
+1. Re-introducing the calmness hard gate in `score_images()` silently kills results for
+   documentary/archaeological content (the pompeii b_60980966 failure mode).
+2. Using the same `MOTION_LEVEL_CALM_THRESHOLD` table for images and videos conflates texture
+   density with temporal motion — wrong for any non-sleep-story profile.
+3. Reading `item.get("prefer","both")` without first checking `search_filters.media_type`
+   re-introduces 660 wasteful video downloads for photo-only manifests.
+4. Omitting `include_keywords` query prefix means location-specific searches return
+   geographically wrong content that visually resembles the target.
+5. Hard-filtering on `exclude_keywords` discards the best available asset when it contains
+   an incidental match (e.g. one tourist in frame of the only Pompeii ruins photo available).
+6. Using metadata as a primary relevance signal (rather than CLIP) degrades ranking when
+   Pexels/Pixabay tags are generic, missing, or keyword-stuffed.
