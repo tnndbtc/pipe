@@ -1065,6 +1065,99 @@ API endpoints: `GET /list_projects`, `GET /pipeline_status`
 | `fallback` | No `scoring_hints` in item (old manifest) | Single `ai_prompt` → one CLIP cosine score |
 | `multi_dim` | `scoring_hints` dict present (new manifest) | 5 dimensions: subjects, environment, style, motion, technical — weighted average |
 
+### Multi-source media — license gate, download, and safety rules
+
+The following rules apply to ALL media sources (Openverse, Wikimedia, Internet Archive,
+Europeana, Pexels, Pixabay). They were added in 2026-03-10 and are required before any
+non-Pexels/Pixabay source goes live.
+
+**RULE 1 — ND licenses excluded pipeline-wide:**
+This pipeline creates derivatives at every stage (resize, transcode, crop, overlay, embed).
+`ACCEPTED_LICENSES = {"CC0", "Public Domain", "CC BY"}` — BY-SA and all ND/NC variants excluded.
+
+```python
+ACCEPTED_PREFIXES = ("CC0", "Public Domain", "CC BY 1", "CC BY 2", "CC BY 3", "CC BY 4")
+
+def is_license_acceptable(license_summary: str) -> bool:
+    if not license_summary:
+        return False
+    s = license_summary.strip()
+    if s in ACCEPTED_LICENSES:
+        return True
+    if any(s.startswith(p) for p in ACCEPTED_PREFIXES):
+        return True
+    return False
+```
+
+Every source's fetch loop calls `if not is_license_acceptable(license_summary): skip`.
+
+**RULE 2 — Centralized license gate:** `is_license_acceptable()` is the ONE function that
+decides. Do NOT add per-source license checks that diverge from it.
+
+**RULE 3 — Download before render (SSRF prevention):**
+Remote URLs MUST NOT be used as render inputs. Every selected candidate must be downloaded first.
+
+`POST /api/media_save` — required for ALL non-Pexels sources:
+```
+Request body: { project_id, episode_id, bg_index, source_site, source_id }
+  (server reconstructs URL from its own cached results — NEVER trusts client URL)
+Server steps:
+  1. Reconstruct download URL from server-side search cache keyed by (source_site, source_id)
+  2. Validate URL hostname against DOWNLOAD_ALLOWLIST (see SSRF invariant §19)
+  3. File size guard: HEAD → Content-Length; reject > 50MB (image) or 2GB (video)
+     If no Content-Length: stream with byte counter; abort at limit
+  4. Download to: projects/{project_id}/episodes/{episode_id}/media/bg_{bg_index}_{hash8}.{ext}
+  5. For video: ffprobe → if codec/dims/duration not acceptable → transcode to h264/aac
+     If no audio stream: inject silent audio track (ffmpeg -f lavfi -i anullsrc)
+     Store backgrounds[N].had_no_audio = true for diagnostics
+  6. For image: verify MIME → convert to PNG if needed (reject SVG, TIFF)
+  7. Atomic manifest write (portalocker around read-modify-write)
+  8. Return: { local_path, status: "ok" }
+```
+
+**RULE 4 — Required attribution sidecar:**
+Every selected media asset must store a structured attribution JSON alongside the file:
+```
+assets/media/{item_id}.info.json  (or inline as backgrounds[N].attribution in manifest)
+Required fields: source_site, source_id, title, author, license_summary, license_url,
+                 asset_page_url, attribution_required (bool), attribution_text
+```
+
+**RULE 5 — Video probe + normalize before render:** (see RULE 3 step 5)
+
+**RULE 6 — Internet Archive PD heuristic tightened:**
+Year < 1928 alone is NOT sufficient. Accept PD only if:
+- `licenseurl` field contains a recognized CC/PD URL, OR
+- item is from an explicitly allowlisted PD collection:
+  `ALLOWLIST_COLLECTIONS = {"nasa", "metropolitanmuseumofart", "smithsonian"}`
+
+`_normalize_license(licenseurl, collections)` — `collections` must be a normalized `list[str]`
+from `metadata.get("collection", [])`. Do NOT call with `(license_raw, subject, date)` —
+that signature was a 3-arg crash bug.
+
+**RULE 7 — LoC general search disabled:**
+General `https://www.loc.gov/search/?q=...` is NOT safe for automated commercial use.
+Only specific manually-verified PD collection endpoints allowed.
+
+**RULE 8 — Cross-source deduplication (mandatory 3-pass):**
+```
+Pass 1: (source_site, source_id) tuples
+Pass 2: normalized asset_page_url (lowercase, strip query params, strip trailing slash)
+Pass 3: (normalize_title, round(duration, 1), source_domain) — fallback only
+```
+Order of operations: Fetch ALL sources → normalize → license gate → dedup → THEN score.
+Dedup BEFORE CLIP scoring (prevents scoring duplicates, wasting bandwidth on filtered items).
+
+**Environment variables for multi-source media:**
+| Variable | Service | Where used |
+|----------|---------|------------|
+| `OPENVERSE_CLIENT_ID` | Openverse | media server |
+| `OPENVERSE_CLIENT_SECRET` | Openverse | media server |
+| `EUROPEANA_API_KEY` | Europeana | media server |
+| `WIKIMEDIA_API_TOKEN` | Wikimedia (optional) | media server |
+
+All keys loaded from `os.environ` only — never in `config.json`.
+
 ### Regression risks for media workflow
 1. `batch_store.create()` MUST use `**item_data` spread — cherry-picking 3 fields was the root cause of `mode: fallback` despite `scoring_hints` being present in the manifest
 2. `_mediaServerUrl()` JS regex must be `/\/+$/` (one backslash) — NOT `/\\/+$/` (two backslashes) — raw string escaping issue causes `SyntaxError: Unexpected token ','` which cascades to `switchTab is not defined`
@@ -1074,6 +1167,181 @@ API endpoints: `GET /list_projects`, `GET /pipeline_status`
 6. `selections.json` must be written before Stage 9 `resolve_assets.py` runs — enforced by the Stage 5 hard stop
 7. **HTTP/1.1 6-connection-per-host limit**: video thumbnails, SSE streams, pollers, and fetch requests all share the same 6-slot budget. `_mediaLazyLoad` throttle MUST stay ≤ 2 concurrent. `_mediaStopVid()` MUST NOT re-set `vid.src` after clearing it (per HTML spec, setting `.src` triggers the load algorithm and opens a new HTTP connection even with `preload='none'`). `_mediaReleaseAllConnections()` MUST be called before `mediaConfirm()` POST.
 8. **`/api/serve_media_file` streams in 256 KB chunks** — does NOT read entire files into RAM. `BrokenPipeError`/`ConnectionResetError` are caught and silently ignored (browser closes connection after getting metadata).
+
+---
+
+## PART 7c — WORKFLOW F: SFX TAB (Sound Effects Search & Selection)
+
+### Files involved
+
+**VC editor** (192.168.86.40:8080):
+- `code/http/test_server.py` — SFX tab JS + 7 API endpoints
+
+**AI server** (192.168.86.27:8000, Windows, HTTP-only, no NFS):
+- `POST /jobs` — submit gen_sfx job (same pattern as background AI gen)
+- `GET /jobs/{job_id}` — poll job status
+- `GET /jobs/{job_id}/files/{filename}` — download AI output WAV
+
+**External APIs:**
+- Freesound: `https://freesound.org/apiv2/search/text/` (primary SFX source)
+- Openverse audio: `https://api.openverse.org/v1/audio/` (secondary — reuses Openverse OAuth)
+
+### Environment variables
+
+| Variable | Purpose | How to set |
+|----------|---------|------------|
+| `FREESOUND_API_KEY` | Freesound API token | Apply at freesound.org/apiv2/apply (instant) |
+| `AI_SERVER_URL` | AI server base URL | Default: `http://192.168.86.27:8000` |
+| `AI_SERVER_KEY` | AI server auth key | `X-Api-Key` header |
+
+```python
+_FREESOUND_KEY = os.environ.get("FREESOUND_API_KEY", "")
+_AI_SERVER_URL = os.environ.get("AI_SERVER_URL", "http://192.168.86.27:8000")
+_AI_SERVER_KEY = os.environ.get("AI_SERVER_KEY", "")
+```
+
+**NEVER store these keys in any config file or HTML.**
+
+### Step-by-step flow
+
+**Step 1 — User opens SFX tab, selects episode**
+- JS: `_sfxInit()` loads `sfx_items[]` from `AssetManifest_draft.shared.json`
+- Calls `_sfxLoadAll()` to search all items
+- Restores `_sfxSelected` from `localStorage` and in-flight AI jobs
+
+**Step 2 — Search (per-item or all-at-once)**
+- `GET /api/sfx_search?slug=X&ep_id=Y&item_id=Z`
+  - Reads sfx_item from manifest (tag, duration_sec)
+  - Searches Freesound: `filter=license:("Creative Commons 0" OR "Attribution") duration:[0 TO {max_dur}]`
+    where `max_dur = max(duration_sec * 2, 15)`
+  - Searches Openverse audio: `license=cc0,by&source=freesound,wikimedia_audio` (NOT `license_type=commercial`)
+  - Merges, normalizes, deduplicates, returns candidates
+- `GET /api/sfx_search_all?slug=X&ep_id=Y` — searches all sfx_items (≤3 concurrent workers)
+
+**Step 3 — Deduplication (mandatory 3-pass):**
+- Pass 1: source-native ID (Freesound sound_id extracted from Openverse `foreign_landing_url`)
+- Pass 2: normalized `asset_page_url`
+- Pass 3: `(normalize(title), round(duration, 1), author)` fallback
+
+**Step 4 — User plays preview + selects candidate**
+- Singleton `<audio>` element with `_sfxPlayGen` generation counter (prevents race conditions)
+- Selection persisted to `localStorage["sfx_selected__{slug}__{ep_id}"]`
+- Cards show: waveform PNG, title, duration, rating, downloads, license, source, [▶] [↗]
+- Query used in each card is shown inline and editable (re-runs search on edit)
+
+**Step 5 — AI Generate (fallback)**
+- `✨` button always visible — not threshold-gated by result count
+- User edits prompt (pre-filled from sfx_item.tag); clicks Generate
+- `POST /api/sfx_ai_generate` → submits job to AI server → returns `{job_id, asset_id}`
+- `asset_id = f"{item_id}-{int(time.time()*1000)}"` — integer milliseconds, never sliced
+- Polls `GET /api/sfx_ai_status?job_id=...` every 3s; timeout 600s
+- On done: `POST /api/sfx_ai_save` → downloads WAV → injects 🤖 badge into card
+- Pending jobs stored in `localStorage["sfx_ai_pending__{slug}__{ep_id}"]` — restored on reload
+
+**Step 6 — Save SFX Selections**
+- `💾 Save SFX Selections` → for each selection:
+  - Library sound: `POST /api/sfx_save { source_site, source_id }` → server reconstructs URL,
+    downloads, canonicalizes, saves to `assets/sfx/{item_id}.wav`
+  - AI sound: already saved during AI gen flow
+- Server atomically patches manifest: `sfx_items[N].file_path`, `.source`, `.source_id`, `.attribution`
+- `GET /api/sfx_saved` → scans `assets/sfx/` to restore saved state after reload
+
+### Audio canonicalization pipeline (MANDATORY for all SFX)
+
+Every saved SFX file — from any source — MUST pass through this pipeline before storage:
+
+```
+Step 1: MIME/type validation — accept only audio/wav, audio/mpeg, audio/ogg, audio/flac
+Step 2: File size cap — HEAD Content-Length; reject > 20MB; streaming byte-counter fallback
+Step 3: Transcode to canonical format:
+          ffmpeg -i {tmp} -ar 44100 -ac 1 -c:a pcm_s16le {dest}.wav
+          (mono, 44100 Hz, 16-bit PCM WAV)
+Step 4: ffprobe duration check vs. target:
+          if abs(actual - target) > 3s → trim (library) or reject (AI)
+          ffprobe -v error -show_entries format=duration -of csv=p=0 {file}
+Step 5: Trim (if needed):
+          ffmpeg -t {target} -i {file} ...
+Step 6: Loudness normalization (EBU R128, -16 LUFS):
+          ffmpeg -i {step3} -af loudnorm=I=-16:LRA=11:TP=-1.5 -ar 44100 -ac 1 -c:a pcm_s16le {final}.wav
+```
+
+Store ONLY the Step 6 output in `assets/sfx/`. Both `/api/sfx_save` and `/api/sfx_ai_save` run this pipeline.
+
+### Attribution sidecar (`.info.json`)
+
+Write alongside every saved SFX file:
+```json
+{
+  "source_site":      "freesound" | "openverse_audio" | "ai",
+  "source_id":        "{sound_id}",
+  "author":           "{username}",
+  "license_summary":  "CC0" | "CC BY",
+  "license_url":      "https://creativecommons.org/...",
+  "asset_page_url":   "https://freesound.org/people/.../sounds/{id}/",
+  "attribution_text": "\"Title\" by author / freesound.org / CC BY",
+  "original_format":  "mp3" | "wav" | "ogg",
+  "saved_at":         "{ISO timestamp}"
+}
+```
+
+### Manifest persistence (one authoritative path)
+
+On `/api/sfx_save` success, server atomically writes:
+```python
+with portalocker.Lock(manifest_path + ".lock", timeout=10):
+    manifest = json.loads(manifest_path.read_text())
+    manifest["sfx_items"][N]["file_path"]  = "assets/sfx/{item_id}.wav"
+    manifest["sfx_items"][N]["source"]     = source_site
+    manifest["sfx_items"][N]["source_id"]  = source_id
+    manifest["sfx_items"][N]["attribution"] = attribution_text
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+```
+
+`gen_sfx` skip logic reads ONLY: `sfx_item.file_path is set AND os.path.exists(resolved_path)`.
+
+### Render pipeline integration
+
+Fields written to sfx_items at save time:
+```
+start_sec:    float  // timecode within episode where SFX begins (default = shot.start_sec)
+duration_sec: float  // how long to play (trim or loop if needed; default = sfx_item.duration_sec)
+volume:       float  // mix level 0.0–1.0 (default = 1.0)
+loop:         bool   // loop if clip shorter than duration_sec (default = false)
+```
+
+RenderPlan.json SFX segment schema:
+```json
+{
+  "type":         "sfx",
+  "file_path":    "assets/sfx/{item_id}.wav",
+  "start_sec":    1.5,
+  "duration_sec": 4.0,
+  "volume":       1.0
+}
+```
+
+`resolve_assets.py`: sfx file_path is relative to episode dir; resolve same way as background local_path.
+`render_video.py`: mix SFX track using ffmpeg `amix` or `adelay` filter at `start_sec`.
+
+### File path conventions
+
+```
+assets/sfx/{item_id}.wav            ← canonicalized library sound (post pipeline)
+assets/sfx/{item_id}.info.json      ← attribution sidecar
+assets/sfx/{asset_id}.wav           ← AI-generated sound (asset_id = {item_id}-{unix_ms})
+```
+
+`resolve_assets.py` searches `assets/sfx/{item_id}.{wav|mp3|ogg}` — canonical format is WAV.
+
+### Regression risks for SFX tab
+1. `ts_ms = int(time.time() * 1000)` — this is an integer. NEVER do `ts_ms[:8]` — that raises `TypeError: 'int' object is not subscriptable`. Use `asset_id = f"{item_id}-{int(time.time()*1000)}"` everywhere.
+2. The same `asset_id` must appear in: POST response, localStorage, poll call, sfx_ai_save body, saved filename, and manifest file_path. Any deviation breaks save/reload correlation.
+3. Openverse audio query MUST use `license=cc0,by` — NOT `license_type=commercial` (BY-SA and BY-ND slip through the commercial filter).
+4. `/api/sfx_save` must save by `(source_site, source_id)` only — NEVER trust client-supplied `preview_url`. Server reconstructs URL from its own cache; validates against SSRF hostname allowlist.
+5. Audio canonicalization pipeline is MANDATORY for all sources — do NOT store raw downloaded bytes.
+6. Manifest write must use file lock (portalocker/fcntl) — plain `write_text` is not atomic.
+7. `_sfxPlayGen` generation counter MUST be checked after `await audioEl.play()` returns — prevents stale async play calls winning a race after the user clicked a different row.
+8. Search result cache (sessionStorage, 30-min TTL) MUST be keyed by `(slug, ep_id, item_id)` — prevents stale results from a previous episode appearing in the current one.
 
 ---
 
@@ -1103,6 +1371,10 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/api/serve_media_file` | `url` | Binary file content — proxies `file://` URIs for NFS media (browsers block file:// from http:// pages) |
 | `/api/vo_locales` | `ep_dir` | `{locales: ["en", "zh-Hans", ...]}` — scans ep_dir for `AssetManifest_merged.*.json` files |
 | `/api/vo_items` | `ep_dir`, `locale` | `{items: [...]}` — returns `vo_items` from merged manifest, each annotated with `duration_sec` from WAV on disk |
+| `/api/sfx_search` | `slug`, `ep_id`, `item_id` | `{item_id, candidates:[{preview_url, duration_sec, title, tags, license_summary, attribution, author, rating, downloads, waveform_img, source_site, source_id, asset_page_url}]}` — searches Freesound + Openverse audio |
+| `/api/sfx_search_all` | `slug`, `ep_id` | `{item_id: {candidates[]}, ...}` — searches all sfx_items (≤3 concurrent workers) |
+| `/api/sfx_saved` | `slug`, `ep_id` | `{item_id: {filename, path, url}}` — scans assets/sfx/ for saved files; called on page reload to restore state |
+| `/api/sfx_ai_status` | `job_id` | Proxied response from `GET {AI_SERVER_URL}/jobs/{job_id}` |
 
 ### POST endpoints
 | Path | Body | Returns |
@@ -1118,6 +1390,10 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/api/media_confirm` | `{slug, ep_id, batch_id, version, selections}` | `{ok, path, n}` — writes selections.json (version: 1=single, 2=per-shot, 3=multi-segment per shot) |
 | `/api/episode_file` | `?slug=X&ep_id=Y&file=ShotList.json` | raw JSON — whitelisted: ShotList.json, selections.json |
 | `/api/retune_vo` | `{slug, ep_id, locale, dry_run, backup, items:[{item_id, text?, azure_style?, azure_rate?, azure_pitch?, azure_style_degree?, azure_break_ms?}]}` | `{results:[{item_id, status, before_duration_sec, after_duration_sec, duration_delta_sec, duration_warn, wav_path, error}]}` |
+| `/api/sfx_save` | `{slug, ep_id, item_id, source_site, source_id}` | `{path, url}` — reconstructs URL server-side (never trusts client URL); runs 6-step canonicalization pipeline; patches manifest atomically |
+| `/api/sfx_ai_generate` | `{slug, ep_id, item_id, prompt, duration_sec}` | `{job_id, asset_id, timestamp_ms}` — submits gen_sfx job to AI server; `asset_id = f"{item_id}-{int(time.time()*1000)}"` |
+| `/api/sfx_ai_save` | `{slug, ep_id, item_id, job_id, asset_id, timestamp_ms}` | `{path, url}` — downloads AI WAV, runs canonicalization pipeline, saves to assets/sfx/{asset_id}.wav |
+| `/api/media_save` | `{project_id, episode_id, bg_index, source_site, source_id}` | `{local_path, status}` — RULE 3: reconstructs URL server-side; validates hostname; enforces size cap; downloads; normalizes video/image; writes attribution; patches manifest atomically |
 
 ### Key invariants for API endpoints
 - `/api/next_episode_id` returns key `"next_ep_id"` — JS client reads `nd.next_ep_id`
@@ -1295,6 +1571,66 @@ Must NOT be reordered:
 - When `background_segments` is `null` or has only 1 entry, render_video.py falls through to existing single-background logic (loop/hold as before)
 - Backward compat: v1/v2 selections.json and old RenderPlans (no `background_segments`) work unchanged
 
+### 17. SFX asset path convention
+```
+assets/sfx/{item_id}.wav            ← library sound (post-canonicalization; always WAV)
+assets/sfx/{item_id}.info.json      ← attribution sidecar (structured JSON)
+assets/sfx/{item_id}_ai_{unix_ms}.wav  ← AI-generated sound
+```
+- `resolve_assets.py` searches: `assets/sfx/{item_id}.{wav|mp3|ogg}` — canonical is WAV
+- `gen_sfx` skip logic: checks `sfx_item.file_path is set AND os.path.exists(resolved_path)` — NO other state consulted
+- AI asset_id format: `f"{item_id}-{int(time.time()*1000)}"` — NEVER `ts_ms[:8]` (integer has no slice)
+
+### 18. Atomic manifest write for SFX and media
+All write paths that patch `AssetManifest_draft.shared.json` (SFX) or `AssetManifest_draft.{locale}.json` (media) MUST use a file lock:
+```python
+with portalocker.Lock(manifest_path + ".lock", timeout=10):
+    manifest = json.loads(manifest_path.read_text())
+    # patch fields
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+```
+Plain `write_text()` without a lock is NOT atomic and will corrupt the manifest under concurrent requests.
+
+### 19. SSRF hostname allowlist for all download endpoints
+`/api/sfx_save`, `/api/sfx_ai_save`, and `/api/media_save` MUST validate all download URLs against an allowlist before fetching. Server reconstructs the URL from its own cache — NEVER trusts client-supplied URLs.
+
+```python
+DOWNLOAD_ALLOWLIST = {
+    "cdn.freesound.org",
+    "freesound.org",
+    "upload.wikimedia.org",
+    "commons.wikimedia.org",
+    "archive.org",
+    "api.openverse.org",
+    "cdn.openverse.engineering",
+    "api.europeana.eu",
+    "live.staticflickr.com",
+}
+# AI server host derived from AI_SERVER_URL env var (not hardcoded)
+```
+Reject any URL whose resolved hostname is not in the allowlist. Log and return HTTP 400. This prevents SSRF via internal network access and cloud metadata endpoint abuse.
+
+### 20. Audio format canonicalization (all SFX sources)
+Every SFX file saved from any source — Freesound, Openverse, or AI — MUST pass the 6-step canonicalization pipeline before being stored. Output is always WAV, 44100 Hz, mono, 16-bit PCM:
+```
+Step 1: MIME validation    → audio/wav, audio/mpeg, audio/ogg, audio/flac only
+Step 2: Size cap           → max 20MB; streaming byte-counter if no Content-Length
+Step 3: Transcode          → ffmpeg -ar 44100 -ac 1 -c:a pcm_s16le
+Step 4: ffprobe duration   → compare actual vs. target; reject if diff > 3s (AI) or trim (library)
+Step 5: Trim if needed     → ffmpeg -t {target}
+Step 6: Loudness normalize → ffmpeg -af loudnorm=I=-16:LRA=11:TP=-1.5
+```
+Storing raw downloaded bytes or skipping any step produces inconsistent quality and ffmpeg errors in the render.
+
+### 21. License gate centralization
+`is_license_acceptable(license_summary)` is the SINGLE decision point for all media and SFX.
+`ACCEPTED_LICENSES = {"CC0", "Public Domain", "CC BY"}` (and versioned CC BY prefixes).
+- CC BY-SA: EXCLUDED — share-alike obligation propagates to rendered video output
+- CC BY-ND: EXCLUDED — pipeline creates derivatives at every stage
+- CC BY-NC: EXCLUDED — pipeline output is not restricted to non-commercial use
+- All unknown / empty strings: EXCLUDED
+Do NOT add per-source license checks that diverge from `is_license_acceptable()`.
+
 ---
 
 ## PART 10 — SCHEMA REFERENCE
@@ -1470,6 +1806,52 @@ Run through the relevant items after any modification:
 - [ ] Section headers (e.g. `====== EN-CAPABLE ======`) do not use `[STANDARD]` or `[DRAGON]` — those brackets are reserved for voice tier lines matched by `VOICE_RE`
 - [ ] ⚠ Token budget: 275 entries already adds ~17–22K tokens to Stage 0 (haiku). Monitor for quality degradation.
 
+### After modifying SFX tab (test_server.py SFX endpoints + JS)
+- [ ] `_FREESOUND_KEY = os.environ.get("FREESOUND_API_KEY", "")` — read from env var, never hardcoded
+- [ ] `_AI_SERVER_URL` and `_AI_SERVER_KEY` read from env vars (`AI_SERVER_URL`, `AI_SERVER_KEY`)
+- [ ] `/api/sfx_save` body uses `{source_site, source_id}` — server reconstructs URL; no client `preview_url` accepted
+- [ ] SSRF allowlist checked before any download in sfx_save and sfx_ai_save handlers
+- [ ] Audio canonicalization pipeline runs for BOTH library sounds (sfx_save) AND AI sounds (sfx_ai_save): MIME check → size cap → ffmpeg transcode → ffprobe duration → trim → loudnorm
+- [ ] `asset_id = f"{item_id}-{int(time.time()*1000)}"` — integer milliseconds, never `ts_ms[:8]` (TypeError on int)
+- [ ] Same `asset_id` used consistently: POST /api/sfx_ai_generate response, localStorage pending, poll, sfx_ai_save body, saved filename, manifest file_path
+- [ ] Openverse audio query uses `license=cc0,by` — NOT `license_type=commercial` (BY-SA/BY-ND leak through commercial filter)
+- [ ] Freesound filter uses `license:("Creative Commons 0" OR "Attribution")` — URL-encoded in query string
+- [ ] Deduplication 3-pass mandatory before returning candidates: (source_site+source_id) → landing_url → (title+duration+author)
+- [ ] Manifest write uses `portalocker.Lock` (or equivalent `fcntl`) around read-modify-write — plain `write_text` is not atomic
+- [ ] Manifest fields patched atomically: `sfx_items[N].file_path`, `.source`, `.source_id`, `.attribution`
+- [ ] `gen_sfx` skip logic reads ONLY manifest `file_path + os.path.exists()` — no browser state
+- [ ] `_sfxPlayGen` counter checked after `await audioEl.play()` — prevents stale play from winning race after faster click
+- [ ] sessionStorage cache keyed by `"sfx_cache__{slug}__{ep_id}__{item_id}"` — stale check: `fetched_at` within 30 min
+- [ ] `localStorage["sfx_selected__{slug}__{ep_id}"]` restored on tab init — persists selections across reloads
+- [ ] `localStorage["sfx_ai_pending__{slug}__{ep_id}"]` restored on tab init — resumes in-flight AI gen jobs
+- [ ] Openverse quality note shown below Openverse results: "ⓘ Openverse results include Wikimedia audio — may contain speech or historical recordings"
+- [ ] `✨` AI generate button always visible — NOT gated behind result count threshold
+- [ ] SFX card header shows editable query field pre-filled from sfx_item.tag; [🔍] re-runs search; does NOT write back to manifest
+- [ ] Attribution sidecar `assets/sfx/{item_id}.info.json` written at save time with all 8 required fields
+- [ ] SFX render pipeline fields (`start_sec`, `duration_sec`, `volume`, `loop`) written to sfx_items at save time
+- [ ] RenderPlan SFX segment has `type: "sfx"`, `file_path`, `start_sec`, `duration_sec`, `volume`
+- [ ] `resolve_assets.py` resolves `sfx_item.file_path` (relative to ep dir) to absolute path — same as background `local_path`
+
+### After modifying multi-source media (Openverse/Wikimedia/Archive/Europeana sources)
+- [ ] `is_license_acceptable()` called after each source's `_normalize_*()` function — no per-source divergence
+- [ ] `ACCEPTED_LICENSES = {"CC0", "Public Domain", "CC BY"}` — CC BY-SA excluded; BY-ND excluded; NC excluded
+- [ ] `_normalize_license(licenseurl, collections)` called with 2 args: `licenseurl` + normalized `collections list[str]` — NOT `(license_raw, subject, date)` (3-arg crash)
+- [ ] Internet Archive PD gate: accepted only if licenseurl present OR item in ALLOWLIST_COLLECTIONS (`{"nasa", "metropolitanmuseumofart", "smithsonian"}`) — NOT year < 1928 alone
+- [ ] LoC general search: disabled (`https://www.loc.gov/search/?q=...` not used in automated flow)
+- [ ] Cross-source dedup order: Fetch ALL → normalize → license gate → 3-pass dedup → THEN CLIP score
+- [ ] 3-pass dedup: (source_site, source_id) → normalized asset_page_url → fallback tuple
+- [ ] `POST /api/media_save` body: `{project_id, episode_id, bg_index, source_site, source_id}` — server reconstructs URL (SSRF prevention); client does NOT supply download URL
+- [ ] SSRF allowlist validated before any download in `/api/media_save`
+- [ ] File size guard in `/api/media_save`: HEAD → Content-Length; 50MB images, 2GB videos; streaming byte-counter fallback
+- [ ] Video normalize step: ffprobe → transcode to h264/aac if not acceptable; inject silent audio if no audio stream
+- [ ] Image normalize step: verify MIME; convert to PNG if needed (reject SVG, TIFF)
+- [ ] Manifest write atomic (portalocker) for all `/api/media_save` calls
+- [ ] Attribution sidecar (`.info.json` or `backgrounds[N].attribution`) written with all required fields
+- [ ] Openverse images: `license=cc0,by` in query (NOT `license_type=commercial`) — same issue as Openverse audio
+- [ ] Europeana: `reusability=open` is not sufficient — post-filter with `is_license_acceptable()` to catch BY-ND, BY-SA
+- [ ] Wikimedia: post-filter on LicenseShortName with `is_license_acceptable()` after normalize
+- [ ] Env vars loaded from `os.environ` only: `OPENVERSE_CLIENT_ID`, `OPENVERSE_CLIENT_SECRET`, `EUROPEANA_API_KEY`, `WIKIMEDIA_API_TOKEN` — never in `config.json`
+
 ### After modifying media server (code/media/http/)
 - [ ] `batch_store.create()` uses `**item_data` spread — does NOT cherry-pick fields from manifest items
 - [ ] `server.py` reads API keys from env vars only (`MEDIA_API_KEY`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`) — no keys in `config.json`
@@ -1595,6 +1977,52 @@ Run through the relevant items after any modification:
     on client). URIs are `file:///mnt/shared/...`. Browsers block `file://` from `http://` pages,
     so the VC editor provides `/api/serve_media_file?url=<encoded>` as a binary proxy.
     JS rewrites `file://` URLs to this proxy before setting `img.src` / `vid.src`.
+
+22. **Download-before-render is a hard requirement (RULE 3)**
+    Remote third-party URLs — Freesound CDN, Openverse, Wikimedia, Europeana, Archive.org — MUST NOT
+    appear as render inputs in RenderPlan.json. They can 404 at any time, be rate-limited mid-render,
+    or change content. Every selected candidate must be downloaded to a project-local path via
+    `/api/sfx_save` or `/api/media_save` before the manifest is written. The render pipeline reads
+    ONLY `file_path` / `local_path` — never the original remote URL. Do NOT shortcut this by passing
+    remote URLs through to render_video.py.
+
+23. **Audio canonicalization is mandatory — all SFX sources produce the same output format**
+    Freesound previews are MP3 at 128 kbps; Openverse sources vary (OGG, WAV, FLAC, MP3); AI output
+    is WAV at varying sample rates. Mixing these in the render pipeline produces unpredictable ffmpeg
+    behavior and inconsistent loudness. The 6-step canonicalization pipeline (MIME check → size cap →
+    transcode to WAV 44100Hz mono → ffprobe duration check → trim → EBU R128 loudnorm at -16 LUFS)
+    is applied to EVERY saved SFX file regardless of source. Raw downloads are NEVER stored.
+    Do NOT add a "fast path" that skips canonicalization for "already WAV" files — sample rate and
+    loudness still need normalization even for WAV inputs.
+
+24. **License gate is centralized in `is_license_acceptable()` — no per-source divergence**
+    `ACCEPTED_LICENSES = {"CC0", "Public Domain", "CC BY"}`. CC BY-SA is excluded because share-alike
+    obligations propagate to the rendered video output, making the entire episode subject to CC BY-SA
+    terms. CC BY-ND is excluded because this pipeline creates derivatives at every stage. A single
+    function in one location makes it impossible for a new source to silently admit bad licenses.
+    `license_type=commercial` on Openverse is NOT equivalent — it admits CC BY-SA and CC BY-ND;
+    always use `license=cc0,by` for Openverse queries.
+
+25. **AI server is Windows-only — no NFS access**
+    The AI server runs on 192.168.86.27 (Windows). It has NO access to the NFS share at
+    `/mnt/shared`. All AI server interactions use HTTP: POST /jobs (submit), GET /jobs/{id} (poll),
+    GET /jobs/{id}/files/{filename} (download result). The VC editor downloads the AI output WAV via
+    HTTP and saves it to the NFS-mounted project directory. Never attempt to pass NFS file paths to
+    the AI server.
+
+26. **SFX asset_id uses unix milliseconds — not sliced integers, not hashes**
+    `asset_id = f"{item_id}-{int(time.time()*1000)}"` — this is the one stable scheme used everywhere:
+    POST /api/sfx_ai_generate response, localStorage pending entry, poll call, sfx_ai_save body,
+    saved WAV filename, and manifest file_path. `ts_ms[:8]` on an int raises TypeError at runtime.
+    `{item_id}-{hash8}` is a different format and breaks save/reload correlation. Use unix_ms, always.
+
+27. **SSRF protection: save endpoints reconstruct URL server-side**
+    `/api/sfx_save` and `/api/media_save` do NOT accept a download URL from the client. The client
+    sends only `(source_site, source_id)`. The server looks up the URL from its own server-side
+    search result cache, then validates the resolved hostname against DOWNLOAD_ALLOWLIST before
+    fetching. This prevents both SSRF (client-controlled internal URLs) and attribution forgery
+    (client-controlled metadata). Do NOT add a `preview_url` or `remote_url` parameter to these
+    endpoints that gets passed directly to `requests.get()` without the allowlist check.
 
 16. **Media server is a separate deployment**
     Runs on NFS server (`192.168.86.33:8200`), separate from VC editor (`192.168.86.40:8080`).

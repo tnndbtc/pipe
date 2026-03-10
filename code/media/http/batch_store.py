@@ -79,12 +79,16 @@ class BatchStore:
 
     def create(
         self,
-        batch_id:        str,
-        project:         str,
-        episode_id:      str,
-        top_n:           int,
-        backgrounds:     dict,
-        content_profile: str = "default",
+        batch_id:                str,
+        project:                 str,
+        episode_id:              str,
+        top_n:                   int,
+        backgrounds:             dict,
+        content_profile:         str = "default",
+        n_img:                   int | None = None,
+        n_vid:                   int | None = None,
+        sources_override:        list | None = None,
+        source_limits_override:  dict | None = None,
     ) -> None:
         """
         Create a new batch directory + batch_state.json.
@@ -107,13 +111,17 @@ class BatchStore:
 
         now = _now_iso()
         state = {
-            "batch_id":        batch_id,
-            "status":          "queued",
-            "project":         project,
-            "episode_id":      episode_id,
-            "top_n":           top_n,
-            "content_profile": content_profile,
-            "created_at":      now,
+            "batch_id":               batch_id,
+            "status":                 "queued",
+            "project":                project,
+            "episode_id":             episode_id,
+            "top_n":                  top_n,
+            "content_profile":        content_profile,
+            "n_img":                  n_img,
+            "n_vid":                  n_vid,
+            "sources_override":       sources_override,
+            "source_limits_override": source_limits_override,
+            "created_at":             now,
             "updated_at":      now,
             "completed_at":    None,
             "progress":        "queued",

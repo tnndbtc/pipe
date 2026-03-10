@@ -2026,6 +2026,21 @@ placeholder="Enter your story here"></textarea>
     <button id="media-btn-search" onclick="mediaStartSearch()" disabled>🔍 Search Media</button>
   </div>
 
+  <!-- per-source settings table (always visible once project selected) -->
+  <div id="media-sources-table" style="display:none;padding:8px 2px 10px;border-bottom:1px solid var(--border)">
+    <table style="border-collapse:collapse;font-size:0.82em;color:var(--text)">
+      <thead>
+        <tr style="color:var(--dim);font-size:0.78em;text-transform:uppercase;letter-spacing:0.05em">
+          <th style="padding:0 18px 5px 0;text-align:left;font-weight:600">Source</th>
+          <th style="padding:0 14px 5px;text-align:center;font-weight:600">Enabled</th>
+          <th style="padding:0 14px 5px;text-align:center;font-weight:600">📷 img / item</th>
+          <th style="padding:0 0 5px 14px;text-align:center;font-weight:600">🎬 vid / item</th>
+        </tr>
+      </thead>
+      <tbody id="media-sources-tbody"></tbody>
+    </table>
+  </div>
+
   <!-- status / spinner -->
   <div class="media-status-bar" id="media-status-bar">
     <span id="media-status-text">Select an episode to begin.</span>
@@ -2062,8 +2077,10 @@ placeholder="Enter your story here"></textarea>
     .sfx-cand-waveform{width:48px;height:28px;object-fit:cover;border-radius:3px;flex-shrink:0;background:#ffffff10}
     .sfx-cand-title{flex:1;font-size:0.83em;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .sfx-cand-meta{font-size:0.76em;color:var(--dim);white-space:nowrap;flex-shrink:0}
-    .sfx-play-btn{background:none;border:none;color:var(--accent);cursor:pointer;font-size:1em;padding:0 2px;flex-shrink:0}
-    .sfx-play-btn:hover{color:var(--text)}
+    .sfx-play-btn{background:var(--accent);border:none;color:#000;cursor:pointer;font-size:1em;font-weight:700;padding:4px 9px;border-radius:5px;flex-shrink:0;min-width:34px;transition:opacity 0.15s}
+    .sfx-play-btn:hover{opacity:0.8}
+    .sfx-play-btn.playing{background:#e8a020}
+    .sfx-play-btn.error{background:#c0392b;color:#fff}
     .sfx-link-btn{background:none;border:none;color:var(--dim);cursor:pointer;font-size:0.85em;padding:0 2px;text-decoration:none;flex-shrink:0}
     .sfx-link-btn:hover{color:var(--text)}
     .sfx-status-bar{font-size:0.82em;color:var(--dim);padding:4px 0}
@@ -3356,42 +3373,60 @@ placeholder="Enter your story here"></textarea>
   let _sfxSelected= {};   // { item_id: index }
   let _sfxAudioEl = null;
   let _sfxPlayingUrl = null;
-  let _sfxPlayGen = 0;
+  let _sfxPlayGen    = 0;
+  let _sfxPlayingBtn = null;  // DOM button currently showing ⏸
 
   function sfxInit() {
-    // Populate episode select from Run tab slug/epId if set
-    const slugEl = document.getElementById('slug');
-    const epEl   = document.getElementById('episode_id');
-    if (slugEl && epEl && slugEl.value && epEl.value) {
-      _sfxSlug = slugEl.value.trim();
-      _sfxEpId = epEl.value.trim();
-      const sel = document.getElementById('sfx-ep-select');
-      let found = false;
-      for (let i = 0; i < sel.options.length; i++) {
-        const v = sel.options[i].value;
-        if (v === _sfxSlug + '/' + _sfxEpId) { sel.selectedIndex = i; found = true; break; }
-      }
-      if (!found) {
-        const opt = document.createElement('option');
-        opt.value = _sfxSlug + '/' + _sfxEpId;
-        opt.textContent = _sfxSlug + ' / ' + _sfxEpId;
-        sel.appendChild(opt);
-        sel.value = opt.value;
-      }
-      document.getElementById('sfx-btn-search').disabled = false;
+    const sel = document.getElementById('sfx-ep-select');
+    const needsPopulate = sel.options.length <= 1;
+    if (needsPopulate) {
+      // Load all projects/episodes into the select, then sync from Run tab
+      fetch('/list_projects').then(r => r.json()).then(data => {
+        (data.projects || []).forEach(proj => {
+          (proj.episodes || []).forEach(ep => {
+            const opt = document.createElement('option');
+            opt.value       = proj.slug + '|' + ep.id;
+            opt.textContent = proj.slug + ' / ' + ep.id;
+            sel.appendChild(opt);
+          });
+        });
+        _sfxSyncFromRunTab();
+      }).catch(() => { _sfxSyncFromRunTab(); });
+    } else {
+      _sfxSyncFromRunTab();
     }
-    // Restore selected from sessionStorage
-    const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
-    if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
+  }
+
+  function _sfxSyncFromRunTab() {
+    // Auto-select episode from Run tab globals if SFX tab has no selection
+    if (_sfxSlug && _sfxEpId) {
+      // Already selected — restore sessionStorage selections
+      const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
+      if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
+      return;
+    }
+    if (!currentSlug || !currentEpId) return;
+    const target = currentSlug + '|' + currentEpId;
+    const sel = document.getElementById('sfx-ep-select');
+    for (let i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === target) {
+        sel.value = target;
+        onSfxEpChange();
+        return;
+      }
+    }
   }
 
   function onSfxEpChange() {
     const val = document.getElementById('sfx-ep-select').value;
     if (!val) return;
-    const parts = val.split('/');
-    _sfxSlug = parts[0]; _sfxEpId = parts.slice(1).join('/');
+    const parts = val.split('|');
+    _sfxSlug = parts[0]; _sfxEpId = parts.slice(1).join('|');
     document.getElementById('sfx-btn-search').disabled = false;
-    document.getElementById('sfx-status-bar').textContent = 'Episode selected. Click Search All SFX.';
+    document.getElementById('sfx-status-bar').textContent = 'Episode selected. Click \u201cSearch All SFX\u201d.';
+    // Restore sessionStorage selections for this episode
+    const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
+    if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
   }
 
   async function sfxSearchAll() {
@@ -3407,11 +3442,13 @@ placeholder="Enter your story here"></textarea>
 
     // Load manifest to get sfx_items
     try {
-      const manifestUrl = '/api/manifest?slug=' + encodeURIComponent(_sfxSlug) + '&ep_id=' + encodeURIComponent(_sfxEpId);
+      const manifestUrl = '/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
+                        + '&ep_id=' + encodeURIComponent(_sfxEpId)
+                        + '&file=AssetManifest_draft.shared.json';
       const mresp = await fetch(manifestUrl);
       if (!mresp.ok) throw new Error('manifest: ' + mresp.status);
       const manifest = await mresp.json();
-      _sfxItems = manifest.sfx || manifest.sfx_items || [];
+      _sfxItems = manifest.sfx_items || manifest.sfx || [];
     } catch(e) {
       document.getElementById('sfx-status-bar').textContent = 'Failed to load manifest: ' + e.message;
       document.getElementById('sfx-btn-search').disabled = false;
@@ -3543,6 +3580,10 @@ placeholder="Enter your story here"></textarea>
   }
 
   function sfxSelectCandidate(itemId, idx) {
+    // Stop playback when user changes selection (avoids ghost audio)
+    if (_sfxAudioEl) { _sfxAudioEl.pause(); }
+    _sfxResetBtn(_sfxPlayingBtn);
+    _sfxPlayingUrl = null; _sfxPlayingBtn = null;
     if (_sfxSelected[itemId] === idx) {
       delete _sfxSelected[itemId];
     } else {
@@ -3560,23 +3601,73 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('sfx-count-label').textContent = sel + '/' + total + ' selected';
   }
 
+  function _sfxResetBtn(b) {
+    if (!b) return;
+    b.textContent = '\u25b6';
+    b.classList.remove('playing', 'error');
+  }
+
   function sfxPlay(event, url, btn) {
     event.stopPropagation();
-    if (!url) return;
+
+    // No URL — show error briefly
+    if (!url) {
+      btn.textContent = '!';
+      btn.classList.add('error');
+      setTimeout(() => _sfxResetBtn(btn), 2000);
+      return;
+    }
+
     const myGen = ++_sfxPlayGen;
+
+    // Create audio element once, attach ended/error handlers
     if (!_sfxAudioEl) {
       _sfxAudioEl = new Audio();
-      _sfxAudioEl.addEventListener('ended', () => { _sfxPlayingUrl = null; });
+      _sfxAudioEl.addEventListener('ended', () => {
+        _sfxResetBtn(_sfxPlayingBtn);
+        _sfxPlayingUrl = null;
+        _sfxPlayingBtn = null;
+      });
+      _sfxAudioEl.addEventListener('error', () => {
+        if (_sfxPlayingBtn) {
+          _sfxPlayingBtn.textContent = '✕';
+          _sfxPlayingBtn.classList.add('error');
+          setTimeout(() => _sfxResetBtn(_sfxPlayingBtn), 2500);
+        }
+        _sfxPlayingUrl = null;
+        _sfxPlayingBtn = null;
+      });
     }
+
+    // Clicking the already-playing row → pause/toggle
     if (_sfxPlayingUrl === url) {
-      _sfxAudioEl.pause(); _sfxPlayingUrl = null; return;
+      _sfxAudioEl.pause();
+      _sfxResetBtn(btn);
+      _sfxPlayingUrl = null;
+      _sfxPlayingBtn = null;
+      return;
     }
+
+    // Switch to new track — reset old button
     _sfxAudioEl.pause();
-    _sfxAudioEl.src = url;
-    _sfxPlayingUrl = url;
+    _sfxResetBtn(_sfxPlayingBtn);
+
+    _sfxAudioEl.src  = url;
+    _sfxPlayingUrl   = url;
+    _sfxPlayingBtn   = btn;
+    btn.textContent  = '\u23f8';   // ⏸
+    btn.classList.add('playing');
+
     _sfxAudioEl.play().then(() => {
-      if (_sfxPlayGen !== myGen) _sfxAudioEl.pause();
-    }).catch(e => { _sfxPlayingUrl = null; });
+      if (_sfxPlayGen !== myGen) { _sfxAudioEl.pause(); _sfxResetBtn(btn); }
+    }).catch(() => {
+      _sfxResetBtn(btn);
+      btn.textContent = '✕';
+      btn.classList.add('error');
+      setTimeout(() => _sfxResetBtn(btn), 2500);
+      _sfxPlayingUrl = null;
+      _sfxPlayingBtn = null;
+    });
   }
 
   async function sfxSaveAll() {
@@ -3742,12 +3833,15 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  function onMediaEpChange() {
+  async function onMediaEpChange() {
     const v = document.getElementById('media-ep-select').value;
     if (!v) { _mediaSlug = null; _mediaEpId = null; return; }
     [_mediaSlug, _mediaEpId] = v.split('|');
     document.getElementById('media-btn-search').disabled = false;
     _mediaSetStatus('Episode selected. Click Search Media to begin.');
+    // Load saved per-source config from meta.json, then render the table
+    await _loadMediaSourceConfig();
+    _renderMediaSourcesTable();
     // Try to load an existing completed batch
     mediaLoadExisting();
   }
@@ -4081,6 +4175,93 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
+  // ── Per-source config: defaults, localStorage persistence ──────────────────
+
+  const _mediaSrcDefaults = {
+    pexels:    { enabled: true,  n_img: 15, n_vid: 5  },
+    pixabay:   { enabled: true,  n_img: 15, n_vid: 5  },
+    openverse: { enabled: true,  n_img: 40, n_vid: 0  },
+    wikimedia: { enabled: true,  n_img: 40, n_vid: 0  },
+    europeana: { enabled: true,  n_img: 15, n_vid: 0  },
+    archive:   { enabled: false, n_img: 10, n_vid: 10 },
+  };
+  let _mediaSourceConfig = JSON.parse(JSON.stringify(_mediaSrcDefaults));
+
+  async function _saveMediaSourceConfig() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    try {
+      await fetch('/api/save_episode_meta', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          slug: _mediaSlug, ep_id: _mediaEpId,
+          media_source_config: _mediaSourceConfig,
+        }),
+      });
+    } catch(e) {}
+  }
+
+  async function _loadMediaSourceConfig() {
+    // Reset to defaults first
+    _mediaSourceConfig = JSON.parse(JSON.stringify(_mediaSrcDefaults));
+    if (!_mediaSlug || !_mediaEpId) return;
+    try {
+      const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
+                            + '&ep_id=' + encodeURIComponent(_mediaEpId) + '&file=meta.json');
+      if (!r.ok) return;
+      const meta = await r.json();
+      const saved = meta.media_source_config;
+      if (saved && typeof saved === 'object') {
+        // Merge saved values over defaults so new sources still appear with defaults
+        Object.keys(_mediaSrcDefaults).forEach(src => {
+          if (saved[src]) _mediaSourceConfig[src] = { ..._mediaSrcDefaults[src], ...saved[src] };
+        });
+      }
+    } catch(e) {}
+  }
+
+  function _renderMediaSourcesTable() {
+    const tbody = document.getElementById('media-sources-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const inp = 'background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 5px;font-size:0.9em;width:60px;text-align:center';
+    Object.entries(_mediaSourceConfig).forEach(([src, v]) => {
+      const label = src.charAt(0).toUpperCase() + src.slice(1);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="padding:3px 18px 3px 0;font-weight:500">${label}</td>
+        <td style="padding:3px 14px;text-align:center">
+          <input type="checkbox" data-src="${src}" data-field="enabled"
+                 ${v.enabled ? 'checked' : ''}
+                 onchange="_onMediaSrcTableChange(this)">
+        </td>
+        <td style="padding:3px 14px;text-align:center">
+          <input type="number" data-src="${src}" data-field="n_img"
+                 min="0" max="200" value="${v.n_img}" style="${inp}"
+                 onchange="_onMediaSrcTableChange(this)">
+        </td>
+        <td style="padding:3px 0 3px 14px;text-align:center">
+          <input type="number" data-src="${src}" data-field="n_vid"
+                 min="0" max="50" value="${v.n_vid}" style="${inp}"
+                 onchange="_onMediaSrcTableChange(this)">
+        </td>`;
+      tbody.appendChild(tr);
+    });
+    document.getElementById('media-sources-table').style.display = 'block';
+  }
+
+  function _onMediaSrcTableChange(el) {
+    const src   = el.dataset.src;
+    const field = el.dataset.field;
+    if (!_mediaSourceConfig[src]) return;
+    if (field === 'enabled') {
+      _mediaSourceConfig[src].enabled = el.checked;
+    } else {
+      _mediaSourceConfig[src][field] = parseInt(el.value) || 0;
+    }
+    _saveMediaSourceConfig();   // fire-and-forget async write to meta.json
+  }
+
   // ── Start a new search batch ──
   async function mediaStartSearch() {
     if (!_mediaSlug || !_mediaEpId) return;
@@ -4097,10 +4278,24 @@ placeholder="Enter your story here"></textarea>
       const r = await fetch('/api/media_batch', {
         method:  'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ slug:            _mediaSlug,
-                               ep_id:           _mediaEpId,
-                               server_url:      serverUrl,
-                               content_profile: _formatToContentProfile(_selectedFormat) }),
+        body: JSON.stringify((function() {
+          const enabledSrcs = Object.entries(_mediaSourceConfig).filter(([, v]) => v.enabled).map(([k]) => k);
+          const srcLimits   = Object.fromEntries(
+            Object.entries(_mediaSourceConfig).map(([src, v]) => [src, { candidates_images: v.n_img, candidates_videos: v.n_vid }])
+          );
+          const maxNImg = enabledSrcs.length ? Math.max(...enabledSrcs.map(s => _mediaSourceConfig[s].n_img)) : 15;
+          const maxNVid = enabledSrcs.length ? Math.max(...enabledSrcs.map(s => _mediaSourceConfig[s].n_vid)) : 5;
+          return {
+            slug:                   _mediaSlug,
+            ep_id:                  _mediaEpId,
+            server_url:             serverUrl,
+            content_profile:        _formatToContentProfile(_selectedFormat),
+            sources_override:       enabledSrcs,
+            source_limits_override: srcLimits,
+            n_img:                  maxNImg || 15,
+            n_vid:                  maxNVid || 0,
+          };
+        })()),
       });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || 'batch creation failed');
@@ -10669,7 +10864,8 @@ class Handler(BaseHTTPRequestHandler):
                                        "assets/media/selections.json",
                                        "assets/music/MusicPlan.json",
                                        "assets/music/user_cut_clips.json",
-                                       "assets/meta/gen_music_clip_results.json"}
+                                       "assets/meta/gen_music_clip_results.json",
+                                       "AssetManifest_draft.shared.json"}
             params   = parse_qs(parsed.query)
             slug     = params.get("slug", [""])[0].strip()
             ep_id    = params.get("ep_id", [""])[0].strip()
@@ -11581,6 +11777,9 @@ class Handler(BaseHTTPRequestHandler):
                 server_url      = (payload.get("server_url") or "http://localhost:8200").rstrip("/")
                 api_key         = os.environ.get("MEDIA_API_KEY", "")
                 content_profile = payload.get("content_profile", "default")
+                n_img            = payload.get("n_img") or None
+                n_vid            = payload.get("n_vid") or None
+                sources_override = payload.get("sources_override") or None
 
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
@@ -11595,12 +11794,15 @@ class Handler(BaseHTTPRequestHandler):
                     manifest = json.load(_mf)
 
                 req_body = json.dumps({
-                    "project":         slug,
-                    "episode_id":      ep_id,
-                    "manifest":        manifest,
-                    "top_n":           int(os.environ.get("MEDIA_TOP_N",
-                                           _vc_config.get("media", {}).get("top_n", 5))),
-                    "content_profile": content_profile,
+                    "project":          slug,
+                    "episode_id":       ep_id,
+                    "manifest":         manifest,
+                    "top_n":            int(os.environ.get("MEDIA_TOP_N",
+                                            _vc_config.get("media", {}).get("top_n", 5))),
+                    "content_profile":  content_profile,
+                    **({"n_img": n_img} if n_img is not None else {}),
+                    **({"n_vid": n_vid} if n_vid is not None else {}),
+                    **({"sources_override": sources_override} if sources_override is not None else {}),
                 }).encode()
 
                 url = server_url + "/batches"
@@ -12163,12 +12365,21 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
                 # Merge user-edited fields (use new-style field names)
-                existing_meta["story_title"]  = payload.get("title", "").strip()
-                existing_meta["series_genre"] = payload.get("genre", "").strip()
-                existing_meta["story_format"] = payload.get("story_format", "episodic").strip()
-                existing_meta["locales"]      = payload.get("locales", "en").strip()
-                existing_meta["no_music"]     = bool(payload.get("no_music", False))
-                existing_meta["purge_cache"]  = bool(payload.get("purge_cache", False))
+                if "title" in payload:
+                    existing_meta["story_title"]  = payload.get("title", "").strip()
+                if "genre" in payload:
+                    existing_meta["series_genre"] = payload.get("genre", "").strip()
+                if "story_format" in payload:
+                    existing_meta["story_format"] = payload.get("story_format", "episodic").strip()
+                if "locales" in payload:
+                    existing_meta["locales"]      = payload.get("locales", "en").strip()
+                if "no_music" in payload:
+                    existing_meta["no_music"]     = bool(payload.get("no_music", False))
+                if "purge_cache" in payload:
+                    existing_meta["purge_cache"]  = bool(payload.get("purge_cache", False))
+                # Media source config (per-source image/video counts and enabled flags)
+                if "media_source_config" in payload:
+                    existing_meta["media_source_config"] = payload["media_source_config"]
                 with open(meta_path, "w", encoding="utf-8") as _f:
                     json.dump(existing_meta, _f, indent=2, ensure_ascii=False)
                 print(f"  Saved meta.json  slug={slug}  ep={ep_id}")

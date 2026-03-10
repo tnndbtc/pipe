@@ -280,11 +280,15 @@ def require_auth(x_api_key: str = Header(..., alias="X-Api-Key")) -> None:
 # ---------------------------------------------------------------------------
 
 class BatchRequest(BaseModel):
-    project:         str
-    episode_id:      str
-    manifest:        dict | str          # full manifest JSON (object or serialised string)
-    top_n:           int = 5
-    content_profile: str = "default"    # scoring profile derived from story_format in UI
+    project:                str
+    episode_id:             str
+    manifest:               dict | str          # full manifest JSON (object or serialised string)
+    top_n:                  int = 5
+    content_profile:        str = "default"     # scoring profile derived from story_format in UI
+    n_img:                  Optional[int] = None    # override candidates_per_source_image from config
+    n_vid:                  Optional[int] = None    # override candidates_per_source_video from config
+    sources_override:       Optional[list] = None   # override sources list from config
+    source_limits_override: Optional[dict] = None   # per-source {candidates_images, candidates_videos}
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +323,10 @@ async def create_batch(body: BatchRequest, _: None = Depends(require_auth)):
 
     batch_id = "b_" + uuid.uuid4().hex[:8]
     store.create(batch_id, body.project, body.episode_id, body.top_n, backgrounds,
-                 content_profile=body.content_profile)
+                 content_profile=body.content_profile,
+                 n_img=body.n_img, n_vid=body.n_vid,
+                 sources_override=body.sources_override,
+                 source_limits_override=body.source_limits_override)
     await batch_queue.put(batch_id)
 
     log.info("Queued batch %s  project=%s  episode=%s  items=%d",
@@ -821,13 +828,27 @@ async def _run_batch(batch_id: str) -> None:
     episode_id  = state["episode_id"]
     backgrounds = state["items"]
     item_count  = len(backgrounds)
-    n_img       = config.get("candidates_per_source_image", 15)
-    n_vid       = config.get("candidates_per_source_video", 5)
+    n_img       = state.get("n_img") or config.get("candidates_per_source_image", 15)
+    n_vid       = state.get("n_vid") or config.get("candidates_per_source_video", 5)
 
     # Apply per-batch content_profile override (section 30)
     # Use a shallow copy so the global config is never mutated across concurrent batches
     cfg = dict(config)
     cfg["content_profile"] = store.get_content_profile(batch_id)
+    # Apply per-batch source overrides from UI settings
+    if state.get("sources_override"):
+        cfg["sources"] = state["sources_override"]
+    # Apply per-source candidate limits from UI settings
+    if state.get("source_limits_override"):
+        merged_limits = dict(cfg.get("source_limits", {}))
+        for src, lims in state["source_limits_override"].items():
+            src_cfg = dict(merged_limits.get(src, {}))
+            if "candidates_images" in lims:
+                src_cfg["candidates_images"] = lims["candidates_images"]
+            if "candidates_videos" in lims:
+                src_cfg["candidates_videos"] = lims["candidates_videos"]
+            merged_limits[src] = src_cfg
+        cfg["source_limits"] = merged_limits
 
     store.update(batch_id, status="running", progress="starting")
     log.info("Running batch %s  (%d items)", batch_id, item_count)
