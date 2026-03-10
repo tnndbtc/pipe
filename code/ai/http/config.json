@@ -2,12 +2,14 @@
   "api_key": "change-me",
   "job_dir": null,
   "offline": false,
+  "subprocess_timeout_s": 7200,
   "models": {
     "characters":  "flux-schnell",
     "backgrounds": "flux-schnell",
     "sfx":         "audiogen",
     "bg_video":    "cogvideox-2b"
   },
+  "sfx_model": "small",
   "bg_hints": {
     "characters":  "plain white studio background, solid backdrop, no scenery, isolated figure",
     "backgrounds": null,

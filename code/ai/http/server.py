@@ -237,6 +237,10 @@ async def run_job(job_id: str, body: JobRequest) -> None:
                 model_flag,     model,
             ]
 
+            # sfx: also pass --model (small/medium/auto) separately from --backend
+            if asset_type == "sfx":
+                cmd += ["--model", config.get("sfx_model", "auto")]
+
             bg_hint = config.get("bg_hints", {}).get(asset_type)
             if bg_hint:
                 cmd += ["--bg-hint", bg_hint]
@@ -252,7 +256,8 @@ async def run_job(job_id: str, body: JobRequest) -> None:
         f.name for f in out_dir.iterdir()
         if f.is_file() and not f.name.endswith(".json")
     )
-    store.update(job_id, status="done", files=final_files)
+    final_status = "failed" if store.get(job_id).get("errors") else "done"
+    store.update(job_id, status=final_status, files=final_files)
 
 
 async def _run_subprocess(
@@ -267,23 +272,52 @@ async def _run_subprocess(
         stderr=asyncio.subprocess.STDOUT,
     )
 
-    async for raw in proc.stdout:
-        line = ANSI_RE.sub("", raw.decode("utf-8", errors="replace"))
-        log_fh.write(line)
+    timeout_s = config.get("subprocess_timeout_s", 7200)  # default 2 hours
+    lines_since_update = 0
+
+    async def _drain():
+        nonlocal lines_since_update
+        async for raw in proc.stdout:
+            line = ANSI_RE.sub("", raw.decode("utf-8", errors="replace"))
+            log_fh.write(line)
+            log_fh.flush()
+            # Periodically update done counter so caller sees progress
+            lines_since_update += 1
+            if lines_since_update >= 50:
+                lines_since_update = 0
+                files_now = sorted(
+                    f.name for f in out_dir.iterdir()
+                    if f.is_file() and not f.name.endswith(".json")
+                )
+                store.update(job_id, done=len(files_now), files=files_now)
+        await proc.wait()
+
+    timed_out = False
+    try:
+        await asyncio.wait_for(_drain(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        timed_out = True
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        msg = f"[SERVER] {Path(cmd[1]).name} timed out after {timeout_s}s — process killed.\n"
+        log_fh.write(msg)
         log_fh.flush()
+        logger.error("[JOB %s] %s", job_id, msg.strip())
 
-    await proc.wait()
-
-    # Update progress counters
+    # Final progress update after subprocess exits
     files_so_far = sorted(
         f.name for f in out_dir.iterdir()
         if f.is_file() and not f.name.endswith(".json")
     )
     state = store.get(job_id)
-    extra_errors = (
-        [f"{Path(cmd[1]).name} exited {proc.returncode}"]
-        if proc.returncode != 0 else []
-    )
+    extra_errors = []
+    if timed_out:
+        extra_errors.append(f"{Path(cmd[1]).name} timed out after {timeout_s}s")
+    elif proc.returncode != 0:
+        extra_errors.append(f"{Path(cmd[1]).name} exited {proc.returncode}")
     store.update(
         job_id,
         done=len(files_so_far),
