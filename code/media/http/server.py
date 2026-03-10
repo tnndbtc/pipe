@@ -686,9 +686,13 @@ async def _run_batch(batch_id: str) -> None:
         ai_prompt     = item.get("ai_prompt") or search_prompt
 
         # C3 / M6: map search_filters → prefer + pixabay source_filters
+        # "photo" → prefer images but still fetch videos (manifest often over-specifies photo)
+        # Only hard-skip the other type when media_type is explicitly "video" or "image"
         sf     = item.get("search_filters") or {}
         mt     = sf.get("media_type", "mixed")
-        prefer = {"photo": "image", "video": "video"}.get(mt, "both")
+        prefer = {"image": "image", "video": "video"}.get(mt, "both")
+        # "photo" maps to "both" (prefer images in scoring, but don't skip video fetch)
+        # Use explicit "image" in manifest to hard-skip videos
 
         # Inject Pixabay dimension constraints into source_filters
         src_filters = dict(item.get("source_filters") or {})
