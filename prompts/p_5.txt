@@ -262,6 +262,14 @@ Never rename, abbreviate, or reformat them.
   Include: period, appearance, lighting, mood, style.
   Use the full story context from episode_direction.txt.
 
+  The ai_prompt must always name the specific location or named subject,
+  especially for abstract visual events such as eruptions, flows, collapses,
+  battles, storms, or explosions. Do not write generic prompts like
+  "a volcanic eruption column". Write location-specific prompts such as
+  "a volcanic eruption column rising above Vesuvius near Pompeii, 79 AD".
+  Include: (1) the event, (2) the named location, and (3) the era/context
+  when relevant.
+
 #### Example — fully-populated background entry
 
 ```json

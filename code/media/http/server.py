@@ -246,10 +246,11 @@ def require_auth(x_api_key: str = Header(..., alias="X-Api-Key")) -> None:
 # ---------------------------------------------------------------------------
 
 class BatchRequest(BaseModel):
-    project:    str
-    episode_id: str
-    manifest:   dict | str          # full manifest JSON (object or serialised string)
-    top_n:      int = 5
+    project:         str
+    episode_id:      str
+    manifest:        dict | str          # full manifest JSON (object or serialised string)
+    top_n:           int = 5
+    content_profile: str = "default"    # scoring profile derived from story_format in UI
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +284,8 @@ async def create_batch(body: BatchRequest, _: None = Depends(require_auth)):
         raise HTTPException(status_code=400, detail="manifest.backgrounds contains no valid items")
 
     batch_id = "b_" + uuid.uuid4().hex[:8]
-    store.create(batch_id, body.project, body.episode_id, body.top_n, backgrounds)
+    store.create(batch_id, body.project, body.episode_id, body.top_n, backgrounds,
+                 content_profile=body.content_profile)
     await batch_queue.put(batch_id)
 
     log.info("Queued batch %s  project=%s  episode=%s  items=%d",
@@ -642,6 +644,11 @@ async def _run_batch(batch_id: str) -> None:
     n_img       = config.get("candidates_per_source_image", 15)
     n_vid       = config.get("candidates_per_source_video", 5)
 
+    # Apply per-batch content_profile override (section 30)
+    # Use a shallow copy so the global config is never mutated across concurrent batches
+    cfg = dict(config)
+    cfg["content_profile"] = store.get_content_profile(batch_id)
+
     store.update(batch_id, status="running", progress="starting")
     log.info("Running batch %s  (%d items)", batch_id, item_count)
 
@@ -677,7 +684,23 @@ async def _run_batch(batch_id: str) -> None:
     async def _process_item(item_id: str, item: dict) -> None:
         search_prompt = item.get("search_prompt", "")
         ai_prompt     = item.get("ai_prompt") or search_prompt
-        prefer        = item.get("prefer", "both")
+
+        # C3 / M6: map search_filters → prefer + pixabay source_filters
+        sf     = item.get("search_filters") or {}
+        mt     = sf.get("media_type", "mixed")
+        prefer = {"photo": "image", "video": "video"}.get(mt, "both")
+
+        # Inject Pixabay dimension constraints into source_filters
+        src_filters = dict(item.get("source_filters") or {})
+        pbay = dict(src_filters.get("pixabay") or {})
+        if sf.get("min_width")  and "min_width"  not in pbay:
+            pbay["min_width"]  = sf["min_width"]
+        if sf.get("min_height") and "min_height" not in pbay:
+            pbay["min_height"] = sf["min_height"]
+        if pbay:
+            src_filters["pixabay"] = pbay
+        # Rebuild item with resolved prefer + source_filters (non-mutating)
+        item = {**item, "prefer": prefer, "source_filters": src_filters}
 
         item_dir = batch_dir / item_id
         img_dir  = item_dir / "images"
@@ -693,12 +716,12 @@ async def _run_batch(batch_id: str) -> None:
                 if prefer != "video":
                     img_path_infos = await asyncio.to_thread(
                         downloader.fetch_images,
-                        search_prompt, n_img, img_dir, API_KEYS, config, item,
+                        search_prompt, n_img, img_dir, API_KEYS, cfg, item,
                     )
                 if prefer != "image":
                     vid_path_infos = await asyncio.to_thread(
                         downloader.fetch_videos,
-                        search_prompt, n_vid, vid_dir, API_KEYS, config, item,
+                        search_prompt, n_vid, vid_dir, API_KEYS, cfg, item,
                     )
 
             img_paths = [p for p, _ in img_path_infos]
@@ -708,21 +731,21 @@ async def _run_batch(batch_id: str) -> None:
 
             store.update(batch_id, progress=f"scoring {item_id} ({done[0]+1}/{item_count})")
 
-            weights        = config.get("score_weights")
+            weights        = cfg.get("score_weights")
             images_ranked  = await asyncio.to_thread(
-                scorer.score_images, clip_model, item, img_paths, weights, config,
+                scorer.score_images, clip_model, item, img_paths, weights, cfg,
                 img_infos,
             )
 
             # Video scoring: distributed (job queue) or local fallback
             if _use_distributed and vid_paths:
                 videos_ranked = await _score_videos_distributed(
-                    batch_id, item, vid_paths, batch_dir, config,
+                    batch_id, item, vid_paths, batch_dir, cfg,
                     vid_infos,
                 )
             else:
                 videos_ranked = await asyncio.to_thread(
-                    scorer.score_videos, clip_model, item, vid_paths, batch_dir, weights, config,
+                    scorer.score_videos, clip_model, item, vid_paths, batch_dir, weights, cfg,
                     vid_infos,
                 )
 

@@ -131,15 +131,49 @@ def _get_queries(search_prompt: str, item: dict | None, n: int) -> list[tuple[st
     """
     Returns a list of (query, per_query_n) tuples.
 
-    When item["search_queries"] is a non-empty list, each query gets a budget
-    of ceil(n / len(queries)) so that after deduplication we can always fill n.
+    B3: Location-specific include_keywords (capitalised words longer than 3 chars)
+        are injected as a prefix into each query where the term is not already present.
+        This ensures manifest intent (e.g. "Pompeii") is enforced in every API call.
+
+    C2: First query gets 50% of budget; remaining queries share the rest equally.
+        The first query in search_queries is the most specific by convention.
+
     Falls back to a single (search_prompt, n) tuple if no search_queries present.
     """
     if item:
-        queries = item.get("search_queries") or []
+        queries = list(item.get("search_queries") or [])
         if queries:
-            per_q = math.ceil(n / len(queries))
-            return [(q, per_q) for q in queries]
+            # B3: build location prefix from include_keywords
+            kws = item.get("include_keywords") or []
+            location_terms = [kw for kw in kws
+                              if kw and kw[0].isupper() and len(kw) > 3]
+            prefix = location_terms[0] if location_terms else ""
+
+            # Inject prefix into each query where not already present
+            if prefix:
+                queries = [
+                    q if prefix.lower() in q.lower() else f"{prefix} {q}"
+                    for q in queries
+                ]
+
+            # C2: first query gets 50%, remaining queries share the rest
+            first_n = max(1, n // 2)
+            if len(queries) > 1:
+                rest_n = max(1, math.ceil((n - first_n) / (len(queries) - 1)))
+            else:
+                first_n = n
+                rest_n  = 0
+
+            result = [(queries[0], first_n)]
+            result += [(q, rest_n) for q in queries[1:]]
+            return result
+
+        # Fallback with location prefix if no search_queries
+        kws = item.get("include_keywords") or []
+        loc = next((kw for kw in kws if kw and kw[0].isupper() and len(kw) > 3), "")
+        if loc and loc.lower() not in search_prompt.lower():
+            search_prompt = f"{loc} {search_prompt}"
+
     return [(search_prompt, n)]
 
 
@@ -516,6 +550,7 @@ def fetch_images(
                             "photographer":    ph.get("photographer", ""),
                             "license_summary": "Pexels License",
                             "license_url":     "https://www.pexels.com/license/",
+                            "query_used":      query,
                             "width":           ph.get("width", 0),
                             "height":          ph.get("height", 0),
                         }
@@ -567,6 +602,7 @@ def fetch_images(
                             "photographer":    hit.get("user", ""),
                             "license_summary": "Pixabay Content License",
                             "license_url":     "https://pixabay.com/service/license-summary/",
+                            "query_used":      query,
                             "width":           hit.get("imageWidth", 0),
                             "height":          hit.get("imageHeight", 0),
                         }
@@ -677,6 +713,7 @@ def fetch_videos(
                             "photographer":    (vd.get("user") or {}).get("name", ""),
                             "license_summary": "Pexels License",
                             "license_url":     "https://www.pexels.com/license/",
+                            "query_used":      query,
                             "width":           vd.get("width", 0),
                             "height":          vd.get("height", 0),
                         }
@@ -727,6 +764,7 @@ def fetch_videos(
                             "photographer":    hit.get("user", ""),
                             "license_summary": "Pixabay Content License",
                             "license_url":     "https://pixabay.com/service/license-summary/",
+                            "query_used":      query,
                             "width":           (vids_data.get("large") or vids_data.get("medium") or {}).get("width", 0),
                             "height":          (vids_data.get("large") or vids_data.get("medium") or {}).get("height", 0),
                         }

@@ -103,6 +103,16 @@ MOTION_LEVEL_CALM_THRESHOLD: dict[str, float | None] = {
 }
 MOTION_LEVEL_DEFAULT_THRESHOLD: float = 0.55
 
+# Content-profile image calmness penalty threshold (soft — not a gate).
+# None = no calmness penalty for images.  sleep_story enforces calm images;
+# documentary/default disable the penalty so ruins/historical photos are not rejected.
+IMAGE_PROFILE_CALM_THRESHOLD: dict[str, float | None] = {
+    "sleep_story": 0.55,
+    "documentary": None,
+    "default":     None,
+    "action":      None,
+}
+
 # lighting → extra style hint string
 LIGHTING_STYLE_HINTS: dict[str, str] = {
     "soft_night":       "soft blue moonlight, night time, low key",
@@ -222,6 +232,35 @@ def _motion_level_threshold(item: dict) -> float | None:
     if ml is None:
         return MOTION_LEVEL_DEFAULT_THRESHOLD
     return MOTION_LEVEL_CALM_THRESHOLD.get(ml, MOTION_LEVEL_DEFAULT_THRESHOLD)
+
+
+def _image_calmness_threshold(item: dict, cfg: dict) -> float | None:
+    """
+    Return the image calmness penalty threshold for this item.
+    Returns None to disable calmness penalty for images (the default).
+    Driven by content_profile: sleep_story enforces a threshold; documentary/default do not.
+    Can be overridden per profile in config.json scoring_profiles["image_calmness_threshold"].
+    """
+    profile = cfg.get("content_profile", "default")
+    profiles_cfg = cfg.get("scoring_profiles") or {}
+    profile_data = profiles_cfg.get(profile) or {}
+    if "image_calmness_threshold" in profile_data:
+        return profile_data["image_calmness_threshold"]
+    return IMAGE_PROFILE_CALM_THRESHOLD.get(profile)
+
+
+def _video_calmness_threshold(item: dict, cfg: dict) -> float | None:
+    """
+    Return the video calmness penalty threshold for this item.
+    Falls back to the existing motion_level table (_motion_level_threshold).
+    Can be overridden per profile in config.json scoring_profiles["video_calmness_threshold"].
+    """
+    profile = cfg.get("content_profile", "default")
+    profiles_cfg = cfg.get("scoring_profiles") or {}
+    profile_data = profiles_cfg.get(profile) or {}
+    if "video_calmness_threshold" in profile_data:
+        return profile_data["video_calmness_threshold"]
+    return _motion_level_threshold(item)
 
 
 # ---------------------------------------------------------------------------
@@ -706,7 +745,9 @@ def score_images(
     ai_prompt    = item.get("ai_prompt") or item.get("search_prompt", "")
     hints        = _resolve_hints(item)
     dim_weights  = _resolve_weights(item, cfg)
-    calm_thresh  = _motion_level_threshold(item)
+    img_calm_thresh = _image_calmness_threshold(item, cfg)
+    exclude_kws     = [kw.lower() for kw in (item.get("exclude_keywords") or [])]
+    min_clip        = cfg.get("min_clip_candidates", 5)
     pflag_thresh = tf_cfg.get("person_flag_threshold", 0.015)
     phash_thresh = cfg.get("phash_dedup_threshold",    8)
     div_thresh   = cfg.get("diversity_phash_threshold", 12)
@@ -722,6 +763,19 @@ def score_images(
 
     results: list[dict] = []
 
+    # B2: Zero-survivor safeguard — if pool is small, bypass thumbnail pre-filter
+    skip_thumbnail = len(img_paths) < (min_clip * 2)
+    if skip_thumbnail:
+        log.debug(
+            "B2 safeguard: only %d image candidates, bypassing thumbnail pre-filter",
+            len(img_paths),
+        )
+
+    # M3: telemetry counters
+    _tel_total     = len(img_paths)
+    _tel_thumb_rej = 0
+    _tel_clip      = 0
+
     for p in img_paths:
         # ------------------------------------------------------------------
         # Pass-1.5: cheap thumbnail filter
@@ -729,27 +783,44 @@ def score_images(
         thumb_detail: dict = {}
         thumb_url = thumbnails.get(str(p)) or thumbnails.get(p.name)
         prefilter_rejected = False
+
+        # Thumbnail pre-filter (B2: bypass if pool is too small)
         if thumb_url:
-            passes, thumb_detail = _thumbnail_filter(thumb_url, tf_cfg)
-            if not passes:
-                log.debug("Thumbnail filter rejected %s (kept with score 0)", p.name)
-                prefilter_rejected = True
+            if not skip_thumbnail:
+                passes, thumb_detail = _thumbnail_filter(thumb_url, tf_cfg)
+                if not passes:
+                    log.debug("Thumbnail filter rejected %s (kept with score 0)", p.name)
+                    prefilter_rejected = True
+                    _tel_thumb_rej += 1
+            else:
+                # Still fetch thumb_detail for luma/contrast metadata even when bypassing
+                _, thumb_detail = _thumbnail_filter(thumb_url, tf_cfg)
 
         # ------------------------------------------------------------------
-        # Calmness (single-image Laplacian proxy)
+        # Calmness (single-image Laplacian proxy) — computed always for logging
+        # B1: no longer a hard gate; used as a soft penalty after CLIP scoring
         # ------------------------------------------------------------------
         calm = _calmness_single(p)
-        calmness_rejected = False
-        if calm_thresh is not None and calm < calm_thresh:
-            log.debug(
-                "Calmness pre-filter rejected %s (calm=%.3f < %.3f, kept with score 0)",
-                p.name, calm, calm_thresh,
-            )
-            calmness_rejected = True
 
-        # If either pre-filter rejected, record with score 0 and skip CLIP
-        if prefilter_rejected or calmness_rejected:
-            reject_reason = "thumbnail_rejected" if prefilter_rejected else "calmness_rejected"
+        # M7: Technical size filter using sidecar metadata (objective — hard gate is OK)
+        if not prefilter_rejected:
+            min_w = (item.get("search_filters") or {}).get("min_width",  0)
+            min_h = (item.get("search_filters") or {}).get("min_height", 0)
+            if min_w or min_h:
+                meta_entry = (infos or {}).get(str(p)) or {}
+                w = meta_entry.get("width",  0)
+                h = meta_entry.get("height", 0)
+                if (min_w and w and w < min_w) or (min_h and h and h < min_h):
+                    log.debug(
+                        "Size filter: %s is %dx%d < required %dx%d — skipping",
+                        p.name, w, h, min_w, min_h,
+                    )
+                    prefilter_rejected = True
+                    _tel_thumb_rej += 1   # count in same bucket for telemetry
+
+        # If thumbnail or size pre-filter rejected, record score 0 and skip CLIP
+        # Calmness is NOT a hard gate (B1) — it becomes a soft penalty below
+        if prefilter_rejected:
             mean_luma    = thumb_detail.get("mean_luma",    0.0)
             rms_contrast = thumb_detail.get("rms_contrast", 0.0)
             person_score = thumb_detail.get("person_score") if thumb_detail else None
@@ -765,10 +836,12 @@ def score_images(
                     "rms_contrast": rms_contrast,
                     "person_score": person_score,
                     "phash_flagged": False,
-                    "error":        reject_reason,
+                    "error":        "thumbnail_rejected",
                 },
             })
             continue
+
+        _tel_clip += 1
 
         # ------------------------------------------------------------------
         # CLIP scoring
@@ -800,6 +873,37 @@ def score_images(
             mode = "fallback"
 
         # ------------------------------------------------------------------
+        # C1: exclude_keywords soft penalty (metadata signal, not hard gate)
+        # ------------------------------------------------------------------
+        if exclude_kws and infos:
+            meta_entry = infos.get(str(p)) or {}
+            meta_text  = " ".join([
+                meta_entry.get("title", ""),
+                meta_entry.get("description", ""),
+                " ".join(meta_entry.get("tags", [])),
+            ]).lower()
+            n_matches = sum(1 for kw in exclude_kws if kw in meta_text)
+            if n_matches:
+                excl_penalty = n_matches * cfg.get("exclude_keyword_penalty", 0.05)
+                clip_total   = max(0.0, clip_total - excl_penalty)
+                log.debug(
+                    "exclude_keywords penalty %.3f for %s (%d matches)",
+                    excl_penalty, p.name, n_matches,
+                )
+
+        # ------------------------------------------------------------------
+        # B1: Image calmness soft penalty (never a hard gate for images)
+        # ------------------------------------------------------------------
+        calmness_penalty = 0.0
+        if img_calm_thresh is not None and calm < img_calm_thresh:
+            motion_w = dim_weights.get("motion", BASE_WEIGHTS["motion"])
+            calmness_penalty = (img_calm_thresh - calm) * motion_w
+            log.debug(
+                "Image calmness penalty %.3f for %s (calm=%.3f < thresh=%.3f)",
+                calmness_penalty, p.name, calm, img_calm_thresh,
+            )
+
+        # ------------------------------------------------------------------
         # Build score_detail
         # ------------------------------------------------------------------
         mean_luma    = thumb_detail.get("mean_luma",    0.0)
@@ -823,6 +927,7 @@ def score_images(
             "clip_total":   clip_total,
             "clip_dims":    {d: clip_dims.get(d, 0.0) for d in DIMS},
             "calmness":     calm,
+            "calmness_penalty": round(calmness_penalty, 4),
             "mode":         mode,
             "mean_luma":    mean_luma,
             "rms_contrast": rms_contrast,
@@ -830,7 +935,7 @@ def score_images(
             "phash_flagged": person_flagged,  # will be updated by dedup pass
         }
 
-        # Final combined score: in fallback mode use legacy clip+calmness
+        # Final combined score (B1: calmness is now a soft penalty, not part of primary score)
         if mode == "multi_dim":
             final_score = clip_total
         else:
@@ -839,6 +944,8 @@ def score_images(
             clip_w   = float(w.get("clip",     0.75))
             calm_w   = float(w.get("calmness", 0.25))
             final_score = clip_w * clip_total + calm_w * calm
+        # Apply image calmness soft penalty (B1)
+        final_score = max(0.0, final_score - calmness_penalty)
 
         # ------------------------------------------------------------------
         # CLIP embedding + meta sidecar
@@ -864,6 +971,18 @@ def score_images(
 
     # Sort by score descending
     results.sort(key=lambda r: r["score"], reverse=True)
+
+    # M3: Filter telemetry — visible in media server logs for every item
+    _tel_final = len([r for r in results if r.get("score", 0.0) > 0.0])
+    log.info(
+        "Scoring telemetry | item=%s | downloaded=%d | prefilter_rejected=%d"
+        " | clip_scored=%d | final_nonzero=%d",
+        item.get("asset_id", item.get("id", "?")),
+        _tel_total,
+        _tel_thumb_rej,
+        _tel_clip,
+        _tel_final,
+    )
 
     # pHash deduplication
     results = _dedup_phash(results, phash_thresh)
@@ -914,7 +1033,7 @@ def score_single_video(
     ai_prompt   = item.get("ai_prompt") or item.get("search_prompt", "")
     hints       = _resolve_hints(item)
     dim_weights = _resolve_weights(item, cfg)
-    calm_thresh = _motion_level_threshold(item)
+    calm_thresh = _video_calmness_threshold(item, cfg)
 
     # Legacy weight fallback
     w       = cfg.get("score_weights") or {"clip": 0.75, "calmness": 0.25}
@@ -936,18 +1055,16 @@ def score_single_video(
 
         calm = _calmness(frames)
 
-        # Optional: skip video if motion_level demands a calmness floor
-        if calm_thresh is not None and calm < calm_thresh:
+        # M2: Video calmness is a soft score penalty, not a hard gate
+        vid_calmness_penalty = 0.0
+        vid_calm_thresh = _video_calmness_threshold(item, cfg)
+        if vid_calm_thresh is not None and calm < vid_calm_thresh:
             log.debug(
-                "Calmness pre-filter rejected video %s (calm=%.3f < %.3f)",
-                vp.name, calm, calm_thresh,
+                "Video calmness below threshold %s (calm=%.3f < %.3f) — soft penalty applies",
+                vp.name, calm, vid_calm_thresh,
             )
-            return {
-                "path": str(vp), "score": 0.0,
-                "clip_score": 0.0, "calmness": float(calm),
-                "duration_sec": vid_duration,
-                "error": "calmness_rejected",
-            }
+            motion_w = dim_weights.get("motion", BASE_WEIGHTS["motion"])
+            vid_calmness_penalty = (vid_calm_thresh - calm) * motion_w
 
         # Score the best frame
         if hints:
@@ -997,6 +1114,9 @@ def score_single_video(
                 _write_meta_sidecar(vp, best_emb, luma, hue_hist)
             except Exception as exc:  # noqa: BLE001
                 log.debug("Meta sidecar write skipped for %s: %s", vp.name, exc)
+
+        # M2: Apply video calmness soft penalty
+        score = max(0.0, score - vid_calmness_penalty)
 
         return {
             "path":         str(vp),

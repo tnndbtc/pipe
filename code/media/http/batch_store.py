@@ -79,11 +79,12 @@ class BatchStore:
 
     def create(
         self,
-        batch_id:   str,
-        project:    str,
-        episode_id: str,
-        top_n:      int,
-        backgrounds: dict,
+        batch_id:        str,
+        project:         str,
+        episode_id:      str,
+        top_n:           int,
+        backgrounds:     dict,
+        content_profile: str = "default",
     ) -> None:
         """
         Create a new batch directory + batch_state.json.
@@ -106,23 +107,29 @@ class BatchStore:
 
         now = _now_iso()
         state = {
-            "batch_id":     batch_id,
-            "status":       "queued",
-            "project":      project,
-            "episode_id":   episode_id,
-            "top_n":        top_n,
-            "created_at":   now,
-            "updated_at":   now,
-            "completed_at": None,
-            "progress":     "queued",
-            "error":        None,
-            "items":        items,
+            "batch_id":        batch_id,
+            "status":          "queued",
+            "project":         project,
+            "episode_id":      episode_id,
+            "top_n":           top_n,
+            "content_profile": content_profile,
+            "created_at":      now,
+            "updated_at":      now,
+            "completed_at":    None,
+            "progress":        "queued",
+            "error":           None,
+            "items":           items,
         }
 
         self._write_atomic(bd / "batch_state.json", state)
         self._batches[batch_id] = state
         log.info("created batch %s  project=%s  episode=%s  items=%d",
                  batch_id, project, episode_id, len(items))
+
+    def get_content_profile(self, batch_id: str) -> str:
+        """Return the content_profile stored for this batch, defaulting to 'default'."""
+        state = self._batches.get(batch_id) or {}
+        return state.get("content_profile", "default")
 
     # ------------------------------------------------------------------
     # Update

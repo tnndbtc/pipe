@@ -1909,11 +1909,11 @@ placeholder="Enter your story here"></textarea>
       <div style="display:flex;align-items:center;gap:8px">
         <span class="info-label">🎬 Format</span>
         <select id="info-format-sel" onchange="onFormatChange()">
-          <option value="episodic">Episodic (default)</option>
-          <option value="continuous_narration">Continuous Narration</option>
-          <option value="illustrated_narration">Illustrated Narration</option>
-          <option value="documentary">Documentary / Explainer</option>
-          <option value="monologue">Monologue / First-Person</option>
+          <option value="episodic"              disabled title="Not yet validated">Episodic (default)</option>
+          <option value="continuous_narration"  selected>Continuous Narration</option>
+          <option value="illustrated_narration" disabled title="Not yet validated">Illustrated Narration</option>
+          <option value="documentary"           disabled title="Not yet validated">Documentary / Explainer</option>
+          <option value="monologue"             disabled title="Not yet validated">Monologue / First-Person</option>
           <option value="ssml_narration">SSML Narration (authored)</option>
         </select>
         <span id="badge-format" class="info-badge" style="display:none"></span>
@@ -1946,11 +1946,11 @@ placeholder="Enter your story here"></textarea>
     <div class="info-row">
       <span class="info-label">🎬 Format</span>
       <select id="info-format-sel-existing" onchange="onFormatChangeExisting()">
-        <option value="episodic">Episodic (default)</option>
-        <option value="continuous_narration">Continuous Narration</option>
-        <option value="illustrated_narration">Illustrated Narration</option>
-        <option value="documentary">Documentary / Explainer</option>
-        <option value="monologue">Monologue / First-Person</option>
+        <option value="episodic"              disabled title="Not yet validated">Episodic (default)</option>
+        <option value="continuous_narration"  selected>Continuous Narration</option>
+        <option value="illustrated_narration" disabled title="Not yet validated">Illustrated Narration</option>
+        <option value="documentary"           disabled title="Not yet validated">Documentary / Explainer</option>
+        <option value="monologue"             disabled title="Not yet validated">Monologue / First-Person</option>
         <option value="ssml_narration">SSML Narration (authored)</option>
       </select>
     </div>
@@ -2379,7 +2379,7 @@ placeholder="Enter your story here"></textarea>
   let _preparedEpId  = null;   // next episode ID fetched during Prepare (e.g. "s01e01")
   let _episodeCreated = false; // true after Create Episode completes
   let _runProjectList = [];    // cached project list for run-tab dropdowns
-  let _selectedFormat  = 'episodic';
+  let _selectedFormat  = 'continuous_narration';
   let _usingExistingEp = false;  // true when an existing project/episode is selected
   const stageStartMs = {};   // stage number → Date.now() at start
   let _runFromStage = 0;
@@ -3433,6 +3433,15 @@ placeholder="Enter your story here"></textarea>
     } catch (_) { _mediaShotMap = null; _mediaShotDur = null; }
   }
 
+  function _formatToContentProfile(fmt) {
+    const map = {
+      continuous_narration: 'documentary',
+      ssml_narration:       'documentary',
+      sleep_story:          'sleep_story',
+    };
+    return map[fmt] || 'default';
+  }
+
   // ── Start a new search batch ──
   async function mediaStartSearch() {
     if (!_mediaSlug || !_mediaEpId) return;
@@ -3449,8 +3458,10 @@ placeholder="Enter your story here"></textarea>
       const r = await fetch('/api/media_batch', {
         method:  'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ slug: _mediaSlug, ep_id: _mediaEpId,
-                               server_url: serverUrl }),
+        body: JSON.stringify({ slug:            _mediaSlug,
+                               ep_id:           _mediaEpId,
+                               server_url:      serverUrl,
+                               content_profile: _formatToContentProfile(_selectedFormat) }),
       });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || 'batch creation failed');
@@ -6913,9 +6924,11 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('ex-genre').value = meta.genre  || '';
     document.getElementById('save-ep-status').textContent = '';
     if (meta.story_format) {
-      _selectedFormat = meta.story_format;
-      document.getElementById('info-format-sel-existing').value = meta.story_format;
-      updateFormatHint(meta.story_format, 'format-hint-existing');
+      const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration']);
+      const fmt = _ENABLED_FORMATS.has(meta.story_format) ? meta.story_format : 'continuous_narration';
+      _selectedFormat = fmt;
+      document.getElementById('info-format-sel-existing').value = fmt;
+      updateFormatHint(fmt, 'format-hint-existing');
     }
     if (meta.locales_str) {
       const locs = meta.locales_str.split(',').map(l => l.trim());
@@ -7506,7 +7519,7 @@ placeholder="Enter your story here"></textarea>
       const d = await r.json();
       if (d.error && !d.title) throw new Error(d.error);
       _preparedMeta = d;
-      _selectedFormat = d.story_format || 'episodic';
+      _selectedFormat = d.story_format || 'continuous_narration';
       applyPreparedMeta(d);
       document.getElementById('info-bar').classList.add('visible');
       // For new projects: fetch next episode ID and show Create Episode button
@@ -7648,7 +7661,9 @@ placeholder="Enter your story here"></textarea>
     const slug = d.slug_suggested || d.slug || '';
     document.getElementById('info-slug').value = slug;
     updateSlugBadge(d.slug_exists, slug);
-    // Format
+    // Format — fall back to continuous_narration if saved format is disabled
+    const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration']);
+    if (!_ENABLED_FORMATS.has(_selectedFormat)) _selectedFormat = 'continuous_narration';
     const fsel = document.getElementById('info-format-sel');
     fsel.value = _selectedFormat;
     updateFormatHint(_selectedFormat, 'format-hint');
@@ -10682,10 +10697,11 @@ class Handler(BaseHTTPRequestHandler):
                 raw_body = self.rfile.read(length)
                 payload  = json.loads(raw_body)
 
-                slug       = payload.get("slug", "").strip()
-                ep_id      = payload.get("ep_id", "").strip()
-                server_url = (payload.get("server_url") or "http://localhost:8200").rstrip("/")
-                api_key    = os.environ.get("MEDIA_API_KEY", "")
+                slug            = payload.get("slug", "").strip()
+                ep_id           = payload.get("ep_id", "").strip()
+                server_url      = (payload.get("server_url") or "http://localhost:8200").rstrip("/")
+                api_key         = os.environ.get("MEDIA_API_KEY", "")
+                content_profile = payload.get("content_profile", "default")
 
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
@@ -10700,11 +10716,12 @@ class Handler(BaseHTTPRequestHandler):
                     manifest = json.load(_mf)
 
                 req_body = json.dumps({
-                    "project":    slug,
-                    "episode_id": ep_id,
-                    "manifest":   manifest,
-                    "top_n":      int(os.environ.get("MEDIA_TOP_N",
-                                      _vc_config.get("media", {}).get("top_n", 5))),
+                    "project":         slug,
+                    "episode_id":      ep_id,
+                    "manifest":        manifest,
+                    "top_n":           int(os.environ.get("MEDIA_TOP_N",
+                                           _vc_config.get("media", {}).get("top_n", 5))),
+                    "content_profile": content_profile,
                 }).encode()
 
                 url = server_url + "/batches"
