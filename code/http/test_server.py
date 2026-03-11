@@ -3444,13 +3444,22 @@ placeholder="Enter your story here"></textarea>
 
   async function _sfxLoadExisting() {
     if (!_sfxSlug || !_sfxEpId) return;
+    const statusBar = document.getElementById('sfx-status-bar');
     try {
       const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
                           + '&ep_id=' + encodeURIComponent(_sfxEpId)
                           + '&file=assets/sfx/sfx_search_results.json');
-      if (!r.ok) return;
+      if (!r.ok) {
+        statusBar.textContent = 'No previous results found. Run a search to get started.';
+        document.getElementById('sfx-btn-search').disabled = false;
+        return;
+      }
       const saved = await r.json();
-      if (!saved || !saved.results) return;
+      if (!saved || !saved.results) {
+        statusBar.textContent = 'No previous results found. Run a search to get started.';
+        document.getElementById('sfx-btn-search').disabled = false;
+        return;
+      }
 
       _sfxResults  = saved.results;
       _sfxSelected = saved.selected || {};
@@ -3466,11 +3475,13 @@ placeholder="Enter your story here"></textarea>
       document.getElementById('sfx-footer').style.display = 'flex';
       sfxUpdateCountLabel();
       document.getElementById('sfx-btn-search').disabled = false;
-      document.getElementById('sfx-status-bar').textContent =
+      statusBar.textContent =
         'Loaded ' + _sfxItems.length + ' items from previous search'
         + (saved.saved_at ? ' (' + new Date(saved.saved_at).toLocaleString() + ')' : '') + '.';
     } catch(e) {
       // No saved results yet — that's fine
+      statusBar.textContent = 'No previous results found. Run a search to get started.';
+      document.getElementById('sfx-btn-search').disabled = false;
     }
   }
 
@@ -11102,6 +11113,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "assets/music/MusicPlan.json",
                                        "assets/music/user_cut_clips.json",
                                        "assets/meta/gen_music_clip_results.json",
+                                       "assets/sfx/sfx_search_results.json",
                                        "AssetManifest_draft.shared.json"}
             params   = parse_qs(parsed.query)
             slug     = params.get("slug", [""])[0].strip()
