@@ -579,6 +579,10 @@ def _normalize_url_for_dedup(url: str) -> str:
 
 _openverse_token: dict = {"token": "", "expires_at": 0.0}
 _openverse_lock = threading.Lock()
+# Global semaphore: caps total concurrent Openverse HTTP requests across ALL
+# parallel items.  Without this, 9 items × max_concurrent=4 = 36 simultaneous
+# API calls which immediately triggers 429s.
+_openverse_search_sem = threading.Semaphore(2)
 
 
 def _get_openverse_token(api_keys: dict) -> str:
@@ -626,23 +630,34 @@ def _source_search_openverse_images(
     headers: dict = {"User-Agent": _USER_AGENT}
     if token: headers["Authorization"] = f"Bearer {token}"
 
-    # Unauthenticated Openverse requests are limited to page_size=20
-    max_page = 500 if token else 20
+    # Openverse page_size limits: authenticated = 50, unauthenticated = 20.
+    # Sending page_size > 50 with a token returns 401 (not 400) — which is
+    # the root cause of the 401 storm: all threads got 401 simultaneously,
+    # triggering cascading token refreshes that 429'd the auth endpoint.
+    max_page = 50 if token else 20
     # cc0, by only — CC BY-SA excluded (ShareAlike conflicts with YouTube ToS).
     params: dict = {"q": query, "license": "cc0,by",
                     "page_size": min(per_page, max_page), "filter_dead": "true", "extension": "jpg,png"}
     if extra_params: params.update(extra_params)
 
     def call():
-        r = requests.get("https://api.openverse.org/v1/images/",
-                         headers=headers, params=params, timeout=_TIMEOUT)
+        # Acquire global semaphore to cap cross-item concurrency at 2 total
+        # (prevents 9 parallel items from firing 36 simultaneous API calls).
+        with _openverse_search_sem:
+            r = requests.get("https://api.openverse.org/v1/images/",
+                             headers=headers, params=params, timeout=_TIMEOUT)
         r.raise_for_status()
         return r.json().get("results", [])
 
     log.info("Openverse search images q=%r per_page=%d", query, per_page)
-    try: results = _with_backoff(call, backoff)
+    try:
+        results = _with_backoff(call, backoff)
+    except requests.HTTPError as exc:
+        body = (exc.response.text or "")[:200] if exc.response is not None else ""
+        log.warning("Openverse search failed q=%r: %s  body=%r", query, exc, body)
+        return []  # do NOT cache failures — allow retry on next call
     except Exception as exc:
-        log.warning("Openverse search failed: %s", exc)
+        log.warning("Openverse search failed q=%r: %s", query, exc)
         return []  # do NOT cache failures — allow retry on next call
 
     candidates = []
