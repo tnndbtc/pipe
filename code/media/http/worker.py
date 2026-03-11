@@ -135,46 +135,82 @@ def poll_loop(
             continue
 
         # -- Got a job --
-        job = resp.json()
-        job_id     = job["job_id"]
-        video_path = Path(job["video_path"])
-        frames_dir = Path(job["frames_dir"])
-        item       = job["item"]
+        job      = resp.json()
+        job_id   = job["job_id"]
+        job_type = job.get("job_type", "video")   # default "video" for back-compat
+        item     = job["item"]
         job_config = job["config"]
 
-        log.info("Scoring job %s: %s", job_id, video_path.name)
+        if job_type == "images":
+            image_paths = [Path(p) for p in job["image_paths"]]
+            log.info("Scoring image job %s: %d images", job_id, len(image_paths))
+            try:
+                result = scorer.score_images(
+                    clip_model,
+                    item,
+                    image_paths,
+                    weights=None,
+                    config=job_config,
+                    infos=job.get("infos"),
+                )
+            except Exception as exc:
+                log.exception("Image score failed for job %s: %s", job_id, exc)
+                result = []
 
-        try:
-            result = scorer.score_single_video(
-                clip_model, video_path, frames_dir, item, job_config,
-            )
-        except Exception as exc:
-            log.exception("Score failed for job %s: %s", job_id, exc)
-            result = {
-                "path":       str(video_path),
-                "score":      0.0,
-                "clip_score": 0.0,
-                "calmness":   0.0,
-                "error":      str(exc),
+            payload = {
+                "job_id": job_id,
+                "worker": name,
+                "result": result,
             }
+            try:
+                r = session.post(
+                    f"{server_url}/result",
+                    json=payload,
+                    timeout=30,
+                )
+                r.raise_for_status()
+                log.info("Submitted image result for job %s (%d scored)",
+                         job_id, len(result))
+            except Exception as exc:
+                log.error("Failed to submit result for job %s: %s", job_id, exc)
 
-        # -- Submit result --
-        payload = {
-            "job_id": job_id,
-            "worker": name,
-            "result": result,
-        }
-        try:
-            r = session.post(
-                f"{server_url}/result",
-                json=payload,
-                timeout=30,
-            )
-            r.raise_for_status()
-            log.info("Submitted result for job %s (score=%.3f)",
-                     job_id, result.get("score", 0.0))
-        except Exception as exc:
-            log.error("Failed to submit result for job %s: %s", job_id, exc)
+        else:
+            # job_type == "video" (or absent)
+            video_path = Path(job["video_path"])
+            frames_dir = Path(job["frames_dir"])
+
+            log.info("Scoring video job %s: %s", job_id, video_path.name)
+
+            try:
+                result = scorer.score_single_video(
+                    clip_model, video_path, frames_dir, item, job_config,
+                )
+            except Exception as exc:
+                log.exception("Video score failed for job %s: %s", job_id, exc)
+                result = {
+                    "path":       str(video_path),
+                    "score":      0.0,
+                    "clip_score": 0.0,
+                    "calmness":   0.0,
+                    "error":      str(exc),
+                }
+
+            payload = {
+                "job_id": job_id,
+                "worker": name,
+                "result": result,
+            }
+            try:
+                r = session.post(
+                    f"{server_url}/result",
+                    json=payload,
+                    timeout=30,
+                )
+                r.raise_for_status()
+                log.info("Submitted video result for job %s (score=%.3f)",
+                         job_id, result.get("score", 0.0))
+            except Exception as exc:
+                log.error("Failed to submit result for job %s: %s", job_id, exc)
 
     log.info("Worker shutting down gracefully")
 

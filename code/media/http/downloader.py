@@ -48,7 +48,78 @@ import requests
 
 log = logging.getLogger("downloader")
 
-_USER_AGENT = "media-fetcher/1.0 (+offline-pipeline)"
+# Wikimedia's robot policy requires a User-Agent with contact info.
+# Format: AppName/version (URL-or-email) — ref: https://w.wiki/4wJS
+_USER_AGENT = "media-fetcher/1.0 (https://github.com/media-pipeline; offline-pipeline-bot)"
+
+# ---------------------------------------------------------------------------
+# Per-host global download rate limiters (token bucket)
+# ---------------------------------------------------------------------------
+# Controls the total request rate to a CDN hostname across ALL download
+# threads in the process — not just concurrency.
+#
+# Example: upload.wikimedia.org at 1 req/sec means that regardless of how
+# many parallel items are running, the combined throughput to that host never
+# exceeds 1 request/second.  Pexels/Pixabay have no limiter — unchanged.
+#
+# Config (per source in rate_limits):
+#   download_host           : "upload.wikimedia.org"  — CDN hostname to throttle
+#   download_rate_per_sec   : 1.0                     — max global requests/sec
+#   download_host_semaphore : 2                        — max concurrent in-flight
+#
+# The two knobs work together:
+#   semaphore  — caps burst (how many requests can be in-flight simultaneously)
+#   rate limit — caps throughput (how many requests per second over time)
+
+
+class _HostRateLimiter:
+    """Token-bucket rate limiter + concurrency semaphore for one CDN host."""
+
+    def __init__(self, rate_per_sec: float, max_concurrent: int) -> None:
+        self._interval  = 1.0 / max(rate_per_sec, 0.01)   # seconds between tokens
+        self._semaphore = threading.Semaphore(max(max_concurrent, 1))
+        self._lock      = threading.Lock()
+        self._next_time = 0.0   # earliest time next token is available
+
+    def acquire(self) -> None:
+        """Block until both a concurrency slot and a rate token are available."""
+        self._semaphore.acquire()
+        with self._lock:
+            now  = time.monotonic()
+            wait = self._next_time - now
+            if wait > 0:
+                time.sleep(wait)
+            # Advance the token clock; add small jitter (±10 %) to avoid bursts
+            jitter = self._interval * random.uniform(-0.1, 0.1)
+            self._next_time = time.monotonic() + self._interval + jitter
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+
+_host_limiters:     dict[str, _HostRateLimiter] = {}
+_host_limiter_lock: threading.Lock              = threading.Lock()
+
+
+def _get_host_limiter(hostname: str, cfg: dict) -> _HostRateLimiter | None:
+    """Return the global rate limiter for hostname, or None if not configured."""
+    if hostname in _host_limiters:
+        return _host_limiters[hostname]
+    with _host_limiter_lock:
+        if hostname in _host_limiters:
+            return _host_limiters[hostname]
+        for src_cfg in cfg.get("rate_limits", {}).values():
+            host = src_cfg.get("download_host", "")
+            if host != hostname:
+                continue
+            rate    = float(src_cfg.get("download_rate_per_sec",   1.0))
+            slots   = int(  src_cfg.get("download_host_semaphore", 2))
+            limiter = _HostRateLimiter(rate, slots)
+            _host_limiters[hostname] = limiter
+            log.info("Created download rate limiter: host=%s rate=%.2f/s concurrent=%d",
+                     hostname, rate, slots)
+            return limiter
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +130,8 @@ ACCEPTED_LICENSES: frozenset = frozenset({"CC0", "Public Domain", "CC BY", "PDM"
 ACCEPTED_PREFIXES: tuple = (
     "CC0", "Public Domain",
     "CC BY 1", "CC BY 2", "CC BY 3", "CC BY 4",
+    # CC BY-SA is excluded: its ShareAlike clause conflicts with YouTube's ToS
+    # (YouTube asserts rights over uploads that are incompatible with SA re-licensing).
 )
 
 def is_license_acceptable(license_summary: str) -> bool:
@@ -423,11 +496,18 @@ def _normalize_europeana_license(rights_uri: str) -> str:
     uri = (rights_uri or "").lower()
     if "publicdomain/zero" in uri:    return "CC0"
     if "publicdomain/mark" in uri:    return "Public Domain"
+    # CC BY (attribution only) — commercially usable
     if "/licenses/by/4" in uri:       return "CC BY 4.0"
     if "/licenses/by/3" in uri:       return "CC BY 3.0"
     if "/licenses/by/2" in uri:       return "CC BY 2.0"
     if "/licenses/by/1" in uri:       return "CC BY 1.0"
-    if "/licenses/by-sa/" in uri:     return ""
+    # CC BY-SA (attribution + ShareAlike) — commercially usable; dominates Wikimedia/Europeana
+    # Must be matched BEFORE /by-nd/ and /by-nc/ to avoid false prefix match.
+    if "/licenses/by-sa/" in uri:
+        m = re.search(r"/by-sa/(\d+)", uri)
+        ver = m.group(1) if m else "4"
+        return f"CC BY-SA {ver}.0"
+    # Non-commercial or NoDerivatives — not accepted for commercial use
     if "/licenses/by-nd/" in uri:     return ""
     if "/licenses/by-nc" in uri:      return ""
     if "rightsstatements.org" in uri:
@@ -548,6 +628,7 @@ def _source_search_openverse_images(
 
     # Unauthenticated Openverse requests are limited to page_size=20
     max_page = 500 if token else 20
+    # cc0, by only — CC BY-SA excluded (ShareAlike conflicts with YouTube ToS).
     params: dict = {"q": query, "license": "cc0,by",
                     "page_size": min(per_page, max_page), "filter_dead": "true", "extension": "jpg,png"}
     if extra_params: params.update(extra_params)
@@ -562,7 +643,7 @@ def _source_search_openverse_images(
     try: results = _with_backoff(call, backoff)
     except Exception as exc:
         log.warning("Openverse search failed: %s", exc)
-        _search_cache[key] = []; return []
+        return []  # do NOT cache failures — allow retry on next call
 
     candidates = []
     for result in results:
@@ -617,10 +698,10 @@ def _source_search_wikimedia_images(
 
     params: dict = {
         "action": "query", "generator": "search", "gsrnamespace": 6,
-        "gsrsearch": query, "gsrlimit": min(per_page, 50),
+        "gsrsearch": query, "gsrlimit": min(per_page, 500),
         "prop": "imageinfo",
         "iiprop": "url|size|dimensions|extmetadata|mime|mediatype",
-        "iiurlwidth": 1280, "format": "json",
+        "iiurlwidth": 800, "format": "json",
     }
     if extra_params: params.update(extra_params)
 
@@ -634,7 +715,7 @@ def _source_search_wikimedia_images(
     try: data = _with_backoff(call, backoff)
     except Exception as exc:
         log.warning("Wikimedia search failed: %s", exc)
-        _search_cache[key] = []; return []
+        return []  # do NOT cache failures — allow retry on next call
 
     pages = (data.get("query") or {}).get("pages", {})
     ACCEPTED_MIMES = {"image/jpeg", "image/png", "image/gif"}
@@ -696,7 +777,7 @@ def _source_search_wikimedia_videos(
 
     params: dict = {
         "action": "query", "generator": "search", "gsrnamespace": 6,
-        "gsrsearch": f"filetype:video {query}", "gsrlimit": min(per_page, 50),
+        "gsrsearch": f"filetype:video {query}", "gsrlimit": min(per_page, 500),
         "prop": "imageinfo",
         "iiprop": "url|size|dimensions|extmetadata|mime|mediatype",
         "format": "json",
@@ -713,7 +794,7 @@ def _source_search_wikimedia_videos(
     try: data = _with_backoff(call, backoff)
     except Exception as exc:
         log.warning("Wikimedia video search failed: %s", exc)
-        _search_cache[key] = []; return []
+        return []  # do NOT cache failures — allow retry on next call
 
     pages = (data.get("query") or {}).get("pages", {})
     ACCEPTED_MIMES = {"video/webm", "video/ogg", "video/mp4"}
@@ -796,7 +877,7 @@ def _source_search_europeana_images(
     try: data = _with_backoff(call, backoff)
     except Exception as exc:
         log.warning("Europeana search failed: %s", exc)
-        _search_cache[key] = []; return []
+        return []  # do NOT cache failures — allow retry on next call
 
     items = data.get("items") or []
     candidates = []
@@ -863,7 +944,7 @@ def _source_search_archive_images(
     try: scrape_data = _with_backoff(call_scrape, backoff)
     except Exception as exc:
         log.warning("Archive scrape failed: %s", exc)
-        _search_cache[key] = []; return []
+        return []  # do NOT cache failures — allow retry on next call
 
     ACCEPTED_FORMATS = {"JPEG", "PNG", "GIF"}
     candidates = []
@@ -944,7 +1025,7 @@ def _source_search_archive_videos(
     try: scrape_data = _with_backoff(call_scrape, backoff)
     except Exception as exc:
         log.warning("Archive scrape videos failed: %s", exc)
-        _search_cache[key] = []; return []
+        return []  # do NOT cache failures — allow retry on next call
 
     VIDEO_FMT_PRIORITY = ["h.264", "MPEG4", "512Kb MPEG4", "H.264 IA"]
     candidates = []
@@ -1528,35 +1609,78 @@ def _run_download_tasks(
         log.info("  %s  total=%d  cached=%d  pending=0  (all cached)", tag, len(tasks), cached)
         return saved, thumbs, pending_candidates
 
-    n_workers = min(max_workers or cfg.get("download_workers", 8), len(pending))
-    log.info("  %s  total=%d  cached=%d  pending=%d  workers=%d",
-             tag, len(tasks), cached, len(pending), n_workers)
-    t0 = time.perf_counter()
-
     # Determine source and media_type from label (e.g. "img/pexels", "vid/wikimedia")
     _label_parts = label.split("/")
     _dl_media_type = "video" if _label_parts[0] == "vid" else "image"
     _dl_source = _label_parts[1] if len(_label_parts) > 1 else ""
+
+    # Per-source download concurrency cap (e.g. Wikimedia throttles bulk downloads).
+    # Read from rate_limits.<source>.max_download_concurrent; fall back to global download_workers.
+    _src_dl_limit = (
+        cfg.get("rate_limits", {}).get(_dl_source, {}).get("max_download_concurrent")
+        if _dl_source else None
+    )
+    n_workers = min(max_workers or _src_dl_limit or cfg.get("download_workers", 8), len(pending))
+    log.info("  %s  total=%d  cached=%d  pending=%d  workers=%d",
+             tag, len(tasks), cached, len(pending), n_workers)
+    t0 = time.perf_counter()
 
     # CC BY attribution check for all tasks before downloading
     for task in pending:
         _ensure_cc_by_attribution(task["info"])
 
     def _do(task: dict) -> tuple[dict, str]:
-        """Returns (task, status) where status is 'ok', 'pending', or 'failed'."""
-        try:
-            result = _download_file(
-                task["url"], task["dest"],
-                headers=task.get("headers") or {},
-                cfg=cfg, source=_dl_source,
-                media_type=_dl_media_type,
-            )
-            if result == "pending":
-                return task, "pending"
-            return task, "ok"
-        except Exception as exc:  # noqa: BLE001
-            log.warning("  %s  failed %s: %s", tag, task["dest"].name, exc)
-            return task, "failed"
+        """Returns (task, status) where status is 'ok', 'pending', or 'failed'.
+
+        Per-host global semaphore (e.g. upload.wikimedia.org) limits concurrent
+        connections across ALL download threads in the process.  This prevents
+        Wikimedia's CDN rate-limit (429) without slowing down Pexels/Pixabay.
+
+        On HTTP 429 the download is retried up to 3 times with increasing delays
+        (3 s, 8 s, 20 s) for genuine rate-limits.  Robot-policy violations are
+        not retried — they fail immediately.
+        """
+        dl_hostname = urlparse(task["url"]).hostname or ""
+        limiter     = _get_host_limiter(dl_hostname, cfg)
+
+        # Exponential backoff delays on 429: 2s, 4s, 8s, 16s
+        _429_waits = (2, 4, 8, 16)
+        for _attempt, _wait in enumerate((*_429_waits, None)):
+            if limiter:
+                limiter.acquire()
+            try:
+                result = _download_file(
+                    task["url"], task["dest"],
+                    headers=task.get("headers") or {},
+                    cfg=cfg, source=_dl_source,
+                    media_type=_dl_media_type,
+                )
+                if result == "pending":
+                    return task, "pending"
+                return task, "ok"
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 429:
+                    body = exc.response.text or ""
+                    # Wikimedia "robot policy violation" — permanent UA-level block,
+                    # retrying never succeeds.  Fail immediately.
+                    is_robot_policy = "robot policy" in body.lower() or "0fa5166" in body
+                    if not is_robot_policy and _wait is not None:
+                        log.debug("  %s  429 rate-limit on %s — retry %d/%d in %ds",
+                                  tag, task["dest"].name, _attempt + 1, len(_429_waits), _wait)
+                        time.sleep(_wait)
+                        continue
+                    if is_robot_policy:
+                        log.warning("  %s  skipped %s: Wikimedia robot policy block (UA rejected)",
+                                    tag, task["dest"].name)
+                log.warning("  %s  failed %s: %s", tag, task["dest"].name, exc)
+                return task, "failed"
+            except Exception as exc:  # noqa: BLE001
+                log.warning("  %s  failed %s: %s", tag, task["dest"].name, exc)
+                return task, "failed"
+            finally:
+                if limiter:
+                    limiter.release()
+        return task, "failed"  # exhausted retries
 
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
         for task, status in ex.map(_do, pending):
@@ -1687,6 +1811,97 @@ def _keyword_fallbacks(query: str, item: dict | None = None) -> list[str]:
             result.append(loc)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Per-source query strategy
+# ---------------------------------------------------------------------------
+
+def _get_queries_for_source(
+    search_prompt: str,
+    item:          dict | None,
+    n:             int,
+    source:        str,
+) -> list[tuple[str, int]]:
+    """
+    Return an optimised (query, per_query_n) list for keyword-indexed sources.
+
+    Pexels and Pixabay use _get_queries() unchanged — their semantic search
+    handles long descriptive phrases well.
+
+    Openverse, Wikimedia, and Europeana are keyword / full-text indexed.
+    Long LLM-generated phrases (e.g. "Soviet control room crisis alarm atmosphere")
+    match nothing in those databases.  This function builds shorter, targeted
+    queries for each source instead.
+
+    Each query gets the full n budget so the deduplication pass (Phase 2) decides
+    the final mix — rather than artificially capping per-query results and coming
+    up short when some queries return fewer hits than their slice.
+
+    Strategies
+    ----------
+    openverse  : 4-word truncated phrases (good keyword coverage on Flickr-heavy
+                 content), location anchor appended as guaranteed top-up.
+    wikimedia  : location anchor first (highest Public Domain hit rate; Commons is
+                 title-indexed so one-word specifics outperform long phrases),
+                 then 2-word truncated phrases for variety.
+    europeana  : location anchor first (broadest CC BY recall), then 4-word phrases
+                 (full-text metadata indexing handles slightly longer terms well).
+    """
+    raw_queries: list[str] = list((item or {}).get("search_queries") or []) or [search_prompt]
+
+    # Location anchors: ALL capitalised include_keywords longer than 3 chars
+    # (e.g. ["Chernobyl", "Pripyat"]).  Using all of them as separate queries
+    # is important for Europeana where each proper noun has its own indexed cluster.
+    loc = ""        # primary (first) — used by openverse/wikimedia
+    all_locs: list[str] = []
+    if item:
+        kws = item.get("include_keywords") or []
+        all_locs = [kw for kw in kws if kw and kw[0].isupper() and len(kw) > 3]
+        loc = all_locs[0] if all_locs else ""
+
+    def _trunc(q: str, words: int) -> str:
+        return " ".join(q.split()[:words])
+
+    def _dedup_build(phrases: list[str]) -> list[tuple[str, int]]:
+        """Deduplicate while preserving order; assign each query the full n budget."""
+        seen: set[str] = set()
+        result: list[tuple[str, int]] = []
+        for q in phrases:
+            key = q.lower().strip()
+            if key and key not in seen:
+                seen.add(key)
+                result.append((q, n))
+        return result or [(search_prompt, n)]
+
+    if source == "openverse":
+        # 4-word truncated phrases first, location anchor as last-resort top-up.
+        phrases = [_trunc(q, 4) for q in raw_queries]
+        if loc and loc.lower() not in {p.lower() for p in phrases}:
+            phrases.append(loc)
+        return _dedup_build(phrases)
+
+    if source == "wikimedia":
+        # Location anchor first (title-indexed → highest PD hit rate),
+        # then 2-word phrases for variety.
+        phrases = ([loc] if loc else []) + [_trunc(q, 2) for q in raw_queries]
+        return _dedup_build(phrases)
+
+    if source == "europeana":
+        # ALL location keywords first (each proper noun is its own indexed cluster).
+        # Then 2-word truncations (Europeana full-text search; shorter phrases recall more).
+        # Then 4-word truncations as additional coverage.
+        # This strategy is important: "Chernobyl" alone returns 17 images; adding
+        # "Pripyat" and "exclusion zone" pushes past 20.
+        phrases = (
+            all_locs
+            + [_trunc(q, 2) for q in raw_queries]
+            + [_trunc(q, 4) for q in raw_queries]
+        )
+        return _dedup_build(phrases)
+
+    # Should not reach here — only called for _KEYWORD_INDEXED_SOURCES.
+    return [(search_prompt, n)]
 
 
 # ---------------------------------------------------------------------------
@@ -2034,7 +2249,14 @@ def fetch_images(
         src_dir.mkdir(parents=True, exist_ok=True)
         source_filters = _get_source_filters(item, source)
         rl = cfg.get("rate_limits", {}).get(source, {})
-        n_q_workers = min(len(queries), max(1, rl.get("max_concurrent", 1)))
+        # Keyword-indexed sources get a per-source query list optimised for
+        # short keyword phrases.  Pexels/Pixabay keep the shared query list.
+        source_queries = (
+            _get_queries_for_source(search_prompt, item, n_src, source)
+            if source in _KEYWORD_INDEXED_SOURCES
+            else queries
+        )
+        n_q_workers = min(len(source_queries), max(1, rl.get("max_concurrent", 1)))
         pexels_key = api_keys.get("pexels", "")
 
         # ------------------------------------------------------------------
@@ -2043,7 +2265,15 @@ def fetch_images(
         # ------------------------------------------------------------------
         def _search_one(q_per_q: tuple) -> list[dict]:
             query, per_q = q_per_q
-            fetch_n = min(per_q, n_src)
+            # Keyword-indexed sources (wikimedia, europeana, openverse) use
+            # title/full-text indexing and have variable license-pass rates.
+            # Over-fetch by 3× so that after license filtering we still have
+            # enough candidates to fill the n_src budget (20 / 40 / 60).
+            # Pexels/Pixabay semantic search is already precise — no over-fetch.
+            if source in _KEYWORD_INDEXED_SOURCES:
+                fetch_n = min(per_q * 3, 500)
+            else:
+                fetch_n = min(per_q, n_src)
             pre: list[dict] = []
             try:
                 if source == "pexels":
@@ -2126,12 +2356,16 @@ def fetch_images(
                         url = c["file_url"]
                         if not url: continue
                         preview = c.get("preview_url", "")
-                        # Per /tmp/t1 analysis: prefer file_url (full-res original) for the
-                        # actual download; preview_url (api.openverse.org proxy thumbnail) is
-                        # used only as the UI thumb.  file_url host (e.g. live.staticflickr.com)
-                        # is in DOWNLOAD_ALLOWLIST; preview_url host (api.openverse.org) also is.
-                        # Prefer file_url so CLIP scoring uses the real image, not a thumbnail.
-                        dl_url = url or preview
+                        # Smart dl_url: prefer file_url (full-res) when its CDN is already
+                        # in DOWNLOAD_ALLOWLIST (e.g. live.staticflickr.com, upload.wikimedia.org).
+                        # For providers on non-allowlisted CDNs (thingiverse, museum servers, etc.),
+                        # fall back to preview_url — api.openverse.org is always allowlisted and
+                        # serves a usable thumbnail for every image.  Without this fallback,
+                        # non-Flickr Openverse results silently go to pending_host_review and
+                        # never save, causing the delivered count to drop to ~3 per item.
+                        file_host = urlparse(url).hostname or ""
+                        file_allowed = _is_host_allowed(file_host) in ("static", "dynamic")
+                        dl_url = url if file_allowed else (preview or url)
                         ext = Path(dl_url.split("?")[0]).suffix or ".jpg"
                         if ext.lower() not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
                         dest = src_dir / f"{uid}{ext}"
@@ -2214,7 +2448,7 @@ def fetch_images(
 
         all_pre: list[dict] = []
         with ThreadPoolExecutor(max_workers=n_q_workers) as qex:
-            for batch in qex.map(_search_one, queries):
+            for batch in qex.map(_search_one, source_queries):
                 all_pre.extend(batch)
 
         # ------------------------------------------------------------------
@@ -2327,11 +2561,16 @@ def fetch_videos(
         src_dir.mkdir(parents=True, exist_ok=True)
         source_filters = _get_source_filters(item, source)
 
-        # Pixabay only: prepend a location-only query so location-tagged videos are
-        # captured first.  It shares the same budget — no extra files beyond n_src total.
-        source_queries = queries
-        if source == "pixabay" and _loc_term:
+        # Keyword-indexed sources get per-source optimised queries.
+        # Pixabay keeps its existing location-first override.
+        # Pexels uses the shared descriptive queries unchanged.
+        if source in _KEYWORD_INDEXED_SOURCES:
+            source_queries = _get_queries_for_source(search_prompt, item, n_src, source)
+        elif source == "pixabay" and _loc_term:
+            # Prepend location-only query so location-tagged videos are captured first.
             source_queries = [(_loc_term, n_src)] + list(queries)
+        else:
+            source_queries = queries
 
         rl = cfg.get("rate_limits", {}).get(source, {})
         n_q_workers = min(len(source_queries), max(1, rl.get("max_concurrent", 1)))
@@ -2341,7 +2580,10 @@ def fetch_videos(
         # ------------------------------------------------------------------
         def _search_one(q_per_q: tuple) -> list[dict]:
             query, per_q = q_per_q
-            fetch_n = min(per_q, n_src)
+            if source in _KEYWORD_INDEXED_SOURCES:
+                fetch_n = min(per_q * 3, 500)
+            else:
+                fetch_n = min(per_q, n_src)
             pre: list[dict] = []
             try:
                 if source == "pexels":

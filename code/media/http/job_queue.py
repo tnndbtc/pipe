@@ -168,8 +168,14 @@ class JobQueue:
         worker_info = self._workers.get(worker_name)
         nfs_root = worker_info.nfs_root if worker_info else "/mnt/shared"
         payload = dict(task)
-        payload["video_path"] = self.remap_path(payload["video_path"], nfs_root)
-        payload["frames_dir"] = self.remap_path(payload["frames_dir"], nfs_root)
+        if "video_path" in payload:
+            payload["video_path"] = self.remap_path(payload["video_path"], nfs_root)
+        if "frames_dir" in payload:
+            payload["frames_dir"] = self.remap_path(payload["frames_dir"], nfs_root)
+        if "image_paths" in payload:
+            payload["image_paths"] = [
+                self.remap_path(p, nfs_root) for p in payload["image_paths"]
+            ]
 
         log.debug("Dispatched job %s to worker %s", job_id, worker_name)
         return payload

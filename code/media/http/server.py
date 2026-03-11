@@ -1298,6 +1298,77 @@ async def _score_videos_distributed(
     return raw_results
 
 
+async def _score_images_distributed(
+    batch_id:   str,
+    item_id:    str,
+    item:       dict,
+    img_paths:  list[Path],
+    cfg:        dict,
+    img_infos:  dict | None = None,
+) -> list[dict]:
+    """
+    Enqueue one image scoring task (all images for this item) and wait for
+    a worker to complete it.  Returns scored results list (same shape as
+    scorer.score_images).
+    """
+    scoring_config = {
+        k: cfg[k] for k in (
+            "score_weights", "scoring_profiles", "content_profile",
+            "phash_dedup_threshold", "diversity_phash_threshold",
+        ) if k in cfg
+    }
+
+    task = {
+        "job_type":    "images",
+        "image_paths": [str(p) for p in img_paths],
+        "item":        item,
+        "config":      scoring_config,
+        "infos":       img_infos or {},
+    }
+
+    workers_cfg     = cfg.get("workers", {})
+    timeout_seconds = workers_cfg.get("timeout_seconds", 120)
+
+    async with _jq_sem:
+        job_queue.enqueue(batch_id, [task])
+        job_queue.start_reaper(timeout_seconds=timeout_seconds)
+
+        try:
+            log.info("Waiting for image scoring job for item %s (batch %s)…",
+                     item_id, batch_id)
+            await job_queue.wait_until_done()
+        finally:
+            job_queue.stop_reaper()
+
+        raw_results = job_queue.get_results()
+
+    # raw_results is a list containing one element: the list[dict] returned
+    # by score_images on the worker.
+    if not raw_results:
+        return []
+
+    scored = raw_results[0]   # list[dict] from score_images
+    if not isinstance(scored, list):
+        log.warning("Unexpected image job result shape for item %s", item_id)
+        return []
+
+    # Reverse-remap worker paths back to server paths in the result dicts.
+    _workers_nfs = [w.nfs_root for w in job_queue._workers.values()] if job_queue else []
+    remapped = []
+    for r in scored:
+        worker_path = r.get("path", "")
+        server_path = worker_path
+        for wnfs in _workers_nfs:
+            if worker_path.startswith(wnfs):
+                server_path = job_queue.server_nfs_root + worker_path[len(wnfs):]
+                break
+        remapped.append({**r, "path": server_path})
+
+    log.info("Distributed image scoring complete: %d results for item %s",
+             len(remapped), item_id)
+    return remapped
+
+
 # ---------------------------------------------------------------------------
 # Batch runner
 # ---------------------------------------------------------------------------
@@ -1472,14 +1543,22 @@ async def _run_batch(batch_id: str) -> None:
 
             log.info("[%s]  scoring start   imgs=%d  vids=%d  mode=%s",
                      item_id, len(img_paths), len(vid_paths),
-                     "distributed" if (_use_distributed and vid_paths) else "local")
+                     "distributed" if _use_distributed else "local")
             t_sc = time.perf_counter()
 
-            weights        = cfg.get("score_weights")
-            images_ranked  = await asyncio.to_thread(
-                scorer.score_images, clip_model, item, img_paths, weights, cfg,
-                img_infos,
-            )
+            weights = cfg.get("score_weights")
+
+            # Image scoring: distributed (job queue) or local fallback
+            if _use_distributed and img_paths:
+                images_ranked = await _score_images_distributed(
+                    batch_id, item_id, item, img_paths, cfg,
+                    img_infos,
+                )
+            else:
+                images_ranked = await asyncio.to_thread(
+                    scorer.score_images, clip_model, item, img_paths, weights, cfg,
+                    img_infos,
+                )
 
             # Video scoring: distributed (job queue) or local fallback
             if _use_distributed and vid_paths:
