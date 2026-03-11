@@ -430,31 +430,13 @@ def _edge_density(img_gray_np) -> float:
 
 def _hog_person_score(img_bgr_np) -> float:
     """
-    HOG person detection — returns fraction of frame area covered by all
-    detected bounding boxes.  Returns 0.0 if cv2 unavailable.
+    HOG person detection — DISABLED.
 
-    Input is resized to max 400 px wide before detection: HOG sliding-window
-    on high-res scans (e.g. 3000×2000 Europeana TIFFs) allocates huge
-    intermediate arrays and can SIGSEGV the worker.
+    cv2.HOGDescriptor.detectMultiScale() causes SIGSEGV in the worker process
+    on certain thumbnail images (signal — uncatchable by try/except).
+    Person detection is a soft quality filter; returning 0.0 is safe.
     """
-    if not _CV2_AVAILABLE:
-        return 0.0
-    try:
-        h, w = img_bgr_np.shape[:2]
-        if w > 400:
-            scale       = 400.0 / w
-            img_bgr_np  = cv2.resize(img_bgr_np, (400, max(1, int(h * scale))))
-            h, w        = img_bgr_np.shape[:2]
-        frame_area = max(h * w, 1)
-        hog = cv2.HOGDescriptor()
-        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-        found, _ = hog.detectMultiScale(img_bgr_np, winStride=(8, 8), padding=(4, 4), scale=1.05)
-        if len(found) == 0:
-            return 0.0
-        covered = sum(rw * rh for (_, _, rw, rh) in found)
-        return min(1.0, covered / frame_area)
-    except Exception:
-        return 0.0
+    return 0.0
 
 
 def _hue_hist_16(img_bgr_np) -> list[float]:
