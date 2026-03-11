@@ -432,18 +432,29 @@ def _hog_person_score(img_bgr_np) -> float:
     """
     HOG person detection — returns fraction of frame area covered by all
     detected bounding boxes.  Returns 0.0 if cv2 unavailable.
+
+    Input is resized to max 400 px wide before detection: HOG sliding-window
+    on high-res scans (e.g. 3000×2000 Europeana TIFFs) allocates huge
+    intermediate arrays and can SIGSEGV the worker.
     """
     if not _CV2_AVAILABLE:
         return 0.0
-    hog = cv2.HOGDescriptor()
-    hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-    h, w = img_bgr_np.shape[:2]
-    frame_area = max(h * w, 1)
-    found, _ = hog.detectMultiScale(img_bgr_np, winStride=(8, 8), padding=(4, 4), scale=1.05)
-    if len(found) == 0:
+    try:
+        h, w = img_bgr_np.shape[:2]
+        if w > 400:
+            scale       = 400.0 / w
+            img_bgr_np  = cv2.resize(img_bgr_np, (400, max(1, int(h * scale))))
+            h, w        = img_bgr_np.shape[:2]
+        frame_area = max(h * w, 1)
+        hog = cv2.HOGDescriptor()
+        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        found, _ = hog.detectMultiScale(img_bgr_np, winStride=(8, 8), padding=(4, 4), scale=1.05)
+        if len(found) == 0:
+            return 0.0
+        covered = sum(rw * rh for (_, _, rw, rh) in found)
+        return min(1.0, covered / frame_area)
+    except Exception:
         return 0.0
-    covered = sum(rw * rh for (_, _, rw, rh) in found)
-    return min(1.0, covered / frame_area)
 
 
 def _hue_hist_16(img_bgr_np) -> list[float]:
@@ -494,17 +505,29 @@ def _calmness_single(img_path: Path) -> float:
     High variance → sharp / busy → lower calmness.
     The scale is tuned so a near-uniform image → ~1.0 and a very busy
     image → near 0.0.
+
+    Uses PIL + numpy instead of cv2.imread so unusual formats from
+    cultural-heritage sources (TIFF variants, old JPEG) raise Python
+    exceptions rather than SIGSEGVing the worker process.
     """
-    if not _CV2_AVAILABLE:
-        return 1.0
+    try:
+        import numpy as np      # noqa: PLC0415
+        from PIL import Image   # noqa: PLC0415
 
-    img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        return 1.0
+        with Image.open(img_path) as pil:
+            gray = np.array(pil.convert("L"), dtype=np.float64)
 
-    lap_var = float(cv2.Laplacian(img, cv2.CV_64F).var())
-    # empirically chosen scale: lap_var ~500 → calmness ~0.0
-    return max(0.0, min(1.0, 1.0 - lap_var / 500.0))
+        # 5-point Laplacian on interior pixels — same kernel as cv2.Laplacian
+        g = gray
+        lap = (
+            g[:-2, 1:-1] + g[2:, 1:-1] +
+            g[1:-1, :-2] + g[1:-1, 2:] -
+            4.0 * g[1:-1, 1:-1]
+        )
+        lap_var = float(lap.var())
+        return max(0.0, min(1.0, 1.0 - lap_var / 500.0))
+    except Exception:
+        return 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -971,14 +994,20 @@ def score_images(
             and person_score > pflag_thresh
         )
 
-        # If no thumbnail detail, compute basic luma from the image file
-        if not thumb_detail and _CV2_AVAILABLE:
-            img_gray = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-            if img_gray is not None:
-                import numpy as np  # noqa: PLC0415
+        # If no thumbnail detail, compute basic luma from the image file.
+        # Use PIL (not cv2.imread) — cultural-heritage images (TIFF, old JPEG)
+        # can SIGSEGV inside OpenCV's native decoders.
+        if not thumb_detail:
+            try:
+                import numpy as np      # noqa: PLC0415
+                from PIL import Image   # noqa: PLC0415
 
-                mean_luma    = float(img_gray.mean() / 255.0)
-                rms_contrast = float(img_gray.astype("float32").std() / 255.0)
+                with Image.open(p) as _pil:
+                    _gray = np.array(_pil.convert("L"), dtype=np.float32)
+                mean_luma    = float(_gray.mean() / 255.0)
+                rms_contrast = float(_gray.std() / 255.0)
+            except Exception:
+                pass
 
         score_detail: dict = {
             "clip_total":   clip_total,
