@@ -236,6 +236,88 @@ def build_duck_expr(
     return expr
 
 
+# ── Animation filter builder ──────────────────────────────────────────────────
+
+def _build_anim_filter(
+    anim_type: str | None,
+    in_label:  str,
+    out_label: str,
+    dur_sec:   float,
+    W: int,
+    H: int,
+    fps: int,
+) -> str | None:
+    """
+    Return an ffmpeg filter-graph fragment that animates a looped still image
+    for `dur_sec` seconds, scaling from W×H input to W×H output.
+
+    Returns None when anim_type is None / "none" (caller uses plain scale+crop).
+
+    Supported values
+    ----------------
+    zoom_in   – slow Ken-Burns-style zoom 1.0 → 1.3
+    zoom_out  – slow zoom 1.3 → 1.0
+    pan_lr    – pan left→right (translate -10 % → +10 % of width)
+    pan_rl    – pan right→left (+10 % → -10 %)
+    pan_up    – pan bottom→top (+10 % → -10 % of height)
+    ken_burns – combined zoom-in + diagonal pan (bottom-left → centre)
+    """
+    if not anim_type or anim_type == "none":
+        return None
+
+    n_frames = int(dur_sec * fps)
+    if n_frames < 1:
+        n_frames = 1
+
+    # zoompan filter operates on each frame independently:
+    #   z  = zoom expression (relative to input dimensions, must be ≥ 1)
+    #   x  = crop origin-x expression (pixels in zoomed space)
+    #   y  = crop origin-y expression
+    #   d  = total duration in frames
+    #   s  = output size
+    # 'on' is the current output frame counter (0-based).
+    # 'iw'/'ih' are input width/height.
+    d = n_frames
+    s = f"{W}x{H}"
+
+    if anim_type == "zoom_in":
+        z = f"1.0+0.3*on/{d}"
+        x = f"iw/2*(1-1/zoom)"
+        y = f"ih/2*(1-1/zoom)"
+    elif anim_type == "zoom_out":
+        z = f"1.3-0.3*on/{d}"
+        x = f"iw/2*(1-1/zoom)"
+        y = f"ih/2*(1-1/zoom)"
+    elif anim_type == "pan_lr":
+        # Fixed zoom 1.2, pan x from −10 % to +10 % of (iw*(zoom-1))
+        z = "1.2"
+        x = f"(iw*(zoom-1)/2) * (-1 + 2.0*on/{d})"
+        y = "ih/2*(1-1/zoom)"
+    elif anim_type == "pan_rl":
+        z = "1.2"
+        x = f"(iw*(zoom-1)/2) * (1 - 2.0*on/{d})"
+        y = "ih/2*(1-1/zoom)"
+    elif anim_type == "pan_up":
+        z = "1.2"
+        x = "iw/2*(1-1/zoom)"
+        y = f"(ih*(zoom-1)/2) * (1 - 2.0*on/{d})"
+    elif anim_type == "ken_burns":
+        z = f"1.0+0.28*on/{d}"
+        # Pan diagonally: start at bottom-left corner, drift toward centre
+        x = f"iw*(zoom-1) * (1-on/({d}.0))"
+        y = f"ih*(zoom-1) * (1-on/({d}.0))"
+    else:
+        return None  # unknown type → static
+
+    frag = (
+        f"{in_label}scale={W*2}:{H*2}:force_original_aspect_ratio=increase,"
+        f"crop={W*2}:{H*2},"
+        f"zoompan=z='{z}':x='{x}':y='{y}':d={d}:s={s}:fps={fps},"
+        f"setsar=1{out_label}"
+    )
+    return frag
+
+
 # ── Per-shot renderer ─────────────────────────────────────────────────────────
 
 def render_shot(
@@ -304,10 +386,17 @@ def render_shot(
             elif seg_path and seg_path.exists():
                 seg_dur = seg.get("hold_sec") or dur_sec
                 seg_idx = add_input(["-loop", "1", "-t", f"{seg_dur:.3f}"], str(seg_path))
-                filter_parts.append(
-                    f"[{seg_idx}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-                    f"crop={W}:{H},setsar=1[seg{si}]"
+                anim_frag = _build_anim_filter(
+                    seg.get("animation_type"), f"[{seg_idx}:v]", f"[seg{si}]",
+                    seg_dur, W, H, fps,
                 )
+                if anim_frag:
+                    filter_parts.append(anim_frag)
+                else:
+                    filter_parts.append(
+                        f"[{seg_idx}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                        f"crop={W}:{H},setsar=1[seg{si}]"
+                    )
             else:
                 # Placeholder segment
                 seg_dur = seg.get("hold_sec") or seg.get("duration_sec") or 2.0
@@ -334,12 +423,20 @@ def render_shot(
                 f"setpts=PTS-STARTPTS[bg]"
             )
         else:
-            # Static image background
+            # Static image background (single segment — bg_segments has 0 or 1 entry)
             bg_idx = add_input(["-loop", "1", "-t", f"{dur_sec:.3f}"], str(bg_path))
-            filter_parts.append(
-                f"[{bg_idx}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-                f"crop={W}:{H},setsar=1[bg]"
+            single_seg = (bg_segments[0] if bg_segments else None)
+            anim_frag = _build_anim_filter(
+                single_seg.get("animation_type") if single_seg else None,
+                f"[{bg_idx}:v]", "[bg]", dur_sec, W, H, fps,
             )
+            if anim_frag:
+                filter_parts.append(anim_frag)
+            else:
+                filter_parts.append(
+                    f"[{bg_idx}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                    f"crop={W}:{H},setsar=1[bg]"
+                )
     else:
         # Placeholder background: grey fill with label
         label = f"BG PENDING {shot_id}"

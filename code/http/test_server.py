@@ -1240,6 +1240,97 @@ HTML = r"""<!DOCTYPE html>
     border-radius: 3px; padding: 2px 5px; font-family: var(--mono);
     pointer-events: none;
   }
+  /* ── Animation picker button on image thumbnails ── */
+  .media-anim-btn {
+    position: absolute; top: 4px; right: 4px;
+    background: rgba(0,0,0,0.65); color: #e0c97f; font-size: 0.75em;
+    border: none; border-radius: 3px; padding: 2px 5px; cursor: pointer;
+    opacity: 0; transition: opacity 0.15s; line-height: 1.2;
+    z-index: 2;
+  }
+  .media-thumb:hover .media-anim-btn { opacity: 1; }
+  .media-thumb.has-anim .media-anim-btn { opacity: 0.9; background: rgba(100,65,0,0.9); }
+  /* ── Animation badge shown on thumbnails that have an animation set ── */
+  .media-anim-thumb-badge {
+    position: absolute; bottom: 18px; left: 4px;
+    background: rgba(80,50,0,0.9); color: #e0c97f; font-size: 0.62em;
+    border-radius: 3px; padding: 1px 4px; pointer-events: none; display: none;
+  }
+  .media-thumb.has-anim .media-anim-thumb-badge { display: block; }
+  /* ── Live animation on the thumbnail img when an animation is set ── */
+  .media-thumb img.anim-playing {
+    animation-duration: 4s;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite;
+    animation-direction: alternate;
+    animation-fill-mode: both;
+  }
+  @keyframes thumb-zoom-in   { from { transform: scale(1.0); } to { transform: scale(1.35); } }
+  @keyframes thumb-zoom-out  { from { transform: scale(1.35); } to { transform: scale(1.0); } }
+  @keyframes thumb-pan-lr    { from { transform: translate(-10%,0) scale(1.2); } to { transform: translate(10%,0) scale(1.2); } }
+  @keyframes thumb-pan-rl    { from { transform: translate(10%,0) scale(1.2); } to { transform: translate(-10%,0) scale(1.2); } }
+  @keyframes thumb-pan-up    { from { transform: translate(0,8%) scale(1.2); } to { transform: translate(0,-8%) scale(1.2); } }
+  @keyframes thumb-ken-burns { from { transform: scale(1.0) translate(0%,0%); } to { transform: scale(1.3) translate(-5%,-3%); } }
+  /* ── Animation picker popup (left = option list, right = live preview) ── */
+  #media-anim-popup {
+    position: fixed; z-index: 9999;
+    background: #1e1e2e; border: 1px solid #444; border-radius: 8px;
+    padding: 0; box-shadow: 0 6px 32px #000c;
+    display: none;
+  }
+  #media-anim-popup .anim-popup-inner {
+    display: flex; gap: 0;
+  }
+  #media-anim-popup .anim-options-col {
+    padding: 8px 6px; min-width: 160px;
+  }
+  #media-anim-popup .anim-popup-title {
+    font-size: 0.72em; color: #888; margin-bottom: 6px; padding-left: 4px;
+  }
+  .anim-option {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 8px; border-radius: 5px; cursor: pointer;
+    transition: background 0.1s; white-space: nowrap;
+  }
+  .anim-option:hover { background: #2a2a3e; }
+  .anim-option.active { background: #2a1f00; }
+  .anim-option-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #555; flex-shrink: 0;
+  }
+  .anim-option.active .anim-option-dot { background: #e0c97f; }
+  .anim-label { font-size: 0.8em; color: #ccc; }
+  .anim-option.active .anim-label { color: #e0c97f; font-weight: 600; }
+  /* ── Right pane: live preview of real image ── */
+  #media-anim-preview-pane {
+    width: 240px; min-height: 140px;
+    background: #111; border-left: 1px solid #333;
+    border-radius: 0 8px 8px 0; overflow: hidden;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; flex-shrink: 0;
+  }
+  #media-anim-preview-pane .anim-live-wrap {
+    width: 240px; height: 135px; overflow: hidden; position: relative;
+  }
+  #media-anim-preview-pane .anim-live-img {
+    width: 240px; height: 135px; object-fit: cover; display: block;
+    animation-duration: 3s;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite;
+    animation-direction: alternate;
+    animation-fill-mode: both;
+  }
+  #media-anim-preview-pane .anim-live-label {
+    font-size: 0.72em; color: #888; padding: 5px 0 4px; text-align: center;
+    width: 100%;
+  }
+  /* ── Animation badge in shot-row segment entries ── */
+  .seg-anim-badge {
+    display: inline-block; background: rgba(80,50,0,0.8); color: #e0c97f;
+    font-size: 0.7em; border-radius: 3px; padding: 1px 5px; margin-left: 4px;
+    cursor: pointer; vertical-align: middle;
+  }
+  .seg-anim-badge:hover { background: rgba(120,80,0,0.9); }
   /* ── Multi-segment shot rows ── */
   .media-shot-bar {
     height: 6px; flex: 0 0 120px; border-radius: 3px;
@@ -5188,6 +5279,180 @@ placeholder="Enter your story here"></textarea>
     applyBtn.style.display = _mediaRecommendedSeq ? 'inline-block' : 'none';
   }
 
+  // ── Animation picker: option definitions ──
+  // keyframe name → matches @keyframes thumb-* in CSS
+  const _ANIM_OPTIONS = [
+    { key: 'none',      label: 'None (static)' },
+    { key: 'zoom_in',   label: 'Zoom In'       },
+    { key: 'zoom_out',  label: 'Zoom Out'      },
+    { key: 'pan_lr',    label: 'Pan L \u2192 R' },
+    { key: 'pan_rl',    label: 'Pan R \u2192 L' },
+    { key: 'pan_up',    label: 'Pan Up'        },
+    { key: 'ken_burns', label: 'Ken Burns'     },
+  ];
+
+  // Map key → CSS animation-name for the thumb-* keyframes
+  const _ANIM_CSS = {
+    zoom_in:   'thumb-zoom-in',
+    zoom_out:  'thumb-zoom-out',
+    pan_lr:    'thumb-pan-lr',
+    pan_rl:    'thumb-pan-rl',
+    pan_up:    'thumb-pan-up',
+    ken_burns: 'thumb-ken-burns',
+  };
+
+  let _animPickerCallback = null;
+
+  function _mediaGetAnimLabel(key) {
+    const opt = _ANIM_OPTIONS.find(o => o.key === key);
+    return (opt && key !== 'none') ? ('\uD83C\uDFAC ' + opt.label) : '';
+  }
+
+  // Apply or remove the live CSS animation on the img inside a wrap element.
+  function _mediaApplyThumbAnim(wrap, animKey) {
+    const img = wrap.querySelector('img');
+    if (!img) return;
+    img.classList.remove('anim-playing');
+    img.style.animationName = '';
+    if (animKey && animKey !== 'none' && _ANIM_CSS[animKey]) {
+      img.classList.add('anim-playing');
+      img.style.animationName = _ANIM_CSS[animKey];
+    }
+  }
+
+  // Set the animation on the live-preview img inside the popup right pane.
+  function _animPreviewSet(animKey) {
+    const img = document.getElementById('media-anim-live-img');
+    if (!img) return;
+    const lbl = document.getElementById('media-anim-live-label');
+    img.classList.remove('anim-playing');
+    img.style.animationName = '';
+    if (animKey && animKey !== 'none' && _ANIM_CSS[animKey]) {
+      // Force animation restart via reflow trick
+      void img.offsetWidth;
+      img.classList.add('anim-playing');
+      img.style.animationName = _ANIM_CSS[animKey];
+    }
+    if (lbl) {
+      const opt = _ANIM_OPTIONS.find(o => o.key === animKey);
+      lbl.textContent = opt ? opt.label : '';
+    }
+  }
+
+  function _mediaShowAnimPicker(e, wrap, callback) {
+    e.stopPropagation();
+    e.preventDefault();
+
+    // Resolve the source image URL from wrap (if provided)
+    const imgEl   = wrap ? wrap.querySelector('img') : null;
+    const imgSrc  = imgEl ? imgEl.src : '';
+    const currentKey = wrap ? (wrap.dataset.animType || 'none') : 'none';
+    _animPickerCallback = callback;
+
+    // Build or reuse popup
+    let popup = document.getElementById('media-anim-popup');
+    if (!popup) {
+      popup = document.createElement('div');
+      popup.id = 'media-anim-popup';
+      document.body.appendChild(popup);
+    }
+
+    // ── Build layout: [options col | live preview pane] ──
+    popup.innerHTML = '';
+    const inner = document.createElement('div');
+    inner.className = 'anim-popup-inner';
+
+    // Left: options list
+    const optCol = document.createElement('div');
+    optCol.className = 'anim-options-col';
+    const title = document.createElement('div');
+    title.className = 'anim-popup-title';
+    title.textContent = '\uD83C\uDFAC Image Animation';
+    optCol.appendChild(title);
+
+    _ANIM_OPTIONS.forEach(function(opt) {
+      const row = document.createElement('div');
+      row.className = 'anim-option' + (opt.key === currentKey ? ' active' : '');
+      const dot = document.createElement('span');
+      dot.className = 'anim-option-dot';
+      const lbl = document.createElement('span');
+      lbl.className = 'anim-label';
+      lbl.textContent = opt.label;
+      row.appendChild(dot);
+      row.appendChild(lbl);
+      // Hover → update live preview
+      row.addEventListener('mouseenter', function() {
+        optCol.querySelectorAll('.anim-option').forEach(r => r.classList.remove('active'));
+        row.classList.add('active');
+        _animPreviewSet(opt.key);
+      });
+      // Click → commit and close
+      row.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        popup.style.display = 'none';
+        document.removeEventListener('click', _animPickerDismiss, true);
+        if (_animPickerCallback) {
+          _animPickerCallback(opt.key);
+          _animPickerCallback = null;
+        }
+      });
+      optCol.appendChild(row);
+    });
+    inner.appendChild(optCol);
+
+    // Right: live preview pane (only when we have an image src)
+    const previewPane = document.createElement('div');
+    previewPane.id = 'media-anim-preview-pane';
+    const liveWrap = document.createElement('div');
+    liveWrap.className = 'anim-live-wrap';
+    const liveImg = document.createElement('img');
+    liveImg.id       = 'media-anim-live-img';
+    liveImg.className = 'anim-live-img';
+    liveImg.src       = imgSrc || '';
+    liveImg.alt       = '';
+    // Start with current animation showing
+    if (currentKey && currentKey !== 'none' && _ANIM_CSS[currentKey]) {
+      liveImg.classList.add('anim-playing');
+      liveImg.style.animationName = _ANIM_CSS[currentKey];
+    }
+    liveWrap.appendChild(liveImg);
+    const liveLbl = document.createElement('div');
+    liveLbl.id = 'media-anim-live-label';
+    liveLbl.className = 'anim-live-label';
+    const curOpt = _ANIM_OPTIONS.find(o => o.key === currentKey);
+    liveLbl.textContent = curOpt ? curOpt.label : 'None';
+    previewPane.appendChild(liveWrap);
+    previewPane.appendChild(liveLbl);
+    inner.appendChild(previewPane);
+
+    popup.appendChild(inner);
+
+    // Position near the click, prefer right side of click point
+    popup.style.display = 'block';
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let x = e.clientX + 6, y = e.clientY + 4;
+    popup.style.left = '0'; popup.style.top = '0';
+    const pw = popup.offsetWidth, ph = popup.offsetHeight;
+    if (x + pw > vw - 8) x = Math.max(4, e.clientX - pw - 6);
+    if (y + ph > vh - 8) y = Math.max(4, vh - ph - 8);
+    popup.style.left = x + 'px';
+    popup.style.top  = y + 'px';
+
+    // Dismiss on outside click
+    setTimeout(function() {
+      document.addEventListener('click', _animPickerDismiss, true);
+    }, 0);
+  }
+
+  function _animPickerDismiss(e) {
+    const popup = document.getElementById('media-anim-popup');
+    if (popup && !popup.contains(e.target)) {
+      popup.style.display = 'none';
+      document.removeEventListener('click', _animPickerDismiss, true);
+      _animPickerCallback = null;
+    }
+  }
+
   // ── Build a single thumbnail cell ──
   function _mediaThumb(itemId, type, entry, idx) {
     const wrap = document.createElement('div');
@@ -5225,6 +5490,36 @@ placeholder="Enter your story here"></textarea>
       img.loading  = 'lazy';
       img.alt      = 'rank ' + (idx + 1);
       wrap.appendChild(img);
+
+      // 🎬 Animation picker button (top-right, shows on hover)
+      const animBtn = document.createElement('button');
+      animBtn.className = 'media-anim-btn';
+      animBtn.title = 'Set animation for this image';
+      animBtn.textContent = '\uD83C\uDFAC';
+      // Small badge below score badge showing current anim (hidden until chosen)
+      const animThumbBadge = document.createElement('span');
+      animThumbBadge.className = 'media-anim-thumb-badge';
+      animThumbBadge.textContent = '';
+      wrap.appendChild(animThumbBadge);
+
+      animBtn.addEventListener('click', function(e) {
+        _mediaShowAnimPicker(e, wrap, function(animKey) {
+          if (animKey && animKey !== 'none') {
+            wrap.dataset.animType = animKey;
+            wrap.classList.add('has-anim');
+            animThumbBadge.textContent = _mediaGetAnimLabel(animKey);
+          } else {
+            delete wrap.dataset.animType;
+            wrap.classList.remove('has-anim');
+            animThumbBadge.textContent = '';
+          }
+          // Apply / remove live animation on the thumbnail img immediately
+          _mediaApplyThumbAnim(wrap, animKey);
+          // If this thumb is already selected in a segment, sync that segment too
+          _mediaUpdateSegmentAnim(wrap, animKey === 'none' ? null : animKey);
+        });
+      });
+      wrap.appendChild(animBtn);
     } else {
       const vid    = document.createElement('video');
       vid.muted    = true;
@@ -5287,6 +5582,27 @@ placeholder="Enter your story here"></textarea>
     }
     wrap.addEventListener('click', () => mediaSelect(itemId, type, entry, wrap));
     return wrap;
+  }
+
+  // ── Update animation_type on any existing segment that matches this thumb's URL ──
+  function _mediaUpdateSegmentAnim(wrapEl, animKey) {
+    const itemId = wrapEl.dataset.itemId;
+    const url    = wrapEl.dataset.url || '';
+    if (!itemId || !url) return;
+    const sel = _mediaSelections[itemId];
+    if (!sel || !sel.per_shot) return;
+    let updated = false;
+    Object.keys(sel.per_shot).forEach(function(sid) {
+      const ps = sel.per_shot[sid];
+      if (!ps.segments) return;
+      ps.segments.forEach(function(seg) {
+        if (seg.url === url) {
+          seg.animation_type = animKey || null;
+          updated = true;
+        }
+      });
+      if (updated) _mediaRenderShotRow(itemId, sid);
+    });
   }
 
   // ── Segment total duration helper ──
@@ -5398,6 +5714,7 @@ placeholder="Enter your story here"></textarea>
       // Image: hold for remaining gap after videos.
       const naturalDur = type === 'video' ? (entry.duration_sec || 0) : 0;
 
+      const animType = (type === 'image' && wrapEl.dataset.animType) ? wrapEl.dataset.animType : null;
       segs.push({
         media_type:           type,
         url:                  entry.url || '',
@@ -5408,6 +5725,7 @@ placeholder="Enter your story here"></textarea>
         duration_sec:         type === 'video' ? naturalDur : null,
         hold_sec:             type === 'image' ? remaining : null,
         source:               entry.source || null,
+        animation_type:       animType,
       });
 
       // Rebalance images to share the remaining gap equally
@@ -5515,9 +5833,26 @@ placeholder="Enter your story here"></textarea>
           durSpan.textContent = dispDur.toFixed(1) + 's';
           se.appendChild(durSpan);
         } else {
+          // Image segment
           const dur = seg.hold_sec || 0;
           se.innerHTML = '<span class="seg-name">\uD83D\uDDBC\uFE0F ' + fname + '</span>'
               + '<span class="seg-dur">' + dur.toFixed(1) + 's</span>';
+          // Animation badge — click to change
+          const animBadge = document.createElement('span');
+          animBadge.className = 'seg-anim-badge';
+          animBadge.title = 'Animation effect — click to change';
+          const animKey = seg.animation_type || 'none';
+          animBadge.textContent = animKey === 'none' ? '\uD83C\uDFAC \u2014' : ('\uD83C\uDFAC ' + (_ANIM_OPTIONS.find(o => o.key === animKey) || {label: animKey}).label);
+          (function(s, badge) {
+            badge.addEventListener('click', function(ev) {
+              ev.stopPropagation();
+              _mediaShowAnimPicker(ev, null, function(newKey) {
+                s.animation_type = newKey === 'none' ? null : newKey;
+                badge.textContent = (!newKey || newKey === 'none') ? '\uD83C\uDFAC \u2014' : ('\uD83C\uDFAC ' + (_ANIM_OPTIONS.find(o => o.key === newKey) || {label: newKey}).label);
+              });
+            });
+          })(seg, animBadge);
+          se.appendChild(animBadge);
         }
         const rmBtn = document.createElement('button');
         rmBtn.className = 'media-seg-remove';

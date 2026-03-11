@@ -280,11 +280,12 @@ def build_shot(
                 ext = Path(path_part).suffix.lower()
                 media_type = "video" if ext in {".mp4", ".mov", ".webm", ".mkv"} else "image"
                 bg_segments.append({
-                    "asset_id":     seg_item["asset_id"],
-                    "uri":          uri,
-                    "media_type":   media_type,
-                    "duration_sec": seg_item.get("duration_sec"),
-                    "hold_sec":     seg_item.get("hold_sec"),
+                    "asset_id":       seg_item["asset_id"],
+                    "uri":            uri,
+                    "media_type":     media_type,
+                    "duration_sec":   seg_item.get("duration_sec"),
+                    "hold_sec":       seg_item.get("hold_sec"),
+                    "animation_type": seg_item.get("animation_type"),  # e.g. zoom_in / pan_lr / ken_burns
                 })
             # Set primary bg from first segment (for backward compat fields)
             bg_media = seg_list[0]

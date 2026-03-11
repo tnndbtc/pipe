@@ -542,6 +542,8 @@ def resolve_all(
                                 item["segment_index"] = seg_idx
                                 item["duration_sec"]  = seg.get("duration_sec")
                                 item["hold_sec"]      = seg.get("hold_sec")
+                                if seg.get("animation_type"):
+                                    item["animation_type"] = seg["animation_type"]
                                 items.append(item)
                                 n_found += 1
                             else:
