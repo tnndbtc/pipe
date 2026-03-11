@@ -133,7 +133,11 @@ def _load_api_keys() -> tuple[str, dict[str, str]]:
     # Sources that are strictly required (missing = server exits)
     REQUIRED_SOURCES = {"pexels", "pixabay"}
     # Sources that are optional (missing = warn + skip, do not exit)
-    OPTIONAL_SOURCES = {"wikimedia", "archive", "openverse", "europeana"}
+    OPTIONAL_SOURCES = {"archive", "europeana"}
+    # Sources that have no {SOURCE}_API_KEY at all — auth is handled separately
+    # (openverse uses OPENVERSE_CLIENT_ID/SECRET via OPTIONAL_EXTRA;
+    #  wikimedia works anonymously with WIKIMEDIA_API_TOKEN as an optional quota upgrade)
+    NO_KEY_SOURCES = {"openverse", "wikimedia"}
     # Special optional keys (not tied to a source name directly)
     OPTIONAL_EXTRA = {
         "WIKIMEDIA_API_TOKEN":     "wikimedia_api_token",
@@ -151,16 +155,20 @@ def _load_api_keys() -> tuple[str, dict[str, str]]:
     source_keys: dict[str, str] = {}
 
     for source in config.get("sources", []):
+        if source in NO_KEY_SOURCES:
+            # These sources don't use a {SOURCE}_API_KEY — skip the check entirely.
+            source_keys[source] = ""
+            continue
         env_name = f"{source.upper()}_API_KEY"
         val = os.environ.get(env_name, "").strip()
         if not val:
             if source in REQUIRED_SOURCES:
                 errors.append(f"{env_name:<22}({source} search API key)")
-            elif source not in OPTIONAL_SOURCES:
+            elif source in OPTIONAL_SOURCES:
+                log.warning("Optional API key %s not set — %s source will be skipped", env_name, source)
+            else:
                 # Unknown source — treat as required to surface config errors
                 errors.append(f"{env_name:<22}({source} search API key)")
-            else:
-                log.warning("Optional API key %s not set — %s source will be skipped", env_name, source)
         source_keys[source] = val
 
     # Load optional extras (not in sources list but needed for certain features)
@@ -504,14 +512,26 @@ async def get_batch(
 # POST /batches/{batch_id}/resume — re-queue an interrupted/failed batch
 # ---------------------------------------------------------------------------
 
+class ResumeBatchBody(BaseModel):
+    source_limits_override: Optional[dict] = None
+    sources_override:       Optional[list] = None
+
 @app.post("/batches/{batch_id}/resume", status_code=202)
-async def resume_batch(batch_id: str, _: None = Depends(require_auth)):
+async def resume_batch(batch_id: str, body: ResumeBatchBody = ResumeBatchBody(),
+                       _: None = Depends(require_auth)):
     state = store.get(batch_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Batch not found")
     if state["status"] == "running":
         return {"batch_id": batch_id, "status": "running",
                 "poll_url": f"/batches/{batch_id}", "message": "already running"}
+    # Update stored source config if the client supplies fresh values.
+    # This lets the UI pass current per-source limits even when resuming an
+    # old batch that was created before source_limits_override was required.
+    if body.source_limits_override:
+        store.patch(batch_id, source_limits_override=body.source_limits_override)
+    if body.sources_override:
+        store.patch(batch_id, sources_override=body.sources_override)
     reset = store.resume(batch_id)
     await batch_queue.put(batch_id)
     log.info("Resuming batch %s  (%d items to process)", batch_id, reset)
@@ -977,7 +997,7 @@ async def _run_batch(batch_id: str) -> None:
             detail=f"source_limits_override missing candidates_images/candidates_videos for: {missing}")
     cfg["source_limits"] = {
         src: {k: v for k, v in lims.items()
-              if k in ("candidates_images", "candidates_videos", "top_n_images", "top_n_videos")}
+              if k in ("candidates_images", "candidates_videos")}
         for src, lims in source_limits_override.items()
     }
 
@@ -1122,13 +1142,6 @@ async def _run_batch(batch_id: str) -> None:
             images_ranked = _relativise(images_ranked, batch_dir)
             videos_ranked = _relativise(videos_ranked, batch_dir)
 
-            # Apply per-source "top_n_images" / "top_n_videos" limits if configured.
-            # Ranked lists are already sorted by score desc; walk them and keep at most
-            # top_n_images from each source, preserving global score order.
-            src_limits = cfg.get("source_limits", {})
-            images_ranked = _apply_per_source_top_n(images_ranked, src_limits, "top_n_images")
-            videos_ranked = _apply_per_source_top_n(videos_ranked, src_limits, "top_n_videos")
-
             store.update_item_progress(
                 batch_id, item_id, phase="done",
                 imgs_scored=len(images_ranked),
@@ -1171,25 +1184,6 @@ async def _run_batch(batch_id: str) -> None:
 # ---------------------------------------------------------------------------
 # URL / path helpers
 # ---------------------------------------------------------------------------
-
-def _apply_per_source_top_n(ranked: list[dict], src_limits: dict, key: str) -> list[dict]:
-    """
-    Walk a score-sorted ranked list and keep at most src_limits[source][key]
-    entries per source.  Entries without a source or without a limit are kept as-is.
-    Global score order is preserved.
-    """
-    from collections import defaultdict
-    counts: dict = defaultdict(int)
-    out = []
-    for r in ranked:
-        src = (r.get("source") or {}).get("source_site", "")
-        limit = (src_limits.get(src) or {}).get(key) if src else None
-        if limit is None or counts[src] < limit:
-            out.append(r)
-            if src:
-                counts[src] += 1
-    return out
-
 
 def _relativise(ranked: list[dict], batch_dir: Path) -> list[dict]:
     """Convert absolute 'path' fields to paths relative to batch_dir."""

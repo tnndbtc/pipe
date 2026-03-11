@@ -207,6 +207,14 @@ class BatchStore:
         state["updated_at"] = _now_iso()
         self._write_atomic(self._state_path(batch_id), state)
 
+    def patch(self, batch_id: str, **fields) -> None:
+        """Overwrite arbitrary top-level fields in the batch state (e.g. source_limits_override)."""
+        state = self._batches[batch_id]
+        for k, v in fields.items():
+            state[k] = v
+        state["updated_at"] = _now_iso()
+        self._write_atomic(self._state_path(batch_id), state)
+
     def resume(self, batch_id: str) -> int:
         """Reset non-done items to pending and mark batch as queued. Returns count to re-run."""
         state = self._batches[batch_id]

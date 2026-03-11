@@ -2092,9 +2092,7 @@ placeholder="Enter your story here"></textarea>
         <tr style="color:var(--dim);font-size:0.78em;text-transform:uppercase;letter-spacing:0.05em">
           <th style="padding:0 18px 5px 0;text-align:left;font-weight:600">Source</th>
           <th style="padding:0 10px 5px;text-align:center;font-weight:600">Enabled</th>
-          <th style="padding:0 10px 5px;text-align:center;font-weight:600">📷 IMG to show</th>
           <th style="padding:0 10px 5px;text-align:center;font-weight:600">📷 IMG candidates</th>
-          <th style="padding:0 10px 5px;text-align:center;font-weight:600">🎬 VID to show</th>
           <th style="padding:0 0 5px 10px;text-align:center;font-weight:600">🎬 VID candidates</th>
         </tr>
       </thead>
@@ -4553,13 +4551,13 @@ placeholder="Enter your story here"></textarea>
   // ── Per-source config: defaults, localStorage persistence ──────────────────
 
   const _mediaSrcDefaults = {
-    //                enabled  show_img  n_img  show_vid  n_vid
-    pexels:    { enabled: true,  show_img:  5, n_img: 15, show_vid: 3, n_vid:  5 },
-    pixabay:   { enabled: true,  show_img:  5, n_img: 15, show_vid: 3, n_vid:  5 },
-    openverse: { enabled: true,  show_img: 10, n_img: 40, show_vid: 0, n_vid:  0 },
-    wikimedia: { enabled: true,  show_img: 10, n_img: 40, show_vid: 0, n_vid:  0 },
-    europeana: { enabled: true,  show_img:  5, n_img: 15, show_vid: 0, n_vid:  0 },
-    archive:   { enabled: false, show_img:  5, n_img: 10, show_vid: 5, n_vid: 10 },
+    //                enabled  n_img  n_vid
+    pexels:    { enabled: true,  n_img: 15, n_vid:  5 },
+    pixabay:   { enabled: true,  n_img: 15, n_vid:  5 },
+    openverse: { enabled: true,  n_img: 40, n_vid:  0 },
+    wikimedia: { enabled: true,  n_img: 40, n_vid:  0 },
+    europeana: { enabled: true,  n_img: 15, n_vid:  0 },
+    archive:   { enabled: false, n_img: 10, n_vid: 10 },
   };
   let _mediaSourceConfig = JSON.parse(JSON.stringify(_mediaSrcDefaults));
 
@@ -4599,8 +4597,7 @@ placeholder="Enter your story here"></textarea>
       // Enforce zero for video fields on sources that have no video API
       _NO_VIDEO_SOURCES.forEach(src => {
         if (_mediaSourceConfig[src]) {
-          _mediaSourceConfig[src].show_vid = 0;
-          _mediaSourceConfig[src].n_vid    = 0;
+          _mediaSourceConfig[src].n_vid = 0;
         }
       });
     } catch(e) {}
@@ -4615,7 +4612,6 @@ placeholder="Enter your story here"></textarea>
     Object.entries(_mediaSourceConfig).forEach(([src, v]) => {
       const label   = src.charAt(0).toUpperCase() + src.slice(1);
       const noVid   = _NO_VIDEO_SOURCES.has(src);
-      const vidVal  = noVid ? 0 : v.show_vid;
       const nVidVal = noVid ? 0 : v.n_vid;
       const tr = document.createElement('tr');
       tr.innerHTML = `
@@ -4626,19 +4622,8 @@ placeholder="Enter your story here"></textarea>
                  onchange="_onMediaSrcTableChange(this)">
         </td>
         <td style="padding:3px 10px;text-align:center">
-          <input type="number" data-src="${src}" data-field="show_img"
-                 min="0" max="100" value="${v.show_img}" style="${inp}"
-                 onchange="_onMediaSrcTableChange(this)">
-        </td>
-        <td style="padding:3px 10px;text-align:center">
           <input type="number" data-src="${src}" data-field="n_img"
                  min="0" max="200" value="${v.n_img}" style="${inp}"
-                 onchange="_onMediaSrcTableChange(this)">
-        </td>
-        <td style="padding:3px 10px;text-align:center">
-          <input type="number" data-src="${src}" data-field="show_vid"
-                 min="0" max="50" value="${vidVal}" style="${noVid ? inpGrey : inp}"
-                 ${noVid ? 'disabled title="This source does not provide videos"' : ''}
                  onchange="_onMediaSrcTableChange(this)">
         </td>
         <td style="padding:3px 0 3px 10px;text-align:center">
@@ -4705,10 +4690,22 @@ placeholder="Enter your story here"></textarea>
             document.getElementById('media-btn-search').disabled = true;
             _mediaSetStatus('Resuming batch…', true);
             try {
+              const enabledSrcs = Object.entries(_mediaSourceConfig).filter(([, v]) => v.enabled).map(([k]) => k);
+              const srcLimits   = Object.fromEntries(
+                Object.entries(_mediaSourceConfig).map(([src, v]) => [src, {
+                  candidates_images: v.n_img,
+                  candidates_videos: v.n_vid,
+                }])
+              );
               const rr = await fetch('/api/media_batch_resume', {
                 method:  'POST',
                 headers: {'Content-Type': 'application/json'},
-                body:    JSON.stringify({ batch_id: existing.batch_id, server_url: serverUrl }),
+                body:    JSON.stringify({
+                  batch_id:               existing.batch_id,
+                  server_url:             serverUrl,
+                  sources_override:       enabledSrcs,
+                  source_limits_override: srcLimits,
+                }),
               });
               const rd = await rr.json();
               if (!rr.ok || rd.error) throw new Error(rd.error || 'resume failed');
@@ -4747,8 +4744,6 @@ placeholder="Enter your story here"></textarea>
             Object.entries(_mediaSourceConfig).map(([src, v]) => [src, {
               candidates_images: v.n_img,
               candidates_videos: v.n_vid,
-              top_n_images:      v.show_img,
-              top_n_videos:      v.show_vid,
             }])
           );
           const maxNImg = enabledSrcs.length ? Math.max(...enabledSrcs.map(s => _mediaSourceConfig[s].n_img)) : 15;
@@ -12461,7 +12456,12 @@ class Handler(BaseHTTPRequestHandler):
                 api_key    = os.environ.get("MEDIA_API_KEY", "")
                 if not batch_id:
                     raise ValueError("batch_id is required")
-                req_body = b"{}"
+                forward = {}
+                if payload.get("source_limits_override"):
+                    forward["source_limits_override"] = payload["source_limits_override"]
+                if payload.get("sources_override"):
+                    forward["sources_override"] = payload["sources_override"]
+                req_body = json.dumps(forward).encode()
                 url = f"{server_url}/batches/{batch_id}/resume"
                 req = _urllib_req.Request(
                     url, data=req_body,
