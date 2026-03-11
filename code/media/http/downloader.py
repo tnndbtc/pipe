@@ -1211,6 +1211,11 @@ def fetch_images(
         item.setdefault("_thumbnails", {})
 
     for source in sources:
+        # Skip source if user explicitly set candidates_images = 0
+        if cfg.get("source_limits", {}).get(source, {}).get("candidates_images") == 0:
+            log.debug("fetch_images: skipping source %s (candidates_images=0)", source)
+            continue
+
         src_dir = output_dir / source
         src_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1519,6 +1524,11 @@ def fetch_videos(
     saved: list[tuple[Path, dict]]  = []
 
     for source in sources:
+        # Skip source if user explicitly set candidates_videos = 0
+        if cfg.get("source_limits", {}).get(source, {}).get("candidates_videos") == 0:
+            log.debug("fetch_videos: skipping source %s (candidates_videos=0)", source)
+            continue
+
         src_dir = output_dir / source
         src_dir.mkdir(parents=True, exist_ok=True)
 
