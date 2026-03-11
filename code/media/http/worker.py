@@ -21,6 +21,7 @@ No configuration change or server restart is needed to add a new worker.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import logging
 import signal
@@ -32,6 +33,10 @@ from pathlib import Path
 import requests
 
 import scorer
+
+# Dump Python stack trace to stderr on SIGSEGV / SIGFPE / SIGABRT.
+# This survives the crash and shows exactly which Python function caused it.
+faulthandler.enable()
 
 # ---------------------------------------------------------------------------
 # Logging
