@@ -167,6 +167,18 @@ def _normalize_wikimedia_license(short_name: str) -> str:
 
 
 def _normalize_freesound_license(lic: str) -> str:
+    if not lic:
+        return ""
+    lic_lower = lic.lower()
+    # URL format — what the Freesound API actually returns in sound objects
+    # e.g. "https://creativecommons.org/publicdomain/zero/1.0/"
+    #      "https://creativecommons.org/licenses/by/4.0/"
+    if "publicdomain/zero" in lic_lower:
+        return "CC0"
+    if "licenses/by/" in lic_lower:          # matches /by/ but NOT /by-sa/, /by-nc/, etc.
+        version = re.search(r"/(\d+\.\d+)/?", lic)
+        return f"CC BY {version.group(1)}" if version else "CC BY"
+    # Legacy display-name format (kept for safety)
     if lic == "Creative Commons 0":        return "CC0"
     if lic == "Attribution":               return "CC BY"
     if lic == "Attribution NonCommercial": return ""
@@ -632,11 +644,12 @@ def fetch_sfx(
     if freesound_key and fs_limit > 0:
         try:
             lic_filter = 'license:("Creative Commons 0" OR "Attribution")'
-            dur_filter = f"duration:[0 TO {max_dur:.1f}]"
+            # Freesound AND-matches every word; >4 words over-constrains and returns 0
+            fs_query = " ".join(query.split()[:4])
             fs_params = {
                 "token": freesound_key,
-                "query": query,
-                "filter": f"{lic_filter} {dur_filter}",
+                "query": fs_query,
+                "filter": lic_filter,
                 "sort": "score",
                 "fields": "id,name,duration,license,previews,tags,username,avg_rating,num_downloads,type,images,url,channels,loopable,single_event",
                 "page_size": min(fs_limit, 150),

@@ -3506,7 +3506,7 @@ placeholder="Enter your story here"></textarea>
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
             slug: _sfxSlug, ep_id: _sfxEpId, item_id: item.item_id,
-            query: item.tag || item.description || '',
+            query: (item.search_queries && item.search_queries[0]) || item.tag || item.description || '',
             duration_sec: item.duration_sec || 5,
             server_url: serverUrl, api_key: apiKey,
           })
