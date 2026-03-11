@@ -958,16 +958,20 @@ async def _run_batch(batch_id: str) -> None:
             vid_path_infos: list[tuple] = []
 
             async with _sem:
-                if prefer != "video":
-                    img_path_infos = await asyncio.to_thread(
+                # Fetch images and videos in parallel — they are fully independent.
+                async def _noop() -> list:
+                    return []
+
+                img_path_infos, vid_path_infos = await asyncio.gather(
+                    asyncio.to_thread(
                         downloader.fetch_images,
                         search_prompt, n_img, img_dir, API_KEYS, cfg, item,
-                    )
-                if prefer != "image":
-                    vid_path_infos = await asyncio.to_thread(
+                    ) if prefer != "video" else _noop(),
+                    asyncio.to_thread(
                         downloader.fetch_videos,
                         search_prompt, n_vid, vid_dir, API_KEYS, cfg, item,
-                    )
+                    ) if prefer != "image" else _noop(),
+                )
 
             img_paths = [p for p, _ in img_path_infos]
             vid_paths = [p for p, _ in vid_path_infos]

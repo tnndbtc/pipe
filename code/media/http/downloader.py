@@ -36,6 +36,7 @@ import random
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urlunparse
@@ -529,6 +530,8 @@ def _source_search_archive_images(
             "height": int(chosen.get("height", 0) or 0),
             "attribution_required": attr_required, "attribution_text": attr_text,
         })
+    # Single politeness delay after fetching all metadata — not per-item.
+    if candidates:
         time.sleep(random.uniform(0.2, 0.5))
 
     _search_cache[key] = candidates
@@ -612,6 +615,8 @@ def _source_search_archive_videos(
             "duration_sec": float(chosen.get("length", 0) or 0),
             "attribution_required": attr_required, "attribution_text": attr_text,
         })
+    # Single politeness delay after fetching all metadata — not per-item.
+    if candidates:
         time.sleep(random.uniform(0.2, 0.5))
 
     _search_cache[key] = candidates
@@ -836,6 +841,66 @@ def _jitter(cfg: dict, source: str) -> None:
     hi = float(rl.get("delay_ms_max", 0))
     if hi > 0:
         time.sleep(random.uniform(lo, hi) / 1000.0)
+
+
+def _run_download_tasks(
+    tasks:       list[dict],
+    cfg:         dict,
+    max_workers: int | None = None,
+) -> tuple[list[tuple[Path, dict]], dict[str, str]]:
+    """
+    Download a batch of files in parallel using ThreadPoolExecutor.
+
+    Each task dict must contain:
+        dest    : Path  — local destination path
+        url     : str   — URL to download
+        info    : dict  — metadata written as .info.json sidecar
+    Optional keys:
+        headers : dict  — extra HTTP headers (e.g. Authorization for Pexels)
+        thumb   : str   — thumbnail URL recorded for scorer pass-1.5
+
+    Returns:
+        saved  : list[(Path, info)] for each successfully saved file
+        thumbs : {str(dest): thumb_url} for thumbnail registration
+    """
+    saved:   list[tuple[Path, dict]] = []
+    thumbs:  dict[str, str]          = {}
+    pending: list[dict]              = []
+
+    # Fast path: files that already exist skip the download entirely.
+    for task in tasks:
+        dest = task["dest"]
+        if dest.exists():
+            _write_info_sidecar(dest, task["info"])
+            saved.append((dest, task["info"]))
+            if task.get("thumb"):
+                thumbs[str(dest)] = task["thumb"]
+        else:
+            pending.append(task)
+
+    if not pending:
+        return saved, thumbs
+
+    n_workers = min(max_workers or cfg.get("download_workers", 8), len(pending))
+
+    def _do(task: dict) -> tuple[dict, bool]:
+        try:
+            _download_file(task["url"], task["dest"], headers=task.get("headers") or {})
+            return task, True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Download failed %s: %s", task["dest"].name, exc)
+            return task, False
+
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        for task, ok in ex.map(_do, pending):
+            if ok:
+                dest = task["dest"]
+                _write_info_sidecar(dest, task["info"])
+                saved.append((dest, task["info"]))
+                if task.get("thumb"):
+                    thumbs[str(dest)] = task["thumb"]
+
+    return saved, thumbs
 
 
 # ---------------------------------------------------------------------------
@@ -1252,6 +1317,7 @@ def fetch_images(
                         extra_params=source_filters or None,
                     )
                     pexels_key = api_keys.get("pexels", "")
+                    tasks: list[dict] = []
                     for i, ph in enumerate(hits[:n_src]):
                         pid  = str(ph.get("id", i))
                         uid  = f"pexels_img_{pid}"
@@ -1262,17 +1328,13 @@ def fetch_images(
                         if not url:
                             continue
                         dest = src_dir / f"{uid}.jpg"
-                        # Record thumbnail URL for pass-1.5 pre-filter in scorer.py
-                        if item is not None:
-                            src = ph.get("src") or {}
-                            thumb = src.get("medium") or src.get("small") or src.get("tiny")
-                            if thumb:
-                                item["_thumbnails"][str(dest)] = thumb
+                        src_ph = ph.get("src") or {}
+                        thumb  = src_ph.get("medium") or src_ph.get("small") or src_ph.get("tiny")
                         info = {
                             "source_site":     "pexels",
                             "asset_page_url":  ph.get("url", ""),
-                            "file_url":        url,  # original high-res URL (for render)
-                            "preview_url":     _pexels_pick_preview_image_url(ph),  # lower-res for download
+                            "file_url":        url,
+                            "preview_url":     _pexels_pick_preview_image_url(ph),
                             "title":           ph.get("alt") or _slug_to_title(ph.get("url", "")),
                             "description":     ph.get("alt", ""),
                             "tags":            [],
@@ -1283,18 +1345,14 @@ def fetch_images(
                             "width":           ph.get("width", 0),
                             "height":          ph.get("height", 0),
                         }
-                        if dest.exists():
-                            _write_info_sidecar(dest, info)
-                            saved.append((dest, info))
-                        else:
-                            try:
-                                _download = info.get("preview_url") or url
-                                _download_file(_download, dest, headers={"Authorization": pexels_key})
-                                _write_info_sidecar(dest, info)
-                                saved.append((dest, info))
-                            except Exception as exc:
-                                log.warning("pexels img %s skip: %s", pid, exc)
-                        _jitter(cfg, source)
+                        dl_url = info.get("preview_url") or url
+                        tasks.append({"dest": dest, "url": dl_url, "info": info,
+                                      "thumb": thumb, "headers": {"Authorization": pexels_key}})
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
+                    saved.extend(batch_saved)
+                    if item is not None:
+                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                    _jitter(cfg, source)
 
                 elif source == "pixabay":
                     n_src = cfg.get("source_limits", {}).get("pixabay", {}).get(
@@ -1306,6 +1364,7 @@ def fetch_images(
                         backoff,
                         extra_params=source_filters or None,
                     )
+                    tasks = []
                     for i, hit in enumerate(hits[:n_src]):
                         hid  = str(hit.get("id", i))
                         uid  = f"pixabay_img_{hid}"
@@ -1317,15 +1376,11 @@ def fetch_images(
                             continue
                         ext  = Path(url.split("?")[0]).suffix or ".jpg"
                         dest = src_dir / f"{uid}{ext}"
-                        # webformatURL is a ~640px preview — ideal for pass-1.5 thumbnail filter
-                        if item is not None:
-                            thumb = hit.get("webformatURL") or hit.get("previewURL")
-                            if thumb:
-                                item["_thumbnails"][str(dest)] = thumb
+                        thumb = hit.get("webformatURL") or hit.get("previewURL")
                         info = {
                             "source_site":     "pixabay",
                             "asset_page_url":  hit.get("pageURL", ""),
-                            "file_url":        url,   # high-res (largeImageURL)
+                            "file_url":        url,
                             "preview_url":     _pixabay_pick_preview_image_url(hit),
                             "title":           _slug_to_title(hit.get("pageURL", "")),
                             "description":     "",
@@ -1337,18 +1392,13 @@ def fetch_images(
                             "width":           hit.get("imageWidth", 0),
                             "height":          hit.get("imageHeight", 0),
                         }
-                        if dest.exists():
-                            _write_info_sidecar(dest, info)
-                            saved.append((dest, info))
-                        else:
-                            try:
-                                _download = info.get("preview_url") or url
-                                _download_file(_download, dest)
-                                _write_info_sidecar(dest, info)
-                                saved.append((dest, info))
-                            except Exception as exc:
-                                log.warning("pixabay img %s skip: %s", hid, exc)
-                        _jitter(cfg, source)
+                        dl_url = info.get("preview_url") or url
+                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
+                    saved.extend(batch_saved)
+                    if item is not None:
+                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                    _jitter(cfg, source)
 
                 elif source == "openverse":
                     n_src = cfg.get("source_limits", {}).get("openverse", {}).get(
@@ -1356,6 +1406,7 @@ def fetch_images(
                     candidates = _source_search_openverse_images(
                         api_keys, query, n_src, backoff, extra_params=source_filters or None,
                     )
+                    tasks = []
                     for c in candidates[:per_q]:
                         sid = c.get("source_id", "")
                         uid = f"openverse_img_{sid}"
@@ -1366,22 +1417,15 @@ def fetch_images(
                         ext = Path(url.split("?")[0]).suffix or ".jpg"
                         if ext.lower() not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
                         dest = src_dir / f"{uid}{ext}"
-                        if item is not None:
-                            thumb = c.get("preview_url", "")
-                            if thumb: item["_thumbnails"][str(dest)] = thumb
+                        thumb = c.get("preview_url", "")
                         info = {**c, "file_url": url, "preview_url": c.get("preview_url", "")}
-                        if dest.exists():
-                            _write_info_sidecar(dest, info)
-                            saved.append((dest, info))
-                        else:
-                            try:
-                                dl_url = c.get("preview_url") or url
-                                _download_file(dl_url, dest)
-                                _write_info_sidecar(dest, info)
-                                saved.append((dest, info))
-                            except Exception as exc2:
-                                log.warning("openverse img %s skip: %s", sid, exc2)
-                        _jitter(cfg, source)
+                        dl_url = c.get("preview_url") or url
+                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
+                    saved.extend(batch_saved)
+                    if item is not None:
+                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                    _jitter(cfg, source)
 
                 elif source == "wikimedia":
                     n_src = cfg.get("source_limits", {}).get("wikimedia", {}).get(
@@ -1389,6 +1433,7 @@ def fetch_images(
                     candidates = _source_search_wikimedia_images(
                         api_keys, query, n_src, backoff, extra_params=source_filters or None,
                     )
+                    tasks = []
                     for c in candidates[:per_q]:
                         sid = c.get("source_id", "")
                         uid = f"wikimedia_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
@@ -1399,22 +1444,15 @@ def fetch_images(
                         mime = c.get("mime", "image/jpeg")
                         ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif"}.get(mime, ".jpg")
                         dest = src_dir / f"{uid}{ext}"
-                        if item is not None:
-                            thumb = c.get("preview_url", "")
-                            if thumb: item["_thumbnails"][str(dest)] = thumb
+                        thumb = c.get("preview_url", "")
                         info = {**c}
-                        if dest.exists():
-                            _write_info_sidecar(dest, info)
-                            saved.append((dest, info))
-                        else:
-                            try:
-                                dl_url = c.get("preview_url") or url
-                                _download_file(dl_url, dest)
-                                _write_info_sidecar(dest, info)
-                                saved.append((dest, info))
-                            except Exception as exc2:
-                                log.warning("wikimedia img %s skip: %s", sid[:50], exc2)
-                        _jitter(cfg, source)
+                        dl_url = c.get("preview_url") or url
+                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
+                    saved.extend(batch_saved)
+                    if item is not None:
+                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                    _jitter(cfg, source)
 
                 elif source == "europeana":
                     n_src = cfg.get("source_limits", {}).get("europeana", {}).get(
@@ -1422,6 +1460,7 @@ def fetch_images(
                     candidates = _source_search_europeana_images(
                         api_keys, query, n_src, backoff, extra_params=source_filters or None,
                     )
+                    tasks = []
                     for c in candidates[:per_q]:
                         sid = c.get("source_id", "")
                         uid = f"europeana_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
@@ -1432,22 +1471,15 @@ def fetch_images(
                         ext = Path(url.split("?")[0]).suffix.lower()
                         if ext not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
                         dest = src_dir / f"{uid}{ext}"
-                        if item is not None:
-                            thumb = c.get("preview_url", "")
-                            if thumb: item["_thumbnails"][str(dest)] = thumb
+                        thumb = c.get("preview_url", "")
                         info = {**c}
-                        if dest.exists():
-                            _write_info_sidecar(dest, info)
-                            saved.append((dest, info))
-                        else:
-                            try:
-                                dl_url = c.get("preview_url") or url
-                                _download_file(dl_url, dest)
-                                _write_info_sidecar(dest, info)
-                                saved.append((dest, info))
-                            except Exception as exc2:
-                                log.warning("europeana img %s skip: %s", sid[:50], exc2)
-                        _jitter(cfg, source)
+                        dl_url = c.get("preview_url") or url
+                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
+                    saved.extend(batch_saved)
+                    if item is not None:
+                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                    _jitter(cfg, source)
 
                 elif source == "archive":
                     n_src = cfg.get("source_limits", {}).get("archive", {}).get(
@@ -1455,6 +1487,7 @@ def fetch_images(
                     candidates = _source_search_archive_images(
                         api_keys, query, n_src, backoff, extra_params=source_filters or None,
                     )
+                    tasks = []
                     for c in candidates[:per_q]:
                         sid = c.get("source_id", "")
                         uid = f"archive_img_{sid}"
@@ -1465,22 +1498,15 @@ def fetch_images(
                         ext = Path(url.split("?")[0]).suffix.lower()
                         if ext not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
                         dest = src_dir / f"{uid}{ext}"
-                        if item is not None:
-                            thumb = c.get("preview_url", "")
-                            if thumb: item["_thumbnails"][str(dest)] = thumb
+                        thumb = c.get("preview_url", "")
                         info = {**c}
-                        if dest.exists():
-                            _write_info_sidecar(dest, info)
-                            saved.append((dest, info))
-                        else:
-                            try:
-                                dl_url = c.get("preview_url") or url
-                                _download_file(dl_url, dest)
-                                _write_info_sidecar(dest, info)
-                                saved.append((dest, info))
-                            except Exception as exc2:
-                                log.warning("archive img %s skip: %s", sid, exc2)
-                        _jitter(cfg, source)
+                        dl_url = c.get("preview_url") or url
+                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
+                    saved.extend(batch_saved)
+                    if item is not None:
+                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                    _jitter(cfg, source)
 
             except Exception as exc:
                 log.warning("fetch_images %s q=%r failed: %s", source, query, exc)
@@ -1577,6 +1603,7 @@ def fetch_videos(
                         backoff,
                         extra_params=source_filters or None,
                     )
+                    tasks = []
                     for i, vd in enumerate(hits[:n_src]):
                         vid  = str(vd.get("id", i))
                         uid  = f"pexels_vid_{vid}"
@@ -1591,7 +1618,7 @@ def fetch_videos(
                         info = {
                             "source_site":     "pexels",
                             "asset_page_url":  vd.get("url", ""),
-                            "file_url":        url,   # highest-res (from _pexels_pick_video_url)
+                            "file_url":        url,
                             "preview_url":     preview_url_v,
                             "preview_width":   pw,
                             "preview_height":  ph_v,
@@ -1607,18 +1634,11 @@ def fetch_videos(
                             "width":           vd.get("width", 0),
                             "height":          vd.get("height", 0),
                         }
-                        if dest.exists():
-                            _write_info_sidecar(dest, info)
-                            saved.append((dest, info))
-                        else:
-                            try:
-                                _download = info.get("preview_url") or url
-                                _download_file(_download, dest)
-                                _write_info_sidecar(dest, info)
-                                saved.append((dest, info))
-                            except Exception as exc:
-                                log.warning("pexels vid %s skip: %s", vid, exc)
-                        _jitter(cfg, source)
+                        dl_url = info.get("preview_url") or url
+                        tasks.append({"dest": dest, "url": dl_url, "info": info})
+                    batch_saved, _ = _run_download_tasks(tasks, cfg)
+                    saved.extend(batch_saved)
+                    _jitter(cfg, source)
 
                 elif source == "pixabay":
                     n_src = cfg.get("source_limits", {}).get("pixabay", {}).get(
@@ -1630,6 +1650,7 @@ def fetch_videos(
                         backoff,
                         extra_params=source_filters or None,
                     )
+                    tasks = []
                     for i, hit in enumerate(hits[:n_src]):
                         hid  = str(hit.get("id", i))
                         uid  = f"pixabay_vid_{hid}"
@@ -1644,7 +1665,7 @@ def fetch_videos(
                         info = {
                             "source_site":     "pixabay",
                             "asset_page_url":  hit.get("pageURL", ""),
-                            "file_url":        url,   # best tier (from _pixabay_pick_video_url)
+                            "file_url":        url,
                             "preview_url":     _pixabay_pick_preview_video_url(hit),
                             "video_files":     [{"tier": t, "width": (vids_data.get(t) or {}).get("width", 0),
                                                   "url": (vids_data.get(t) or {}).get("url", "")}
@@ -1660,18 +1681,11 @@ def fetch_videos(
                             "width":           (vids_data.get("large") or vids_data.get("medium") or {}).get("width", 0),
                             "height":          (vids_data.get("large") or vids_data.get("medium") or {}).get("height", 0),
                         }
-                        if dest.exists():
-                            _write_info_sidecar(dest, info)
-                            saved.append((dest, info))
-                        else:
-                            try:
-                                _download = info.get("preview_url") or url
-                                _download_file(_download, dest)
-                                _write_info_sidecar(dest, info)
-                                saved.append((dest, info))
-                            except Exception as exc:
-                                log.warning("pixabay vid %s skip: %s", hid, exc)
-                        _jitter(cfg, source)
+                        dl_url = info.get("preview_url") or url
+                        tasks.append({"dest": dest, "url": dl_url, "info": info})
+                    batch_saved, _ = _run_download_tasks(tasks, cfg)
+                    saved.extend(batch_saved)
+                    _jitter(cfg, source)
 
                 elif source == "archive":
                     n_src = cfg.get("source_limits", {}).get("archive", {}).get(
@@ -1679,6 +1693,7 @@ def fetch_videos(
                     candidates = _source_search_archive_videos(
                         api_keys, query, n_src, backoff, extra_params=source_filters or None,
                     )
+                    tasks = []
                     for c in candidates[:per_q]:
                         sid = c.get("source_id", "")
                         uid = f"archive_vid_{sid}"
@@ -1689,18 +1704,11 @@ def fetch_videos(
                         dest = src_dir / f"{uid}.mp4"
                         info = {**c,
                                 "video_files": [{"url": url, "width": c.get("width",0), "height": c.get("height",0)}]}
-                        if dest.exists():
-                            _write_info_sidecar(dest, info)
-                            saved.append((dest, info))
-                        else:
-                            try:
-                                dl_url = c.get("preview_url") or url
-                                _download_file(dl_url, dest)
-                                _write_info_sidecar(dest, info)
-                                saved.append((dest, info))
-                            except Exception as exc2:
-                                log.warning("archive vid %s skip: %s", sid, exc2)
-                        _jitter(cfg, source)
+                        dl_url = c.get("preview_url") or url
+                        tasks.append({"dest": dest, "url": dl_url, "info": info})
+                    batch_saved, _ = _run_download_tasks(tasks, cfg)
+                    saved.extend(batch_saved)
+                    _jitter(cfg, source)
 
             except Exception as exc:
                 log.warning("fetch_videos %s q=%r failed: %s", source, query, exc)

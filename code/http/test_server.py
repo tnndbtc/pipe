@@ -3443,8 +3443,11 @@ placeholder="Enter your story here"></textarea>
   }
 
   async function _sfxLoadExisting() {
-    if (!_sfxSlug || !_sfxEpId) return;
     const statusBar = document.getElementById('sfx-status-bar');
+    if (!_sfxSlug || !_sfxEpId) {
+      statusBar.textContent = 'Select an episode first.';
+      return;
+    }
     try {
       const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
                           + '&ep_id=' + encodeURIComponent(_sfxEpId)
@@ -3479,7 +3482,6 @@ placeholder="Enter your story here"></textarea>
         'Loaded ' + _sfxItems.length + ' items from previous search'
         + (saved.saved_at ? ' (' + new Date(saved.saved_at).toLocaleString() + ')' : '') + '.';
     } catch(e) {
-      // No saved results yet — that's fine
       statusBar.textContent = 'No previous results found. Run a search to get started.';
       document.getElementById('sfx-btn-search').disabled = false;
     }
@@ -4027,12 +4029,29 @@ placeholder="Enter your story here"></textarea>
   }, { rootMargin: '200px' });
 
   // ── called once when tab is first activated ──
+  function _mediaRestoreLastEp() {
+    // Fallback: restore last-selected episode from localStorage (survives page reload)
+    if (_mediaSlug && _mediaEpId) return;  // already selected via Run-tab sync
+    var last = '';
+    try { last = localStorage.getItem('media_last_ep') || ''; } catch(_) {}
+    if (!last) return;
+    var sel = document.getElementById('media-ep-select');
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === last) {
+        sel.value = last;
+        onMediaEpChange();
+        return;
+      }
+    }
+  }
+
   function initMediaTab() {
     // Populate episode selector from list_projects (same as Pipeline tab)
     var needsSync = document.getElementById('media-ep-select').options.length <= 1;
     if (!needsSync) {
-      // Already populated — but still sync from Run tab if media has no selection
+      // Already populated — sync from Run tab, then fall back to localStorage
       _mediaSyncFromRunTab();
+      _mediaRestoreLastEp();
       return;
     }
     fetch('/list_projects').then(r => r.json()).then(data => {
@@ -4045,8 +4064,9 @@ placeholder="Enter your story here"></textarea>
           sel.appendChild(opt);
         });
       });
-      // After populating, sync from Run tab's current project/episode
+      // Sync from Run tab first; fall back to last-used episode from localStorage
       _mediaSyncFromRunTab();
+      _mediaRestoreLastEp();
     }).catch(() => {});
   }
 
@@ -4069,6 +4089,7 @@ placeholder="Enter your story here"></textarea>
     const v = document.getElementById('media-ep-select').value;
     if (!v) { _mediaSlug = null; _mediaEpId = null; return; }
     [_mediaSlug, _mediaEpId] = v.split('|');
+    try { localStorage.setItem('media_last_ep', v); } catch(_) {}
     document.getElementById('media-btn-search').disabled = false;
     _mediaSetStatus('Episode selected. Click Search Media to begin.');
     // Load saved per-source config from meta.json, then render the table
@@ -11109,6 +11130,7 @@ class Handler(BaseHTTPRequestHandler):
         # Whitelisted files only to limit exposure.
         elif parsed.path == "/api/episode_file":
             _EPISODE_FILE_WHITELIST = {"ShotList.json", "selections.json",
+                                       "meta.json",
                                        "assets/media/selections.json",
                                        "assets/music/MusicPlan.json",
                                        "assets/music/user_cut_clips.json",

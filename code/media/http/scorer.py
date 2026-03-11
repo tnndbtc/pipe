@@ -187,6 +187,17 @@ def load_clip(cfg: dict) -> ClipModel:
     tokenizer = open_clip.get_tokenizer(model_name)
     model.eval()
     log.info("CLIP loaded: %s / %s on %s", model_name, pretrained, device)
+
+    # Warmup: trigger MKL/BLAS thread-pool init and PyTorch dispatch-cache population
+    # so the first real scoring shot isn't penalised by one-time CPU init overhead.
+    log.info("Warming up CLIP inference …")
+    with torch.no_grad():
+        dummy_img = torch.zeros(1, 3, 224, 224)
+        dummy_tok = tokenizer(["warmup"])
+        model.encode_image(dummy_img)
+        model.encode_text(dummy_tok)
+    log.info("CLIP warmup done.")
+
     return ClipModel(model=model, preprocess=preprocess, tokenizer=tokenizer, device=device)
 
 
@@ -319,16 +330,45 @@ def _clip_scores(clipm: ClipModel, prompt: str, image_paths: list[Path]) -> dict
     return scores
 
 
+def _clip_precompute_text_embeddings(
+    clipm: ClipModel,
+    hints: dict[str, list[str]],   # dim → list of hint texts
+) -> dict[str, list]:              # dim → list of normalised embedding tensors
+    """
+    Pre-compute and normalise CLIP text embeddings for all hint texts.
+    Call once per shot (outside the per-image loop) to avoid redundant encodes.
+    """
+    import torch  # noqa: PLC0415
+
+    result: dict[str, list] = {}
+    with torch.no_grad():
+        for dim, texts in hints.items():
+            embeddings = []
+            for t in texts:
+                try:
+                    tok = clipm.tokenizer([t]).to(clipm.device)
+                    tf  = clipm.model.encode_text(tok)
+                    tf  = tf / tf.norm(dim=-1, keepdim=True)
+                    embeddings.append(tf)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("CLIP text encode failed (%s): %s", t[:40], exc)
+            result[dim] = embeddings
+    return result
+
+
 def _clip_score_multidim(
-    clipm:  ClipModel,
-    img_f,                          # pre-computed image embedding (1×D tensor)
-    hints:  dict[str, list[str]],   # dim → list of hint texts
+    clipm:   ClipModel,
+    img_f,                           # pre-computed image embedding (1×D tensor)
+    hints:   dict[str, list[str]],   # dim → list of hint texts
     weights: dict[str, float],
+    text_embeddings: dict[str, list] | None = None,  # pre-computed via _clip_precompute_text_embeddings
 ) -> tuple[float, dict[str, float]]:
     """
     Compute weighted multi-dim CLIP score.
 
     For each dimension, take the max cosine similarity across its hint texts.
+    Pass pre-computed text_embeddings (from _clip_precompute_text_embeddings) to
+    avoid redundant encode_text calls when scoring many images for the same shot.
     Returns (combined_score, {dim: score}).
     """
     import torch  # noqa: PLC0415
@@ -340,16 +380,28 @@ def _clip_score_multidim(
                 dim_scores[dim] = 0.0
                 continue
             best = 0.0
-            for t in texts:
-                try:
-                    tok = clipm.tokenizer([t]).to(clipm.device)
-                    tf  = clipm.model.encode_text(tok)
-                    tf  = tf / tf.norm(dim=-1, keepdim=True)
-                    sim = float((img_f @ tf.T).item())
-                    if sim > best:
-                        best = sim
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("CLIP text encode failed (%s): %s", t[:40], exc)
+            # Use pre-computed embeddings when available
+            pre = (text_embeddings or {}).get(dim)
+            if pre:
+                for tf in pre:
+                    try:
+                        sim = float((img_f @ tf.T).item())
+                        if sim > best:
+                            best = sim
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("CLIP sim failed for dim %s: %s", dim, exc)
+            else:
+                # Fallback: encode on the fly (slower, used when no pre-computed cache)
+                for t in texts:
+                    try:
+                        tok = clipm.tokenizer([t]).to(clipm.device)
+                        tf  = clipm.model.encode_text(tok)
+                        tf  = tf / tf.norm(dim=-1, keepdim=True)
+                        sim = float((img_f @ tf.T).item())
+                        if sim > best:
+                            best = sim
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("CLIP text encode failed (%s): %s", t[:40], exc)
             dim_scores[dim] = best
 
     combined = sum(weights.get(d, 0.0) * s for d, s in dim_scores.items())
@@ -777,6 +829,9 @@ def score_images(
     _tel_thumb_rej = 0
     _tel_clip      = 0
 
+    # Pre-compute text embeddings once per shot (not once per image)
+    precomputed_text_emb = _clip_precompute_text_embeddings(clip_model, hints) if hints else {}
+
     for p in img_paths:
         # ------------------------------------------------------------------
         # Pass-1.5: cheap thumbnail filter
@@ -854,8 +909,9 @@ def score_images(
             continue
 
         if hints:
-            # Multi-dimensional scoring
-            clip_total, clip_dims = _clip_score_multidim(clip_model, img_f, hints, dim_weights)
+            # Multi-dimensional scoring (text embeddings pre-computed once per shot)
+            clip_total, clip_dims = _clip_score_multidim(
+                clip_model, img_f, hints, dim_weights, precomputed_text_emb)
             mode = "multi_dim"
         else:
             # Fallback: single text prompt
@@ -1067,6 +1123,9 @@ def score_single_video(
 
         # Score the best frame
         if hints:
+            # Pre-compute text embeddings once per video (not once per frame) — same
+            # optimisation already applied to images in score_images().
+            precomputed_text_emb = _clip_precompute_text_embeddings(clip_model, hints)
             # Multi-dim: pick frame with highest total clip score
             best_total = -1.0
             best_dims:  dict[str, float] = {}
@@ -1076,7 +1135,7 @@ def score_single_video(
                 try:
                     img_f = _clip_encode_image(clip_model, fp)
                     total, dims = _clip_score_multidim(
-                        clip_model, img_f, hints, dim_weights
+                        clip_model, img_f, hints, dim_weights, precomputed_text_emb
                     )
                     if total > best_total:
                         best_total = total
