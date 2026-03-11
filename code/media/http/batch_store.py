@@ -60,11 +60,15 @@ class BatchStore:
                     continue
 
                 if data.get("status") in ("queued", "running"):
-                    data["status"]     = "failed"
+                    data["status"]     = "interrupted"
                     data["error"]      = "server_restarted"
                     data["updated_at"] = _now_iso()
                     self._write_atomic(state_file, data)
-                    log.info("marked interrupted batch %s as failed", bid)
+                    items_done = sum(
+                        1 for it in data.get("items", {}).values()
+                        if it.get("status") == "done"
+                    )
+                    log.info("marked interrupted batch %s (%d items done)", bid, items_done)
 
                 self._batches[bid] = data
 
@@ -174,6 +178,52 @@ class BatchStore:
         state["updated_at"] = _now_iso()
         self._write_atomic(self._state_path(batch_id), state)
 
+    def update_item_progress(
+        self,
+        batch_id:        str,
+        item_id:         str,
+        *,
+        phase:           str,
+        imgs_downloaded: int | None = None,
+        vids_downloaded: int | None = None,
+        imgs_scored:     int | None = None,
+        vids_scored:     int | None = None,
+    ) -> None:
+        """
+        Write lightweight mid-processing progress for a single item.
+        Called at phase transitions: 'downloading' → 'scoring' → (update_item 'done').
+        """
+        state = self._batches[batch_id]
+        item  = state["items"][item_id]
+        item["phase"] = phase
+        if imgs_downloaded is not None:
+            item["imgs_downloaded"] = imgs_downloaded
+        if vids_downloaded is not None:
+            item["vids_downloaded"] = vids_downloaded
+        if imgs_scored is not None:
+            item["imgs_scored"] = imgs_scored
+        if vids_scored is not None:
+            item["vids_scored"] = vids_scored
+        state["updated_at"] = _now_iso()
+        self._write_atomic(self._state_path(batch_id), state)
+
+    def resume(self, batch_id: str) -> int:
+        """Reset non-done items to pending and mark batch as queued. Returns count to re-run."""
+        state = self._batches[batch_id]
+        reset = 0
+        for item in state["items"].values():
+            if item.get("status") != "done":
+                item["status"] = "pending"
+                item["phase"]  = ""
+                item["error"]  = None
+                reset += 1
+        state["status"]   = "queued"
+        state["progress"] = "resuming"
+        state["error"]    = None
+        state["updated_at"] = _now_iso()
+        self._write_atomic(self._state_path(batch_id), state)
+        return reset
+
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
@@ -242,10 +292,13 @@ class BatchStore:
 
 def _summary(b: dict) -> dict:
     """Lightweight summary for GET /batches list endpoint."""
+    items = b.get("items", {})
+    items_done = sum(1 for it in items.values() if it.get("status") == "done")
     return {
         "batch_id":    b["batch_id"],
         "status":      b["status"],
-        "item_count":  len(b.get("items", {})),
+        "item_count":  len(items),
+        "items_done":  items_done,
         "progress":    b.get("progress", ""),
         "created_at":  b.get("created_at", ""),
     }

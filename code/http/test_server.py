@@ -932,6 +932,32 @@ HTML = r"""<!DOCTYPE html>
   #btn-modal-no  { background: #ffffff12; color: var(--dim);
                    border: 1px solid var(--border); }
 
+  /* ── Media batch resume modal ── */
+  #media-modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: #00000099; z-index: 101;
+    align-items: center; justify-content: center;
+  }
+  #media-modal-overlay.visible { display: flex; }
+  #media-modal-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 28px 32px; max-width: 500px; width: 92%;
+    box-shadow: 0 24px 64px #000c;
+  }
+  #media-modal-box h2 { color: var(--gold); font-size: 1rem; margin: 0 0 10px; }
+  #media-modal-box p  { color: var(--text); font-size: 0.85em; line-height: 1.65; margin: 0 0 10px; }
+  .media-modal-meta {
+    font-family: var(--mono); font-size: 0.78em; color: var(--dim);
+    background: #ffffff08; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; margin-bottom: 18px; line-height: 1.8;
+  }
+  .media-modal-meta b { color: var(--text); }
+  .media-modal-meta .mm-path { color: var(--blue); word-break: break-all; }
+  .media-modal-btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 6px; }
+  #btn-mm-cancel    { background: #ffffff12; color: var(--dim); border: 1px solid var(--border); }
+  #btn-mm-resume    { background: var(--blue); color: #fff; }
+  #btn-mm-new       { background: var(--red);  color: #fff; }
+
   /* ── Stage review buttons ── */
   .review-bar {
     display: flex; flex-wrap: wrap; gap: 6px;
@@ -1050,6 +1076,39 @@ HTML = r"""<!DOCTYPE html>
     display: flex; flex-direction: column; gap: 14px;
     padding-right: 2px;
   }
+  .media-progress-table {
+    width: 100%; border-collapse: collapse; font-size: 0.82em;
+    color: var(--text);
+  }
+  .media-progress-table th {
+    color: var(--dim); font-size: 0.78em; text-transform: uppercase;
+    letter-spacing: 0.05em; font-weight: 600; padding: 0 10px 6px 0;
+    text-align: left; border-bottom: 1px solid var(--border);
+  }
+  .media-progress-table td {
+    padding: 5px 10px 5px 0; border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  .media-progress-table tr:last-child td { border-bottom: none; }
+  .mprog-pending  { color: var(--dim); }
+  .mprog-dl       { color: #5bc4f5; }
+  .mprog-scoring  { color: var(--gold); }
+  .mprog-done     { color: #3ecf6e; }
+  .mprog-failed   { color: #f55; }
+  .mprog-num      { text-align: right; padding-right: 16px; font-family: var(--mono); }
+  .mprog-dash     { text-align: right; padding-right: 16px; color: var(--dim); }
+  .mprog-toggle   { cursor:pointer; user-select:none; color:var(--dim); font-size:0.8em;
+                    padding-right:6px; transition:color 0.15s; }
+  .mprog-toggle:hover { color:var(--text); }
+  .mprog-toggle.open  { color:var(--blue); }
+  .mprog-detail-row td { background:rgba(255,255,255,0.03); padding:6px 10px 8px 28px;
+                          border-bottom:1px solid var(--border); }
+  .mprog-detail-table { font-size:0.82em; border-collapse:collapse; }
+  .mprog-detail-table td { padding:2px 16px 2px 0; color:var(--dim); vertical-align:middle; }
+  .mprog-detail-table td.src-name { font-family:var(--mono); color:var(--text); min-width:90px; }
+  .mprog-detail-table td.src-num  { text-align:right; font-family:var(--mono);
+                                     color:var(--text); padding-right:20px; min-width:40px; }
+  .mprog-detail-note { font-size:0.8em; color:var(--dim); margin-top:4px; font-style:italic; }
   .media-body::-webkit-scrollbar { width: 6px; }
   .media-body::-webkit-scrollbar-track { background: transparent; }
   .media-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -2446,6 +2505,20 @@ placeholder="Enter your story here"></textarea>
   </div>
 </div>
 
+<!-- ── Media batch resume modal ── -->
+<div id="media-modal-overlay">
+  <div id="media-modal-box">
+    <h2 id="media-modal-title">⚠️  Previous search batch found</h2>
+    <p id="media-modal-msg"></p>
+    <div class="media-modal-meta" id="media-modal-meta"></div>
+    <div class="media-modal-btns">
+      <button id="btn-mm-cancel" onclick="_mediaModalDismiss('cancel')">Cancel</button>
+      <button id="btn-mm-resume" onclick="_mediaModalDismiss('resume')">▶ Resume</button>
+      <button id="btn-mm-new"    onclick="_mediaModalDismiss('new')">🔍 New Search</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Confirm modal ── -->
 <div id="modal-overlay">
   <div id="modal-box">
@@ -2676,6 +2749,53 @@ placeholder="Enter your story here"></textarea>
   // Close on Escape
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && _modalResolve) dismissModal(false);
+    if (e.key === 'Escape' && _mediaModalResolve) _mediaModalDismiss('cancel');
+  });
+
+  // ── Media batch resume modal ─────────────────────────────────────────────
+  let _mediaModalResolve = null;
+
+  /**
+   * Show a 3-button modal for an existing batch.
+   * Returns a Promise that resolves to 'cancel' | 'resume' | 'new'.
+   *
+   * batch fields expected: batch_id, status, item_count, items_done, created_at
+   * slug / epId used to build the folder path shown in the dialog.
+   */
+  function _mediaShowBatchModal(batch, slug, epId) {
+    const pct      = batch.item_count ? Math.round(100 * batch.items_done / batch.item_count) : 0;
+    const statusLabel = { interrupted: 'Interrupted', failed: 'Failed', done: 'Done', running: 'Running' }[batch.status] || batch.status;
+    const created  = batch.created_at ? new Date(batch.created_at).toLocaleString() : '—';
+    const folder   = slug + '/episodes/' + epId + '/assets/media/' + batch.batch_id + '/';
+
+    document.getElementById('media-modal-msg').textContent =
+      'A previous search batch exists for this episode. Choose an action:';
+
+    document.getElementById('media-modal-meta').innerHTML =
+      '<b>Batch ID:</b>   ' + batch.batch_id + '<br>' +
+      '<b>Status:</b>    ' + statusLabel + '  (' + batch.items_done + ' / ' + batch.item_count + ' shots done' + (batch.item_count ? ', ' + pct + '%' : '') + ')<br>' +
+      '<b>Started:</b>   ' + created + '<br>' +
+      '<b>Folder:</b>    <span class="mm-path">' + folder + '</span>';
+
+    // Show/hide Resume button — only relevant when not already done
+    document.getElementById('btn-mm-resume').style.display =
+      (batch.status === 'interrupted' || batch.status === 'failed') ? '' : 'none';
+
+    document.getElementById('media-modal-overlay').classList.add('visible');
+    document.getElementById('btn-mm-resume').style.display !== 'none'
+      ? document.getElementById('btn-mm-resume').focus()
+      : document.getElementById('btn-mm-new').focus();
+
+    return new Promise(resolve => { _mediaModalResolve = resolve; });
+  }
+
+  function _mediaModalDismiss(choice) {
+    document.getElementById('media-modal-overlay').classList.remove('visible');
+    if (_mediaModalResolve) { _mediaModalResolve(choice); _mediaModalResolve = null; }
+  }
+
+  document.getElementById('media-modal-overlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('media-modal-overlay')) _mediaModalDismiss('cancel');
   });
 
   // ── Next story number ───────────────────────────────────────────────────────
@@ -3958,6 +4078,8 @@ placeholder="Enter your story here"></textarea>
   let _mediaEpId           = null;
   let _mediaBatchId        = null;
   let _mediaPollTimer      = null;
+  let _mediaExpandedRows   = new Set();   // item IDs whose detail row is open
+  let _mediaLastProgress   = null;        // last batch-status data received while running
   let _mediaResults        = null;   // full items dict from last completed batch
   let _mediaItemIds        = [];     // ordered item IDs for confirm iteration
   let _mediaRecommendedSeq = null;   // recommended_sequence from batch response
@@ -4455,6 +4577,9 @@ placeholder="Enter your story here"></textarea>
     } catch(e) {}
   }
 
+  // Sources that have no video API — vid inputs locked to 0 and greyed out
+  const _NO_VIDEO_SOURCES = new Set(['openverse', 'europeana']);
+
   async function _loadMediaSourceConfig() {
     // Reset to defaults first
     _mediaSourceConfig = JSON.parse(JSON.stringify(_mediaSrcDefaults));
@@ -4471,6 +4596,13 @@ placeholder="Enter your story here"></textarea>
           if (saved[src]) _mediaSourceConfig[src] = { ..._mediaSrcDefaults[src], ...saved[src] };
         });
       }
+      // Enforce zero for video fields on sources that have no video API
+      _NO_VIDEO_SOURCES.forEach(src => {
+        if (_mediaSourceConfig[src]) {
+          _mediaSourceConfig[src].show_vid = 0;
+          _mediaSourceConfig[src].n_vid    = 0;
+        }
+      });
     } catch(e) {}
   }
 
@@ -4478,9 +4610,13 @@ placeholder="Enter your story here"></textarea>
     const tbody = document.getElementById('media-sources-tbody');
     if (!tbody) return;
     tbody.innerHTML = '';
-    const inp = 'background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 5px;font-size:0.9em;width:52px;text-align:center';
+    const inp     = 'background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 5px;font-size:0.9em;width:52px;text-align:center';
+    const inpGrey = 'background:var(--surface);color:var(--text-muted,#888);border:1px solid var(--border);border-radius:4px;padding:2px 5px;font-size:0.9em;width:52px;text-align:center;opacity:0.4;cursor:not-allowed';
     Object.entries(_mediaSourceConfig).forEach(([src, v]) => {
-      const label = src.charAt(0).toUpperCase() + src.slice(1);
+      const label   = src.charAt(0).toUpperCase() + src.slice(1);
+      const noVid   = _NO_VIDEO_SOURCES.has(src);
+      const vidVal  = noVid ? 0 : v.show_vid;
+      const nVidVal = noVid ? 0 : v.n_vid;
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="padding:3px 14px 3px 0;font-weight:500">${label}</td>
@@ -4501,12 +4637,14 @@ placeholder="Enter your story here"></textarea>
         </td>
         <td style="padding:3px 10px;text-align:center">
           <input type="number" data-src="${src}" data-field="show_vid"
-                 min="0" max="50" value="${v.show_vid}" style="${inp}"
+                 min="0" max="50" value="${vidVal}" style="${noVid ? inpGrey : inp}"
+                 ${noVid ? 'disabled title="This source does not provide videos"' : ''}
                  onchange="_onMediaSrcTableChange(this)">
         </td>
         <td style="padding:3px 0 3px 10px;text-align:center">
           <input type="number" data-src="${src}" data-field="n_vid"
-                 min="0" max="50" value="${v.n_vid}" style="${inp}"
+                 min="0" max="50" value="${nVidVal}" style="${noVid ? inpGrey : inp}"
+                 ${noVid ? 'disabled title="This source does not provide videos"' : ''}
                  onchange="_onMediaSrcTableChange(this)">
         </td>`;
       tbody.appendChild(tr);
@@ -4530,13 +4668,74 @@ placeholder="Enter your story here"></textarea>
   async function mediaStartSearch() {
     if (!_mediaSlug || !_mediaEpId) return;
     const serverUrl = _mediaServerUrl();
+
+    // Check for existing batches and let the user decide what to do
+    try {
+      const rb = await fetch(
+        '/api/media_batches?slug=' + encodeURIComponent(_mediaSlug)
+        + '&ep_id='      + encodeURIComponent(_mediaEpId)
+        + '&server_url=' + encodeURIComponent(serverUrl));
+      const db = await rb.json();
+      if (rb.ok && !db.error) {
+        const batches = db.batches || [];
+
+        // If a batch is actively running, reconnect silently (no dialog needed)
+        const running = batches.find(b => b.status === 'running');
+        if (running) {
+          _mediaBatchId = running.batch_id;
+          document.getElementById('media-btn-search').disabled = true;
+          _mediaSetStatus('Reconnecting to running batch…', true);
+          _mediaStartPolling();
+          return;
+        }
+
+        // Any other existing batch (interrupted, failed, done) — show the modal
+        const existing = batches.find(b =>
+          b.status === 'interrupted' || b.status === 'failed' ||
+          (b.status === 'done' && b.item_count > 0));
+        if (existing) {
+          const choice = await _mediaShowBatchModal(existing, _mediaSlug, _mediaEpId);
+
+          if (choice === 'cancel') {
+            // Do nothing — user dismissed
+            return;
+          }
+
+          if (choice === 'resume') {
+            document.getElementById('media-btn-search').disabled = true;
+            _mediaSetStatus('Resuming batch…', true);
+            try {
+              const rr = await fetch('/api/media_batch_resume', {
+                method:  'POST',
+                headers: {'Content-Type': 'application/json'},
+                body:    JSON.stringify({ batch_id: existing.batch_id, server_url: serverUrl }),
+              });
+              const rd = await rr.json();
+              if (!rr.ok || rd.error) throw new Error(rd.error || 'resume failed');
+              _mediaBatchId = existing.batch_id;
+              _mediaSetStatus('Resuming — polling for results…', true);
+              _mediaStartPolling();
+            } catch (err) {
+              _mediaSetStatus('Resume error: ' + err.message, false);
+              document.getElementById('media-btn-search').disabled = false;
+            }
+            return;
+          }
+
+          // choice === 'new' — fall through to create a fresh batch below
+        }
+      }
+    } catch (_) {}
+
     _mediaSetStatus('Submitting batch …', true);
     document.getElementById('media-btn-search').disabled = true;
     document.getElementById('media-footer').style.display = 'none';
     document.getElementById('media-body').innerHTML = '';
-    _mediaSelections = {};
-    _mediaBatchId    = null;
-    _mediaResults    = null;
+    _mediaSelections   = {};
+    _mediaBatchId      = null;
+    _mediaResults      = null;
+    _mediaExpandedRows = new Set();
+    _mediaLastProgress = null;
 
     try {
       const r = await fetch('/api/media_batch', {
@@ -4577,6 +4776,141 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
+  // ── Per-shot progress table (shown while batch is running) ──
+  //
+  // Column meanings:
+  //   📷 DL  = total image files downloaded across ALL sources × ALL search queries.
+  //            Higher than per-source candidate limit because multiple queries (one per
+  //            keyword set) × multiple sources each contribute candidates before dedup.
+  //   🎬 DL  = same, for video files.
+  //   📷 ✓   = images kept after CLIP scoring (top-N per source).
+  //   🎬 ✓   = videos kept after scoring.
+  //
+  // Click ▶ on any row to expand per-source breakdown (available once item is done).
+  //
+  function _mediaRenderProgress(d) {
+    if (d) _mediaLastProgress = d;
+    else   d = _mediaLastProgress;
+    if (!d) return;
+    const body  = document.getElementById('media-body');
+    const items = d.items || {};
+    if (!Object.keys(items).length) return;
+
+    // Re-use existing table if already rendered; otherwise create it
+    let tbl = body.querySelector('.media-progress-table');
+    if (!tbl) {
+      body.innerHTML = '';
+      tbl = document.createElement('table');
+      tbl.className = 'media-progress-table';
+      tbl.innerHTML = `<thead><tr>
+        <th style="width:18px"></th>
+        <th>Shot</th>
+        <th>Status</th>
+        <th style="text-align:right;padding-right:16px" title="Total image files downloaded (all sources × all queries — higher than per-source limit)">📷 DL</th>
+        <th style="text-align:right;padding-right:16px" title="Total video files downloaded (all sources × all queries)">🎬 DL</th>
+        <th style="text-align:right;padding-right:16px" title="Images kept after CLIP scoring">📷 ✓</th>
+        <th style="text-align:right;padding-right:16px" title="Videos kept after CLIP scoring">🎬 ✓</th>
+      </tr></thead><tbody></tbody>`;
+      body.appendChild(tbl);
+    }
+
+    const tbody = tbl.querySelector('tbody');
+
+    // Helper: build per-source detail HTML from source counts dicts
+    function _sourceDetailHtml(imgSources, vidSources, isDone) {
+      const allSources = new Set([...Object.keys(imgSources), ...Object.keys(vidSources)]);
+      if (!allSources.size) {
+        if (!isDone) {
+          return `<div class="mprog-detail-note">Per-source breakdown available after item completes.</div>`;
+        }
+        return `<div class="mprog-detail-note">No per-source data.</div>`;
+      }
+      let rows = '';
+      allSources.forEach(src => {
+        const iN = imgSources[src] || 0;
+        const vN = vidSources[src] || 0;
+        rows += `<tr>
+          <td class="src-name">${src}</td>
+          <td class="src-num">${iN || '—'}</td>
+          <td style="color:var(--dim);padding-right:8px">img</td>
+          <td class="src-num">${vN || '—'}</td>
+          <td style="color:var(--dim)">vid</td>
+        </tr>`;
+      });
+      return `<table class="mprog-detail-table">
+        <tr><td colspan="5" style="color:var(--dim);font-size:0.85em;padding-bottom:3px">
+          Per-source breakdown (ranked candidates kept after scoring)
+        </td></tr>
+        ${rows}
+      </table>
+      <div class="mprog-detail-note">
+        DL total may exceed per-source limit: multiple search queries × sources contribute candidates before dedup &amp; scoring.
+      </div>`;
+    }
+
+    // Update or create one row per item
+    Object.entries(items).forEach(([itemId, it]) => {
+      const phase  = it.phase || it.status || 'pending';
+      const isDone = it.status === 'done';
+      const isOpen = _mediaExpandedRows.has(itemId);
+
+      let statusCls, statusTxt;
+      if      (it.status === 'failed')  { statusCls = 'mprog-failed';  statusTxt = '✗ failed'; }
+      else if (isDone)                  { statusCls = 'mprog-done';    statusTxt = '✓ done'; }
+      else if (phase === 'scoring')     { statusCls = 'mprog-scoring'; statusTxt = '⚙ scoring…'; }
+      else if (phase === 'downloading') { statusCls = 'mprog-dl';      statusTxt = '↓ downloading…'; }
+      else                             { statusCls = 'mprog-pending'; statusTxt = '· pending'; }
+
+      const num = (n) => (n != null && n > 0)
+        ? `<td class="mprog-num">${n}</td>`
+        : `<td class="mprog-dash">—</td>`;
+
+      const imgDl  = isDone ? it.total_images : it.imgs_downloaded;
+      const vidDl  = isDone ? it.total_videos : it.vids_downloaded;
+      const imgSc  = isDone ? it.total_images : it.imgs_scored;
+      const vidSc  = isDone ? it.total_videos : it.vids_scored;
+
+      // ── Main row ──
+      let row = tbody.querySelector(`tr.mprog-main-row[data-item="${CSS.escape(itemId)}"]`);
+      if (!row) {
+        row = document.createElement('tr');
+        row.className = 'mprog-main-row';
+        row.dataset.item = itemId;
+        tbody.appendChild(row);
+      }
+      const toggleCls = 'mprog-toggle' + (isOpen ? ' open' : '');
+      const toggleChar = isOpen ? '▼' : '▶';
+      row.innerHTML = `
+        <td><span class="${toggleCls}" data-toggle="${CSS.escape(itemId)}">${toggleChar}</span></td>
+        <td style="font-family:var(--mono);font-size:0.9em">${itemId}</td>
+        <td class="${statusCls}">${statusTxt}</td>
+        ${num(imgDl)}${num(vidDl)}${num(imgSc)}${num(vidSc)}`;
+
+      // Wire toggle click — re-render using cached _mediaLastProgress
+      row.querySelector('[data-toggle]').onclick = () => {
+        if (_mediaExpandedRows.has(itemId)) _mediaExpandedRows.delete(itemId);
+        else                                _mediaExpandedRows.add(itemId);
+        _mediaRenderProgress(null);   // null → uses _mediaLastProgress
+      };
+
+      // ── Detail row ──
+      let detailRow = tbody.querySelector(`tr[data-detail="${CSS.escape(itemId)}"]`);
+      if (isOpen) {
+        if (!detailRow) {
+          detailRow = document.createElement('tr');
+          detailRow.dataset.detail = itemId;
+          detailRow.className = 'mprog-detail-row';
+          row.insertAdjacentElement('afterend', detailRow);
+        }
+        const imgSrc = it.img_sources || {};
+        const vidSrc = it.vid_sources || {};
+        detailRow.innerHTML = `<td colspan="7">${_sourceDetailHtml(imgSrc, vidSrc, isDone)}</td>`;
+      } else if (detailRow) {
+        detailRow.remove();
+      }
+    });
+  }
+
   // ── Poll loop ──
   function _mediaStartPolling() {
     if (_mediaPollTimer) clearInterval(_mediaPollTimer);
@@ -4613,12 +4947,20 @@ placeholder="Enter your story here"></textarea>
         await _mediaLoadShotMap();
         _mediaRenderResults(_mediaResults);
         await _aiLoadSavedImages();
-      } else if (d.status === 'failed') {
+      } else if (d.status === 'failed' || d.status === 'interrupted') {
         clearInterval(_mediaPollTimer); _mediaPollTimer = null;
-        _mediaSetStatus('Batch failed: ' + (d.error || 'unknown'), false);
+        _mediaSetStatus((d.status === 'interrupted' ? 'Batch interrupted' : 'Batch failed')
+          + ': ' + (d.error || 'unknown') + ' — click Search Media to resume.', false);
         document.getElementById('media-btn-search').disabled = false;
       } else {
-        _mediaSetStatus((d.progress || d.status) + ' …', true);
+        // Running — show progress string in status bar + per-shot table in body
+        const doneCount  = Object.values(d.items || {}).filter(it => it.status === 'done').length;
+        const totalCount = Object.keys(d.items || {}).length;
+        _mediaSetStatus(
+          (d.progress || d.status) + ' …' +
+          (totalCount ? `  (${doneCount}/${totalCount} done)` : ''),
+          true);
+        _mediaRenderProgress(d);
       }
     } catch (err) {
       _mediaSetStatus('Poll error: ' + err.message, true);
@@ -5551,7 +5893,16 @@ placeholder="Enter your story here"></textarea>
         + '&server_url=' + encodeURIComponent(serverUrl));
       const d = await r.json();
       if (r.ok && !d.error) {
-        const done = (d.batches || []).find(b => b.status === 'done');
+        const batches = d.batches || [];
+        const running = batches.find(b => b.status === 'running');
+        if (running) {
+          _mediaBatchId = running.batch_id;
+          document.getElementById('media-btn-search').disabled = true;
+          _mediaSetStatus('Reconnecting to running batch…', true);
+          _mediaStartPolling();
+          return;
+        }
+        const done = batches.find(b => b.status === 'done');
         if (done) {
           _mediaBatchId = done.batch_id;
           const r2 = await fetch(
@@ -12100,6 +12451,40 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── Media proxy: resume an interrupted batch (POST /api/media_batch_resume) ──
+        elif self.path == "/api/media_batch_resume":
+            try:
+                length     = int(self.headers.get("Content-Length", 0))
+                payload    = json.loads(self.rfile.read(length))
+                batch_id   = payload.get("batch_id", "").strip()
+                server_url = (payload.get("server_url") or "http://localhost:8200").rstrip("/")
+                api_key    = os.environ.get("MEDIA_API_KEY", "")
+                if not batch_id:
+                    raise ValueError("batch_id is required")
+                req_body = b"{}"
+                url = f"{server_url}/batches/{batch_id}/resume"
+                req = _urllib_req.Request(
+                    url, data=req_body,
+                    headers={"X-Api-Key": api_key,
+                             "Content-Type": "application/json",
+                             "Content-Length": str(len(req_body))},
+                    method="POST",
+                )
+                with _urllib_req.urlopen(req, timeout=15) as resp:
+                    body = resp.read()
+                self.send_response(202)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # ── SFX: search candidates (POST /api/sfx_search) ────────────────────
         elif self.path == "/api/sfx_search":
             try:
@@ -13349,7 +13734,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/create_episode", "/api/save_episode_meta",
                   "/api/diagnose_pipeline",
                   "/api/media_batches", "/api/media_batch_status",
-                  "/api/media_batch", "/api/media_confirm",
+                  "/api/media_batch", "/api/media_batch_resume", "/api/media_confirm",
                   "/api/sfx_search", "/api/sfx_save", "/api/sfx_results_save",
                   "/api/ai_sfx_generate", "/api/ai_sfx_save",
                   "/api/ai_images", "/api/ai_job_status",

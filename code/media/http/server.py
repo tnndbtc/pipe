@@ -50,9 +50,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import shutil
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -70,13 +72,29 @@ import scorer
 import sequence_ranker
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging — terminal + rotating file (50 MB, 3 backups)
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+_LOG_FMT = "%(asctime)s  %(levelname)-8s  %(name)-12s  %(message)s"
+_LOG_DIR  = Path(__file__).parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
+_root_log = logging.getLogger()
+_root_log.setLevel(logging.INFO)
+
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(logging.Formatter(_LOG_FMT))
+_root_log.addHandler(_stream_handler)
+
+_file_handler = logging.handlers.RotatingFileHandler(
+    _LOG_DIR / "media_server.log",
+    maxBytes=50 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
 )
+_file_handler.setFormatter(logging.Formatter(_LOG_FMT))
+_root_log.addHandler(_file_handler)
+
 log = logging.getLogger("server")
 
 # ---------------------------------------------------------------------------
@@ -368,11 +386,57 @@ async def get_batch(
         raise HTTPException(status_code=404, detail="Batch not found")
 
     if state["status"] != "done":
+        # Include per-item progress so the UI can render a live progress table
+        def _count_by_source(ranked_list: list) -> dict:
+            """Count ranked entries by source name.
+
+            Prefers the structured 'source' field written by the scorer from the
+            .info.json sidecar (r["source"]["source_site"]).  Falls back to path
+            parsing only for relative paths (absolute paths like /data/shared/…
+            would yield a bogus "shared" token at parts[2]).
+            """
+            counts: dict = {}
+            for entry in ranked_list:
+                if not isinstance(entry, dict):
+                    continue
+                # Primary: scorer attaches r["source"] = info dict with source_site
+                src_info = entry.get("source")
+                src = (src_info or {}).get("source_site", "") if isinstance(src_info, dict) else ""
+                if not src:
+                    # Fallback: derive from path — only safe for relative paths
+                    # (relative = does NOT start with /, so parts[0] is the item_id)
+                    path = entry.get("path", "").replace("\\", "/")
+                    if path and not path.startswith("/"):
+                        parts = path.split("/")
+                        # expected: {item_id}/{images|videos}/{source}/{filename}
+                        if len(parts) >= 4:
+                            src = parts[2]
+                if src:
+                    counts[src] = counts.get(src, 0) + 1
+            return counts
+
+        items_progress = {}
+        for iid, it in state["items"].items():
+            item_done = it.get("status") == "done"
+            items_progress[iid] = {
+                "status":          it.get("status", "pending"),
+                "phase":           it.get("phase", ""),
+                "imgs_downloaded": it.get("imgs_downloaded", 0),
+                "vids_downloaded": it.get("vids_downloaded", 0),
+                "imgs_scored":     it.get("imgs_scored", 0),
+                "vids_scored":     it.get("vids_scored", 0),
+                # include final counts + per-source breakdown if item already done
+                "total_images":    len(it.get("images_ranked", [])),
+                "total_videos":    len(it.get("videos_ranked", [])),
+                "img_sources":     _count_by_source(it.get("images_ranked", [])) if item_done else {},
+                "vid_sources":     _count_by_source(it.get("videos_ranked", [])) if item_done else {},
+            }
         return {
             "batch_id": state["batch_id"],
             "status":   state["status"],
             "progress": state.get("progress", ""),
             "error":    state.get("error"),
+            "items":    items_progress,
         }
 
     # Build result with resolved URLs (all candidates returned; top_n used for sequence ranker)
@@ -434,6 +498,24 @@ async def get_batch(
         "items":                items_out,
         "recommended_sequence": recommended_sequence,
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /batches/{batch_id}/resume — re-queue an interrupted/failed batch
+# ---------------------------------------------------------------------------
+
+@app.post("/batches/{batch_id}/resume", status_code=202)
+async def resume_batch(batch_id: str, _: None = Depends(require_auth)):
+    state = store.get(batch_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if state["status"] == "running":
+        return {"batch_id": batch_id, "status": "running",
+                "poll_url": f"/batches/{batch_id}", "message": "already running"}
+    reset = store.resume(batch_id)
+    await batch_queue.put(batch_id)
+    log.info("Resuming batch %s  (%d items to process)", batch_id, reset)
+    return {"batch_id": batch_id, "status": "queued", "poll_url": f"/batches/{batch_id}"}
 
 
 # ---------------------------------------------------------------------------
@@ -878,15 +960,15 @@ async def _run_batch(batch_id: str) -> None:
     # Apply per-batch source overrides from UI settings
     if state.get("sources_override"):
         cfg["sources"] = state["sources_override"]
-    # Apply per-source candidate limits from UI settings
+    # Apply per-source candidate limits and post-scoring caps from UI settings
     if state.get("source_limits_override"):
         merged_limits = dict(cfg.get("source_limits", {}))
         for src, lims in state["source_limits_override"].items():
             src_cfg = dict(merged_limits.get(src, {}))
-            if "candidates_images" in lims:
-                src_cfg["candidates_images"] = lims["candidates_images"]
-            if "candidates_videos" in lims:
-                src_cfg["candidates_videos"] = lims["candidates_videos"]
+            for key in ("candidates_images", "candidates_videos",
+                        "top_n_images",      "top_n_videos"):
+                if key in lims:
+                    src_cfg[key] = lims[key]
             merged_limits[src] = src_cfg
         cfg["source_limits"] = merged_limits
 
@@ -923,6 +1005,12 @@ async def _run_batch(batch_id: str) -> None:
     done: list[int] = [0]
 
     async def _process_item(item_id: str, item: dict) -> None:
+        # Skip items already completed (allows resume after server restart)
+        if item.get("status") == "done":
+            log.info("[%s]  already done — skipping", item_id)
+            done[0] += 1
+            return
+
         search_prompt = item.get("search_prompt", "")
         ai_prompt     = item.get("ai_prompt") or search_prompt
 
@@ -952,10 +1040,15 @@ async def _run_batch(batch_id: str) -> None:
         vid_dir  = item_dir / "videos"
 
         store.update(batch_id, progress=f"downloading {item_id} ({done[0]+1}/{item_count})")
+        store.update_item_progress(batch_id, item_id, phase="downloading")
 
         try:
             img_path_infos: list[tuple] = []
             vid_path_infos: list[tuple] = []
+
+            log.info("[%s]  download start  prompt=%r  n_img=%d  n_vid=%d  prefer=%s",
+                     item_id, search_prompt[:80], n_img, n_vid, prefer)
+            t_dl = time.perf_counter()
 
             async with _sem:
                 # Fetch images and videos in parallel — they are fully independent.
@@ -973,12 +1066,26 @@ async def _run_batch(batch_id: str) -> None:
                     ) if prefer != "image" else _noop(),
                 )
 
+            log.info("[%s]  download done   imgs=%d  vids=%d  elapsed=%.1fs",
+                     item_id, len(img_path_infos), len(vid_path_infos),
+                     time.perf_counter() - t_dl)
+
             img_paths = [p for p, _ in img_path_infos]
             vid_paths = [p for p, _ in vid_path_infos]
             img_infos = {str(p): info for p, info in img_path_infos}
             vid_infos = {str(p): info for p, info in vid_path_infos}
 
             store.update(batch_id, progress=f"scoring {item_id} ({done[0]+1}/{item_count})")
+            store.update_item_progress(
+                batch_id, item_id, phase="scoring",
+                imgs_downloaded=len(img_path_infos),
+                vids_downloaded=len(vid_path_infos),
+            )
+
+            log.info("[%s]  scoring start   imgs=%d  vids=%d  mode=%s",
+                     item_id, len(img_paths), len(vid_paths),
+                     "distributed" if (_use_distributed and vid_paths) else "local")
+            t_sc = time.perf_counter()
 
             weights        = cfg.get("score_weights")
             images_ranked  = await asyncio.to_thread(
@@ -998,6 +1105,10 @@ async def _run_batch(batch_id: str) -> None:
                     vid_infos,
                 )
 
+            log.info("[%s]  scoring done    imgs_ranked=%d  vids_ranked=%d  elapsed=%.1fs",
+                     item_id, len(images_ranked), len(videos_ranked),
+                     time.perf_counter() - t_sc)
+
             # Convert absolute paths → relative-to-batch_dir
             images_ranked = _relativise(images_ranked, batch_dir)
             videos_ranked = _relativise(videos_ranked, batch_dir)
@@ -1009,6 +1120,11 @@ async def _run_batch(batch_id: str) -> None:
             images_ranked = _apply_per_source_top_n(images_ranked, src_limits, "top_n_images")
             videos_ranked = _apply_per_source_top_n(videos_ranked, src_limits, "top_n_videos")
 
+            store.update_item_progress(
+                batch_id, item_id, phase="done",
+                imgs_scored=len(images_ranked),
+                vids_scored=len(videos_ranked),
+            )
             store.update_item(
                 batch_id, item_id,
                 status="done",

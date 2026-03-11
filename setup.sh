@@ -26,8 +26,12 @@ run_tests() {
     local exit_code=0
 
     # ── 1. Contract / schema validation ──────────────────────────────────────
-    echo -e "${CYAN}[1/1] Contract validation${RESET}  contracts/tools/verify_contracts.py"
+    echo -e "${CYAN}[1/2] Contract validation${RESET}  contracts/tools/verify_contracts.py"
     python3 "$PIPE_DIR/contracts/tools/verify_contracts.py" || exit_code=$?
+
+    # ── 2. Media source-limit unit tests ─────────────────────────────────────
+    echo -e "${CYAN}[2/2] Media source limits${RESET}  code/media/http/tests/test_source_limits.py"
+    python3 -m pytest "$PIPE_DIR/code/media/http/tests/test_source_limits.py" -v || exit_code=$?
 
     # ── Summary ──────────────────────────────────────────────────────────────
     echo

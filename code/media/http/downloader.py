@@ -74,7 +74,7 @@ ALLOWLIST_COLLECTIONS: frozenset = frozenset({
 })
 
 DOWNLOAD_ALLOWLIST: list = [
-    "images.pexels.com", "videos.pexels.com", "cdn.pixabay.com",
+    "images.pexels.com", "videos.pexels.com", "cdn.pixabay.com", "pixabay.com",
     "upload.wikimedia.org", "*.wikimedia.org",
     "archive.org", "ia*.us.archive.org", "ia*.archive.org",
     "api.europeana.eu", "europeanastatic.eu", "*.europeana.eu",
@@ -382,6 +382,84 @@ def _source_search_wikimedia_images(
             "photographer": author, "license_summary": license_summary,
             "license_url": license_url, "query_used": query,
             "width": ii.get("width", 0), "height": ii.get("height", 0),
+            "attribution_required": attr_required, "attribution_text": attr_text,
+        })
+    _search_cache[key] = candidates
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# New source: Wikimedia Commons videos
+# ---------------------------------------------------------------------------
+
+def _source_search_wikimedia_videos(
+    api_keys: dict, query: str, per_page: int, backoff: list, extra_params: dict | None = None,
+) -> list:
+    key = ("wikimedia", "video", query, per_page, tuple(sorted((extra_params or {}).items())))
+    if key in _search_cache: return _search_cache[key]
+
+    token = api_keys.get("wikimedia_api_token", "")
+    headers: dict = {"User-Agent": _USER_AGENT}
+    if token: headers["Authorization"] = f"Bearer {token}"
+
+    params: dict = {
+        "action": "query", "generator": "search", "gsrnamespace": 6,
+        "gsrsearch": f"filetype:video {query}", "gsrlimit": min(per_page, 50),
+        "prop": "imageinfo",
+        "iiprop": "url|size|dimensions|extmetadata|mime|mediatype",
+        "format": "json",
+    }
+    if extra_params: params.update(extra_params)
+
+    def call():
+        r = requests.get("https://commons.wikimedia.org/w/api.php",
+                         headers=headers, params=params, timeout=_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+    log.info("Wikimedia search videos q=%r per_page=%d", query, per_page)
+    try: data = _with_backoff(call, backoff)
+    except Exception as exc:
+        log.warning("Wikimedia video search failed: %s", exc)
+        _search_cache[key] = []; return []
+
+    pages = (data.get("query") or {}).get("pages", {})
+    ACCEPTED_MIMES = {"video/webm", "video/ogg", "video/mp4"}
+    candidates = []
+
+    for page in pages.values():
+        ii_list = page.get("imageinfo") or []
+        if not ii_list: continue
+        ii = ii_list[0]
+        mime = ii.get("mime", "")
+        if mime not in ACCEPTED_MIMES: continue
+
+        meta = ii.get("extmetadata", {})
+        title = page.get("title", "").replace("File:", "", 1).strip()
+        author = _strip_html((meta.get("Artist") or {}).get("value", ""))
+        license_short_raw = (meta.get("LicenseShortName") or {}).get("value", "")
+        license_summary = _normalize_wikimedia_license(license_short_raw)
+        if not is_license_acceptable(license_summary): continue
+
+        license_url = (meta.get("LicenseUrl") or {}).get("value", "")
+        categories_raw = (meta.get("Categories") or {}).get("value", "")
+        tags = [c.strip() for c in categories_raw.split("|") if c.strip()]
+        asset_page = ii.get("descriptionurl", "")
+        source_id = page.get("title", "")
+        attr_required = (meta.get("AttributionRequired") or {}).get("value", "").lower() == "true"
+        attr_text = (f'"{title}" by {author} / Wikimedia Commons / {license_summary}' if author
+                     else f'"{title}" / Wikimedia Commons / {license_summary}')
+
+        candidates.append({
+            "source_site": "wikimedia", "source_id": source_id,
+            "asset_page_url": asset_page,
+            "file_url": ii.get("url", ""),
+            "preview_url": "",
+            "title": title, "description": "", "tags": tags,
+            "photographer": author, "license_summary": license_summary,
+            "license_url": license_url, "query_used": query,
+            "width": ii.get("width", 0), "height": ii.get("height", 0),
+            "mime": mime,
             "attribution_required": attr_required, "attribution_text": attr_text,
         })
     _search_cache[key] = candidates
@@ -847,6 +925,7 @@ def _run_download_tasks(
     tasks:       list[dict],
     cfg:         dict,
     max_workers: int | None = None,
+    label:       str        = "",
 ) -> tuple[list[tuple[Path, dict]], dict[str, str]]:
     """
     Download a batch of files in parallel using ThreadPoolExecutor.
@@ -863,6 +942,8 @@ def _run_download_tasks(
         saved  : list[(Path, info)] for each successfully saved file
         thumbs : {str(dest): thumb_url} for thumbnail registration
     """
+    tag = f"[{label}]" if label else "[download]"
+
     saved:   list[tuple[Path, dict]] = []
     thumbs:  dict[str, str]          = {}
     pending: list[dict]              = []
@@ -878,17 +959,22 @@ def _run_download_tasks(
         else:
             pending.append(task)
 
+    cached = len(tasks) - len(pending)
     if not pending:
+        log.info("  %s  total=%d  cached=%d  pending=0  (all cached)", tag, len(tasks), cached)
         return saved, thumbs
 
     n_workers = min(max_workers or cfg.get("download_workers", 8), len(pending))
+    log.info("  %s  total=%d  cached=%d  pending=%d  workers=%d",
+             tag, len(tasks), cached, len(pending), n_workers)
+    t0 = time.perf_counter()
 
     def _do(task: dict) -> tuple[dict, bool]:
         try:
             _download_file(task["url"], task["dest"], headers=task.get("headers") or {})
             return task, True
         except Exception as exc:  # noqa: BLE001
-            log.warning("Download failed %s: %s", task["dest"].name, exc)
+            log.warning("  %s  failed %s: %s", tag, task["dest"].name, exc)
             return task, False
 
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
@@ -900,6 +986,8 @@ def _run_download_tasks(
                 if task.get("thumb"):
                     thumbs[str(dest)] = task["thumb"]
 
+    log.info("  %s  saved=%d/%d  elapsed=%.1fs",
+             tag, len(saved) - cached, len(pending), time.perf_counter() - t0)
     return saved, thumbs
 
 
@@ -1278,55 +1366,52 @@ def fetch_images(
     sources  = cfg.get("sources", ["pexels", "pixabay"])
     queries  = _get_queries(search_prompt, item, n)
 
-    # Collect all hits across queries; deduplicate by (source, file_id)
-    # before trimming to n so that multi-query rotation actually widens coverage.
-    seen_ids: set[str] = set()
-    saved: list[tuple[Path, dict]]  = []
-
     # Initialise thumbnail map on item so scorer.py thumbnail pass-1.5 can use it.
     # Maps str(local_dest_path) → thumbnail_url (smaller API-provided preview URL).
     if item is not None:
         item.setdefault("_thumbnails", {})
 
-    for source in sources:
-        # Skip source if user explicitly set candidates_images = 0
-        if cfg.get("source_limits", {}).get(source, {}).get("candidates_images") == 0:
-            log.debug("fetch_images: skipping source %s (candidates_images=0)", source)
-            continue
+    def _fetch_images_from_source(source: str) -> tuple[list, dict]:
+        """
+        Search + download one source independently.
+
+        candidates_images is the TOTAL file budget for this source across ALL queries
+        combined.  Queries share the budget; once exhausted, no further API calls are
+        made and the loop exits early.  This makes the UI value the hard truth.
+        """
+        n_src = cfg.get("source_limits", {}).get(source, {}).get("candidates_images", 15)
+        if n_src == 0:
+            log.info("fetch_images: skipping source %s (candidates_images=0)", source)
+            return [], {}
 
         src_dir = output_dir / source
         src_dir.mkdir(parents=True, exist_ok=True)
-
-        # Source-specific filter overrides from the manifest item
         source_filters = _get_source_filters(item, source)
+        seen_ids_src: set[str] = set()
+        src_saved:  list[tuple[Path, dict]] = []
+        src_thumbs: dict[str, str]          = {}
+        budget = n_src   # slots remaining for this source across all queries
 
         for query, per_q in queries:
-            # Per-query per_page budget (floor at provider minimums)
-            per_page_pexels  = max(per_q, 10)
-            per_page_pixabay = max(per_q, 20)
+            if budget <= 0:
+                break
+            fetch_n = min(per_q, budget)   # ask API for at most this many
 
             try:
                 if source == "pexels":
-                    n_src = cfg.get("source_limits", {}).get("pexels", {}).get(
-                        "candidates_images", per_page_pexels)
                     hits = _pexels_search_images(
-                        api_keys.get("pexels", ""),
-                        query,
-                        n_src,
-                        backoff,
+                        api_keys.get("pexels", ""), query, fetch_n, backoff,
                         extra_params=source_filters or None,
                     )
                     pexels_key = api_keys.get("pexels", "")
                     tasks: list[dict] = []
-                    for i, ph in enumerate(hits[:n_src]):
-                        pid  = str(ph.get("id", i))
-                        uid  = f"pexels_img_{pid}"
-                        if uid in seen_ids:
-                            continue
-                        seen_ids.add(uid)
-                        url  = _pexels_pick_image_url(ph)
-                        if not url:
-                            continue
+                    for i, ph in enumerate(hits):
+                        if budget <= 0: break
+                        pid = str(ph.get("id", i));  uid = f"pexels_img_{pid}"
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
+                        url = _pexels_pick_image_url(ph)
+                        if not url: continue
                         dest = src_dir / f"{uid}.jpg"
                         src_ph = ph.get("src") or {}
                         thumb  = src_ph.get("medium") or src_ph.get("small") or src_ph.get("tiny")
@@ -1348,32 +1433,24 @@ def fetch_images(
                         dl_url = info.get("preview_url") or url
                         tasks.append({"dest": dest, "url": dl_url, "info": info,
                                       "thumb": thumb, "headers": {"Authorization": pexels_key}})
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
-                    saved.extend(batch_saved)
-                    if item is not None:
-                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                        budget -= 1
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
+                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
                     _jitter(cfg, source)
 
                 elif source == "pixabay":
-                    n_src = cfg.get("source_limits", {}).get("pixabay", {}).get(
-                        "candidates_images", per_page_pixabay)
                     hits = _pixabay_search_images(
-                        api_keys.get("pixabay", ""),
-                        query,
-                        n_src,
-                        backoff,
+                        api_keys.get("pixabay", ""), query, fetch_n, backoff,
                         extra_params=source_filters or None,
                     )
                     tasks = []
-                    for i, hit in enumerate(hits[:n_src]):
-                        hid  = str(hit.get("id", i))
-                        uid  = f"pixabay_img_{hid}"
-                        if uid in seen_ids:
-                            continue
-                        seen_ids.add(uid)
-                        url  = _pixabay_pick_image_url(hit)
-                        if not url:
-                            continue
+                    for i, hit in enumerate(hits):
+                        if budget <= 0: break
+                        hid = str(hit.get("id", i));  uid = f"pixabay_img_{hid}"
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
+                        url = _pixabay_pick_image_url(hit)
+                        if not url: continue
                         ext  = Path(url.split("?")[0]).suffix or ".jpg"
                         dest = src_dir / f"{uid}{ext}"
                         thumb = hit.get("webformatURL") or hit.get("previewURL")
@@ -1394,125 +1471,132 @@ def fetch_images(
                         }
                         dl_url = info.get("preview_url") or url
                         tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
-                    saved.extend(batch_saved)
-                    if item is not None:
-                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                        budget -= 1
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
+                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
                     _jitter(cfg, source)
 
                 elif source == "openverse":
-                    n_src = cfg.get("source_limits", {}).get("openverse", {}).get(
-                        "candidates_images", per_page_pexels)
                     candidates = _source_search_openverse_images(
-                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                        api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
                     tasks = []
-                    for c in candidates[:per_q]:
-                        sid = c.get("source_id", "")
-                        uid = f"openverse_img_{sid}"
-                        if uid in seen_ids: continue
-                        seen_ids.add(uid)
+                    for c in candidates:
+                        if budget <= 0: break
+                        sid = c.get("source_id", "");  uid = f"openverse_img_{sid}"
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         ext = Path(url.split("?")[0]).suffix or ".jpg"
                         if ext.lower() not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
                         dest = src_dir / f"{uid}{ext}"
                         thumb = c.get("preview_url", "")
-                        info = {**c, "file_url": url, "preview_url": c.get("preview_url", "")}
+                        info  = {**c, "file_url": url, "preview_url": c.get("preview_url", "")}
                         dl_url = c.get("preview_url") or url
                         tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
-                    saved.extend(batch_saved)
-                    if item is not None:
-                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                        budget -= 1
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
+                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
                     _jitter(cfg, source)
 
                 elif source == "wikimedia":
-                    n_src = cfg.get("source_limits", {}).get("wikimedia", {}).get(
-                        "candidates_images", per_page_pexels)
                     candidates = _source_search_wikimedia_images(
-                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                        api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
                     tasks = []
-                    for c in candidates[:per_q]:
+                    for c in candidates:
+                        if budget <= 0: break
                         sid = c.get("source_id", "")
                         uid = f"wikimedia_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
-                        if uid in seen_ids: continue
-                        seen_ids.add(uid)
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         mime = c.get("mime", "image/jpeg")
                         ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif"}.get(mime, ".jpg")
                         dest = src_dir / f"{uid}{ext}"
                         thumb = c.get("preview_url", "")
-                        info = {**c}
+                        info  = {**c}
                         dl_url = c.get("preview_url") or url
                         tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
-                    saved.extend(batch_saved)
-                    if item is not None:
-                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                        budget -= 1
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
+                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
                     _jitter(cfg, source)
 
                 elif source == "europeana":
-                    n_src = cfg.get("source_limits", {}).get("europeana", {}).get(
-                        "candidates_images", per_page_pexels)
                     candidates = _source_search_europeana_images(
-                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                        api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
                     tasks = []
-                    for c in candidates[:per_q]:
+                    for c in candidates:
+                        if budget <= 0: break
                         sid = c.get("source_id", "")
                         uid = f"europeana_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
-                        if uid in seen_ids: continue
-                        seen_ids.add(uid)
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         ext = Path(url.split("?")[0]).suffix.lower()
                         if ext not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
                         dest = src_dir / f"{uid}{ext}"
                         thumb = c.get("preview_url", "")
-                        info = {**c}
+                        info  = {**c}
                         dl_url = c.get("preview_url") or url
                         tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
-                    saved.extend(batch_saved)
-                    if item is not None:
-                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                        budget -= 1
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
+                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
                     _jitter(cfg, source)
 
                 elif source == "archive":
-                    n_src = cfg.get("source_limits", {}).get("archive", {}).get(
-                        "candidates_images", per_page_pexels)
                     candidates = _source_search_archive_images(
-                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                        api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
                     tasks = []
-                    for c in candidates[:per_q]:
-                        sid = c.get("source_id", "")
-                        uid = f"archive_img_{sid}"
-                        if uid in seen_ids: continue
-                        seen_ids.add(uid)
+                    for c in candidates:
+                        if budget <= 0: break
+                        sid = c.get("source_id", "");  uid = f"archive_img_{sid}"
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         ext = Path(url.split("?")[0]).suffix.lower()
                         if ext not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
                         dest = src_dir / f"{uid}{ext}"
                         thumb = c.get("preview_url", "")
-                        info = {**c}
+                        info  = {**c}
                         dl_url = c.get("preview_url") or url
                         tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg)
-                    saved.extend(batch_saved)
-                    if item is not None:
-                        item.setdefault("_thumbnails", {}).update(batch_thumbs)
+                        budget -= 1
+                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
+                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
                     _jitter(cfg, source)
 
             except Exception as exc:
                 log.warning("fetch_images %s q=%r failed: %s", source, query, exc)
 
-    # Return at most n results
-    return saved[:n]
+        return src_saved, src_thumbs
+
+    # Run all sources in parallel — each source does its own API search + file downloads
+    # concurrently with every other source.  Within each source, _run_download_tasks
+    # further parallelises individual file downloads via its own ThreadPoolExecutor.
+    all_saved:  list[tuple[Path, dict]] = []
+    all_thumbs: dict[str, str]          = {}
+    n_src_workers = min(len(sources), cfg.get("source_workers", len(sources)))
+    log.info("fetch_images: running %d source(s) in parallel (workers=%d)", len(sources), n_src_workers)
+    with ThreadPoolExecutor(max_workers=n_src_workers) as ex:
+        for src_saved, src_thumbs in ex.map(_fetch_images_from_source, sources):
+            all_saved.extend(src_saved)
+            all_thumbs.update(src_thumbs)
+
+    if item is not None:
+        item["_thumbnails"].update(all_thumbs)
+
+    # Return all candidates (up to max_candidates_per_item) so every source contributes.
+    max_total = cfg.get("max_candidates_per_item", len(all_saved))
+    return all_saved[:max_total]
 
 
 def fetch_videos(
@@ -1563,56 +1647,51 @@ def fetch_videos(
         kws = item.get("include_keywords") or []
         _loc_term = next((kw for kw in kws if kw and kw[0].isupper() and len(kw) > 3), "")
 
-    seen_ids: set[str] = set()
-    saved: list[tuple[Path, dict]]  = []
+    def _fetch_videos_from_source(source: str) -> list[tuple[Path, dict]]:
+        """
+        Search + download videos from one source independently.
 
-    for source in sources:
-        # Skip source if user explicitly set candidates_videos = 0
-        if cfg.get("source_limits", {}).get(source, {}).get("candidates_videos") == 0:
-            log.debug("fetch_videos: skipping source %s (candidates_videos=0)", source)
-            continue
+        candidates_videos is the TOTAL file budget for this source across ALL queries
+        combined (including the Pixabay location query).  The budget counter ensures
+        the UI value is the hard ceiling on files downloaded from this source.
+        """
+        n_src = cfg.get("source_limits", {}).get(source, {}).get("candidates_videos", 0)
+        if n_src == 0:
+            log.info("fetch_videos: skipping source %s (candidates_videos=0)", source)
+            return []
 
         src_dir = output_dir / source
         src_dir.mkdir(parents=True, exist_ok=True)
-
-        # Source-specific filter overrides from the manifest item
         source_filters = _get_source_filters(item, source)
+        seen_ids_src: set[str] = set()
+        src_saved: list[tuple[Path, dict]] = []
+        budget = n_src   # total file slots remaining for this source across all queries
 
-        # Pixabay only: prepend a location-only query (e.g. "Pompeii") so all
-        # location-tagged videos are captured. Pixabay has strict tag matching and
-        # typically returns <20 results for specific location terms — all valuable.
-        # Pexels is NOT given this query — it returns 5000+ loosely-matched results
-        # for any location term, adding noise rather than signal.
+        # Pixabay only: prepend a location-only query so location-tagged videos are
+        # captured first.  It shares the same budget — no extra files beyond n_src total.
         source_queries = queries
         if source == "pixabay" and _loc_term:
-            loc_n = min(20, max(5, n // 4))
-            source_queries = [(_loc_term, loc_n)] + list(queries)
+            source_queries = [(_loc_term, n_src)] + list(queries)
 
         for query, per_q in source_queries:
-            per_page_pexels  = max(per_q, 10)
-            per_page_pixabay = max(per_q, 20)
+            if budget <= 0:
+                break
+            fetch_n = min(per_q, budget)   # ask API for at most this many
 
             try:
                 if source == "pexels":
-                    n_src = cfg.get("source_limits", {}).get("pexels", {}).get(
-                        "candidates_videos", per_page_pexels)
                     hits = _pexels_search_videos(
-                        api_keys.get("pexels", ""),
-                        query,
-                        n_src,
-                        backoff,
+                        api_keys.get("pexels", ""), query, fetch_n, backoff,
                         extra_params=source_filters or None,
                     )
                     tasks = []
-                    for i, vd in enumerate(hits[:n_src]):
-                        vid  = str(vd.get("id", i))
-                        uid  = f"pexels_vid_{vid}"
-                        if uid in seen_ids:
-                            continue
-                        seen_ids.add(uid)
-                        url  = _pexels_pick_video_url(vd)
-                        if not url:
-                            continue
+                    for i, vd in enumerate(hits):
+                        if budget <= 0: break
+                        vid = str(vd.get("id", i));  uid = f"pexels_vid_{vid}"
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
+                        url = _pexels_pick_video_url(vd)
+                        if not url: continue
                         dest = src_dir / f"{uid}.mp4"
                         preview_url_v, pw, ph_v = _pexels_pick_preview_video_url(vd)
                         info = {
@@ -1636,30 +1715,24 @@ def fetch_videos(
                         }
                         dl_url = info.get("preview_url") or url
                         tasks.append({"dest": dest, "url": dl_url, "info": info})
-                    batch_saved, _ = _run_download_tasks(tasks, cfg)
-                    saved.extend(batch_saved)
+                        budget -= 1
+                    batch_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
+                    src_saved.extend(batch_saved)
                     _jitter(cfg, source)
 
                 elif source == "pixabay":
-                    n_src = cfg.get("source_limits", {}).get("pixabay", {}).get(
-                        "candidates_videos", per_page_pixabay)
                     hits = _pixabay_search_videos(
-                        api_keys.get("pixabay", ""),
-                        query,
-                        n_src,
-                        backoff,
+                        api_keys.get("pixabay", ""), query, fetch_n, backoff,
                         extra_params=source_filters or None,
                     )
                     tasks = []
-                    for i, hit in enumerate(hits[:n_src]):
-                        hid  = str(hit.get("id", i))
-                        uid  = f"pixabay_vid_{hid}"
-                        if uid in seen_ids:
-                            continue
-                        seen_ids.add(uid)
-                        url  = _pixabay_pick_video_url(hit)
-                        if not url:
-                            continue
+                    for i, hit in enumerate(hits):
+                        if budget <= 0: break
+                        hid = str(hit.get("id", i));  uid = f"pixabay_vid_{hid}"
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
+                        url = _pixabay_pick_video_url(hit)
+                        if not url: continue
                         dest = src_dir / f"{uid}.mp4"
                         vids_data = hit.get("videos") or {}
                         info = {
@@ -1683,35 +1756,68 @@ def fetch_videos(
                         }
                         dl_url = info.get("preview_url") or url
                         tasks.append({"dest": dest, "url": dl_url, "info": info})
-                    batch_saved, _ = _run_download_tasks(tasks, cfg)
-                    saved.extend(batch_saved)
+                        budget -= 1
+                    batch_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
+                    src_saved.extend(batch_saved)
+                    _jitter(cfg, source)
+
+                elif source == "wikimedia":
+                    candidates = _source_search_wikimedia_videos(
+                        api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
+                    )
+                    tasks = []
+                    for c in candidates:
+                        if budget <= 0: break
+                        sid = c.get("source_id", "")
+                        uid = f"wikimedia_vid_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
+                        url = c["file_url"]
+                        if not url: continue
+                        mime = c.get("mime", "video/webm")
+                        ext  = {"video/mp4": ".mp4", "video/webm": ".webm", "video/ogg": ".ogv"}.get(mime, ".webm")
+                        dest = src_dir / f"{uid}{ext}"
+                        info = {**c, "video_files": [{"url": url, "width": c.get("width", 0), "height": c.get("height", 0)}]}
+                        tasks.append({"dest": dest, "url": url, "info": info})
+                        budget -= 1
+                    batch_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
+                    src_saved.extend(batch_saved)
                     _jitter(cfg, source)
 
                 elif source == "archive":
-                    n_src = cfg.get("source_limits", {}).get("archive", {}).get(
-                        "candidates_videos", per_page_pexels)
                     candidates = _source_search_archive_videos(
-                        api_keys, query, n_src, backoff, extra_params=source_filters or None,
+                        api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
                     tasks = []
-                    for c in candidates[:per_q]:
-                        sid = c.get("source_id", "")
-                        uid = f"archive_vid_{sid}"
-                        if uid in seen_ids: continue
-                        seen_ids.add(uid)
+                    for c in candidates:
+                        if budget <= 0: break
+                        sid = c.get("source_id", "");  uid = f"archive_vid_{sid}"
+                        if uid in seen_ids_src: continue
+                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         dest = src_dir / f"{uid}.mp4"
-                        info = {**c,
-                                "video_files": [{"url": url, "width": c.get("width",0), "height": c.get("height",0)}]}
+                        info = {**c, "video_files": [{"url": url, "width": c.get("width", 0), "height": c.get("height", 0)}]}
                         dl_url = c.get("preview_url") or url
                         tasks.append({"dest": dest, "url": dl_url, "info": info})
-                    batch_saved, _ = _run_download_tasks(tasks, cfg)
-                    saved.extend(batch_saved)
+                        budget -= 1
+                    batch_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
+                    src_saved.extend(batch_saved)
                     _jitter(cfg, source)
 
             except Exception as exc:
                 log.warning("fetch_videos %s q=%r failed: %s", source, query, exc)
 
-    # Return at most n results
-    return saved[:n]
+        return src_saved
+
+    # Run all sources in parallel
+    all_saved: list[tuple[Path, dict]] = []
+    n_src_workers = min(len(sources), cfg.get("source_workers", len(sources)))
+    log.info("fetch_videos: running %d source(s) in parallel (workers=%d)", len(sources), n_src_workers)
+    with ThreadPoolExecutor(max_workers=n_src_workers) as ex:
+        for src_saved in ex.map(_fetch_videos_from_source, sources):
+            all_saved.extend(src_saved)
+
+    # Return all candidates (up to max_candidates_per_item) so every source contributes.
+    max_total = cfg.get("max_candidates_per_item", len(all_saved))
+    return all_saved[:max_total]
