@@ -1362,8 +1362,13 @@ async def _run_batch(batch_id: str) -> None:
                 log.warning("Batch %s: no workers registered after %ds — falling back to local scoring",
                             batch_id, grace)
 
-    # Shared counter (mutated only from async gather callbacks — safe in asyncio)
-    done: list[int] = [0]
+    # Shared counters (mutated only from async gather callbacks — safe in asyncio)
+    # dl_started: increments as each item begins downloading (for progress display)
+    # score_started: increments as each item begins scoring (for progress display)
+    # done: increments when an item is fully complete (images + videos scored)
+    done:          list[int] = [0]
+    dl_started:    list[int] = [0]
+    score_started: list[int] = [0]
 
     # ---------------------------------------------------------------
     # Phase 1 — Download (all items in parallel)
@@ -1402,7 +1407,8 @@ async def _run_batch(batch_id: str) -> None:
         img_dir  = item_dir / "images"
         vid_dir  = item_dir / "videos"
 
-        store.update(batch_id, progress=f"downloading {item_id} ({done[0]+1}/{item_count})")
+        dl_started[0] += 1
+        store.update(batch_id, progress=f"downloading {item_id} ({dl_started[0]}/{item_count})")
         store.update_item_progress(batch_id, item_id, phase="downloading")
 
         try:
@@ -1461,8 +1467,9 @@ async def _run_batch(batch_id: str) -> None:
         if resolved_item.get("status") == "done":
             continue
         items_to_score[item_id] = (img_pi, vid_pi, resolved_item)
+        score_started[0] += 1
         store.update(batch_id,
-                     progress=f"scoring {item_id} ({done[0]+1}/{item_count})")
+                     progress=f"scoring {item_id} ({score_started[0]}/{item_count})")
         store.update_item_progress(
             batch_id, item_id, phase="scoring",
             imgs_downloaded=len(img_pi),

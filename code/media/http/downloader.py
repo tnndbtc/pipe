@@ -2414,6 +2414,12 @@ def fetch_images(
                         if not url: continue
                         mime = c.get("mime", "image/jpeg")
                         ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif"}.get(mime, ".jpg")
+                        # Wikimedia Commons titles can be very long. Guard against the
+                        # Linux 255-byte filename limit: the .info.json sidecar appends
+                        # 10 chars, so uid must fit in 255 - len(ext) - 10 bytes.
+                        max_uid = 255 - len(ext) - 10
+                        if len(uid) > max_uid:
+                            uid = uid[:max_uid]
                         dest = src_dir / f"{uid}{ext}"
                         thumb = c.get("preview_url", "")
                         info  = {**c}
