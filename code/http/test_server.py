@@ -26,7 +26,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, unquote_plus
+from urllib.parse import parse_qs, urlparse, unquote_plus, quote as _url_quote
 import urllib.request as _urllib_req
 
 # ── YouTube category mapping (genre → category_id, no LLM needed) ─────────────
@@ -12316,7 +12316,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
                 rel_path = os.path.relpath(dest_path, PIPE_DIR)
-                serve_url = "/serve_media?path=" + urllib.parse.quote(rel_path)
+                serve_url = "/serve_media?path=" + _url_quote(rel_path)
                 body = json.dumps({"path": dest_path,
                                    "url":  serve_url,
                                    "filename": dest_file,
