@@ -960,17 +960,26 @@ async def _run_batch(batch_id: str) -> None:
     # Apply per-batch source overrides from UI settings
     if state.get("sources_override"):
         cfg["sources"] = state["sources_override"]
-    # Apply per-source candidate limits and post-scoring caps from UI settings
-    if state.get("source_limits_override"):
-        merged_limits = dict(cfg.get("source_limits", {}))
-        for src, lims in state["source_limits_override"].items():
-            src_cfg = dict(merged_limits.get(src, {}))
-            for key in ("candidates_images", "candidates_videos",
-                        "top_n_images",      "top_n_videos"):
-                if key in lims:
-                    src_cfg[key] = lims[key]
-            merged_limits[src] = src_cfg
-        cfg["source_limits"] = merged_limits
+    # source_limits_override is required — the server has no defaults of its own.
+    # Every enabled source must supply candidates_images and candidates_videos.
+    source_limits_override = state.get("source_limits_override") or {}
+    if not source_limits_override:
+        raise HTTPException(status_code=400,
+            detail="source_limits_override is required: client must supply per-source candidate counts")
+    active_sources = cfg.get("sources", [])
+    missing = [
+        src for src in active_sources
+        if "candidates_images" not in source_limits_override.get(src, {})
+        or "candidates_videos" not in source_limits_override.get(src, {})
+    ]
+    if missing:
+        raise HTTPException(status_code=400,
+            detail=f"source_limits_override missing candidates_images/candidates_videos for: {missing}")
+    cfg["source_limits"] = {
+        src: {k: v for k, v in lims.items()
+              if k in ("candidates_images", "candidates_videos", "top_n_images", "top_n_videos")}
+        for src, lims in source_limits_override.items()
+    }
 
     store.update(batch_id, status="running", progress="starting")
     log.info("Running batch %s  (%d items)", batch_id, item_count)

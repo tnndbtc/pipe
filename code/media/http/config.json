@@ -42,21 +42,6 @@
   ],
   "sources": ["pexels", "pixabay", "openverse", "wikimedia", "europeana"],
 
-  "source_limits": {
-    "_comment": [
-      "Per-source candidate counts and post-scoring caps.",
-      "candidates_images / candidates_videos : how many raw files to fetch per query.",
-      "top_n_images / top_n_videos           : max kept per source after CLIP scoring.",
-      "Set candidates_* to 0 to disable that media type for a source entirely."
-    ],
-    "pexels":    { "candidates_images": 30, "candidates_videos": 30, "top_n_images": 15, "top_n_videos": 10 },
-    "pixabay":   { "candidates_images": 30, "candidates_videos": 30, "top_n_images": 15, "top_n_videos": 10 },
-    "openverse": { "candidates_images": 50, "candidates_videos": 0,  "top_n_images": 20 },
-    "wikimedia": { "candidates_images": 20, "candidates_videos": 15, "top_n_images": 10, "top_n_videos":  8 },
-    "europeana": { "candidates_images": 30, "candidates_videos": 0,  "top_n_images": 15 },
-    "archive":   { "candidates_images": 20, "candidates_videos": 15, "top_n_images": 10, "top_n_videos":  8 }
-  },
-
   "sfx_source_limits": {
     "_comment": [
       "Per-source candidate counts for the SFX tab.",

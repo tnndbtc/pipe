@@ -47,6 +47,7 @@ log = logging.getLogger("downloader")
 
 _USER_AGENT = "media-fetcher/1.0 (+offline-pipeline)"
 
+
 # ---------------------------------------------------------------------------
 # License gate — RULE 1 + RULE 2
 # ---------------------------------------------------------------------------
@@ -1379,7 +1380,9 @@ def fetch_images(
         combined.  Queries share the budget; once exhausted, no further API calls are
         made and the loop exits early.  This makes the UI value the hard truth.
         """
-        n_src = cfg.get("source_limits", {}).get(source, {}).get("candidates_images", 15)
+        n_src = cfg.get("source_limits", {}).get(source, {}).get("candidates_images")
+        if n_src is None:
+            raise ValueError(f"candidates_images not set for source '{source}' — caller must supply source_limits")
         if n_src == 0:
             log.info("fetch_images: skipping source %s (candidates_images=0)", source)
             return [], {}
@@ -1655,7 +1658,9 @@ def fetch_videos(
         combined (including the Pixabay location query).  The budget counter ensures
         the UI value is the hard ceiling on files downloaded from this source.
         """
-        n_src = cfg.get("source_limits", {}).get(source, {}).get("candidates_videos", 0)
+        n_src = cfg.get("source_limits", {}).get(source, {}).get("candidates_videos")
+        if n_src is None:
+            raise ValueError(f"candidates_videos not set for source '{source}' — caller must supply source_limits")
         if n_src == 0:
             log.info("fetch_videos: skipping source %s (candidates_videos=0)", source)
             return []
