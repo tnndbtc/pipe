@@ -12274,9 +12274,17 @@ class Handler(BaseHTTPRequestHandler):
                 dest_path = os.path.join(dest_dir, dest_file)
                 with open(dest_path, "wb") as fh:
                     fh.write(audio_bytes)
+                import wave, contextlib
+                duration_sec = 0.0
+                try:
+                    with contextlib.closing(wave.open(dest_path, "r")) as wf:
+                        duration_sec = wf.getnframes() / wf.getframerate()
+                except Exception:
+                    pass
                 body = json.dumps({"path": dest_path,
                                    "url":  "file://" + dest_path,
-                                   "filename": dest_file}).encode()
+                                   "filename": dest_file,
+                                   "duration_sec": duration_sec}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
