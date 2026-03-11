@@ -2032,9 +2032,11 @@ placeholder="Enter your story here"></textarea>
       <thead>
         <tr style="color:var(--dim);font-size:0.78em;text-transform:uppercase;letter-spacing:0.05em">
           <th style="padding:0 18px 5px 0;text-align:left;font-weight:600">Source</th>
-          <th style="padding:0 14px 5px;text-align:center;font-weight:600">Enabled</th>
-          <th style="padding:0 14px 5px;text-align:center;font-weight:600">📷 img / item</th>
-          <th style="padding:0 0 5px 14px;text-align:center;font-weight:600">🎬 vid / item</th>
+          <th style="padding:0 10px 5px;text-align:center;font-weight:600">Enabled</th>
+          <th style="padding:0 10px 5px;text-align:center;font-weight:600">📷 IMG to show</th>
+          <th style="padding:0 10px 5px;text-align:center;font-weight:600">📷 IMG candidates</th>
+          <th style="padding:0 10px 5px;text-align:center;font-weight:600">🎬 VID to show</th>
+          <th style="padding:0 0 5px 10px;text-align:center;font-weight:600">🎬 VID candidates</th>
         </tr>
       </thead>
       <tbody id="media-sources-tbody"></tbody>
@@ -2083,6 +2085,16 @@ placeholder="Enter your story here"></textarea>
     .sfx-play-btn.error{background:#c0392b;color:#fff}
     .sfx-link-btn{background:none;border:none;color:var(--dim);cursor:pointer;font-size:0.85em;padding:0 2px;text-decoration:none;flex-shrink:0}
     .sfx-link-btn:hover{color:var(--text)}
+    .sfx-ai-toggle-btn{background:#1a0d1a;border:1px solid #4a2a4a;border-radius:4px;color:#ba8aba;cursor:pointer;font-size:0.78em;padding:2px 8px;margin-left:6px;flex-shrink:0}
+    .sfx-ai-toggle-btn:hover{background:#2a1a2a}
+    .sfx-ai-panel{display:none;background:#1a0d1a;border:1px solid #4a2a4a;border-radius:4px;padding:8px 10px;margin:4px 0 6px}
+    .sfx-ai-panel textarea{width:100%;box-sizing:border-box;background:#111;color:#ccc;border:1px solid #5a3a5a;border-radius:3px;font-size:11px;font-family:monospace;resize:vertical;padding:4px}
+    .sfx-ai-panel .sfx-ai-hint{font-size:10px;color:#666;margin:3px 0 5px}
+    .sfx-ai-panel .sfx-ai-row{display:flex;align-items:center;gap:8px;margin-top:5px}
+    .sfx-ai-gen-btn{padding:3px 12px;font-size:12px;cursor:pointer;background:#2a1a2a;border:1px solid #7a4a7a;border-radius:4px;color:#ba8aba}
+    .sfx-ai-gen-btn:hover{background:#3a2a3a}
+    .sfx-ai-gen-btn:disabled{opacity:0.5;cursor:default}
+    .sfx-ai-status{font-size:11px;color:#888}
     .sfx-status-bar{font-size:0.82em;color:var(--dim);padding:4px 0}
     .sfx-footer{display:flex;align-items:center;gap:10px;padding-top:10px;border-top:1px solid var(--border)}
     .sfx-empty{color:var(--dim);font-size:0.85em;padding:12px 0}
@@ -3366,12 +3378,14 @@ placeholder="Enter your story here"></textarea>
 
   // ── SFX tab ─────────────────────────────────────────────────────────────────
 
-  let _sfxSlug    = '';
-  let _sfxEpId    = '';
-  let _sfxItems   = [];
-  let _sfxResults = {};   // { item_id: { item, candidates[] } }
-  let _sfxSelected= {};   // { item_id: index }
-  let _sfxAudioEl = null;
+  let _sfxSlug       = '';
+  let _sfxEpId       = '';
+  let _sfxItems      = [];
+  let _sfxResults    = {};   // { item_id: { item, candidates[] } }
+  let _sfxSelected   = {};   // { item_id: index }
+  let _sfxServerError= null; // set when media server is unreachable
+  let _sfxAiState    = {};   // { item_id: { open, prompt, generating, statusText } }
+  let _sfxAudioEl    = null;
   let _sfxPlayingUrl = null;
   let _sfxPlayGen    = 0;
   let _sfxPlayingBtn = null;  // DOM button currently showing ⏸
@@ -3574,9 +3588,22 @@ placeholder="Enter your story here"></textarea>
         <span class="sfx-card-id">\ud83d\udd0a ${itemId}</span>
         <span class="sfx-card-tag">${tag}</span>
         <span class="sfx-card-dur">Target: ${dur}s</span>
+        <button class="sfx-ai-toggle-btn" onclick="event.stopPropagation();_sfxAiToggle('${itemId}')" title="Generate SFX with AI">\u2728 AI</button>
+      </div>
+      <div class="sfx-ai-panel" id="sfx-ai-panel-${itemId}">
+        <textarea id="sfx-ai-prompt-${itemId}" rows="3" placeholder="Describe the sound to generate\u2026"
+                  oninput="_sfxAiStateSet('${itemId}','prompt',this.value)"></textarea>
+        <div class="sfx-ai-hint">Target duration: ${dur}s</div>
+        <div class="sfx-ai-row">
+          <button class="sfx-ai-gen-btn" id="sfx-ai-btn-${itemId}"
+                  onclick="_sfxAiGenStart('${itemId}')">\u2728 Generate</button>
+          <span class="sfx-ai-status" id="sfx-ai-status-${itemId}"></span>
+        </div>
       </div>
       <div class="sfx-cand-list">${rows}</div>
     `;
+    // Restore AI panel state (survives re-renders when user selects a candidate)
+    _sfxAiRestorePanel(itemId, item);
   }
 
   function sfxSelectCandidate(itemId, idx) {
@@ -3599,6 +3626,150 @@ placeholder="Enter your story here"></textarea>
     const total = _sfxItems.length;
     const sel   = Object.keys(_sfxSelected).length;
     document.getElementById('sfx-count-label').textContent = sel + '/' + total + ' selected';
+  }
+
+  // ── SFX AI Generation ─────────────────────────────────────────────────────
+
+  function _sfxAiStateSet(itemId, key, val) {
+    if (!_sfxAiState[itemId]) _sfxAiState[itemId] = {};
+    _sfxAiState[itemId][key] = val;
+  }
+
+  function _sfxAiRestorePanel(itemId, item) {
+    const state  = _sfxAiState[itemId] || {};
+    const panel  = document.getElementById('sfx-ai-panel-' + itemId);
+    const ta     = document.getElementById('sfx-ai-prompt-' + itemId);
+    const btn    = document.getElementById('sfx-ai-btn-' + itemId);
+    const status = document.getElementById('sfx-ai-status-' + itemId);
+    if (!panel) return;
+    // Restore panel open/closed state
+    panel.style.display = state.open ? 'block' : 'none';
+    // Restore textarea: saved prompt → item.tag → item.search_queries[0]
+    if (ta) ta.value = state.prompt !== undefined
+      ? state.prompt
+      : (item.tag || (item.search_queries && item.search_queries[0]) || '');
+    // Restore status text + button state
+    if (status) { status.textContent = state.statusText || ''; status.style.color = state.statusError ? '#e06c75' : (state.statusDone ? '#6a9a6a' : '#888'); }
+    if (btn && state.generating) btn.disabled = true;
+  }
+
+  function _sfxAiToggle(itemId) {
+    if (!_sfxAiState[itemId]) _sfxAiState[itemId] = {};
+    _sfxAiState[itemId].open = !_sfxAiState[itemId].open;
+    const panel = document.getElementById('sfx-ai-panel-' + itemId);
+    if (panel) panel.style.display = _sfxAiState[itemId].open ? 'block' : 'none';
+  }
+
+  async function _sfxAiGenStart(itemId) {
+    const ta     = document.getElementById('sfx-ai-prompt-' + itemId);
+    const btn    = document.getElementById('sfx-ai-btn-' + itemId);
+    const status = document.getElementById('sfx-ai-status-' + itemId);
+    const prompt = ta ? ta.value.trim() : '';
+    if (!prompt) { if (status) status.textContent = 'Prompt is empty.'; return; }
+    _sfxAiStateSet(itemId, 'generating', true);
+    _sfxAiStateSet(itemId, 'prompt', prompt);
+    _sfxAiStateSet(itemId, 'statusText', '\u23f3 Submitting\u2026');
+    _sfxAiStateSet(itemId, 'statusError', false);
+    _sfxAiStateSet(itemId, 'statusDone', false);
+    if (btn) btn.disabled = true;
+    if (status) { status.textContent = '\u23f3 Submitting\u2026'; status.style.color = '#888'; }
+    const item = (_sfxResults[itemId] || {}).item || {};
+    try {
+      const r = await fetch('/api/ai_sfx_generate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ slug: _sfxSlug, ep_id: _sfxEpId,
+                               item_id: itemId, prompt,
+                               duration_sec: item.duration_sec || 5 }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || 'submit failed');
+      const { job_id, asset_id, timestamp_ms } = d;
+      const st = '\u23f3 Generating\u2026 (job ' + job_id.slice(0,8) + ')';
+      _sfxAiStateSet(itemId, 'statusText', st);
+      if (status) status.textContent = st;
+      _sfxAiGenPoll(itemId, job_id, asset_id, prompt, timestamp_ms, 0);
+    } catch(err) {
+      _sfxAiStateSet(itemId, 'generating', false);
+      _sfxAiStateSet(itemId, 'statusText', '\u274c ' + err.message);
+      _sfxAiStateSet(itemId, 'statusError', true);
+      if (status) { status.textContent = '\u274c ' + err.message; status.style.color = '#e06c75'; }
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function _sfxAiGenPoll(itemId, jobId, assetId, prompt, tMs, elapsed) {
+    const btn    = document.getElementById('sfx-ai-btn-' + itemId);
+    const status = document.getElementById('sfx-ai-status-' + itemId);
+    const MAX_S  = 300;
+    if (elapsed > MAX_S) {
+      _sfxAiStateSet(itemId, 'generating', false);
+      _sfxAiStateSet(itemId, 'statusText', '\u274c Timed out after ' + MAX_S + 's');
+      _sfxAiStateSet(itemId, 'statusError', true);
+      if (status) { status.textContent = '\u274c Timed out after ' + MAX_S + 's'; status.style.color = '#e06c75'; }
+      if (btn) btn.disabled = false;
+      return;
+    }
+    try {
+      const r = await fetch('/api/ai_job_status?job_id=' + encodeURIComponent(jobId));
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      if (d.status === 'done') {
+        const filename = assetId + '.mp3';
+        const st = '\u23f3 Saving audio\u2026';
+        _sfxAiStateSet(itemId, 'statusText', st);
+        if (status) status.textContent = st;
+        const r2 = await fetch('/api/ai_sfx_save', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ job_id: jobId, filename,
+                                 slug: _sfxSlug, ep_id: _sfxEpId,
+                                 item_id: itemId, timestamp_ms: tMs }),
+        });
+        const d2 = await r2.json();
+        if (!r2.ok || d2.error) throw new Error(d2.error || 'save failed');
+        _sfxAiStateSet(itemId, 'generating', false);
+        _sfxAiStateSet(itemId, 'statusText', '\u2713 Done \u2014 audio added below');
+        _sfxAiStateSet(itemId, 'statusDone', true);
+        if (status) { status.textContent = '\u2713 Done \u2014 audio added below'; status.style.color = '#6a9a6a'; }
+        if (btn) btn.disabled = false;
+        // Inject as first candidate so user can immediately preview & select
+        _sfxAiInjectResult(itemId, {
+          preview_url:      d2.url,
+          title:            '\u2728 AI: ' + prompt.slice(0, 50),
+          source_site:      'ai_gen',
+          license_summary:  'AI Generated',
+          duration_sec:     d2.duration_sec || 0,
+          attribution_text: 'AI generated',
+          asset_page_url:   '',
+          waveform_img:     '',
+          author:           'AI',
+          rating:           0,
+          downloads:        0,
+        });
+      } else if (d.status === 'failed') {
+        throw new Error('AI job failed: ' + (d.errors || []).join('; '));
+      } else {
+        const secs = elapsed + 2;
+        const st = '\u23f3 Generating\u2026 ' + secs + 's';
+        _sfxAiStateSet(itemId, 'statusText', st);
+        if (status) status.textContent = st;
+        setTimeout(function() { _sfxAiGenPoll(itemId, jobId, assetId, prompt, tMs, secs); }, 2000);
+      }
+    } catch(err) {
+      _sfxAiStateSet(itemId, 'generating', false);
+      _sfxAiStateSet(itemId, 'statusText', '\u274c ' + err.message);
+      _sfxAiStateSet(itemId, 'statusError', true);
+      if (status) { status.textContent = '\u274c ' + err.message; status.style.color = '#e06c75'; }
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function _sfxAiInjectResult(itemId, candidate) {
+    const res = _sfxResults[itemId];
+    if (!res) return;
+    res.candidates.unshift(candidate);  // prepend — AI result appears first
+    sfxRenderCard(res.item, res.candidates);
   }
 
   function _sfxResetBtn(b) {
@@ -4178,12 +4349,13 @@ placeholder="Enter your story here"></textarea>
   // ── Per-source config: defaults, localStorage persistence ──────────────────
 
   const _mediaSrcDefaults = {
-    pexels:    { enabled: true,  n_img: 15, n_vid: 5  },
-    pixabay:   { enabled: true,  n_img: 15, n_vid: 5  },
-    openverse: { enabled: true,  n_img: 40, n_vid: 0  },
-    wikimedia: { enabled: true,  n_img: 40, n_vid: 0  },
-    europeana: { enabled: true,  n_img: 15, n_vid: 0  },
-    archive:   { enabled: false, n_img: 10, n_vid: 10 },
+    //                enabled  show_img  n_img  show_vid  n_vid
+    pexels:    { enabled: true,  show_img:  5, n_img: 15, show_vid: 3, n_vid:  5 },
+    pixabay:   { enabled: true,  show_img:  5, n_img: 15, show_vid: 3, n_vid:  5 },
+    openverse: { enabled: true,  show_img: 10, n_img: 40, show_vid: 0, n_vid:  0 },
+    wikimedia: { enabled: true,  show_img: 10, n_img: 40, show_vid: 0, n_vid:  0 },
+    europeana: { enabled: true,  show_img:  5, n_img: 15, show_vid: 0, n_vid:  0 },
+    archive:   { enabled: false, show_img:  5, n_img: 10, show_vid: 5, n_vid: 10 },
   };
   let _mediaSourceConfig = JSON.parse(JSON.stringify(_mediaSrcDefaults));
 
@@ -4224,23 +4396,33 @@ placeholder="Enter your story here"></textarea>
     const tbody = document.getElementById('media-sources-tbody');
     if (!tbody) return;
     tbody.innerHTML = '';
-    const inp = 'background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 5px;font-size:0.9em;width:60px;text-align:center';
+    const inp = 'background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 5px;font-size:0.9em;width:52px;text-align:center';
     Object.entries(_mediaSourceConfig).forEach(([src, v]) => {
       const label = src.charAt(0).toUpperCase() + src.slice(1);
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td style="padding:3px 18px 3px 0;font-weight:500">${label}</td>
-        <td style="padding:3px 14px;text-align:center">
+        <td style="padding:3px 14px 3px 0;font-weight:500">${label}</td>
+        <td style="padding:3px 10px;text-align:center">
           <input type="checkbox" data-src="${src}" data-field="enabled"
                  ${v.enabled ? 'checked' : ''}
                  onchange="_onMediaSrcTableChange(this)">
         </td>
-        <td style="padding:3px 14px;text-align:center">
+        <td style="padding:3px 10px;text-align:center">
+          <input type="number" data-src="${src}" data-field="show_img"
+                 min="0" max="100" value="${v.show_img}" style="${inp}"
+                 onchange="_onMediaSrcTableChange(this)">
+        </td>
+        <td style="padding:3px 10px;text-align:center">
           <input type="number" data-src="${src}" data-field="n_img"
                  min="0" max="200" value="${v.n_img}" style="${inp}"
                  onchange="_onMediaSrcTableChange(this)">
         </td>
-        <td style="padding:3px 0 3px 14px;text-align:center">
+        <td style="padding:3px 10px;text-align:center">
+          <input type="number" data-src="${src}" data-field="show_vid"
+                 min="0" max="50" value="${v.show_vid}" style="${inp}"
+                 onchange="_onMediaSrcTableChange(this)">
+        </td>
+        <td style="padding:3px 0 3px 10px;text-align:center">
           <input type="number" data-src="${src}" data-field="n_vid"
                  min="0" max="50" value="${v.n_vid}" style="${inp}"
                  onchange="_onMediaSrcTableChange(this)">
@@ -4281,7 +4463,12 @@ placeholder="Enter your story here"></textarea>
         body: JSON.stringify((function() {
           const enabledSrcs = Object.entries(_mediaSourceConfig).filter(([, v]) => v.enabled).map(([k]) => k);
           const srcLimits   = Object.fromEntries(
-            Object.entries(_mediaSourceConfig).map(([src, v]) => [src, { candidates_images: v.n_img, candidates_videos: v.n_vid }])
+            Object.entries(_mediaSourceConfig).map(([src, v]) => [src, {
+              candidates_images: v.n_img,
+              candidates_videos: v.n_vid,
+              top_n_images:      v.show_img,
+              top_n_videos:      v.show_vid,
+            }])
           );
           const maxNImg = enabledSrcs.length ? Math.max(...enabledSrcs.map(s => _mediaSourceConfig[s].n_img)) : 15;
           const maxNVid = enabledSrcs.length ? Math.max(...enabledSrcs.map(s => _mediaSourceConfig[s].n_vid)) : 5;
@@ -11913,6 +12100,101 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── AI SFX Generate: submit generation job to AI server ──────────────
+        elif self.path == "/api/ai_sfx_generate":
+            try:
+                length      = int(self.headers.get("Content-Length", 0))
+                payload     = json.loads(self.rfile.read(length))
+                slug        = payload.get("slug", "").strip()
+                ep_id       = payload.get("ep_id", "").strip()
+                item_id     = payload.get("item_id", "").strip()
+                prompt      = payload.get("prompt", "").strip()
+                duration_sec = float(payload.get("duration_sec", 5.0))
+                if not all([slug, ep_id, item_id, prompt]):
+                    raise ValueError("slug, ep_id, item_id, and prompt are required")
+                timestamp_ms = int(time.time() * 1000)
+                h = hashlib.sha1(prompt.encode()).hexdigest()[:8]
+                asset_id = f"{item_id}-{h}-{timestamp_ms}"
+                req_body = json.dumps({
+                    "manifest": {
+                        "sfx_items": [{
+                            "asset_id":    asset_id,
+                            "ai_prompt":   prompt,
+                            "duration_sec": duration_sec,
+                        }]
+                    },
+                    "asset_types": ["sfx"],
+                    "asset_ids":   [asset_id],
+                }).encode()
+                req = _urllib_req.Request(
+                    _AI_SERVER_URL + "/jobs",
+                    data=req_body,
+                    headers={"Content-Type": "application/json",
+                             "X-Api-Key": _AI_SERVER_KEY},
+                    method="POST",
+                )
+                with _urllib_req.urlopen(req, timeout=15) as resp:
+                    ai_resp = json.loads(resp.read())
+                body = json.dumps({"job_id": ai_resp.get("job_id"),
+                                   "asset_id": asset_id,
+                                   "timestamp_ms": timestamp_ms}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── AI SFX Save: fetch generated audio from AI server → local path ───
+        elif self.path == "/api/ai_sfx_save":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                payload  = json.loads(self.rfile.read(length))
+                job_id   = payload.get("job_id", "").strip()
+                filename = payload.get("filename", "").strip()
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                item_id  = payload.get("item_id", "").strip()
+                ts_ms    = payload.get("timestamp_ms", "")
+                if not all([job_id, filename, slug, ep_id, item_id, ts_ms]):
+                    raise ValueError("job_id, filename, slug, ep_id, item_id, timestamp_ms required")
+                # Fetch audio bytes from AI server
+                req = _urllib_req.Request(
+                    _AI_SERVER_URL + f"/jobs/{job_id}/files/{filename}",
+                    headers={"X-Api-Key": _AI_SERVER_KEY},
+                )
+                with _urllib_req.urlopen(req, timeout=120) as resp:
+                    audio_bytes = resp.read()
+                # Save to episode sfx assets directory
+                dest_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                        "assets", "sfx", item_id)
+                os.makedirs(dest_dir, exist_ok=True)
+                dest_file = f"ai_{ts_ms}.mp3"
+                dest_path = os.path.join(dest_dir, dest_file)
+                with open(dest_path, "wb") as fh:
+                    fh.write(audio_bytes)
+                body = json.dumps({"path": dest_path,
+                                   "url":  "file://" + dest_path,
+                                   "filename": dest_file}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # ── Media: write selections.json (POST /api/media_confirm) ───────────
         elif self.path == "/api/media_confirm":
             try:
@@ -12930,6 +13212,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/media_batches", "/api/media_batch_status",
                   "/api/media_batch", "/api/media_confirm",
                   "/api/sfx_search", "/api/sfx_save",
+                  "/api/ai_sfx_generate", "/api/ai_sfx_save",
                   "/api/ai_images", "/api/ai_job_status",
                   "/api/serve_media_file",
                   "/api/music_loop_candidates", "/api/music_timeline",

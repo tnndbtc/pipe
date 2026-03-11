@@ -1229,15 +1229,17 @@ def fetch_images(
 
             try:
                 if source == "pexels":
+                    n_src = cfg.get("source_limits", {}).get("pexels", {}).get(
+                        "candidates_images", per_page_pexels)
                     hits = _pexels_search_images(
                         api_keys.get("pexels", ""),
                         query,
-                        per_page_pexels,
+                        n_src,
                         backoff,
                         extra_params=source_filters or None,
                     )
                     pexels_key = api_keys.get("pexels", "")
-                    for i, ph in enumerate(hits[:per_q]):
+                    for i, ph in enumerate(hits[:n_src]):
                         pid  = str(ph.get("id", i))
                         uid  = f"pexels_img_{pid}"
                         if uid in seen_ids:
@@ -1282,14 +1284,16 @@ def fetch_images(
                         _jitter(cfg, source)
 
                 elif source == "pixabay":
+                    n_src = cfg.get("source_limits", {}).get("pixabay", {}).get(
+                        "candidates_images", per_page_pixabay)
                     hits = _pixabay_search_images(
                         api_keys.get("pixabay", ""),
                         query,
-                        per_page_pixabay,
+                        n_src,
                         backoff,
                         extra_params=source_filters or None,
                     )
-                    for i, hit in enumerate(hits[:per_q]):
+                    for i, hit in enumerate(hits[:n_src]):
                         hid  = str(hit.get("id", i))
                         uid  = f"pixabay_img_{hid}"
                         if uid in seen_ids:
@@ -1551,14 +1555,16 @@ def fetch_videos(
 
             try:
                 if source == "pexels":
+                    n_src = cfg.get("source_limits", {}).get("pexels", {}).get(
+                        "candidates_videos", per_page_pexels)
                     hits = _pexels_search_videos(
                         api_keys.get("pexels", ""),
                         query,
-                        per_page_pexels,
+                        n_src,
                         backoff,
                         extra_params=source_filters or None,
                     )
-                    for i, vd in enumerate(hits[:per_q]):
+                    for i, vd in enumerate(hits[:n_src]):
                         vid  = str(vd.get("id", i))
                         uid  = f"pexels_vid_{vid}"
                         if uid in seen_ids:
@@ -1602,14 +1608,16 @@ def fetch_videos(
                         _jitter(cfg, source)
 
                 elif source == "pixabay":
+                    n_src = cfg.get("source_limits", {}).get("pixabay", {}).get(
+                        "candidates_videos", per_page_pixabay)
                     hits = _pixabay_search_videos(
                         api_keys.get("pixabay", ""),
                         query,
-                        per_page_pixabay,
+                        n_src,
                         backoff,
                         extra_params=source_filters or None,
                     )
-                    for i, hit in enumerate(hits[:per_q]):
+                    for i, hit in enumerate(hits[:n_src]):
                         hid  = str(hit.get("id", i))
                         uid  = f"pixabay_vid_{hid}"
                         if uid in seen_ids:

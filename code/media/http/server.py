@@ -958,6 +958,13 @@ async def _run_batch(batch_id: str) -> None:
             images_ranked = _relativise(images_ranked, batch_dir)
             videos_ranked = _relativise(videos_ranked, batch_dir)
 
+            # Apply per-source "top_n_images" / "top_n_videos" limits if configured.
+            # Ranked lists are already sorted by score desc; walk them and keep at most
+            # top_n_images from each source, preserving global score order.
+            src_limits = cfg.get("source_limits", {})
+            images_ranked = _apply_per_source_top_n(images_ranked, src_limits, "top_n_images")
+            videos_ranked = _apply_per_source_top_n(videos_ranked, src_limits, "top_n_videos")
+
             store.update_item(
                 batch_id, item_id,
                 status="done",
@@ -995,6 +1002,25 @@ async def _run_batch(batch_id: str) -> None:
 # ---------------------------------------------------------------------------
 # URL / path helpers
 # ---------------------------------------------------------------------------
+
+def _apply_per_source_top_n(ranked: list[dict], src_limits: dict, key: str) -> list[dict]:
+    """
+    Walk a score-sorted ranked list and keep at most src_limits[source][key]
+    entries per source.  Entries without a source or without a limit are kept as-is.
+    Global score order is preserved.
+    """
+    from collections import defaultdict
+    counts: dict = defaultdict(int)
+    out = []
+    for r in ranked:
+        src = (r.get("source") or {}).get("source_site", "")
+        limit = (src_limits.get(src) or {}).get(key) if src else None
+        if limit is None or counts[src] < limit:
+            out.append(r)
+            if src:
+                counts[src] += 1
+    return out
+
 
 def _relativise(ranked: list[dict], batch_dir: Path) -> list[dict]:
     """Convert absolute 'path' fields to paths relative to batch_dir."""
