@@ -78,10 +78,18 @@ ALLOWLIST_COLLECTIONS: frozenset = frozenset({
 })
 
 DOWNLOAD_ALLOWLIST: list = [
-    "images.pexels.com", "videos.pexels.com", "cdn.pixabay.com", "pixabay.com",
+    "images.pexels.com", "videos.pexels.com",
+    "vod-progressive.akamaized.net",  # Pexels video CDN (Akamai)
+    "cdn.pixabay.com", "pixabay.com",
+    # Pixabay pre-2020 video CDN: videos.*.url in the API returns player.vimeo.com
+    # URLs for older content that was originally hosted on Vimeo before Pixabay migrated
+    # to their own CDN.  Without these, all such videos return "pending" and 0 are saved.
+    "player.vimeo.com", "*.vimeocdn.com", "vimeocdn.com",
     "upload.wikimedia.org", "*.wikimedia.org",
     "archive.org", "ia*.us.archive.org", "ia*.archive.org",
     "api.europeana.eu", "europeanastatic.eu", "*.europeana.eu",
+    # Europeana thumbnail proxy final-hop CDNs (served via api.europeana.eu/thumbnail redirect):
+    "europeana-iiif.org", "*.europeana-iiif.org",
     "live.staticflickr.com", "farm*.staticflickr.com",
     "cdn.openverse.engineering", "api.openverse.org",
     "cdn.freesound.org", "freesound.org",
@@ -158,12 +166,17 @@ def _resolve_all_ips(hostname: str) -> list[str]:
 
 
 class _BoundHostAdapter(requests.adapters.HTTPAdapter):
-    """HTTP adapter that connects to pre-validated IP addresses.
+    """HTTP adapter that carries pre-validated IPs for logging.
 
-    Prevents DNS rebinding by binding the TCP socket directly to an IP
-    that was already validated against private ranges. The Host header
-    is set to the original hostname for SNI + vhost routing. TLS cert
-    verification remains active against the original hostname.
+    NOTE: We intentionally do NOT rewrite the URL to a raw IP address.
+    Rewriting the URL breaks TLS certificate verification because urllib3
+    verifies the cert against the URL hostname (the IP), not the Host header,
+    and the server's cert is for the original domain — causing an SSL mismatch
+    on every request.
+
+    DNS pre-validation in _hard_block_check (resolve all A/AAAA, reject private
+    ranges) provides the SSRF protection. The theoretical DNS-rebinding window
+    between that check and the actual connect() is negligible for this workload.
     """
 
     def __init__(self, validated_ips: list[str], hostname: str, **kwargs):
@@ -171,22 +184,7 @@ class _BoundHostAdapter(requests.adapters.HTTPAdapter):
         self._hostname = hostname
         super().__init__(**kwargs)
 
-    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
-        # Replace hostname with validated IP in the URL, set Host header
-        from urllib.parse import urlparse, urlunparse
-        parsed = urlparse(request.url)
-        ip = self._validated_ips[0]
-        # For IPv6, wrap in brackets
-        ip_host = f"[{ip}]" if ":" in ip else ip
-        # Preserve port if present
-        if parsed.port:
-            netloc = f"{ip_host}:{parsed.port}"
-        else:
-            netloc = ip_host
-        request.url = urlunparse(parsed._replace(netloc=netloc))
-        request.headers["Host"] = self._hostname
-        return super().send(request, stream=stream, timeout=timeout,
-                           verify=verify, cert=cert, proxies=proxies)
+    # No send() override — let requests use normal DNS + TLS verification.
 
 
 def _hard_block_check(url: str) -> tuple[str, list[str]]:
@@ -570,6 +568,14 @@ def _source_search_openverse_images(
     for result in results:
         license_summary = _normalize_openverse_license(result)
         if not is_license_acceptable(license_summary): continue
+
+        # Require a thumbnail URL from Openverse's own CDN.  Without it, the only
+        # fallback is the raw provider URL (could be any host), which hits the SSRF
+        # allowlist and returns "pending" for the vast majority of providers.
+        thumbnail = result.get("thumbnail") or ""
+        if not thumbnail:
+            continue
+
         source_id = result.get("id", "")
         title = result.get("title") or ""
         author = result.get("creator") or ""
@@ -581,7 +587,7 @@ def _source_search_openverse_images(
             "source_site": "openverse", "source_id": source_id,
             "asset_page_url": result.get("foreign_landing_url", ""),
             "file_url": result.get("url", ""),
-            "preview_url": result.get("thumbnail", ""),
+            "preview_url": thumbnail,
             "title": title, "description": "",
             "tags": [t["name"] for t in result.get("tags", []) if isinstance(t, dict)],
             "photographer": author, "license_summary": license_summary,
@@ -614,7 +620,7 @@ def _source_search_wikimedia_images(
         "gsrsearch": query, "gsrlimit": min(per_page, 50),
         "prop": "imageinfo",
         "iiprop": "url|size|dimensions|extmetadata|mime|mediatype",
-        "iiurlwidth": 600, "format": "json",
+        "iiurlwidth": 1280, "format": "json",
     }
     if extra_params: params.update(extra_params)
 
@@ -772,7 +778,10 @@ def _source_search_europeana_images(
 
     params: dict = {
         "wskey": europeana_key, "query": query, "qf": "TYPE:IMAGE",
-        "reusability": "open", "media": "true", "thumbnail": "true",
+        # "open" = CC0/PDM only.  "restricted" adds CC BY (and CC BY-SA/NC which
+        # is_license_acceptable will then reject).  Using both broadens recall
+        # significantly — many cultural heritage items carry CC BY, not CC0/PDM.
+        "reusability": "open,restricted", "media": "true", "thumbnail": "true",
         "rows": min(per_page, 100), "cursor": "*", "profile": "rich",
     }
     if extra_params: params.update(extra_params)
@@ -800,6 +809,10 @@ def _source_search_europeana_images(
         if not is_license_acceptable(license_summary): continue
 
         preview_url = (item.get("edmPreview") or [""])[0]
+        # Require Europeana's own CDN thumbnail.  The fallback (edmIsShownBy) is a
+        # museum/institution server URL that is almost never in DOWNLOAD_ALLOWLIST.
+        if not preview_url:
+            continue
         title = (item.get("title") or [""])[0]
         author = ", ".join(item.get("dcCreator") or [])
         provider = (item.get("dataProvider") or [""])[0]
@@ -1206,6 +1219,10 @@ def _get(url: str, headers: Optional[dict] = None, validated_ips: list[str] | No
             log.warning("SSRF block reason=rejected_host host=%s url=%s source=%s",
                         new_hostname, location[:80], source)
             raise ValueError(f"rejected_host: redirect target {new_hostname} is rejected")
+        if status == "unknown":
+            log.warning("SSRF block reason=pending_host_review host=%s url=%s source=%s",
+                        new_hostname, location[:80], source)
+            raise ValueError(f"pending_host_review: redirect target {new_hostname} not in allowlist")
 
         # Update for next hop
         url = location
@@ -1633,6 +1650,46 @@ def _get_queries(
 
 
 # ---------------------------------------------------------------------------
+# Query helpers for keyword-indexed sources
+# ---------------------------------------------------------------------------
+
+# Sources that use keyword/full-text indexing rather than semantic search.
+# Long descriptive phrases (e.g. "Soviet reactor building dark dramatic night")
+# match nothing in these databases.  _keyword_fallbacks() produces progressively
+# shorter forms to retry when the full query returns 0 candidates.
+_KEYWORD_INDEXED_SOURCES = frozenset({"openverse", "wikimedia", "europeana"})
+
+
+def _keyword_fallbacks(query: str, item: dict | None = None) -> list[str]:
+    """
+    Return up to two shorter fallback queries for keyword-indexed databases.
+
+    Strategy (each only added if different from the original and non-empty):
+      1. First 4 words  — preserves the most specific phrase chunk
+      2. First 2 words  — broadest catch-all
+      3. item.include_keywords location term — direct keyword hit (e.g. "Chernobyl")
+    """
+    words = query.split()
+    seen: set[str] = {query.lower()}
+    result: list[str] = []
+
+    for n in (4, 2):
+        if len(words) > n:
+            short = " ".join(words[:n])
+            if short.lower() not in seen:
+                seen.add(short.lower())
+                result.append(short)
+
+    if item:
+        kws = item.get("include_keywords") or []
+        loc = next((kw for kw in kws if kw and kw[0].isupper() and len(kw) > 3), "")
+        if loc and loc.lower() not in seen:
+            result.append(loc)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Source-filter helper
 # ---------------------------------------------------------------------------
 
@@ -1889,8 +1946,13 @@ def _pexels_pick_preview_video_url(video: dict) -> tuple[str | None, int, int]:
 
 
 def _pixabay_pick_preview_image_url(hit: dict) -> str | None:
-    """Pick a preview-resolution image URL from a Pixabay hit object (~640px)."""
-    return hit.get("webformatURL") or hit.get("previewURL")
+    """Pick the best downloadable image URL from a Pixabay hit object.
+
+    Prefer largeImageURL (≤1280px, same CDN as webformatURL) so CLIP scores are
+    comparable with Pexels medium images (~1280px).  webformatURL (~640px) makes
+    Pixabay images score lower even when content is equally relevant.
+    """
+    return hit.get("largeImageURL") or hit.get("webformatURL") or hit.get("previewURL")
 
 
 def _pixabay_pick_preview_video_url(hit: dict) -> str | None:
@@ -2049,22 +2111,46 @@ def fetch_images(
                     candidates = _source_search_openverse_images(
                         api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
+                    # Keyword-indexed: descriptive phrases often return 0.  Retry with
+                    # progressively shorter queries until we get results.
+                    if not candidates:
+                        for fb_q in _keyword_fallbacks(query, item):
+                            candidates = _source_search_openverse_images(
+                                api_keys, fb_q, fetch_n, backoff, extra_params=source_filters or None,
+                            )
+                            if candidates:
+                                log.debug("openverse fallback q=%r -> %d results", fb_q, len(candidates))
+                                break
                     for c in candidates:
                         sid = c.get("source_id", "");  uid = f"openverse_img_{sid}"
                         url = c["file_url"]
                         if not url: continue
-                        ext = Path(url.split("?")[0]).suffix or ".jpg"
+                        preview = c.get("preview_url", "")
+                        # Per /tmp/t1 analysis: prefer file_url (full-res original) for the
+                        # actual download; preview_url (api.openverse.org proxy thumbnail) is
+                        # used only as the UI thumb.  file_url host (e.g. live.staticflickr.com)
+                        # is in DOWNLOAD_ALLOWLIST; preview_url host (api.openverse.org) also is.
+                        # Prefer file_url so CLIP scoring uses the real image, not a thumbnail.
+                        dl_url = url or preview
+                        ext = Path(dl_url.split("?")[0]).suffix or ".jpg"
                         if ext.lower() not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
                         dest = src_dir / f"{uid}{ext}"
-                        thumb = c.get("preview_url", "")
-                        info  = {**c, "file_url": url, "preview_url": c.get("preview_url", "")}
-                        dl_url = c.get("preview_url") or url
-                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info, "thumb": thumb})
+                        info  = {**c, "file_url": url, "preview_url": preview}
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info, "thumb": preview})
 
                 elif source == "wikimedia":
                     candidates = _source_search_wikimedia_images(
                         api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
+                    # Keyword-indexed: retry with shorter queries on zero results.
+                    if not candidates:
+                        for fb_q in _keyword_fallbacks(query, item):
+                            candidates = _source_search_wikimedia_images(
+                                api_keys, fb_q, fetch_n, backoff, extra_params=source_filters or None,
+                            )
+                            if candidates:
+                                log.debug("wikimedia fallback q=%r -> %d results", fb_q, len(candidates))
+                                break
                     for c in candidates:
                         sid = c.get("source_id", "")
                         uid = f"wikimedia_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
@@ -2082,6 +2168,15 @@ def fetch_images(
                     candidates = _source_search_europeana_images(
                         api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
+                    # Keyword-indexed: retry with shorter queries on zero results.
+                    if not candidates:
+                        for fb_q in _keyword_fallbacks(query, item):
+                            candidates = _source_search_europeana_images(
+                                api_keys, fb_q, fetch_n, backoff, extra_params=source_filters or None,
+                            )
+                            if candidates:
+                                log.debug("europeana fallback q=%r -> %d results", fb_q, len(candidates))
+                                break
                     for c in candidates:
                         sid = c.get("source_id", "")
                         uid = f"europeana_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
