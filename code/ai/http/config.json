@@ -9,7 +9,7 @@
     "sfx":         "audiogen",
     "bg_video":    "cogvideox-2b"
   },
-  "sfx_model": "small",
+  "sfx_model": "medium",
   "bg_hints": {
     "characters":  "plain white studio background, solid backdrop, no scenery, isolated figure",
     "backgrounds": null,

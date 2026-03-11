@@ -12248,9 +12248,20 @@ class Handler(BaseHTTPRequestHandler):
                 ts_ms    = payload.get("timestamp_ms", "")
                 if not all([job_id, filename, slug, ep_id, item_id, ts_ms]):
                     raise ValueError("job_id, filename, slug, ep_id, item_id, timestamp_ms required")
+                # Resolve actual filename from AI server job state
+                state_req = _urllib_req.Request(
+                    _AI_SERVER_URL + f"/jobs/{job_id}",
+                    headers={"X-Api-Key": _AI_SERVER_KEY},
+                )
+                with _urllib_req.urlopen(state_req, timeout=15) as sr:
+                    job_state = json.loads(sr.read())
+                actual_files = job_state.get("files", [])
+                if not actual_files:
+                    raise ValueError(f"AI job {job_id} completed with no files")
+                actual_filename = actual_files[0]
                 # Fetch audio bytes from AI server
                 req = _urllib_req.Request(
-                    _AI_SERVER_URL + f"/jobs/{job_id}/files/{filename}",
+                    _AI_SERVER_URL + f"/jobs/{job_id}/files/{actual_filename}",
                     headers={"X-Api-Key": _AI_SERVER_KEY},
                 )
                 with _urllib_req.urlopen(req, timeout=120) as resp:

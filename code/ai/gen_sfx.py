@@ -163,7 +163,7 @@ def load_from_manifest(manifest_path: str, asset_id_filter):
     if sfx_items is None:
         return None  # section absent -- caller falls back to hardcoded
     if asset_id_filter:
-        sfx_items = [j for j in sfx_items if j.get("shot_id") == asset_id_filter]
+        sfx_items = [j for j in sfx_items if j.get("asset_id") == asset_id_filter or j.get("shot_id") == asset_id_filter]
     return sfx_items
 
 
@@ -257,29 +257,12 @@ def parse_args():
 # Model loader
 # ---------------------------------------------------------------------------
 def load_audiogen(preference: str, device: str):
-    """Load AudioGen, falling back to small if medium OOMs."""
+    """Load AudioGen medium (only publicly available model)."""
     from audiocraft.models import AudioGen
 
-    if preference == "small":
-        print(f"[MODEL] Loading AudioGen small...")
-        model = AudioGen.get_pretrained(AUDIOGEN_SMALL, device=device)
-        return model
-
-    try:
-        print(f"[MODEL] Loading AudioGen medium...")
-        model = AudioGen.get_pretrained(AUDIOGEN_MEDIUM, device=device)
-        # Probe with a tiny generation to confirm it fits in VRAM
-        model.set_generation_params(duration=1.0)
-        model.generate(["test"])
-        torch.cuda.empty_cache()
-        print("[MODEL] AudioGen medium fits -- using medium.")
-        return model
-    except (RuntimeError, torch.cuda.OutOfMemoryError) as exc:
-        print(f"[WARN] AudioGen medium OOM ({exc}). Falling back to small.")
-        torch.cuda.empty_cache()
-        gc.collect()
-        model = AudioGen.get_pretrained(AUDIOGEN_SMALL, device=device)
-        return model
+    print(f"[MODEL] Loading AudioGen medium...")
+    model = AudioGen.get_pretrained(AUDIOGEN_MEDIUM, device=device)
+    return model
 
 
 def load_stable_audio_model(device: str):
@@ -326,9 +309,9 @@ def _iter_sfx_tags(sfx_jobs, default_duration: float = 10.0):
       manifest sfx_items -- {shot_id, tag, duration_sec}
     """
     for job in sfx_jobs:
-        shot_id  = job.get("shot_id", "unknown")
+        shot_id  = job.get("asset_id") or job.get("shot_id") or "unknown"
         duration = job.get("duration") or job.get("duration_sec") or default_duration
-        tags     = job.get("tags") or ([job["tag"]] if "tag" in job else [])
+        tags     = job.get("tags") or ([job["tag"]] if "tag" in job else None) or ([job["ai_prompt"]] if "ai_prompt" in job else [])
         for tag in tags:
             yield shot_id, tag, float(duration)
 
