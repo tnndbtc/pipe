@@ -1893,9 +1893,13 @@ def _get_queries_for_source(
         return result or [(search_prompt, n)]
 
     if source == "openverse":
-        # 4-word truncated phrases first, location anchor as last-resort top-up.
-        phrases = [_trunc(q, 4) for q in raw_queries]
-        if loc and loc.lower() not in {p.lower() for p in phrases}:
+        # Cap at 2 queries per item: 1 primary 4-word phrase + 1 location anchor.
+        # page_size=50 already returns up to 50 candidates per query, which is
+        # more than enough to fill the 20–30 image budget.  More queries add
+        # API load with diminishing returns on result quality.
+        primary = _trunc(raw_queries[0], 4) if raw_queries else search_prompt
+        phrases = [primary]
+        if loc and loc.lower() != primary.lower():
             phrases.append(loc)
         return _dedup_build(phrases)
 
