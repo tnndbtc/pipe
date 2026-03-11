@@ -81,7 +81,7 @@ def test_fetch_images_skips_source_with_zero_candidates(tmp_path):
     with ExitStack() as stack:
         mock_pexels  = stack.enter_context(patch.object(downloader, "_pexels_search_images",  return_value=[]))
         mock_pixabay = stack.enter_context(patch.object(downloader, "_pixabay_search_images", return_value=[]))
-        stack.enter_context(patch.object(downloader, "_run_download_tasks", return_value=([], {})))
+        stack.enter_context(patch.object(downloader, "_run_download_tasks", return_value=([], {}, [])))
 
         downloader.fetch_images("test query", 30, tmp_path, api_keys, cfg)
 
@@ -107,7 +107,7 @@ def test_fetch_videos_skips_source_with_zero_candidates(tmp_path):
     with ExitStack() as stack:
         mock_pexels  = stack.enter_context(patch.object(downloader, "_pexels_search_videos",  return_value=[]))
         mock_pixabay = stack.enter_context(patch.object(downloader, "_pixabay_search_videos", return_value=[]))
-        stack.enter_context(patch.object(downloader, "_run_download_tasks", return_value=([], {})))
+        stack.enter_context(patch.object(downloader, "_run_download_tasks", return_value=([], {}, [])))
 
         downloader.fetch_videos("test query", 30, tmp_path, api_keys, cfg)
 
@@ -138,8 +138,8 @@ def test_fetch_images_returns_results_from_all_sources(tmp_path):
     def _fake_run_download_tasks(tasks, cfg, max_workers=None, label=""):
         call_count["n"] += 1
         if "pexels" in label:
-            return pexels_results[:len(tasks)], {}
-        return pixabay_results[:len(tasks)], {}
+            return pexels_results[:len(tasks)], {}, []
+        return pixabay_results[:len(tasks)], {}, []
 
     pexels_hits  = [{"id": i, "src": {"large": f"http://p.com/{i}.jpg"}, "url": f"http://p.com/{i}"} for i in range(5)]
     pixabay_hits = [{"id": i, "largeImageURL": f"http://pb.com/{i}.jpg",
@@ -153,7 +153,7 @@ def test_fetch_images_returns_results_from_all_sources(tmp_path):
         stack.enter_context(patch.object(downloader, "_run_download_tasks",    side_effect=_fake_run_download_tasks))
         stack.enter_context(patch.object(downloader, "_jitter"))
 
-        result = downloader.fetch_images("nature", 5, tmp_path, api_keys, cfg)
+        result, _pending = downloader.fetch_images("nature", 5, tmp_path, api_keys, cfg)
 
     sources_in_result = {info["source_site"] for _, info in result}
     assert "pexels"  in sources_in_result, "pexels results must be included"
@@ -177,7 +177,7 @@ def test_fetch_images_respects_max_candidates_cap(tmp_path):
     api_keys = {"pexels": "pk", "pixabay": "pb"}
 
     def _fake_run(tasks, cfg, max_workers=None, label=""):
-        return [(tmp_path / f"img_{label}_{i}.jpg", {"source_site": label}) for i in range(len(tasks))], {}
+        return [(tmp_path / f"img_{label}_{i}.jpg", {"source_site": label}) for i in range(len(tasks))], {}, []
 
     pexels_hits  = [{"id": i, "src": {"large": f"http://p.com/{i}.jpg"}, "url": f"http://p.com/{i}"} for i in range(10)]
     pixabay_hits = [{"id": i, "largeImageURL": f"http://pb.com/{i}.jpg",
@@ -191,7 +191,7 @@ def test_fetch_images_respects_max_candidates_cap(tmp_path):
         stack.enter_context(patch.object(downloader, "_run_download_tasks",    side_effect=_fake_run))
         stack.enter_context(patch.object(downloader, "_jitter"))
 
-        result = downloader.fetch_images("nature", 10, tmp_path, api_keys, cfg)
+        result, _pending = downloader.fetch_images("nature", 10, tmp_path, api_keys, cfg)
 
     assert len(result) <= 8, f"Expected at most 8 results, got {len(result)}"
 
@@ -215,13 +215,14 @@ def test_run_download_tasks_skips_existing_files(tmp_path):
 
     downloaded_urls: list[str] = []
 
-    def _fake_download(url, dest, headers=None):
+    def _fake_download(url, dest, headers=None, cfg=None, source="", media_type="image"):
         downloaded_urls.append(url)
         dest.write_bytes(b"downloaded")
+        return None
 
     with patch.object(downloader, "_download_file", side_effect=_fake_download):
         with patch.object(downloader, "_write_info_sidecar"):
-            saved, _ = downloader._run_download_tasks(tasks, cfg, label="test")
+            saved, _, _pending = downloader._run_download_tasks(tasks, cfg, label="test")
 
     assert len(downloaded_urls) == 1, "Only the missing file should be downloaded"
     assert downloaded_urls[0] == "http://example.com/b.jpg"
@@ -245,7 +246,7 @@ def test_fetch_images_passes_label_to_run_download_tasks(tmp_path):
     labels_seen: list[str] = []
     def _fake_run(tasks, cfg, max_workers=None, label=""):
         labels_seen.append(label)
-        return [], {}
+        return [], {}, []
 
     with ExitStack() as stack:
         stack.enter_context(patch.object(downloader, "_pexels_search_images", return_value=pexels_hits))
@@ -272,7 +273,7 @@ def test_fetch_videos_calls_wikimedia_when_enabled(tmp_path):
     with ExitStack() as stack:
         mock_wm_vid = stack.enter_context(
             patch.object(downloader, "_source_search_wikimedia_videos", return_value=[]))
-        stack.enter_context(patch.object(downloader, "_run_download_tasks", return_value=([], {})))
+        stack.enter_context(patch.object(downloader, "_run_download_tasks", return_value=([], {}, [])))
         stack.enter_context(patch.object(downloader, "_jitter"))
 
         downloader.fetch_videos("ancient ruins", 5, tmp_path, api_keys, cfg)

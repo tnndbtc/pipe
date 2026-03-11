@@ -251,6 +251,9 @@ async def lifespan(app: FastAPI):
     store = bs.BatchStore(PROJECTS_ROOT)
     store.startup_scan()
 
+    # Load SSRF host lists
+    downloader._load_host_lists({"projects_root": str(PROJECTS_ROOT)})
+
     # Per-item download semaphore
     _sem = _make_semaphore()
 
@@ -353,6 +356,18 @@ async def create_batch(body: BatchRequest, _: None = Depends(require_auth)):
 
     if not backgrounds:
         raise HTTPException(status_code=400, detail="manifest.backgrounds contains no valid items")
+
+    # A13: Validate manifest — reject any item containing raw external download URLs
+    for item_id, item_data in backgrounds.items():
+        if isinstance(item_data, dict):
+            for key in ("download_url", "file_url", "url"):
+                val = item_data.get(key, "")
+                if val and isinstance(val, str) and val.startswith("http"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"manifest.backgrounds[{item_id}] contains raw download URL in '{key}' — "
+                               f"only search queries and metadata are accepted",
+                    )
 
     batch_id = "b_" + uuid.uuid4().hex[:8]
     store.create(batch_id, body.project, body.episode_id, body.top_n, backgrounds,
@@ -543,6 +558,322 @@ async def resume_batch(batch_id: str, body: ResumeBatchBody = ResumeBatchBody(),
     await batch_queue.put(batch_id)
     log.info("Resuming batch %s  (%d items to process)", batch_id, reset)
     return {"batch_id": batch_id, "status": "queued", "poll_url": f"/batches/{batch_id}"}
+
+
+# ---------------------------------------------------------------------------
+# POST /hosts/allow — approve a hostname for SSRF allowlist
+# ---------------------------------------------------------------------------
+
+class HostAllowRequest(BaseModel):
+    hostname: str
+    note: str = ""
+    source: str = ""
+
+
+@app.post("/hosts/allow")
+async def allow_host(body: HostAllowRequest, _: None = Depends(require_auth)):
+    """Add a hostname to the SSRF dynamic allowlist."""
+    from datetime import datetime, timezone
+    hostname = body.hostname.strip().lower()
+    if not hostname:
+        raise HTTPException(status_code=400, detail="hostname is required")
+    # No wildcards allowed
+    if "*" in hostname or "?" in hostname:
+        raise HTTPException(status_code=400, detail="wildcards not allowed in hostname")
+
+    meta = {
+        "added_ts": datetime.now(timezone.utc).isoformat(),
+        "added_by": "user",
+        "source": body.source,
+        "note": body.note,
+        "expires_ts": None,
+    }
+    downloader._add_allowed_host(hostname, meta, {"projects_root": str(PROJECTS_ROOT)})
+
+    # Audit trail
+    _append_audit("allow", hostname, meta)
+
+    return {"status": "allowed", "hostname": hostname}
+
+
+# ---------------------------------------------------------------------------
+# POST /hosts/reject — reject a hostname
+# ---------------------------------------------------------------------------
+
+class HostRejectRequest(BaseModel):
+    hostname: str
+
+
+@app.post("/hosts/reject")
+async def reject_host(body: HostRejectRequest, _: None = Depends(require_auth)):
+    """Add a hostname to the SSRF rejected list."""
+    hostname = body.hostname.strip().lower()
+    if not hostname:
+        raise HTTPException(status_code=400, detail="hostname is required")
+
+    downloader._add_rejected_host(hostname, {"projects_root": str(PROJECTS_ROOT)})
+
+    # Audit trail
+    _append_audit("reject", hostname, {})
+
+    return {"status": "rejected", "hostname": hostname}
+
+
+# ---------------------------------------------------------------------------
+# GET /hosts — list current allowed and rejected hosts
+# ---------------------------------------------------------------------------
+
+@app.get("/hosts")
+async def list_hosts(_: None = Depends(require_auth)):
+    """Return current SSRF allowed and rejected host lists."""
+    return {
+        "allowed": downloader._ssrf_allowed_hosts,
+        "rejected": downloader._ssrf_rejected_hosts,
+    }
+
+
+def _append_audit(action: str, hostname: str, meta: dict) -> None:
+    """Append an entry to the SSRF audit log."""
+    from datetime import datetime, timezone
+    audit_path = PROJECTS_ROOT / "_ssrf_audit.jsonl"
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "hostname": hostname,
+        "added_by": meta.get("added_by", "user"),
+        "source": meta.get("source", ""),
+        "note": meta.get("note", ""),
+    }
+    try:
+        with audit_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        log.warning("Could not append to audit log %s: %s", audit_path, exc)
+
+
+# ---------------------------------------------------------------------------
+# POST /batches/{batch_id}/items/{item_id}/resume — resume downloads for pending hosts (MH-2)
+# ---------------------------------------------------------------------------
+
+@app.post("/batches/{batch_id}/items/{item_id}/resume", status_code=202)
+async def resume_item_downloads(batch_id: str, item_id: str, _: None = Depends(require_auth)):
+    """Re-run download phase for a single item using stored pending candidates.
+
+    Only downloads candidates whose hostnames have been approved since the
+    initial batch run. Appends results to existing item results.
+    """
+    state = store.get(batch_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    pending_all = state.get("pending_candidates") or {}
+    item_candidates = pending_all.get(item_id)
+    if not item_candidates:
+        raise HTTPException(status_code=404, detail=f"No pending candidates for item {item_id}")
+
+    # Filter: only download candidates whose hostnames are now approved
+    approved = []
+    still_pending = []
+    for cand in item_candidates:
+        hostname = cand.get("hostname", "")
+        host_status = downloader._is_host_allowed(hostname)
+        if host_status in ("static", "dynamic"):
+            approved.append(cand)
+        elif host_status == "rejected":
+            pass  # skip rejected
+        else:
+            still_pending.append(cand)
+
+    if not approved:
+        return {
+            "batch_id": batch_id,
+            "item_id": item_id,
+            "status": "no_approved_candidates",
+            "still_pending": len(still_pending),
+        }
+
+    # Download approved candidates in a background thread
+    cfg = dict(config)
+    cfg["content_profile"] = store.get_content_profile(batch_id)
+    if state.get("sources_override"):
+        cfg["sources"] = state["sources_override"]
+    if state.get("source_limits_override"):
+        cfg["source_limits"] = {
+            src: {k: v for k, v in lims.items()
+                  if k in ("candidates_images", "candidates_videos")}
+            for src, lims in state["source_limits_override"].items()
+        }
+
+    batch_dir = store.batch_dir(state["project"], state["episode_id"], batch_id)
+
+    async def _do_resume():
+        from downloader import _download_file, _write_info_sidecar
+        downloaded = 0
+        for cand in approved:
+            url = cand.get("url", "")
+            info = cand.get("info", {})
+            source = info.get("source_site", "")
+
+            # Determine destination
+            source_id = info.get("source_id", cand.get("source_id", ""))
+            uid = f"{source}_img_{source_id}"
+            ext = Path(url.split("?")[0]).suffix or ".jpg"
+            if ext.lower() not in {".jpg", ".jpeg", ".png", ".gif", ".mp4", ".webm"}:
+                ext = ".jpg"
+
+            item_dir = batch_dir / item_id / "images" / source
+            item_dir.mkdir(parents=True, exist_ok=True)
+            dest = item_dir / f"{uid}{ext}"
+
+            try:
+                result = await asyncio.to_thread(
+                    _download_file, url, dest,
+                    headers={}, cfg=cfg, source=source,
+                    media_type="image",
+                )
+                if result is None:  # success
+                    _write_info_sidecar(dest, info)
+                    downloaded += 1
+            except Exception as exc:
+                log.warning("Resume download failed for %s: %s", url[:80], exc)
+
+        # Update pending_candidates: remove processed, keep still_pending
+        if still_pending:
+            pending_all[item_id] = still_pending
+        else:
+            pending_all.pop(item_id, None)
+
+        # Clean up empty pending_candidates
+        if not pending_all:
+            store.update(batch_id, pending_candidates=None)
+        else:
+            store.update(batch_id, pending_candidates=pending_all)
+
+        return downloaded
+
+    downloaded = await _do_resume()
+
+    return {
+        "batch_id": batch_id,
+        "item_id": item_id,
+        "status": "resumed",
+        "downloaded": downloaded,
+        "still_pending": len(still_pending),
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /batches/{batch_id}/items/{item_id}/select — select an asset (MH-3, MH-4)
+# ---------------------------------------------------------------------------
+
+class AssetSelectRequest(BaseModel):
+    asset_path: str          # relative path within batch dir
+    project: str = ""        # override (usually from batch state)
+    episode_id: str = ""     # override (usually from batch state)
+
+
+@app.post("/batches/{batch_id}/items/{item_id}/select")
+async def select_asset(
+    batch_id: str, item_id: str,
+    body: AssetSelectRequest,
+    _: None = Depends(require_auth),
+):
+    """Select an asset for use in a project. Creates .license.json and
+    appends CC BY attribution to youtube_description.txt if needed.
+    """
+    from datetime import datetime, timezone
+
+    state = store.get(batch_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    project = body.project or state["project"]
+    episode_id = body.episode_id or state["episode_id"]
+
+    # Resolve asset path and find its .info.json sidecar
+    batch_dir = store.batch_dir(project, episode_id, batch_id)
+    asset_path = (batch_dir / body.asset_path).resolve()
+
+    # Security: must be inside batch_dir
+    try:
+        asset_path.relative_to(batch_dir)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Asset path outside batch directory")
+
+    if not asset_path.is_file():
+        raise HTTPException(status_code=404, detail="Asset file not found")
+
+    # Read info sidecar
+    sidecar_path = Path(str(asset_path) + ".info.json")
+    if not sidecar_path.exists():
+        raise HTTPException(status_code=404, detail="Asset .info.json sidecar not found")
+
+    info = json.loads(sidecar_path.read_text(encoding="utf-8"))
+
+    # MH-3: Create .license.json alongside the asset
+    now_ts = datetime.now(timezone.utc).isoformat()
+    license_data = {
+        "asset_file":          asset_path.name,
+        "source_site":         info.get("source_site", ""),
+        "asset_page_url":      info.get("asset_page_url", ""),
+        "file_url":            info.get("file_url", ""),
+        "title":               info.get("title", ""),
+        "photographer":        info.get("photographer", info.get("author", "")),
+        "license_summary":     info.get("license_summary", ""),
+        "license_url":         info.get("license_url", ""),
+        "attribution_required": info.get("attribution_required", False),
+        "attribution_text":    info.get("attribution_text", ""),
+        "selected_ts":         now_ts,
+        "project":             project,
+        "episode":             episode_id,
+        "item_id":             item_id,
+    }
+
+    license_path = Path(str(asset_path) + ".license.json")
+    license_path.write_text(
+        json.dumps(license_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    log.info("Created license file: %s", license_path)
+
+    # MH-4: Append CC BY attribution to youtube_description.txt
+    attribution_appended = False
+    lic = info.get("license_summary", "")
+    if lic.startswith("CC BY"):
+        ep_dir = PROJECTS_ROOT / project / "episodes" / episode_id
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        desc_path = ep_dir / "youtube_description.txt"
+
+        asset_page = info.get("asset_page_url", "")
+        title = info.get("title", "")
+        photographer = info.get("photographer", info.get("author", ""))
+        license_url = info.get("license_url", "")
+
+        attribution_block = (
+            f'---\n'
+            f'"{title}" by {photographer} is licensed under {lic}.\n'
+            f'Source: {asset_page}\n'
+            f'License: {license_url}\n'
+        )
+
+        # Deduplicate by asset_page_url
+        existing = ""
+        if desc_path.exists():
+            existing = desc_path.read_text(encoding="utf-8")
+
+        if asset_page and asset_page not in existing:
+            with desc_path.open("a", encoding="utf-8") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(attribution_block + "\n")
+            attribution_appended = True
+            log.info("Appended CC BY attribution for %s to %s", title, desc_path)
+
+    return {
+        "status": "selected",
+        "license_path": str(license_path),
+        "attribution_appended": attribution_appended,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1040,12 +1371,12 @@ async def _run_batch(batch_id: str) -> None:
     # Shared counter (mutated only from async gather callbacks — safe in asyncio)
     done: list[int] = [0]
 
-    async def _process_item(item_id: str, item: dict) -> None:
+    async def _process_item(item_id: str, item: dict) -> list:
         # Skip items already completed (allows resume after server restart)
         if item.get("status") == "done":
             log.info("[%s]  already done — skipping", item_id)
             done[0] += 1
-            return
+            return []
 
         search_prompt = item.get("search_prompt", "")
         ai_prompt     = item.get("ai_prompt") or search_prompt
@@ -1091,20 +1422,41 @@ async def _run_batch(batch_id: str) -> None:
                 async def _noop() -> list:
                     return []
 
-                img_path_infos, vid_path_infos = await asyncio.gather(
-                    asyncio.to_thread(
+                async def _fetch_imgs():
+                    if prefer == "video":
+                        return [], []
+                    result = await asyncio.to_thread(
                         downloader.fetch_images,
                         search_prompt, n_img, img_dir, API_KEYS, cfg, item,
-                    ) if prefer != "video" else _noop(),
-                    asyncio.to_thread(
+                    )
+                    # fetch_images now returns (saved_list, pending_list)
+                    if isinstance(result, tuple) and len(result) == 2:
+                        return result
+                    return result, []  # backward compat
+
+                async def _fetch_vids():
+                    if prefer == "image":
+                        return [], []
+                    result = await asyncio.to_thread(
                         downloader.fetch_videos,
                         search_prompt, n_vid, vid_dir, API_KEYS, cfg, item,
-                    ) if prefer != "image" else _noop(),
+                    )
+                    if isinstance(result, tuple) and len(result) == 2:
+                        return result
+                    return result, []
+
+                (img_path_infos, img_pending), (vid_path_infos, vid_pending) = await asyncio.gather(
+                    _fetch_imgs(), _fetch_vids(),
                 )
 
             log.info("[%s]  download done   imgs=%d  vids=%d  elapsed=%.1fs",
                      item_id, len(img_path_infos), len(vid_path_infos),
                      time.perf_counter() - t_dl)
+
+            # Collect pending candidates for this item (SSRF review queue)
+            item_pending = img_pending + vid_pending
+            if item_pending:
+                log.info("[%s]  %d candidates pending host review", item_id, len(item_pending))
 
             img_paths = [p for p, _ in img_path_infos]
             vid_paths = [p for p, _ in vid_path_infos]
@@ -1163,14 +1515,31 @@ async def _run_batch(batch_id: str) -> None:
             log.info("  item %s done  imgs=%d  vids=%d",
                      item_id, len(images_ranked), len(videos_ranked))
 
+            # Return pending candidates for this item
+            return item_pending
+
         except Exception as exc:  # noqa: BLE001
             log.exception("  item %s failed: %s", item_id, exc)
             store.update_item(batch_id, item_id, status="failed", error=str(exc))
+            return []
 
         done[0] += 1
+        return []
 
     # Run all items concurrently (bounded by _sem)
-    await asyncio.gather(*[_process_item(iid, idata) for iid, idata in backgrounds.items()])
+    all_item_results = await asyncio.gather(*[_process_item(iid, idata) for iid, idata in backgrounds.items()])
+
+    # Collect pending candidates per-item (keyed by item_id)
+    pending_candidates: dict[str, list] = {}
+    for (iid, _), item_pending in zip(backgrounds.items(), all_item_results):
+        if item_pending:
+            pending_candidates[iid] = item_pending
+
+    if pending_candidates:
+        total_pending = sum(len(v) for v in pending_candidates.values())
+        log.info("Batch %s: %d candidates across %d items pending host review",
+                 batch_id, total_pending, len(pending_candidates))
+        store.update(batch_id, pending_candidates=pending_candidates)
 
     # Delete temp frames directory created by scorer
     frames_dir = batch_dir / "_frames"

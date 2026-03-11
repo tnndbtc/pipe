@@ -17,8 +17,8 @@ Features
 
 Public API
 ----------
-fetch_images(search_prompt, n, output_dir, api_keys, cfg, item=None) → list[tuple[Path, dict]]
-fetch_videos(search_prompt, n, output_dir, api_keys, cfg, item=None) → list[tuple[Path, dict]]
+fetch_images(search_prompt, n, output_dir, api_keys, cfg, item=None) → tuple[list[tuple[Path, dict]], list[dict]]
+fetch_videos(search_prompt, n, output_dir, api_keys, cfg, item=None) → tuple[list[tuple[Path, dict]], list[dict]]
 
 output_dir layout (created by this module):
     output_dir/
@@ -29,11 +29,14 @@ output_dir layout (created by this module):
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import json
 import logging
 import math
 import random
 import re
+import socket
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -91,6 +94,278 @@ def _check_download_allowlist(url: str) -> bool:
         return any(fnmatch.fnmatch(hostname, p) for p in DOWNLOAD_ALLOWLIST)
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# SSRF Protection — Hard Rules + DNS Rebinding Prevention
+# ---------------------------------------------------------------------------
+
+_PRIVATE_RANGES: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+# Maximum redirect hops before hard block
+_MAX_REDIRECT_DEPTH = 5
+
+# Default rate limits for dynamically approved Tier-2 hosts (A17)
+_DEFAULT_DYNAMIC_RATE_LIMIT = {
+    "delay_ms_min": 300,
+    "delay_ms_max": 800,
+    "max_concurrent": 2,
+}
+
+# Content-Type values that are ALWAYS rejected before streaming
+_BLOCKED_CONTENT_TYPES = frozenset({
+    "text/html", "text/xml", "application/json", "application/javascript",
+    "text/javascript", "application/xml", "text/plain",
+})
+
+
+def _is_private_ip(ip_str: str) -> bool:
+    """Return True if ip_str falls in any private/reserved range."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return True  # unparseable → treat as private (safe default)
+    return any(addr in net for net in _PRIVATE_RANGES)
+
+
+def _resolve_all_ips(hostname: str) -> list[str]:
+    """Resolve ALL A + AAAA records for hostname. Raises ValueError if any is private."""
+    try:
+        results = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"DNS resolution failed for {hostname}: {exc}") from exc
+
+    ips = list({r[4][0] for r in results})
+    if not ips:
+        raise ValueError(f"DNS returned no records for {hostname}")
+
+    for ip in ips:
+        if _is_private_ip(ip):
+            log.warning("SSRF block reason=hard_block_private_ip host=%s ip=%s", hostname, ip)
+            raise ValueError(f"DNS record for {hostname} resolves to private IP {ip}")
+
+    return ips
+
+
+class _BoundHostAdapter(requests.adapters.HTTPAdapter):
+    """HTTP adapter that connects to pre-validated IP addresses.
+
+    Prevents DNS rebinding by binding the TCP socket directly to an IP
+    that was already validated against private ranges. The Host header
+    is set to the original hostname for SNI + vhost routing. TLS cert
+    verification remains active against the original hostname.
+    """
+
+    def __init__(self, validated_ips: list[str], hostname: str, **kwargs):
+        self._validated_ips = validated_ips
+        self._hostname = hostname
+        super().__init__(**kwargs)
+
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        # Replace hostname with validated IP in the URL, set Host header
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(request.url)
+        ip = self._validated_ips[0]
+        # For IPv6, wrap in brackets
+        ip_host = f"[{ip}]" if ":" in ip else ip
+        # Preserve port if present
+        if parsed.port:
+            netloc = f"{ip_host}:{parsed.port}"
+        else:
+            netloc = ip_host
+        request.url = urlunparse(parsed._replace(netloc=netloc))
+        request.headers["Host"] = self._hostname
+        return super().send(request, stream=stream, timeout=timeout,
+                           verify=verify, cert=cert, proxies=proxies)
+
+
+def _hard_block_check(url: str) -> tuple[str, list[str]]:
+    """Run Hard Rules 1-3 on a URL.
+
+    Returns (normalized_hostname, validated_ips) on success.
+    Raises ValueError with structured reason code on failure.
+    """
+    parsed = urlparse(url)
+
+    # Rule 1: HTTPS only
+    if (parsed.scheme or "").lower() != "https":
+        log.warning("SSRF block reason=hard_block_scheme url=%s", url[:80])
+        raise ValueError(f"hard_block_scheme: URL scheme '{parsed.scheme}' not allowed")
+
+    hostname = parsed.hostname or ""
+    if not hostname:
+        raise ValueError("hard_block_scheme: empty hostname")
+
+    # Rule 2: No bare IP-literal hostnames
+    try:
+        ipaddress.ip_address(hostname)
+        log.warning("SSRF block reason=hard_block_ip_literal host=%s url=%s", hostname, url[:80])
+        raise ValueError(f"hard_block_ip_literal: bare IP address '{hostname}' not allowed")
+    except ValueError as exc:
+        if "hard_block_ip_literal" in str(exc):
+            raise
+        # Not an IP address — this is good, it's a hostname
+
+    # IDNA normalization
+    try:
+        hostname = hostname.encode("idna").decode("ascii")
+    except (UnicodeError, UnicodeDecodeError):
+        pass
+
+    # Rule 3: DNS resolution — reject if any record is private
+    validated_ips = _resolve_all_ips(hostname)
+
+    return hostname, validated_ips
+
+
+# ---------------------------------------------------------------------------
+# SSRF Host Lists — persistent allowed/rejected hostname tracking
+# ---------------------------------------------------------------------------
+
+_ssrf_host_lock = threading.Lock()
+_ssrf_allowed_hosts: dict[str, dict] = {}
+_ssrf_rejected_hosts: dict[str, dict] = {}
+_ssrf_lists_loaded = False
+
+
+def _load_host_lists(cfg: dict) -> None:
+    """Load allowed/rejected host lists from disk into memory."""
+    global _ssrf_allowed_hosts, _ssrf_rejected_hosts, _ssrf_lists_loaded
+    projects_root = Path(cfg.get("projects_root", "/data/shared"))
+
+    for name, target in [
+        ("_ssrf_allowed_hosts.json", "_allowed"),
+        ("_ssrf_rejected_hosts.json", "_rejected"),
+    ]:
+        path = projects_root / name
+        data: dict = {}
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                data = raw.get("hosts", {})
+                log.info("Loaded %d entries from %s", len(data), path)
+            except Exception as exc:
+                log.warning("Could not load %s: %s", path, exc)
+
+        if target == "_allowed":
+            _ssrf_allowed_hosts = data
+        else:
+            _ssrf_rejected_hosts = data
+
+    _ssrf_lists_loaded = True
+
+    # Startup warnings
+    if len(_ssrf_allowed_hosts) > 50:
+        log.warning("SSRF allowed_hosts has %d entries (>50) — consider manual audit",
+                    len(_ssrf_allowed_hosts))
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    for host, meta in _ssrf_allowed_hosts.items():
+        added = meta.get("added_ts", "")
+        expires = meta.get("expires_ts")
+        if expires:
+            try:
+                if datetime.fromisoformat(expires) < now:
+                    log.warning("SSRF allowed host %s has EXPIRED (expires_ts=%s)", host, expires)
+            except Exception:
+                pass
+        elif added:
+            try:
+                age = (now - datetime.fromisoformat(added)).days
+                if age > 180:
+                    log.warning("SSRF allowed host %s is %d days old without expires_ts", host, age)
+            except Exception:
+                pass
+
+
+def _save_host_list(cfg: dict, list_name: str, data: dict) -> None:
+    """Atomically write a host list to disk."""
+    import os as _os
+    projects_root = Path(cfg.get("projects_root", "/data/shared"))
+    path = projects_root / list_name
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"hosts": data}, indent=2, ensure_ascii=False), encoding="utf-8")
+    _os.replace(tmp, path)
+
+
+def _add_allowed_host(hostname: str, meta: dict, cfg: dict) -> None:
+    """Add a hostname to the allowed list and persist."""
+    with _ssrf_host_lock:
+        _ssrf_allowed_hosts[hostname] = meta
+        _save_host_list(cfg, "_ssrf_allowed_hosts.json", _ssrf_allowed_hosts)
+    log.info("SSRF host ALLOWED: %s  source=%s", hostname, meta.get("source", ""))
+
+
+def _add_rejected_host(hostname: str, cfg: dict) -> None:
+    """Add a hostname to the rejected list and persist."""
+    from datetime import datetime, timezone
+    with _ssrf_host_lock:
+        _ssrf_rejected_hosts[hostname] = {
+            "added_ts": datetime.now(timezone.utc).isoformat(),
+            "added_by": "user",
+        }
+        _save_host_list(cfg, "_ssrf_rejected_hosts.json", _ssrf_rejected_hosts)
+    log.info("SSRF host REJECTED: %s", hostname)
+
+
+def _is_host_allowed(hostname: str) -> str:
+    """Check hostname against static + dynamic allowlists and rejected list.
+
+    Returns:
+        "static"   — in DOWNLOAD_ALLOWLIST
+        "dynamic"  — in _ssrf_allowed_hosts
+        "rejected" — in _ssrf_rejected_hosts
+        "unknown"  — not in any list
+    """
+    # Check rejected first
+    if hostname in _ssrf_rejected_hosts:
+        return "rejected"
+    # Check static allowlist
+    if any(fnmatch.fnmatch(hostname, p) for p in DOWNLOAD_ALLOWLIST):
+        return "static"
+    # Check dynamic allowlist (with expiry)
+    if hostname in _ssrf_allowed_hosts:
+        meta = _ssrf_allowed_hosts[hostname]
+        expires = meta.get("expires_ts")
+        if expires:
+            from datetime import datetime, timezone
+            try:
+                if datetime.fromisoformat(expires) < datetime.now(timezone.utc):
+                    return "unknown"  # expired — treat as unknown
+            except Exception:
+                pass
+        return "dynamic"
+    return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# CC BY attribution helper
+# ---------------------------------------------------------------------------
+
+def _ensure_cc_by_attribution(info: dict) -> None:
+    """Ensure CC BY candidates have attribution_text. Construct fallback if missing."""
+    lic = info.get("license_summary", "")
+    if lic.startswith("CC BY") and not info.get("attribution_text"):
+        title = info.get("title", "")
+        author = info.get("photographer", "") or info.get("author", "")
+        source = info.get("source_site", "")
+        info["attribution_text"] = (
+            f'"{title}" by {author} / {source} / {lic}' if author
+            else f'"{title}" / {source} / {lic}'
+        )
+        info["attribution_required"] = True
+        log.warning("CC BY candidate missing attribution_text, constructed fallback: source=%s title=%s",
+                    source, title[:60])
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +432,12 @@ def _normalize_europeana_license(rights_uri: str) -> str:
     if "/licenses/by-sa/" in uri:     return ""
     if "/licenses/by-nd/" in uri:     return ""
     if "/licenses/by-nc" in uri:      return ""
-    if "rightsstatements.org" in uri: return ""
+    if "rightsstatements.org" in uri:
+        parts = [p for p in uri.rstrip("/").split("/") if p]
+        slug = parts[-2] if len(parts) >= 2 else parts[-1] if parts else ""
+        if slug.upper() == "PDM":
+            return "Public Domain"
+        return ""
     return ""
 
 
@@ -165,6 +445,8 @@ def _normalize_wikimedia_license(short_name: str) -> str:
     s = short_name.strip()
     if s.lower() in {"public domain", "pd"}: return "Public Domain"
     if s.lower() in {"cc0", "cc 0"}:         return "CC0"
+    if s.lower().startswith("pd-"):
+        return "Public Domain"
     return s
 
 
@@ -374,7 +656,7 @@ def _source_search_wikimedia_images(
         attr_text = (f'"{title}" by {author} / Wikimedia Commons / {license_summary}' if author
                      else f'"{title}" / Wikimedia Commons / {license_summary}')
 
-        candidates.append({
+        candidate = {
             "source_site": "wikimedia", "source_id": source_id,
             "asset_page_url": asset_page,
             "file_url": ii.get("url", ""),
@@ -384,7 +666,10 @@ def _source_search_wikimedia_images(
             "license_url": license_url, "query_used": query,
             "width": ii.get("width", 0), "height": ii.get("height", 0),
             "attribution_required": attr_required, "attribution_text": attr_text,
-        })
+        }
+        if license_short_raw.lower().startswith("pd-art"):
+            candidate["license_note"] = "PD-Art — jurisdiction-specific reproduction limits may apply"
+        candidates.append(candidate)
     _search_cache[key] = candidates
     return candidates
 
@@ -451,7 +736,7 @@ def _source_search_wikimedia_videos(
         attr_text = (f'"{title}" by {author} / Wikimedia Commons / {license_summary}' if author
                      else f'"{title}" / Wikimedia Commons / {license_summary}')
 
-        candidates.append({
+        candidate = {
             "source_site": "wikimedia", "source_id": source_id,
             "asset_page_url": asset_page,
             "file_url": ii.get("url", ""),
@@ -462,7 +747,10 @@ def _source_search_wikimedia_videos(
             "width": ii.get("width", 0), "height": ii.get("height", 0),
             "mime": mime,
             "attribution_required": attr_required, "attribution_text": attr_text,
-        })
+        }
+        if license_short_raw.lower().startswith("pd-art"):
+            candidate["license_note"] = "PD-Art — jurisdiction-specific reproduction limits may apply"
+        candidates.append(candidate)
     _search_cache[key] = candidates
     return candidates
 
@@ -870,27 +1158,283 @@ _search_cache: dict[tuple, list] = {}
 # Low-level HTTP helpers
 # ---------------------------------------------------------------------------
 
-def _get(url: str, headers: Optional[dict] = None, **kwargs) -> requests.Response:
+def _get(url: str, headers: Optional[dict] = None, validated_ips: list[str] | None = None,
+         source: str = "", **kwargs) -> requests.Response:
+    """HTTP GET with SSRF-safe redirect handling.
+
+    If validated_ips is provided, uses _BoundHostAdapter to connect directly
+    to pre-validated IPs (prevents DNS rebinding). Manual redirect loop
+    re-validates each hop against hard rules + allowlist.
+    """
     hdrs = {"User-Agent": _USER_AGENT}
     if headers:
         hdrs.update(headers)
-    return requests.get(url, headers=hdrs, timeout=_TIMEOUT, **kwargs)
+
+    # Use separate connect/read timeouts
+    timeout = kwargs.pop("timeout", (10, 45))
+
+    session = requests.Session()
+
+    if validated_ips:
+        hostname = urlparse(url).hostname or ""
+        adapter = _BoundHostAdapter(validated_ips, hostname)
+        session.mount("https://", adapter)
+
+    # Manual redirect loop (Rule 4)
+    kwargs["allow_redirects"] = False
+    for hop in range(_MAX_REDIRECT_DEPTH + 1):
+        resp = session.get(url, headers=hdrs, timeout=timeout, **kwargs)
+
+        if resp.status_code not in (301, 302, 307, 308):
+            return resp
+
+        location = resp.headers.get("Location", "")
+        if not location:
+            return resp
+
+        # Re-validate the redirect target
+        try:
+            new_hostname, new_ips = _hard_block_check(location)
+        except ValueError as exc:
+            log.warning("SSRF block reason=hard_block_redirect url=%s location=%s source=%s: %s",
+                        url[:80], location[:80], source, exc)
+            raise ValueError(f"hard_block_redirect: redirect to {location[:80]} blocked") from exc
+
+        # Check allowlist for redirect target
+        status = _is_host_allowed(new_hostname)
+        if status == "rejected":
+            log.warning("SSRF block reason=rejected_host host=%s url=%s source=%s",
+                        new_hostname, location[:80], source)
+            raise ValueError(f"rejected_host: redirect target {new_hostname} is rejected")
+
+        # Update for next hop
+        url = location
+        validated_ips = new_ips
+        if validated_ips:
+            hostname = new_hostname
+            adapter = _BoundHostAdapter(validated_ips, hostname)
+            session = requests.Session()
+            session.mount("https://", adapter)
+
+    raise ValueError(f"hard_block_redirect: exceeded {_MAX_REDIRECT_DEPTH} redirects")
 
 
-def _download_file(url: str, dest: Path, headers: Optional[dict] = None) -> None:
-    """Stream-download url → dest using an atomic .part rename."""
-    if not _check_download_allowlist(url):
-        raise ValueError(f"SSRF protection: download URL not in allowlist: {url[:120]}")
+def _download_file(url: str, dest: Path, headers: Optional[dict] = None,
+                   cfg: dict | None = None, source: str = "",
+                   media_type: str = "image") -> str | None:
+    """Stream-download url → dest with full SSRF protection.
+
+    Returns None on success, "pending" if hostname is unknown and needs review.
+    Raises ValueError on hard blocks or validation failures.
+    """
+    cfg = cfg or {}
+    hostname = urlparse(url).hostname or ""
+
+    # Step 1-2: Hard block checks (scheme, IP literal, DNS)
+    try:
+        norm_hostname, validated_ips = _hard_block_check(url)
+    except ValueError:
+        raise  # already logged by _hard_block_check
+
+    # Step 3: Check rejected hosts
+    host_status = _is_host_allowed(norm_hostname)
+    if host_status == "rejected":
+        log.warning("SSRF block reason=rejected_host host=%s url=%s source=%s",
+                    norm_hostname, url[:80], source)
+        raise ValueError(f"rejected_host: {norm_hostname}")
+
+    # Step 4-5: Check static + dynamic allowlists
+    if host_status == "unknown":
+        log.warning("SSRF block reason=pending_host_review host=%s url=%s source=%s",
+                    norm_hostname, url[:80], source)
+        return "pending"
+
+    # Host is allowed (static or dynamic) — proceed with download
     dest.parent.mkdir(parents=True, exist_ok=True)
-    r = _get(url, headers=headers, stream=True)
-    r.raise_for_status()
+
+    # Determine size limit based on media type
+    if media_type == "video":
+        max_bytes = cfg.get("max_download_bytes_video", 2 * 1024 * 1024 * 1024)
+    elif media_type == "audio":
+        max_bytes = cfg.get("sfx_max_download_bytes", 20 * 1024 * 1024)
+    else:
+        max_bytes = cfg.get("max_download_bytes_image", 50 * 1024 * 1024)
+
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with tmp.open("wb") as fh:
-        for chunk in r.iter_content(chunk_size=512 * 1024):
-            if chunk:
-                fh.write(chunk)
-    tmp.replace(dest)
-    log.debug("Downloaded %s → %s (%d bytes)", url[:80], dest.name, dest.stat().st_size)
+    try:
+        r = _get(url, headers=headers, validated_ips=validated_ips, source=source, stream=True)
+        r.raise_for_status()
+
+        # Rule 5a: Pre-check Content-Length
+        cl = r.headers.get("Content-Length")
+        if cl:
+            try:
+                if int(cl) > max_bytes:
+                    log.warning("SSRF block reason=file_size_exceeded host=%s url=%s cl=%s max=%d source=%s",
+                                norm_hostname, url[:80], cl, max_bytes, source)
+                    raise ValueError(f"file_size_exceeded: Content-Length {cl} > {max_bytes}")
+            except ValueError as exc:
+                if "file_size_exceeded" in str(exc):
+                    raise
+
+        # Content-Type pre-check
+        ct = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ct:
+            if ct in _BLOCKED_CONTENT_TYPES:
+                log.warning("SSRF block reason=invalid_content_type host=%s url=%s ct=%s source=%s",
+                            norm_hostname, url[:80], ct, source)
+                raise ValueError(f"invalid_content_type: {ct}")
+            # Allow: image/*, audio/*, video/*, application/octet-stream, or absent
+            if (not ct.startswith(("image/", "audio/", "video/"))
+                    and ct != "application/octet-stream"):
+                log.warning("SSRF block reason=invalid_content_type host=%s url=%s ct=%s source=%s",
+                            norm_hostname, url[:80], ct, source)
+                raise ValueError(f"invalid_content_type: {ct}")
+
+        # Stream download with size enforcement (Rule 5b)
+        total_bytes = 0
+        with tmp.open("wb") as fh:
+            for chunk in r.iter_content(chunk_size=512 * 1024):
+                if chunk:
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        log.warning("SSRF block reason=file_size_exceeded host=%s url=%s streamed=%d max=%d source=%s",
+                                    norm_hostname, url[:80], total_bytes, max_bytes, source)
+                        raise ValueError(f"file_size_exceeded: streamed {total_bytes} > {max_bytes}")
+                    fh.write(chunk)
+
+        # Magic-bytes post-check
+        _check_magic_bytes(tmp, media_type)
+
+        # Success — atomic rename
+        tmp.replace(dest)
+        log.debug("Downloaded %s → %s (%d bytes)", url[:80], dest.name, dest.stat().st_size)
+        return None
+
+    except Exception:
+        # Clean up .part file on ANY failure
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+
+
+# Magic byte signatures for file validation
+_MAGIC_IMAGE = {
+    "jpeg": b"\xff\xd8\xff",
+    "png":  b"\x89PNG\r\n\x1a\n",
+    "gif":  b"GIF8",
+}
+_MAGIC_WEBP_RIFF = b"RIFF"
+_MAGIC_WEBP_WEBP = b"WEBP"
+
+_MAGIC_AUDIO = {
+    "id3":  b"ID3",
+    "ogg":  b"OggS",
+    "flac": b"fLaC",
+}
+_MAGIC_AUDIO_MPEG_SYNC = (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")
+_MAGIC_AUDIO_WAV_RIFF = b"RIFF"
+_MAGIC_AUDIO_WAV_WAVE = b"WAVE"
+
+_MAGIC_VIDEO_FTYP = b"ftyp"
+_MAGIC_VIDEO_WEBM = b"\x1aE\xdf\xa3"
+
+
+def _check_magic_bytes(path: Path, media_type: str) -> None:
+    """Validate file header bytes match expected media type.
+
+    Raises ValueError (reason=invalid_signature) on mismatch.
+    """
+    try:
+        with path.open("rb") as f:
+            header = f.read(12)
+    except OSError as exc:
+        raise ValueError(f"invalid_signature: cannot read file header: {exc}") from exc
+
+    if len(header) == 0:
+        raise ValueError("invalid_signature: empty file")
+
+    if media_type == "image":
+        # JPEG
+        if header[:3] == _MAGIC_IMAGE["jpeg"]:
+            return
+        # PNG
+        if header[:8] == _MAGIC_IMAGE["png"]:
+            return
+        # GIF
+        if header[:4] == _MAGIC_IMAGE["gif"]:
+            return
+        # WebP: RIFF....WEBP
+        if header[:4] == _MAGIC_WEBP_RIFF and header[8:12] == _MAGIC_WEBP_WEBP:
+            return
+        log.warning("SSRF block reason=invalid_signature path=%s media_type=%s header=%s",
+                    path.name, media_type, header[:12].hex())
+        raise ValueError(f"invalid_signature: image file header does not match any known format")
+
+    elif media_type == "audio":
+        # MP3 sync word
+        if header[:2] in _MAGIC_AUDIO_MPEG_SYNC:
+            return
+        # ID3 tag (MP3 with metadata)
+        if header[:3] == _MAGIC_AUDIO["id3"]:
+            return
+        # OGG
+        if header[:4] == _MAGIC_AUDIO["ogg"]:
+            return
+        # FLAC
+        if header[:4] == _MAGIC_AUDIO["flac"]:
+            return
+        # WAV: RIFF....WAVE
+        if header[:4] == _MAGIC_AUDIO_WAV_RIFF and header[8:12] == _MAGIC_AUDIO_WAV_WAVE:
+            return
+        log.warning("SSRF block reason=invalid_signature path=%s media_type=%s header=%s",
+                    path.name, media_type, header[:12].hex())
+        raise ValueError(f"invalid_signature: audio file header does not match any known format")
+
+    elif media_type == "video":
+        # Try ffprobe first (already a project dependency)
+        try:
+            probe_result = subprocess.run(
+                ["ffprobe", "-v", "error",
+                 "-show_entries", "format=format_name:stream=codec_type,duration",
+                 "-of", "json", str(path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if probe_result.returncode == 0:
+                import json as _json
+                probe_data = _json.loads(probe_result.stdout)
+                fmt = (probe_data.get("format") or {}).get("format_name", "")
+                allowed_fmts = {"mp4", "mov", "webm", "avi", "matroska",
+                                "mov,mp4,m4a,3gp,3g2,mj2"}  # ffprobe compound name
+                if not any(f in fmt for f in {"mp4", "mov", "webm", "avi", "matroska"}):
+                    raise ValueError(f"invalid_signature: video format '{fmt}' not allowed")
+                streams = probe_data.get("streams") or []
+                has_video = any(s.get("codec_type") == "video" for s in streams)
+                if not has_video:
+                    raise ValueError("invalid_signature: no video stream found")
+                return
+        except FileNotFoundError:
+            pass  # ffprobe not available — fall back to magic bytes
+        except subprocess.TimeoutExpired:
+            pass  # ffprobe hung — fall back
+        except ValueError:
+            raise  # re-raise our own validation errors
+        except Exception:
+            pass  # any other ffprobe error — fall back
+
+        # Fallback: check magic bytes
+        # MP4/MOV: ftyp box at offset 4
+        if header[4:8] == _MAGIC_VIDEO_FTYP:
+            return
+        # WebM/MKV: EBML header
+        if header[:4] == _MAGIC_VIDEO_WEBM:
+            return
+        log.warning("SSRF block reason=invalid_signature path=%s media_type=%s header=%s",
+                    path.name, media_type, header[:12].hex())
+        raise ValueError(f"invalid_signature: video file header does not match any known format")
 
 
 def _with_backoff(fn, backoff_seconds: list[int]):
@@ -927,7 +1471,7 @@ def _run_download_tasks(
     cfg:         dict,
     max_workers: int | None = None,
     label:       str        = "",
-) -> tuple[list[tuple[Path, dict]], dict[str, str]]:
+) -> tuple[list[tuple[Path, dict]], dict[str, str], list[dict]]:
     """
     Download a batch of files in parallel using ThreadPoolExecutor.
 
@@ -940,14 +1484,16 @@ def _run_download_tasks(
         thumb   : str   — thumbnail URL recorded for scorer pass-1.5
 
     Returns:
-        saved  : list[(Path, info)] for each successfully saved file
-        thumbs : {str(dest): thumb_url} for thumbnail registration
+        saved              : list[(Path, info)] for each successfully saved file
+        thumbs             : {str(dest): thumb_url} for thumbnail registration
+        pending_candidates : list[dict] — candidates whose hostname needs review
     """
     tag = f"[{label}]" if label else "[download]"
 
-    saved:   list[tuple[Path, dict]] = []
-    thumbs:  dict[str, str]          = {}
-    pending: list[dict]              = []
+    saved:              list[tuple[Path, dict]] = []
+    thumbs:             dict[str, str]          = {}
+    pending_candidates: list[dict]              = []
+    pending:            list[dict]              = []
 
     # Fast path: files that already exist skip the download entirely.
     for task in tasks:
@@ -963,33 +1509,66 @@ def _run_download_tasks(
     cached = len(tasks) - len(pending)
     if not pending:
         log.info("  %s  total=%d  cached=%d  pending=0  (all cached)", tag, len(tasks), cached)
-        return saved, thumbs
+        return saved, thumbs, pending_candidates
 
     n_workers = min(max_workers or cfg.get("download_workers", 8), len(pending))
     log.info("  %s  total=%d  cached=%d  pending=%d  workers=%d",
              tag, len(tasks), cached, len(pending), n_workers)
     t0 = time.perf_counter()
 
-    def _do(task: dict) -> tuple[dict, bool]:
+    # Determine source and media_type from label (e.g. "img/pexels", "vid/wikimedia")
+    _label_parts = label.split("/")
+    _dl_media_type = "video" if _label_parts[0] == "vid" else "image"
+    _dl_source = _label_parts[1] if len(_label_parts) > 1 else ""
+
+    # CC BY attribution check for all tasks before downloading
+    for task in pending:
+        _ensure_cc_by_attribution(task["info"])
+
+    def _do(task: dict) -> tuple[dict, str]:
+        """Returns (task, status) where status is 'ok', 'pending', or 'failed'."""
         try:
-            _download_file(task["url"], task["dest"], headers=task.get("headers") or {})
-            return task, True
+            result = _download_file(
+                task["url"], task["dest"],
+                headers=task.get("headers") or {},
+                cfg=cfg, source=_dl_source,
+                media_type=_dl_media_type,
+            )
+            if result == "pending":
+                return task, "pending"
+            return task, "ok"
         except Exception as exc:  # noqa: BLE001
             log.warning("  %s  failed %s: %s", tag, task["dest"].name, exc)
-            return task, False
+            return task, "failed"
 
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
-        for task, ok in ex.map(_do, pending):
-            if ok:
+        for task, status in ex.map(_do, pending):
+            if status == "ok":
                 dest = task["dest"]
                 _write_info_sidecar(dest, task["info"])
                 saved.append((dest, task["info"]))
                 if task.get("thumb"):
                     thumbs[str(dest)] = task["thumb"]
+            elif status == "pending":
+                # Build pending candidate entry from task info
+                info = task["info"]
+                hostname = urlparse(task["url"]).hostname or ""
+                pending_candidates.append({
+                    "hostname":        hostname,
+                    "url":             task["url"],
+                    "asset_id":        info.get("source_id", ""),
+                    "source":          info.get("source_site", _dl_source),
+                    "source_id":       info.get("source_id", ""),
+                    "license_summary": info.get("license_summary", ""),
+                    "title":           info.get("title", ""),
+                    "preview_url":     info.get("preview_url", ""),
+                    "info":            info,
+                })
 
-    log.info("  %s  saved=%d/%d  elapsed=%.1fs",
-             tag, len(saved) - cached, len(pending), time.perf_counter() - t0)
-    return saved, thumbs
+    n_pending = len(pending_candidates)
+    log.info("  %s  saved=%d/%d  pending_review=%d  elapsed=%.1fs",
+             tag, len(saved) - cached, len(pending), n_pending, time.perf_counter() - t0)
+    return saved, thumbs, pending_candidates
 
 
 # ---------------------------------------------------------------------------
@@ -1335,11 +1914,10 @@ def fetch_images(
     api_keys:      dict,
     cfg:           dict,
     item:          dict | None = None,
-) -> list[tuple[Path, dict]]:
+) -> tuple[list[tuple[Path, dict]], list[dict]]:
     """
     Search and download up to n images into output_dir/<source>/.
-    Returns a list of (Path, info_dict) tuples (may be shorter than n × sources
-    if some downloads fail or the API returns fewer results).
+    Returns a tuple of (list of (Path, info_dict), list of pending_candidates).
 
     Already-downloaded files (by filename) are reused without re-downloading.
 
@@ -1361,7 +1939,7 @@ def fetch_images(
           - source_filters (dict):      per-source param overrides
     """
     if n <= 0:
-        return []
+        return [], []
 
     backoff  = cfg.get("backoff_seconds", [5, 15, 45])
     sources  = cfg.get("sources", ["pexels", "pixabay"])
@@ -1372,7 +1950,7 @@ def fetch_images(
     if item is not None:
         item.setdefault("_thumbnails", {})
 
-    def _fetch_images_from_source(source: str) -> tuple[list, dict]:
+    def _fetch_images_from_source(source: str) -> tuple[list, dict, list]:
         """
         Search + download images from one source independently.
 
@@ -1388,7 +1966,7 @@ def fetch_images(
             raise ValueError(f"candidates_images not set for source '{source}' — caller must supply source_limits")
         if n_src == 0:
             log.info("fetch_images: skipping source %s (candidates_images=0)", source)
-            return [], {}
+            return [], {}, []
 
         src_dir = output_dir / source
         src_dir.mkdir(parents=True, exist_ok=True)
@@ -1558,27 +2136,29 @@ def fetch_images(
             seen_ids_src.add(uid)
             tasks.append(pt)
 
-        src_saved, src_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
-        return src_saved, src_thumbs
+        src_saved, src_thumbs, src_pending = _run_download_tasks(tasks, cfg, label=f"img/{source}")
+        return src_saved, src_thumbs, src_pending
 
     # Run all sources in parallel — each source does its own API search + file downloads
     # concurrently with every other source.  Within each source, _run_download_tasks
     # further parallelises individual file downloads via its own ThreadPoolExecutor.
-    all_saved:  list[tuple[Path, dict]] = []
-    all_thumbs: dict[str, str]          = {}
+    all_saved:   list[tuple[Path, dict]] = []
+    all_thumbs:  dict[str, str]          = {}
+    all_pending: list[dict]              = []
     n_src_workers = min(len(sources), cfg.get("source_workers", len(sources)))
     log.info("fetch_images: running %d source(s) in parallel (workers=%d)", len(sources), n_src_workers)
     with ThreadPoolExecutor(max_workers=n_src_workers) as ex:
-        for src_saved, src_thumbs in ex.map(_fetch_images_from_source, sources):
+        for src_saved, src_thumbs, src_pending in ex.map(_fetch_images_from_source, sources):
             all_saved.extend(src_saved)
             all_thumbs.update(src_thumbs)
+            all_pending.extend(src_pending)
 
     if item is not None:
         item["_thumbnails"].update(all_thumbs)
 
     # Return all candidates (up to max_candidates_per_item) so every source contributes.
     max_total = cfg.get("max_candidates_per_item", len(all_saved))
-    return all_saved[:max_total]
+    return all_saved[:max_total], all_pending
 
 
 def fetch_videos(
@@ -1588,10 +2168,10 @@ def fetch_videos(
     api_keys:      dict,
     cfg:           dict,
     item:          dict | None = None,
-) -> list[tuple[Path, dict]]:
+) -> tuple[list[tuple[Path, dict]], list[dict]]:
     """
     Search and download up to n videos into output_dir/<source>/.
-    Returns a list of (Path, info_dict) tuples.
+    Returns a tuple of (list of (Path, info_dict), list of pending_candidates).
 
     Already-downloaded files are reused without re-downloading.
 
@@ -1613,7 +2193,7 @@ def fetch_videos(
           - source_filters (dict):      per-source param overrides
     """
     if n <= 0:
-        return []
+        return [], []
 
     backoff  = cfg.get("backoff_seconds", [5, 15, 45])
     sources  = cfg.get("sources", ["pexels", "pixabay"])
@@ -1629,7 +2209,7 @@ def fetch_videos(
         kws = item.get("include_keywords") or []
         _loc_term = next((kw for kw in kws if kw and kw[0].isupper() and len(kw) > 3), "")
 
-    def _fetch_videos_from_source(source: str) -> list[tuple[Path, dict]]:
+    def _fetch_videos_from_source(source: str) -> tuple[list[tuple[Path, dict]], list[dict]]:
         """
         Search + download videos from one source independently.
 
@@ -1646,7 +2226,7 @@ def fetch_videos(
             raise ValueError(f"candidates_videos not set for source '{source}' — caller must supply source_limits")
         if n_src == 0:
             log.info("fetch_videos: skipping source %s (candidates_videos=0)", source)
-            return []
+            return [], []
 
         src_dir = output_dir / source
         src_dir.mkdir(parents=True, exist_ok=True)
@@ -1788,17 +2368,19 @@ def fetch_videos(
             seen_ids_src.add(uid)
             tasks.append(pt)
 
-        src_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
-        return src_saved
+        src_saved, _, src_pending = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
+        return src_saved, src_pending
 
     # Run all sources in parallel
-    all_saved: list[tuple[Path, dict]] = []
+    all_saved:   list[tuple[Path, dict]] = []
+    all_pending: list[dict]              = []
     n_src_workers = min(len(sources), cfg.get("source_workers", len(sources)))
     log.info("fetch_videos: running %d source(s) in parallel (workers=%d)", len(sources), n_src_workers)
     with ThreadPoolExecutor(max_workers=n_src_workers) as ex:
-        for src_saved in ex.map(_fetch_videos_from_source, sources):
+        for src_saved, src_pending in ex.map(_fetch_videos_from_source, sources):
             all_saved.extend(src_saved)
+            all_pending.extend(src_pending)
 
     # Return all candidates (up to max_candidates_per_item) so every source contributes.
     max_total = cfg.get("max_candidates_per_item", len(all_saved))
-    return all_saved[:max_total]
+    return all_saved[:max_total], all_pending
