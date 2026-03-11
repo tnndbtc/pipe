@@ -1170,10 +1170,13 @@ def fetch_sfx(
                 "duration": dur_bucket, "source": "freesound,wikimedia_audio",
                 "page_size": min(ov_limit, ov_max_page),
             }
-            r = requests.get("https://api.openverse.org/v1/audio/",
-                             params=ov_params, headers=ov_headers, timeout=_TIMEOUT)
-            r.raise_for_status()
-            for result in r.json().get("results", []):
+            def _ov_audio_call():
+                r = requests.get("https://api.openverse.org/v1/audio/",
+                                 params=ov_params, headers=ov_headers, timeout=_TIMEOUT)
+                r.raise_for_status()
+                return r.json().get("results", [])
+
+            for result in _with_backoff(_ov_audio_call, backoff):
                 lic = _normalize_openverse_license(result)
                 if not is_license_acceptable(lic): continue
                 source_id = result.get("id", "")
