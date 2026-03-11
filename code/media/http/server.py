@@ -254,9 +254,16 @@ async def lifespan(app: FastAPI):
     # Per-item download semaphore
     _sem = _make_semaphore()
 
-    # Distributed job-queue serialisation semaphore (JobQueue is single-batch;
-    # concurrent batch workers must take turns using it)
-    _jq_sem = asyncio.Semaphore(1)
+    # Distributed job-queue serialisation semaphore.
+    # The global JobQueue singleton only supports one active scoring session
+    # at a time (shared _jobs/_results state).  video_scoring_concurrency=1
+    # is the safe default; raise it only after upgrading JobQueue to support
+    # batch-keyed concurrent state.
+    _video_scoring_concurrency = max(1, int(config.get("video_scoring_concurrency", 1)))
+    _jq_sem = asyncio.Semaphore(_video_scoring_concurrency)
+    if _video_scoring_concurrency > 1:
+        log.info("Distributed video scoring concurrency: %d (ensure JobQueue supports concurrent batches)",
+                 _video_scoring_concurrency)
 
     # Job queue for distributed workers
     workers_cfg = config.get("workers", {})

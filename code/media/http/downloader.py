@@ -1374,11 +1374,14 @@ def fetch_images(
 
     def _fetch_images_from_source(source: str) -> tuple[list, dict]:
         """
-        Search + download one source independently.
+        Search + download images from one source independently.
 
-        candidates_images is the TOTAL file budget for this source across ALL queries
-        combined.  Queries share the budget; once exhausted, no further API calls are
-        made and the loop exits early.  This makes the UI value the hard truth.
+        Two-phase approach:
+          Phase 1 — Run all queries concurrently (up to max_concurrent workers).
+                     Each worker calls the API then jitters immediately, so jitter
+                     only gates between successive search calls — not the full
+                     search+download cycle.
+          Phase 2 — Deduplicate hits across queries, apply budget, single download pass.
         """
         n_src = cfg.get("source_limits", {}).get(source, {}).get("candidates_images")
         if n_src is None:
@@ -1390,29 +1393,26 @@ def fetch_images(
         src_dir = output_dir / source
         src_dir.mkdir(parents=True, exist_ok=True)
         source_filters = _get_source_filters(item, source)
-        seen_ids_src: set[str] = set()
-        src_saved:  list[tuple[Path, dict]] = []
-        src_thumbs: dict[str, str]          = {}
-        budget = n_src   # slots remaining for this source across all queries
+        rl = cfg.get("rate_limits", {}).get(source, {})
+        n_q_workers = min(len(queries), max(1, rl.get("max_concurrent", 1)))
+        pexels_key = api_keys.get("pexels", "")
 
-        for query, per_q in queries:
-            if budget <= 0:
-                break
-            fetch_n = min(per_q, budget)   # ask API for at most this many
-
+        # ------------------------------------------------------------------
+        # Phase 1 — search all queries concurrently.
+        # Each worker returns pre-built task dicts with "_uid" for dedup.
+        # ------------------------------------------------------------------
+        def _search_one(q_per_q: tuple) -> list[dict]:
+            query, per_q = q_per_q
+            fetch_n = min(per_q, n_src)
+            pre: list[dict] = []
             try:
                 if source == "pexels":
                     hits = _pexels_search_images(
-                        api_keys.get("pexels", ""), query, fetch_n, backoff,
+                        pexels_key, query, fetch_n, backoff,
                         extra_params=source_filters or None,
                     )
-                    pexels_key = api_keys.get("pexels", "")
-                    tasks: list[dict] = []
                     for i, ph in enumerate(hits):
-                        if budget <= 0: break
                         pid = str(ph.get("id", i));  uid = f"pexels_img_{pid}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = _pexels_pick_image_url(ph)
                         if not url: continue
                         dest = src_dir / f"{uid}.jpg"
@@ -1434,24 +1434,16 @@ def fetch_images(
                             "height":          ph.get("height", 0),
                         }
                         dl_url = info.get("preview_url") or url
-                        tasks.append({"dest": dest, "url": dl_url, "info": info,
-                                      "thumb": thumb, "headers": {"Authorization": pexels_key}})
-                        budget -= 1
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
-                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info,
+                                    "thumb": thumb, "headers": {"Authorization": pexels_key}})
 
                 elif source == "pixabay":
                     hits = _pixabay_search_images(
                         api_keys.get("pixabay", ""), query, fetch_n, backoff,
                         extra_params=source_filters or None,
                     )
-                    tasks = []
                     for i, hit in enumerate(hits):
-                        if budget <= 0: break
                         hid = str(hit.get("id", i));  uid = f"pixabay_img_{hid}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = _pixabay_pick_image_url(hit)
                         if not url: continue
                         ext  = Path(url.split("?")[0]).suffix or ".jpg"
@@ -1473,22 +1465,14 @@ def fetch_images(
                             "height":          hit.get("imageHeight", 0),
                         }
                         dl_url = info.get("preview_url") or url
-                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                        budget -= 1
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
-                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info, "thumb": thumb})
 
                 elif source == "openverse":
                     candidates = _source_search_openverse_images(
                         api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
-                    tasks = []
                     for c in candidates:
-                        if budget <= 0: break
                         sid = c.get("source_id", "");  uid = f"openverse_img_{sid}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         ext = Path(url.split("?")[0]).suffix or ".jpg"
@@ -1497,23 +1481,15 @@ def fetch_images(
                         thumb = c.get("preview_url", "")
                         info  = {**c, "file_url": url, "preview_url": c.get("preview_url", "")}
                         dl_url = c.get("preview_url") or url
-                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                        budget -= 1
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
-                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info, "thumb": thumb})
 
                 elif source == "wikimedia":
                     candidates = _source_search_wikimedia_images(
                         api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
-                    tasks = []
                     for c in candidates:
-                        if budget <= 0: break
                         sid = c.get("source_id", "")
                         uid = f"wikimedia_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         mime = c.get("mime", "image/jpeg")
@@ -1522,23 +1498,15 @@ def fetch_images(
                         thumb = c.get("preview_url", "")
                         info  = {**c}
                         dl_url = c.get("preview_url") or url
-                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                        budget -= 1
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
-                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info, "thumb": thumb})
 
                 elif source == "europeana":
                     candidates = _source_search_europeana_images(
                         api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
-                    tasks = []
                     for c in candidates:
-                        if budget <= 0: break
                         sid = c.get("source_id", "")
                         uid = f"europeana_img_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         ext = Path(url.split("?")[0]).suffix.lower()
@@ -1547,22 +1515,14 @@ def fetch_images(
                         thumb = c.get("preview_url", "")
                         info  = {**c}
                         dl_url = c.get("preview_url") or url
-                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                        budget -= 1
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
-                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info, "thumb": thumb})
 
                 elif source == "archive":
                     candidates = _source_search_archive_images(
                         api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
-                    tasks = []
                     for c in candidates:
-                        if budget <= 0: break
                         sid = c.get("source_id", "");  uid = f"archive_img_{sid}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         ext = Path(url.split("?")[0]).suffix.lower()
@@ -1571,15 +1531,34 @@ def fetch_images(
                         thumb = c.get("preview_url", "")
                         info  = {**c}
                         dl_url = c.get("preview_url") or url
-                        tasks.append({"dest": dest, "url": dl_url, "info": info, "thumb": thumb})
-                        budget -= 1
-                    batch_saved, batch_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
-                    src_saved.extend(batch_saved);  src_thumbs.update(batch_thumbs)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info, "thumb": thumb})
 
             except Exception as exc:
                 log.warning("fetch_images %s q=%r failed: %s", source, query, exc)
 
+            _jitter(cfg, source)  # gate between search API calls, not between search+download cycles
+            return pre
+
+        all_pre: list[dict] = []
+        with ThreadPoolExecutor(max_workers=n_q_workers) as qex:
+            for batch in qex.map(_search_one, queries):
+                all_pre.extend(batch)
+
+        # ------------------------------------------------------------------
+        # Phase 2 — deduplicate across queries, apply budget, download once.
+        # ------------------------------------------------------------------
+        seen_ids_src: set[str] = set()
+        tasks: list[dict] = []
+        for pt in all_pre:
+            if len(tasks) >= n_src:
+                break
+            uid = pt.pop("_uid")
+            if uid in seen_ids_src:
+                continue
+            seen_ids_src.add(uid)
+            tasks.append(pt)
+
+        src_saved, src_thumbs = _run_download_tasks(tasks, cfg, label=f"img/{source}")
         return src_saved, src_thumbs
 
     # Run all sources in parallel — each source does its own API search + file downloads
@@ -1654,9 +1633,13 @@ def fetch_videos(
         """
         Search + download videos from one source independently.
 
+        Two-phase approach (same as fetch_images):
+          Phase 1 — Run all queries concurrently (up to max_concurrent workers).
+                     Jitter fires immediately after each API call, not after downloads.
+          Phase 2 — Deduplicate, apply budget, single download pass.
+
         candidates_videos is the TOTAL file budget for this source across ALL queries
-        combined (including the Pixabay location query).  The budget counter ensures
-        the UI value is the hard ceiling on files downloaded from this source.
+        combined (including the Pixabay location query).
         """
         n_src = cfg.get("source_limits", {}).get(source, {}).get("candidates_videos")
         if n_src is None:
@@ -1668,9 +1651,6 @@ def fetch_videos(
         src_dir = output_dir / source
         src_dir.mkdir(parents=True, exist_ok=True)
         source_filters = _get_source_filters(item, source)
-        seen_ids_src: set[str] = set()
-        src_saved: list[tuple[Path, dict]] = []
-        budget = n_src   # total file slots remaining for this source across all queries
 
         # Pixabay only: prepend a location-only query so location-tagged videos are
         # captured first.  It shares the same budget — no extra files beyond n_src total.
@@ -1678,23 +1658,24 @@ def fetch_videos(
         if source == "pixabay" and _loc_term:
             source_queries = [(_loc_term, n_src)] + list(queries)
 
-        for query, per_q in source_queries:
-            if budget <= 0:
-                break
-            fetch_n = min(per_q, budget)   # ask API for at most this many
+        rl = cfg.get("rate_limits", {}).get(source, {})
+        n_q_workers = min(len(source_queries), max(1, rl.get("max_concurrent", 1)))
 
+        # ------------------------------------------------------------------
+        # Phase 1 — search all queries concurrently.
+        # ------------------------------------------------------------------
+        def _search_one(q_per_q: tuple) -> list[dict]:
+            query, per_q = q_per_q
+            fetch_n = min(per_q, n_src)
+            pre: list[dict] = []
             try:
                 if source == "pexels":
                     hits = _pexels_search_videos(
                         api_keys.get("pexels", ""), query, fetch_n, backoff,
                         extra_params=source_filters or None,
                     )
-                    tasks = []
                     for i, vd in enumerate(hits):
-                        if budget <= 0: break
                         vid = str(vd.get("id", i));  uid = f"pexels_vid_{vid}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = _pexels_pick_video_url(vd)
                         if not url: continue
                         dest = src_dir / f"{uid}.mp4"
@@ -1719,23 +1700,15 @@ def fetch_videos(
                             "height":          vd.get("height", 0),
                         }
                         dl_url = info.get("preview_url") or url
-                        tasks.append({"dest": dest, "url": dl_url, "info": info})
-                        budget -= 1
-                    batch_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
-                    src_saved.extend(batch_saved)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info})
 
                 elif source == "pixabay":
                     hits = _pixabay_search_videos(
                         api_keys.get("pixabay", ""), query, fetch_n, backoff,
                         extra_params=source_filters or None,
                     )
-                    tasks = []
                     for i, hit in enumerate(hits):
-                        if budget <= 0: break
                         hid = str(hit.get("id", i));  uid = f"pixabay_vid_{hid}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = _pixabay_pick_video_url(hit)
                         if not url: continue
                         dest = src_dir / f"{uid}.mp4"
@@ -1760,59 +1733,62 @@ def fetch_videos(
                             "height":          (vids_data.get("large") or vids_data.get("medium") or {}).get("height", 0),
                         }
                         dl_url = info.get("preview_url") or url
-                        tasks.append({"dest": dest, "url": dl_url, "info": info})
-                        budget -= 1
-                    batch_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
-                    src_saved.extend(batch_saved)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info})
 
                 elif source == "wikimedia":
                     candidates = _source_search_wikimedia_videos(
                         api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
-                    tasks = []
                     for c in candidates:
-                        if budget <= 0: break
                         sid = c.get("source_id", "")
                         uid = f"wikimedia_vid_{re.sub(r'[^a-zA-Z0-9_-]', '_', sid)}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         mime = c.get("mime", "video/webm")
                         ext  = {"video/mp4": ".mp4", "video/webm": ".webm", "video/ogg": ".ogv"}.get(mime, ".webm")
                         dest = src_dir / f"{uid}{ext}"
                         info = {**c, "video_files": [{"url": url, "width": c.get("width", 0), "height": c.get("height", 0)}]}
-                        tasks.append({"dest": dest, "url": url, "info": info})
-                        budget -= 1
-                    batch_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
-                    src_saved.extend(batch_saved)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": url, "info": info})
 
                 elif source == "archive":
                     candidates = _source_search_archive_videos(
                         api_keys, query, fetch_n, backoff, extra_params=source_filters or None,
                     )
-                    tasks = []
                     for c in candidates:
-                        if budget <= 0: break
                         sid = c.get("source_id", "");  uid = f"archive_vid_{sid}"
-                        if uid in seen_ids_src: continue
-                        seen_ids_src.add(uid)
                         url = c["file_url"]
                         if not url: continue
                         dest = src_dir / f"{uid}.mp4"
                         info = {**c, "video_files": [{"url": url, "width": c.get("width", 0), "height": c.get("height", 0)}]}
                         dl_url = c.get("preview_url") or url
-                        tasks.append({"dest": dest, "url": dl_url, "info": info})
-                        budget -= 1
-                    batch_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
-                    src_saved.extend(batch_saved)
-                    _jitter(cfg, source)
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info})
 
             except Exception as exc:
                 log.warning("fetch_videos %s q=%r failed: %s", source, query, exc)
 
+            _jitter(cfg, source)  # gate between search API calls, not between search+download cycles
+            return pre
+
+        all_pre: list[dict] = []
+        with ThreadPoolExecutor(max_workers=n_q_workers) as qex:
+            for batch in qex.map(_search_one, source_queries):
+                all_pre.extend(batch)
+
+        # ------------------------------------------------------------------
+        # Phase 2 — deduplicate across queries, apply budget, download once.
+        # ------------------------------------------------------------------
+        seen_ids_src: set[str] = set()
+        tasks: list[dict] = []
+        for pt in all_pre:
+            if len(tasks) >= n_src:
+                break
+            uid = pt.pop("_uid")
+            if uid in seen_ids_src:
+                continue
+            seen_ids_src.add(uid)
+            tasks.append(pt)
+
+        src_saved, _ = _run_download_tasks(tasks, cfg, label=f"vid/{source}")
         return src_saved
 
     # Run all sources in parallel

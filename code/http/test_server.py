@@ -4801,10 +4801,10 @@ placeholder="Enter your story here"></textarea>
         <th style="width:18px"></th>
         <th>Shot</th>
         <th>Status</th>
-        <th style="text-align:right;padding-right:16px" title="Total image files downloaded (all sources × all queries — higher than per-source limit)">📷 DL</th>
-        <th style="text-align:right;padding-right:16px" title="Total video files downloaded (all sources × all queries)">🎬 DL</th>
-        <th style="text-align:right;padding-right:16px" title="Images kept after CLIP scoring">📷 ✓</th>
-        <th style="text-align:right;padding-right:16px" title="Videos kept after CLIP scoring">🎬 ✓</th>
+        <th style="text-align:right;padding-right:16px" title="Total image files downloaded across all sources and search queries">Img Downloaded</th>
+        <th style="text-align:right;padding-right:16px" title="Total video files downloaded across all sources and search queries">Vid Downloaded</th>
+        <th style="text-align:right;padding-right:16px" title="Images kept after CLIP scoring">Img Scored</th>
+        <th style="text-align:right;padding-right:16px" title="Videos kept after CLIP scoring">Vid Scored</th>
       </tr></thead><tbody></tbody>`;
       body.appendChild(tbl);
     }
@@ -12396,7 +12396,8 @@ class Handler(BaseHTTPRequestHandler):
                 content_profile = payload.get("content_profile", "default")
                 n_img            = payload.get("n_img") or None
                 n_vid            = payload.get("n_vid") or None
-                sources_override = payload.get("sources_override") or None
+                sources_override        = payload.get("sources_override") or None
+                source_limits_override  = payload.get("source_limits_override") or None
 
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
@@ -12420,6 +12421,7 @@ class Handler(BaseHTTPRequestHandler):
                     **({"n_img": n_img} if n_img is not None else {}),
                     **({"n_vid": n_vid} if n_vid is not None else {}),
                     **({"sources_override": sources_override} if sources_override is not None else {}),
+                    **({"source_limits_override": source_limits_override} if source_limits_override is not None else {}),
                 }).encode()
 
                 url = server_url + "/batches"
