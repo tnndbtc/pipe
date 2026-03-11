@@ -1111,7 +1111,7 @@ class RegisterRequest(BaseModel):
 class ResultRequest(BaseModel):
     job_id: str
     worker: str
-    result: dict
+    result: dict | list   # dict for video jobs, list[dict] for image jobs
 
 
 @app.post("/register")
@@ -1201,115 +1201,17 @@ async def _queue_worker() -> None:
 # Distributed video scoring via job queue
 # ---------------------------------------------------------------------------
 
-async def _score_videos_distributed(
-    batch_id:  str,
-    item:      dict,
-    vid_paths: list[Path],
-    batch_dir: Path,
-    cfg:       dict,
-    infos:     dict | None = None,
-) -> list[dict]:
-    """
-    Enqueue video scoring tasks into the job queue and wait for workers
-    to complete them.  Returns scored results list (same shape as
-    scorer.score_videos).
-    """
-    # Build tasks for the queue
-    tasks = []
-    for vp in vid_paths:
-        frames_dir = batch_dir / "_frames" / vp.stem
-        tasks.append({
-            "video_path": str(vp),
-            "frames_dir": str(frames_dir),
-            "item":       item,
-            "config":     {
-                k: cfg[k] for k in (
-                    "score_weights", "scoring_profiles", "content_profile",
-                    "phash_dedup_threshold", "diversity_phash_threshold",
-                ) if k in cfg
-            },
-        })
-
-    workers_cfg    = cfg.get("workers", {})
-    timeout_seconds = workers_cfg.get("timeout_seconds", 120)
-
-    # Serialise access to the single-batch JobQueue.  When N batches run
-    # concurrently each one waits its turn here; remote scoring workers never
-    # see this — they continue to poll /next_job independently.
-    async with _jq_sem:
-        job_queue.enqueue(batch_id, tasks)
-        job_queue.start_reaper(timeout_seconds=timeout_seconds)
-
-        try:
-            log.info("Waiting for %d video scoring jobs (batch %s)…",
-                     len(tasks), batch_id)
-            await job_queue.wait_until_done()
-        finally:
-            job_queue.stop_reaper()
-
-        # Collect results while still holding the lock (before next batch
-        # can call enqueue and reset the queue state)
-        raw_results = job_queue.get_results()
-
-    # Sort by score descending
-    raw_results.sort(key=lambda r: r.get("score", 0.0), reverse=True)
-
-    # Attach source metadata from infos dict.
-    # Workers receive remapped paths (server_nfs_root → worker nfs_root), so
-    # r["path"] may differ from the infos keys (which use server_nfs_root).
-    # Strategy:
-    #   1. Direct lookup (works when worker and server share the same mount path)
-    #   2. Reverse-remap each registered worker's nfs_root → server_nfs_root
-    #   3. Disk fallback: read sidecar using the server-side path
-    _workers_nfs = [w.nfs_root for w in job_queue._workers.values()] if job_queue else []
-    for r in raw_results:
-        worker_path = r.get("path", "")
-        source = infos.get(worker_path) if infos else None
-
-        if source is None and infos:
-            # Try reverse-remapping worker path back to server path
-            for wnfs in _workers_nfs:
-                if worker_path.startswith(wnfs):
-                    server_path = job_queue.server_nfs_root + worker_path[len(wnfs):]
-                    source = infos.get(server_path)
-                    if source is not None:
-                        break
-
-        if source is None:
-            # Disk fallback: resolve to server-side path and read sidecar
-            server_path = worker_path
-            if not worker_path.startswith(job_queue.server_nfs_root if job_queue else ""):
-                for wnfs in _workers_nfs:
-                    if worker_path.startswith(wnfs):
-                        server_path = job_queue.server_nfs_root + worker_path[len(wnfs):]
-                        break
-            sidecar = Path(server_path + ".info.json")
-            if sidecar.exists():
-                try:
-                    source = json.loads(sidecar.read_text())
-                except Exception:
-                    pass
-
-        if source is not None:
-            r["source"] = source
-
-    log.info("Distributed scoring complete: %d results for batch %s",
-             len(raw_results), batch_id)
-    return raw_results
 
 
-async def _score_images_distributed(
+async def _score_images_distributed_batch(
     batch_id:   str,
-    item_id:    str,
-    item:       dict,
-    img_paths:  list[Path],
+    items_data: list[tuple[str, dict, list[Path], dict]],
+    # each tuple: (item_id, item, img_paths, img_infos)
     cfg:        dict,
-    img_infos:  dict | None = None,
-) -> list[dict]:
+) -> dict[str, list[dict]]:
     """
-    Enqueue one image scoring task (all images for this item) and wait for
-    a worker to complete it.  Returns scored results list (same shape as
-    scorer.score_images).
+    Enqueue image scoring tasks for ALL items in one batch so all workers
+    can run in parallel.  Returns {item_id: scored_list}.
     """
     scoring_config = {
         k: cfg[k] for k in (
@@ -1318,55 +1220,76 @@ async def _score_images_distributed(
         ) if k in cfg
     }
 
-    task = {
-        "job_type":    "images",
-        "image_paths": [str(p) for p in img_paths],
-        "item":        item,
-        "config":      scoring_config,
-        "infos":       img_infos or {},
-    }
+    tasks = []
+    item_id_for_task = []   # parallel list: task index → item_id
+    for item_id, item, img_paths, img_infos in items_data:
+        if not img_paths:
+            continue
+        task = {
+            "job_type":    "images",
+            "item_id":     item_id,       # carried through for result mapping
+            "image_paths": [str(p) for p in img_paths],
+            "item":        item,
+            "config":      scoring_config,
+            "infos":       img_infos or {},
+        }
+        tasks.append(task)
+        item_id_for_task.append(item_id)
+
+    if not tasks:
+        return {}
 
     workers_cfg     = cfg.get("workers", {})
     timeout_seconds = workers_cfg.get("timeout_seconds", 120)
 
     async with _jq_sem:
-        job_queue.enqueue(batch_id, [task])
+        job_queue.enqueue(batch_id, tasks)
         job_queue.start_reaper(timeout_seconds=timeout_seconds)
 
         try:
-            log.info("Waiting for image scoring job for item %s (batch %s)…",
-                     item_id, batch_id)
+            log.info(
+                "Waiting for %d image scoring jobs across %d items (batch %s)…",
+                len(tasks), len(tasks), batch_id,
+            )
             await job_queue.wait_until_done()
         finally:
             job_queue.stop_reaper()
 
-        raw_results = job_queue.get_results()
+        results_by_job = job_queue.get_results_dict()   # {job_id: list[dict]}
 
-    # raw_results is a list containing one element: the list[dict] returned
-    # by score_images on the worker.
-    if not raw_results:
-        return []
-
-    scored = raw_results[0]   # list[dict] from score_images
-    if not isinstance(scored, list):
-        log.warning("Unexpected image job result shape for item %s", item_id)
-        return []
-
-    # Reverse-remap worker paths back to server paths in the result dicts.
+    # Map results back to item_id
     _workers_nfs = [w.nfs_root for w in job_queue._workers.values()] if job_queue else []
-    remapped = []
-    for r in scored:
-        worker_path = r.get("path", "")
-        server_path = worker_path
-        for wnfs in _workers_nfs:
-            if worker_path.startswith(wnfs):
-                server_path = job_queue.server_nfs_root + worker_path[len(wnfs):]
-                break
-        remapped.append({**r, "path": server_path})
+    out: dict[str, list[dict]] = {}
 
-    log.info("Distributed image scoring complete: %d results for item %s",
-             len(remapped), item_id)
-    return remapped
+    for job_id, scored in results_by_job.items():
+        task_meta = job_queue._job_tasks.get(job_id, {})
+        item_id = task_meta.get("item_id", "")
+        if not item_id:
+            log.warning("Image result job %s has no item_id in task metadata", job_id)
+            continue
+
+        if not isinstance(scored, list):
+            log.warning("Unexpected image result shape for job %s item %s", job_id, item_id)
+            out[item_id] = []
+            continue
+
+        # Reverse-remap worker paths → server paths
+        remapped = []
+        for r in scored:
+            worker_path = r.get("path", "")
+            server_path = worker_path
+            for wnfs in _workers_nfs:
+                if worker_path.startswith(wnfs):
+                    server_path = job_queue.server_nfs_root + worker_path[len(wnfs):]
+                    break
+            remapped.append({**r, "path": server_path})
+        out[item_id] = remapped
+
+    log.info(
+        "Distributed image scoring complete: %d items scored (batch %s)",
+        len(out), batch_id,
+    )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1442,26 +1365,29 @@ async def _run_batch(batch_id: str) -> None:
     # Shared counter (mutated only from async gather callbacks — safe in asyncio)
     done: list[int] = [0]
 
-    async def _process_item(item_id: str, item: dict) -> list:
-        # Skip items already completed (allows resume after server restart)
+    # ---------------------------------------------------------------
+    # Phase 1 — Download (all items in parallel)
+    # ---------------------------------------------------------------
+
+    # dl_data[item_id] = (img_path_infos, vid_path_infos, item_pending, resolved_item)
+    dl_data: dict[str, tuple] = {}
+
+    async def _download_item(item_id: str, item: dict) -> tuple:
+        """Download images and videos for one item. Return data for scoring."""
+        # Skip items already completed (resume support)
         if item.get("status") == "done":
             log.info("[%s]  already done — skipping", item_id)
             done[0] += 1
-            return []
+            return item_id, [], [], [], item
 
         search_prompt = item.get("search_prompt", "")
-        ai_prompt     = item.get("ai_prompt") or search_prompt
 
-        # C3 / M6: map search_filters → prefer + pixabay source_filters
-        # "photo" → prefer images but still fetch videos (manifest often over-specifies photo)
-        # Only hard-skip the other type when media_type is explicitly "video" or "image"
+        # C3/M6: media_type → prefer
         sf     = item.get("search_filters") or {}
         mt     = sf.get("media_type", "mixed")
         prefer = {"image": "image", "video": "video"}.get(mt, "both")
-        # "photo" maps to "both" (prefer images in scoring, but don't skip video fetch)
-        # Use explicit "image" in manifest to hard-skip videos
 
-        # Inject Pixabay dimension constraints into source_filters
+        # Inject Pixabay dimension constraints
         src_filters = dict(item.get("source_filters") or {})
         pbay = dict(src_filters.get("pixabay") or {})
         if sf.get("min_width")  and "min_width"  not in pbay:
@@ -1470,7 +1396,6 @@ async def _run_batch(batch_id: str) -> None:
             pbay["min_height"] = sf["min_height"]
         if pbay:
             src_filters["pixabay"] = pbay
-        # Rebuild item with resolved prefer + source_filters (non-mutating)
         item = {**item, "prefer": prefer, "source_filters": src_filters}
 
         item_dir = batch_dir / item_id
@@ -1481,18 +1406,11 @@ async def _run_batch(batch_id: str) -> None:
         store.update_item_progress(batch_id, item_id, phase="downloading")
 
         try:
-            img_path_infos: list[tuple] = []
-            vid_path_infos: list[tuple] = []
-
             log.info("[%s]  download start  prompt=%r  n_img=%d  n_vid=%d  prefer=%s",
                      item_id, search_prompt[:80], n_img, n_vid, prefer)
             t_dl = time.perf_counter()
 
             async with _sem:
-                # Fetch images and videos in parallel — they are fully independent.
-                async def _noop() -> list:
-                    return []
-
                 async def _fetch_imgs():
                     if prefer == "video":
                         return [], []
@@ -1500,10 +1418,9 @@ async def _run_batch(batch_id: str) -> None:
                         downloader.fetch_images,
                         search_prompt, n_img, img_dir, API_KEYS, cfg, item,
                     )
-                    # fetch_images now returns (saved_list, pending_list)
                     if isinstance(result, tuple) and len(result) == 2:
                         return result
-                    return result, []  # backward compat
+                    return result, []
 
                 async def _fetch_vids():
                     if prefer == "image":
@@ -1516,103 +1433,195 @@ async def _run_batch(batch_id: str) -> None:
                         return result
                     return result, []
 
-                (img_path_infos, img_pending), (vid_path_infos, vid_pending) = await asyncio.gather(
-                    _fetch_imgs(), _fetch_vids(),
+                (img_path_infos, img_pending), (vid_path_infos, vid_pending) = (
+                    await asyncio.gather(_fetch_imgs(), _fetch_vids())
                 )
 
             log.info("[%s]  download done   imgs=%d  vids=%d  elapsed=%.1fs",
                      item_id, len(img_path_infos), len(vid_path_infos),
                      time.perf_counter() - t_dl)
 
-            # Collect pending candidates for this item (SSRF review queue)
-            item_pending = img_pending + vid_pending
-            if item_pending:
-                log.info("[%s]  %d candidates pending host review", item_id, len(item_pending))
+            return item_id, img_path_infos, vid_path_infos, img_pending + vid_pending, item
 
-            img_paths = [p for p, _ in img_path_infos]
-            vid_paths = [p for p, _ in vid_path_infos]
-            img_infos = {str(p): info for p, info in img_path_infos}
-            vid_infos = {str(p): info for p, info in vid_path_infos}
-
-            store.update(batch_id, progress=f"scoring {item_id} ({done[0]+1}/{item_count})")
-            store.update_item_progress(
-                batch_id, item_id, phase="scoring",
-                imgs_downloaded=len(img_path_infos),
-                vids_downloaded=len(vid_path_infos),
-            )
-
-            log.info("[%s]  scoring start   imgs=%d  vids=%d  mode=%s",
-                     item_id, len(img_paths), len(vid_paths),
-                     "distributed" if _use_distributed else "local")
-            t_sc = time.perf_counter()
-
-            weights = cfg.get("score_weights")
-
-            # Image scoring: distributed (job queue) or local fallback
-            if _use_distributed and img_paths:
-                images_ranked = await _score_images_distributed(
-                    batch_id, item_id, item, img_paths, cfg,
-                    img_infos,
-                )
-            else:
-                images_ranked = await asyncio.to_thread(
-                    scorer.score_images, clip_model, item, img_paths, weights, cfg,
-                    img_infos,
-                )
-
-            # Video scoring: distributed (job queue) or local fallback
-            if _use_distributed and vid_paths:
-                videos_ranked = await _score_videos_distributed(
-                    batch_id, item, vid_paths, batch_dir, cfg,
-                    vid_infos,
-                )
-            else:
-                videos_ranked = await asyncio.to_thread(
-                    scorer.score_videos, clip_model, item, vid_paths, batch_dir, weights, cfg,
-                    vid_infos,
-                )
-
-            log.info("[%s]  scoring done    imgs_ranked=%d  vids_ranked=%d  elapsed=%.1fs",
-                     item_id, len(images_ranked), len(videos_ranked),
-                     time.perf_counter() - t_sc)
-
-            # Convert absolute paths → relative-to-batch_dir
-            images_ranked = _relativise(images_ranked, batch_dir)
-            videos_ranked = _relativise(videos_ranked, batch_dir)
-
-            store.update_item_progress(
-                batch_id, item_id, phase="done",
-                imgs_scored=len(images_ranked),
-                vids_scored=len(videos_ranked),
-            )
-            store.update_item(
-                batch_id, item_id,
-                status="done",
-                images_ranked=images_ranked,
-                videos_ranked=videos_ranked,
-            )
-            log.info("  item %s done  imgs=%d  vids=%d",
-                     item_id, len(images_ranked), len(videos_ranked))
-
-            # Return pending candidates for this item
-            return item_pending
-
-        except Exception as exc:  # noqa: BLE001
-            log.exception("  item %s failed: %s", item_id, exc)
+        except Exception as exc:
+            log.exception("  item %s download failed: %s", item_id, exc)
             store.update_item(batch_id, item_id, status="failed", error=str(exc))
-            return []
+            return item_id, [], [], [], item
 
+    download_tasks = [_download_item(iid, idata) for iid, idata in backgrounds.items()]
+    download_outputs = await asyncio.gather(*download_tasks)
+
+    # Collect download results; update store progress
+    pending_by_item: dict[str, list] = {}   # item_id → pending candidates list
+    items_to_score: dict[str, tuple] = {}   # item_id → (img_path_infos, vid_path_infos, item)
+    for item_id, img_pi, vid_pi, item_pending, resolved_item in download_outputs:
+        if item_pending:
+            pending_by_item[item_id] = item_pending
+            log.info("[%s]  %d candidates pending host review", item_id, len(item_pending))
+        if resolved_item.get("status") == "done":
+            continue
+        items_to_score[item_id] = (img_pi, vid_pi, resolved_item)
+        store.update(batch_id,
+                     progress=f"scoring {item_id} ({done[0]+1}/{item_count})")
+        store.update_item_progress(
+            batch_id, item_id, phase="scoring",
+            imgs_downloaded=len(img_pi),
+            vids_downloaded=len(vid_pi),
+        )
+
+    # ---------------------------------------------------------------
+    # Phase 2 — Image scoring (all items in one batch → all workers busy)
+    # ---------------------------------------------------------------
+
+    image_results: dict[str, list[dict]] = {}   # item_id → scored list
+
+    if _use_distributed:
+        img_batch_input = []
+        for item_id, (img_pi, _, item) in items_to_score.items():
+            img_paths = [p for p, _ in img_pi]
+            if not img_paths:
+                image_results[item_id] = []
+                continue
+            img_infos = {str(p): info for p, info in img_pi}
+            img_batch_input.append((item_id, item, img_paths, img_infos))
+
+        if img_batch_input:
+            image_results.update(
+                await _score_images_distributed_batch(batch_id, img_batch_input, cfg)
+            )
+    else:
+        weights = cfg.get("score_weights")
+        for item_id, (img_pi, _, item) in items_to_score.items():
+            img_paths = [p for p, _ in img_pi]
+            img_infos = {str(p): info for p, info in img_pi}
+            image_results[item_id] = await asyncio.to_thread(
+                scorer.score_images, clip_model, item, img_paths, weights, cfg, img_infos,
+            )
+
+    # ---------------------------------------------------------------
+    # Phase 3 — Video scoring (all items in one batch → all workers busy)
+    # ---------------------------------------------------------------
+
+    video_results: dict[str, list[dict]] = {}   # item_id → scored list
+
+    if _use_distributed:
+        # Build all video tasks across all items at once
+        all_vid_tasks = []
+        for item_id, (_, vid_pi, item) in items_to_score.items():
+            vid_paths = [p for p, _ in vid_pi]
+            if not vid_paths:
+                video_results[item_id] = []
+                continue
+            vid_infos = {str(p): info for p, info in vid_pi}
+            scoring_config = {
+                k: cfg[k] for k in (
+                    "score_weights", "scoring_profiles", "content_profile",
+                    "phash_dedup_threshold", "diversity_phash_threshold",
+                ) if k in cfg
+            }
+            for vp in vid_paths:
+                frames_dir = batch_dir / "_frames" / vp.stem
+                all_vid_tasks.append({
+                    "item_id":    item_id,
+                    "video_path": str(vp),
+                    "frames_dir": str(frames_dir),
+                    "item":       item,
+                    "config":     scoring_config,
+                })
+
+        if all_vid_tasks:
+            workers_cfg     = cfg.get("workers", {})
+            timeout_seconds = workers_cfg.get("timeout_seconds", 120)
+
+            async with _jq_sem:
+                job_queue.enqueue(batch_id, all_vid_tasks)
+                job_queue.start_reaper(timeout_seconds=timeout_seconds)
+                try:
+                    log.info(
+                        "Waiting for %d video scoring jobs across all items (batch %s)…",
+                        len(all_vid_tasks), batch_id,
+                    )
+                    await job_queue.wait_until_done()
+                finally:
+                    job_queue.stop_reaper()
+                raw_vid_results = job_queue.get_results_dict()   # {job_id: dict}
+
+            # Group video results by item_id (from task metadata)
+            _workers_nfs = [w.nfs_root for w in job_queue._workers.values()] if job_queue else []
+            grouped: dict[str, list[dict]] = {}
+            for job_id, r in raw_vid_results.items():
+                task_meta = job_queue._job_tasks.get(job_id, {})
+                item_id = task_meta.get("item_id", "")
+                if not item_id:
+                    continue
+                # Reverse-remap worker path
+                worker_path = r.get("path", "")
+                server_path = worker_path
+                for wnfs in _workers_nfs:
+                    if worker_path.startswith(wnfs):
+                        server_path = job_queue.server_nfs_root + worker_path[len(wnfs):]
+                        break
+                r_remapped = {**r, "path": server_path}
+
+                # Attach source metadata
+                vid_pi_for_item = items_to_score.get(item_id, ([], [], None))[1]
+                vid_infos_for_item = {str(p): info for p, info in vid_pi_for_item} if vid_pi_for_item else {}
+                source = vid_infos_for_item.get(server_path)
+                if source is None:
+                    for wnfs in _workers_nfs:
+                        if worker_path.startswith(wnfs):
+                            source = vid_infos_for_item.get(
+                                job_queue.server_nfs_root + worker_path[len(wnfs):]
+                            )
+                            if source:
+                                break
+                if source is not None:
+                    r_remapped["source"] = source
+
+                grouped.setdefault(item_id, []).append(r_remapped)
+
+            # Sort each item's videos by score descending
+            for item_id, vlist in grouped.items():
+                vlist.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+                video_results[item_id] = vlist
+    else:
+        weights = cfg.get("score_weights")
+        for item_id, (_, vid_pi, item) in items_to_score.items():
+            vid_paths = [p for p, _ in vid_pi]
+            vid_infos = {str(p): info for p, info in vid_pi}
+            video_results[item_id] = await asyncio.to_thread(
+                scorer.score_videos, clip_model, item, vid_paths, batch_dir, weights, cfg,
+                vid_infos,
+            )
+
+    # ---------------------------------------------------------------
+    # Phase 4 — Save results per item
+    # ---------------------------------------------------------------
+
+    for item_id in items_to_score:
+        images_ranked = image_results.get(item_id, [])
+        videos_ranked = video_results.get(item_id, [])
+
+        images_ranked = _relativise(images_ranked, batch_dir)
+        videos_ranked = _relativise(videos_ranked, batch_dir)
+
+        store.update_item_progress(
+            batch_id, item_id, phase="done",
+            imgs_scored=len(images_ranked),
+            vids_scored=len(videos_ranked),
+        )
+        store.update_item(
+            batch_id, item_id,
+            status="done",
+            images_ranked=images_ranked,
+            videos_ranked=videos_ranked,
+        )
+        log.info("  item %s done  imgs=%d  vids=%d",
+                 item_id, len(images_ranked), len(videos_ranked))
         done[0] += 1
-        return []
-
-    # Run all items concurrently (bounded by _sem)
-    all_item_results = await asyncio.gather(*[_process_item(iid, idata) for iid, idata in backgrounds.items()])
 
     # Collect pending candidates per-item (keyed by item_id)
-    pending_candidates: dict[str, list] = {}
-    for (iid, _), item_pending in zip(backgrounds.items(), all_item_results):
-        if item_pending:
-            pending_candidates[iid] = item_pending
+    pending_candidates: dict[str, list] = pending_by_item
 
     if pending_candidates:
         total_pending = sum(len(v) for v in pending_candidates.values())

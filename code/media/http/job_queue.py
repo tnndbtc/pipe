@@ -68,7 +68,8 @@ class JobQueue:
         self._batch_id: str | None = None
         self._total: int = 0
         self._in_flight: dict[str, InFlightJob] = {}   # job_id → InFlightJob
-        self._results: dict[str, dict] = {}             # job_id → result dict
+        self._results: dict[str, Any] = {}              # job_id → result (dict for video, list for images)
+        self._job_tasks: dict[str, dict] = {}           # job_id → original task (for metadata)
         self._done_event: asyncio.Event = asyncio.Event()
         self._reaper_task: asyncio.Task | None = None
 
@@ -123,6 +124,7 @@ class JobQueue:
         self._batch_id = batch_id
         self._in_flight.clear()
         self._results.clear()
+        self._job_tasks.clear()
         self._done_event.clear()
         self._total = len(tasks)
 
@@ -130,6 +132,7 @@ class JobQueue:
             job_id = "j_" + uuid.uuid4().hex[:8]
             t["job_id"] = job_id
             t["batch_id"] = batch_id
+            self._job_tasks[job_id] = t
             self._queue.put_nowait(t)
 
         log.info("Enqueued %d jobs for batch %s", len(tasks), batch_id)
@@ -176,6 +179,25 @@ class JobQueue:
             payload["image_paths"] = [
                 self.remap_path(p, nfs_root) for p in payload["image_paths"]
             ]
+        # Remap infos dict keys (server path → worker path) so score_images
+        # can look up metadata by the local path it actually uses.
+        if "infos" in payload and payload["infos"]:
+            payload["infos"] = {
+                self.remap_path(k, nfs_root): v
+                for k, v in payload["infos"].items()
+            }
+        # Remap _thumbnails inside item dict (server path → worker path) so
+        # the thumbnail pre-filter can match image paths on the worker.
+        if "item" in payload and isinstance(payload["item"], dict):
+            thumbs = payload["item"].get("_thumbnails")
+            if thumbs:
+                payload["item"] = {
+                    **payload["item"],
+                    "_thumbnails": {
+                        self.remap_path(k, nfs_root): v
+                        for k, v in thumbs.items()
+                    },
+                }
 
         log.debug("Dispatched job %s to worker %s", job_id, worker_name)
         return payload
@@ -184,7 +206,7 @@ class JobQueue:
     # Result submission
     # ------------------------------------------------------------------
 
-    def submit_result(self, job_id: str, result: dict) -> bool:
+    def submit_result(self, job_id: str, result: Any) -> bool:
         """
         Store the result for a completed job.
 
@@ -220,9 +242,13 @@ class JobQueue:
             return
         await self._done_event.wait()
 
-    def get_results(self) -> list[dict]:
+    def get_results(self) -> list[Any]:
         """Return all collected results (unordered)."""
         return list(self._results.values())
+
+    def get_results_dict(self) -> dict[str, Any]:
+        """Return {job_id: result} — lets callers correlate results with job metadata."""
+        return dict(self._results)
 
     @property
     def batch_id(self) -> str | None:
