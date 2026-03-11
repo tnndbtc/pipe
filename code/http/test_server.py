@@ -12315,8 +12315,10 @@ class Handler(BaseHTTPRequestHandler):
                         duration_sec = wf.getnframes() / wf.getframerate()
                 except Exception:
                     pass
+                rel_path = os.path.relpath(dest_path, PIPE_DIR)
+                serve_url = "/serve_media?path=" + urllib.parse.quote(rel_path)
                 body = json.dumps({"path": dest_path,
-                                   "url":  "file://" + dest_path,
+                                   "url":  serve_url,
                                    "filename": dest_file,
                                    "duration_sec": duration_sec}).encode()
                 self.send_response(200)
