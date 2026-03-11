@@ -522,6 +522,16 @@ async def sfx_save(body: SfxSaveRequest, _: None = Depends(require_auth)):
     import hashlib as _hashlib
     from urllib.parse import urlparse as _urlparse
 
+    # License gate — reject non-commercial-safe licenses before doing any I/O
+    from downloader import is_license_acceptable as _lic_ok
+    lic_summary = (body.attribution or {}).get("license_summary", "")
+    if not _lic_ok(lic_summary):
+        raise HTTPException(
+            status_code=400,
+            detail=f"License '{lic_summary}' is not acceptable for commercial use "
+                   f"(accepted: CC0, Public Domain, CC BY)",
+        )
+
     # SSRF protection: validate hostname against allowlist
     SFX_DOWNLOAD_ALLOWLIST = [
         "cdn.freesound.org", "freesound.org",
@@ -589,21 +599,51 @@ async def sfx_save(body: SfxSaveRequest, _: None = Depends(require_auth)):
         log.exception("sfx_save download failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
-    # Write attribution sidecar
+    # Write attribution sidecar (.info.json alongside the audio file)
     import json as _json, datetime as _dt
+    attr = body.attribution or {}
     sidecar = dest.with_suffix(".info.json")
     info = {
-        "source_site":      body.source_site,
-        "source_id":        (body.attribution or {}).get("source_id", ""),
-        "author":           (body.attribution or {}).get("author", ""),
-        "license_summary":  (body.attribution or {}).get("license_summary", ""),
-        "license_url":      (body.attribution or {}).get("license_url", ""),
-        "asset_page_url":   (body.attribution or {}).get("asset_page_url", ""),
-        "attribution_text": (body.attribution or {}).get("attribution_text", ""),
-        "original_format":  "mp3",
-        "saved_at":         _dt.datetime.utcnow().isoformat() + "Z",
+        "source_site":        body.source_site,
+        "source_id":          attr.get("source_id", ""),
+        "author":             attr.get("author", ""),
+        "license_summary":    lic_summary,
+        "license_url":        attr.get("license_url", ""),
+        "asset_page_url":     attr.get("asset_page_url", ""),
+        "attribution_text":   attr.get("attribution_text", ""),
+        "attribution_required": lic_summary not in {"CC0", "Public Domain"},
+        "original_format":    "mp3",
+        "saved_at":           _dt.datetime.utcnow().isoformat() + "Z",
     }
-    sidecar.write_text(_json.dumps(info, ensure_ascii=False))
+    sidecar.write_text(_json.dumps(info, indent=2, ensure_ascii=False))
+
+    # Patch AssetManifest_draft.shared.json with structured license fields
+    manifest_path = ep_dir / "AssetManifest_draft.shared.json"
+    if manifest_path.exists():
+        import fcntl as _fcntl
+        lock_path = str(manifest_path) + ".lock"
+        with open(lock_path, "w") as _lf:
+            _fcntl.flock(_lf, _fcntl.LOCK_EX)
+            try:
+                manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                for sfx in manifest.get("sfx_items", []):
+                    if sfx.get("item_id") == body.item_id:
+                        sfx["file_path"]            = str(dest.relative_to(ep_dir))
+                        sfx["source"]               = body.source_site
+                        sfx["source_id"]            = attr.get("source_id", "")
+                        sfx["license_summary"]      = lic_summary
+                        sfx["license_type"]         = lic_summary   # key for SPDX_MAP in resolve_assets
+                        sfx["license_url"]          = attr.get("license_url", "")
+                        sfx["attribution_required"] = lic_summary not in {"CC0", "Public Domain"}
+                        sfx["attribution_text"]     = attr.get("attribution_text", "")
+                        sfx["author"]               = attr.get("author", "")
+                        sfx["asset_page_url"]       = attr.get("asset_page_url", "")
+                        break
+                manifest_path.write_text(
+                    _json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            finally:
+                _fcntl.flock(_lf, _fcntl.LOCK_UN)
 
     transport = config.get("transport", "http")
     file_mount_root = config.get("file_mount_root", "").rstrip("/")

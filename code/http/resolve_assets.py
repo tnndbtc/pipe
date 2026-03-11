@@ -61,6 +61,12 @@ SPDX_MAP: dict[str, str] = {
     "commercial_licensed": "LicenseRef-commercial-licensed",
     "CC0":                 "CC0-1.0",
     "CC0-1.0":             "CC0-1.0",
+    "Public Domain":       "CC0-1.0",
+    "CC BY":               "CC-BY-4.0",
+    "CC BY 4.0":           "CC-BY-4.0",
+    "CC BY 3.0":           "CC-BY-3.0",
+    "CC BY 2.0":           "CC-BY-2.0",
+    "CC BY 1.0":           "CC-BY-1.0",
     "MIT":                 "MIT",
 }
 
@@ -276,6 +282,64 @@ def _resolved_stock(
             # Pixabay requires attribution in some commercial contexts
             "attribution_required": provider == "pixabay",
             "text":                "",
+        },
+        "schema_id":      "urn:media:resolved-asset",
+        "schema_version": "1.0.0",
+        "producer":       PRODUCER,
+    }
+
+
+def _resolved_sfx(asset_id: str, file_path: Path, sfx_item: dict) -> dict:
+    """Build a resolved SFX item, reading the .info.json sidecar for license fields.
+
+    Falls back to manifest sfx_item fields when the sidecar is absent, and to
+    'proprietary_cleared' when neither has a recognized license_type.
+    """
+    # Locate sidecar: {item_id}.mp3 → {item_id}.info.json (same stem, no double-ext)
+    sidecar = file_path.parent / (file_path.stem + ".info.json")
+    info: dict = {}
+    if sidecar.exists():
+        try:
+            info = json.loads(sidecar.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("[sfx] failed to read sidecar %s: %s", sidecar, exc)
+
+    # License fields — sidecar takes priority over manifest
+    lic_summary  = info.get("license_summary")  or sfx_item.get("license_summary", "")
+    lic_url      = info.get("license_url")       or sfx_item.get("license_url", "")
+    attr_text    = info.get("attribution_text")  or sfx_item.get("attribution_text", "")
+    author       = info.get("author")            or sfx_item.get("author", "")
+    source_site  = info.get("source_site")       or sfx_item.get("source", "")
+    attr_req     = info.get("attribution_required",
+                            sfx_item.get("attribution_required",
+                                         lic_summary not in {"CC0", "Public Domain"}))
+
+    # Map to SPDX — prefer manifest's license_type key (already mapped at save time)
+    lic_type = sfx_item.get("license_type") or lic_summary or "proprietary_cleared"
+    spdx_id  = SPDX_MAP.get(lic_type, SPDX_MAP.get(lic_summary, "NOASSERTION"))
+
+    rights_warning = ""
+    if attr_req and attr_text:
+        rights_warning = f"Attribution required: {attr_text}"
+
+    return {
+        "asset_id":       asset_id,
+        "asset_type":     "sfx",
+        "uri":            file_path.as_uri(),
+        "is_placeholder": False,
+        "metadata": {
+            "license_type":       lic_type,
+            "attribution":        attr_text,
+            "provider_or_model":  source_site,
+            "purchase_record":    "",
+            "retrieval_date":     DETERMINISTIC_TS,
+        },
+        "rights_warning": rights_warning,
+        "source":  {"type": "library", "provider": source_site, "url": lic_url},
+        "license": {
+            "spdx_id":              spdx_id,
+            "attribution_required": bool(attr_req),
+            "text":                 "",
         },
         "schema_id":      "urn:media:resolved-asset",
         "schema_version": "1.0.0",
@@ -544,10 +608,9 @@ def resolve_all(
     sfx_dir = assets_root / "sfx"
     for sfx in merged.get("sfx_items", []):
         aid = sfx["item_id"]
-        lt  = sfx.get("license_type", "proprietary_cleared")
         f   = search_dirs([sfx_dir], aid, AUDIO_EXTS)
         if f:
-            items.append(_resolved(aid, "sfx", f, lt))
+            items.append(_resolved_sfx(aid, f, sfx))
             n_found += 1
         else:
             items.append(_placeholder(aid, "sfx"))

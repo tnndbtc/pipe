@@ -3431,16 +3431,63 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  function onSfxEpChange() {
+  async function onSfxEpChange() {
     const val = document.getElementById('sfx-ep-select').value;
     if (!val) return;
     const parts = val.split('|');
     _sfxSlug = parts[0]; _sfxEpId = parts.slice(1).join('|');
     document.getElementById('sfx-btn-search').disabled = false;
-    document.getElementById('sfx-status-bar').textContent = 'Episode selected. Click \u201cSearch All SFX\u201d.';
-    // Restore sessionStorage selections for this episode
-    const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
-    if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
+    document.getElementById('sfx-status-bar').textContent = 'Episode selected. Loading previous results\u2026';
+    // Try to load previously saved search results from disk
+    await _sfxLoadExisting();
+  }
+
+  async function _sfxLoadExisting() {
+    if (!_sfxSlug || !_sfxEpId) return;
+    try {
+      const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
+                          + '&ep_id=' + encodeURIComponent(_sfxEpId)
+                          + '&file=assets/sfx/sfx_search_results.json');
+      if (!r.ok) return;
+      const saved = await r.json();
+      if (!saved || !saved.results) return;
+
+      _sfxResults  = saved.results;
+      _sfxSelected = saved.selected || {};
+      _sfxItems    = Object.values(_sfxResults).map(r => r.item);
+
+      // Render all cards
+      document.getElementById('sfx-body').innerHTML = '';
+      _sfxItems.forEach(item => {
+        const res = _sfxResults[item.item_id || item.asset_id || ''];
+        if (res) sfxRenderCard(res.item, res.candidates);
+      });
+
+      document.getElementById('sfx-footer').style.display = 'flex';
+      sfxUpdateCountLabel();
+      document.getElementById('sfx-btn-search').disabled = false;
+      document.getElementById('sfx-status-bar').textContent =
+        'Loaded ' + _sfxItems.length + ' items from previous search'
+        + (saved.saved_at ? ' (' + new Date(saved.saved_at).toLocaleString() + ')' : '') + '.';
+    } catch(e) {
+      // No saved results yet — that's fine
+    }
+  }
+
+  async function _sfxSaveResults() {
+    if (!_sfxSlug || !_sfxEpId || !Object.keys(_sfxResults).length) return;
+    try {
+      await fetch('/api/sfx_results_save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          slug:     _sfxSlug,
+          ep_id:    _sfxEpId,
+          results:  _sfxResults,
+          selected: _sfxSelected,
+        }),
+      });
+    } catch(e) {}
   }
 
   async function sfxSearchAll() {
@@ -3539,6 +3586,7 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('sfx-footer').style.display = 'flex';
     sfxUpdateCountLabel();
     document.getElementById('sfx-btn-search').disabled = false;
+    _sfxSaveResults();  // persist to disk so results survive page reload
   }
 
   function sfxRenderCard(item, candidates) {
@@ -3620,6 +3668,7 @@ placeholder="Enter your story here"></textarea>
     const res = _sfxResults[itemId];
     if (res) sfxRenderCard(res.item, res.candidates);
     sfxUpdateCountLabel();
+    _sfxSaveResults();  // persist selection change to disk
   }
 
   function sfxUpdateCountLabel() {
@@ -3770,6 +3819,7 @@ placeholder="Enter your story here"></textarea>
     if (!res) return;
     res.candidates.unshift(candidate);  // prepend — AI result appears first
     sfxRenderCard(res.item, res.candidates);
+    _sfxSaveResults();  // persist AI-generated result to disk
   }
 
   function _sfxResetBtn(b) {
@@ -12100,6 +12150,40 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── SFX: persist search results to disk (POST /api/sfx_results_save) ──
+        elif self.path == "/api/sfx_results_save":
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length))
+                slug    = payload.get("slug", "").strip()
+                ep_id   = payload.get("ep_id", "").strip()
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                dest_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                        "assets", "sfx")
+                os.makedirs(dest_dir, exist_ok=True)
+                dest_path = os.path.join(dest_dir, "sfx_search_results.json")
+                data = {
+                    "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "results":  payload.get("results", {}),
+                    "selected": payload.get("selected", {}),
+                }
+                with open(dest_path, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh, ensure_ascii=False, indent=2)
+                body = json.dumps({"ok": True}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # ── AI SFX Generate: submit generation job to AI server ──────────────
         elif self.path == "/api/ai_sfx_generate":
             try:
@@ -13211,7 +13295,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/diagnose_pipeline",
                   "/api/media_batches", "/api/media_batch_status",
                   "/api/media_batch", "/api/media_confirm",
-                  "/api/sfx_search", "/api/sfx_save",
+                  "/api/sfx_search", "/api/sfx_save", "/api/sfx_results_save",
                   "/api/ai_sfx_generate", "/api/ai_sfx_save",
                   "/api/ai_images", "/api/ai_job_status",
                   "/api/serve_media_file",
