@@ -75,10 +75,42 @@ def split_sentences(text: str) -> list:
     Split text into sentences.
 
     Handles CJK (。！？…) and Latin (. ! ?) terminal punctuation.
+    Protects common abbreviations (a.m., p.m., Mr., Dr., vs., e.g., i.e.,
+    single initials, ordinals like 1st/2nd) from being treated as sentence
+    boundaries.
     Returns a list of non-empty stripped sentence strings.
     """
-    pattern = r'(?<=[。！？…\.\!\?])\s*'
-    sentences = [s.strip() for s in re.split(pattern, text) if s.strip()]
+    # Step 1: protect known abbreviations by replacing their periods with a
+    # placeholder that won't be touched by the sentence splitter.
+    _PLACEHOLDER = "\x00"
+
+    # Titles and common abbreviations (case-insensitive)
+    _ABBREVS = re.compile(
+        r'\b(Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|approx|dept|est|govt|corp'
+        r'|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec'
+        r'|e\.g|i\.e|i\.e|cf|ibid|et al|op|cit)\.',
+        re.IGNORECASE,
+    )
+    # a.m. / p.m. style — letter-dot-letter-dot
+    _AM_PM = re.compile(r'\b([a-zA-Z])\.([a-zA-Z])\.')
+    # Single uppercase initial followed by a period and a space then a lowercase
+    # word (likely an initial, not end-of-sentence): "J. edgar" or "U.S. army"
+    _INITIAL = re.compile(r'\b([A-Z])\.(?=\s+[a-z])')
+    # Ordinals: 1st. 2nd. 3rd. 4th. etc.
+    _ORDINAL = re.compile(r'\b(\d+(?:st|nd|rd|th))\.')
+
+    protected = text
+    protected = _ABBREVS.sub(lambda m: m.group(0).replace('.', _PLACEHOLDER), protected)
+    protected = _AM_PM.sub(lambda m: m.group(0).replace('.', _PLACEHOLDER), protected)
+    protected = _INITIAL.sub(lambda m: m.group(0).replace('.', _PLACEHOLDER), protected)
+    protected = _ORDINAL.sub(lambda m: m.group(0).replace('.', _PLACEHOLDER), protected)
+
+    # Step 2: split on genuine sentence-ending punctuation
+    pattern = r'(?<=[。！？…\.\!\?])\s+'
+    parts = [s.strip() for s in re.split(pattern, protected) if s.strip()]
+
+    # Step 3: restore placeholders
+    sentences = [p.replace(_PLACEHOLDER, '.') for p in parts]
     return sentences
 
 
