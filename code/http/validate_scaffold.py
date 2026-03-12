@@ -67,6 +67,25 @@ def collect_prefilled_leaves(obj, path: str = ""):
         yield path, obj
 
 
+def _parse_path_parts(path: str):
+    """Split a dot/bracket path into (key_or_index, …) navigation steps."""
+    raw_parts = re.split(r'\.(?![^\[]*\])', path)
+    steps = []
+    for part in raw_parts:
+        if not part:
+            continue
+        m = re.match(r'^([^\[]+)\[(\d+)\]$', part)
+        if m:
+            steps.append(m.group(1))
+            steps.append(int(m.group(2)))
+        elif '[' in part:
+            idx = int(re.search(r'\[(\d+)\]', part).group(1))
+            steps.append(idx)
+        else:
+            steps.append(part)
+    return steps
+
+
 def resolve_path(obj, path: str):
     """
     Navigate obj using dot/bracket notation path string.
@@ -76,22 +95,22 @@ def resolve_path(obj, path: str):
       "cast[0].role"   → obj["cast"][0]["role"]
       "[2]"            → obj[2]
     """
-    parts = re.split(r'\.(?![^\[]*\])', path)
     cur = obj
-    for part in parts:
-        if not part:
-            continue
-        # Handle "key[idx]" — e.g. "items[2]"
-        m = re.match(r'^([^\[]+)\[(\d+)\]$', part)
-        if m:
-            cur = cur[m.group(1)][int(m.group(2))]
-        elif '[' in part:
-            # Bare "[idx]" — index only
-            idx = int(re.search(r'\[(\d+)\]', part).group(1))
-            cur = cur[idx]
-        else:
-            cur = cur[part]
+    for step in _parse_path_parts(path):
+        cur = cur[step]
     return cur
+
+
+def set_path(obj, path: str, value):
+    """
+    Set a value in obj at the given dot/bracket notation path.
+    Creates intermediate dicts/extends lists as needed.
+    """
+    steps = _parse_path_parts(path)
+    cur = obj
+    for step in steps[:-1]:
+        cur = cur[step]
+    cur[steps[-1]] = value
 
 
 # ── Validation logic ──────────────────────────────────────────────────────────
@@ -138,6 +157,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warn-only", action="store_true",
                    help="Print warnings instead of exiting 1 on drift (Part B only). "
                         "Residual __FILL__ tokens (Part A) always exit 1.")
+    p.add_argument("--fix", action="store_true",
+                   help="Restore drifted pre-filled values from scaffold into output. "
+                        "Writes the corrected output in-place. Implies --warn-only "
+                        "(drift is fixed, not fatal).")
     return p.parse_args()
 
 
@@ -181,14 +204,41 @@ def main() -> None:
     # ── Part B: Pre-filled field drift check ──────────────────────────────────
     diffs = check_prefilled_drift(scaffold, output)
     if diffs:
-        prefix = "[WARN]" if args.warn_only else "[ERROR]"
-        print(f"{prefix} {len(diffs)} pre-filled field(s) drifted from scaffold:")
-        for path, expected, actual in diffs:
-            print(f"  {path}: {expected!r} → {actual!r}")
-        if args.warn_only:
-            print("[WARN] --warn-only: continuing despite drift")
+        if args.fix:
+            # --fix mode: restore drifted values from scaffold into output
+            fixed = 0
+            skipped = 0
+            for path, expected, actual in diffs:
+                if actual == "<MISSING>":
+                    # Path doesn't exist in output — can't safely reconstruct
+                    print(f"  [SKIP] {path}: missing in output (cannot restore)")
+                    skipped += 1
+                    continue
+                try:
+                    set_path(output, path, expected)
+                    print(f"  [FIX]  {path}: {actual!r} → {expected!r}")
+                    fixed += 1
+                except (KeyError, IndexError, TypeError) as exc:
+                    print(f"  [SKIP] {path}: restore failed ({exc})")
+                    skipped += 1
+            # Write corrected output back to disk
+            if fixed:
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(output, f, indent=2, ensure_ascii=False)
+                    f.write("\n")
+                print(f"✓ Fixed {fixed} drifted field(s) in-place"
+                      + (f" ({skipped} skipped)" if skipped else ""))
+            else:
+                print(f"[WARN] {len(diffs)} drift(s) detected but none fixable")
         else:
-            exit_code = 1
+            prefix = "[WARN]" if args.warn_only else "[ERROR]"
+            print(f"{prefix} {len(diffs)} pre-filled field(s) drifted from scaffold:")
+            for path, expected, actual in diffs:
+                print(f"  {path}: {expected!r} → {actual!r}")
+            if args.warn_only:
+                print("[WARN] --warn-only: continuing despite drift")
+            else:
+                exit_code = 1
     else:
         print("✓ No pre-filled field drift detected")
 

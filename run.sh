@@ -617,13 +617,13 @@ for N in 1 2 3 4 5 6 7 8 9; do
           "${EP_DIR}/ShotList_scaffold.json" \
           "${EP_DIR}/ShotList.json"
         # FIX2: validate scaffold fidelity (no residual __FILL__, no drift).
-        # --warn-only for drift: patch_scaffold_toplevel.py already restored
-        # top-level scalar fields; treating remaining drift as fatal would kill
-        # the pipeline via set -e even though the output is structurally correct.
+        # --fix restores any drifted pre-filled values (e.g. vo_text sentences
+        # the LLM silently dropped or rewrote) from the scaffold back into the
+        # output JSON in-place, so downstream stages get the correct data.
         python3 "${code_dir}/validate_scaffold.py" \
           --scaffold "${EP_DIR}/ShotList_scaffold.json" \
           --output   "${EP_DIR}/ShotList.json" \
-          --warn-only
+          --fix
         continue
       fi
       # episodic / monologue: fall through to fill_and_run below
