@@ -432,8 +432,24 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         if length > 0:
             buf[s:e] += music_data[:length]
 
-    # Trim trailing silence
-    buf = buf[:int(total_dur * SAMPLE_RATE)]
+    # Trim to last VO end + 5s fade-out, so music review doesn't play 45s of
+    # music-only after narration finishes (accumulated music-loop padding).
+    last_vo_end_sec = 0.0
+    for entry in timeline_shots:
+        for vo in entry.get("vo_lines", []):
+            end = vo.get("end_sec")
+            if end is not None:
+                last_vo_end_sec = max(last_vo_end_sec, end)
+    VO_OUTRO_SEC = 5.0
+    trim_sec = min(last_vo_end_sec + VO_OUTRO_SEC, total_dur) if last_vo_end_sec > 0 else total_dur
+    trim_samples = int(trim_sec * SAMPLE_RATE)
+    buf = buf[:trim_samples]
+    # Apply a short fade-out on the last VO_OUTRO_SEC so music doesn't cut abruptly
+    fade_len = min(int(VO_OUTRO_SEC * SAMPLE_RATE), trim_samples)
+    fade_env = np.linspace(1.0, 0.0, fade_len)
+    buf[-fade_len:] *= fade_env[:, None] if CHANNELS > 1 else fade_env
+    total_dur = trim_sec
+    print(f"  [TRIM] last VO at {last_vo_end_sec:.1f}s → preview trimmed to {trim_sec:.1f}s (+{VO_OUTRO_SEC:.0f}s fade)")
 
     # Clip to prevent distortion
     peak = np.max(np.abs(buf))
