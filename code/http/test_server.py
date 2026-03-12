@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote_plus, quote as _url_quote
 import urllib.request as _urllib_req
+import urllib.error   as _urllib_err
 
 # ── YouTube category mapping (genre → category_id, no LLM needed) ─────────────
 _GENRE_TO_CATEGORY = {
@@ -4209,6 +4210,8 @@ placeholder="Enter your story here"></textarea>
       if (!res) continue;
       const cand = res.candidates[idx];
       if (!cand) continue;
+      // AI-generated SFX are already saved to disk at generation time; no re-download needed.
+      if (cand.source_site === 'ai_gen') { saved++; continue; }
       try {
         const serverUrl = (document.getElementById('sfx-server-url').value || 'http://localhost:8200').trim();
         const r = await fetch('/api/sfx_save', {
@@ -13283,6 +13286,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+            except _urllib_err.HTTPError as exc:
+                # Pass through the real error body from the media server so the
+                # browser console shows the actual reason (license, SSRF, etc.)
+                try:
+                    err_body = exc.read()
+                except Exception:
+                    err_body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(exc.code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err_body)))
+                self.end_headers()
+                self.wfile.write(err_body)
             except Exception as exc:
                 body = json.dumps({"error": str(exc)}).encode()
                 self.send_response(502)

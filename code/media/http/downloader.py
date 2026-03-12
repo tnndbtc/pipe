@@ -126,7 +126,7 @@ def _get_host_limiter(hostname: str, cfg: dict) -> _HostRateLimiter | None:
 # License gate — RULE 1 + RULE 2
 # ---------------------------------------------------------------------------
 
-ACCEPTED_LICENSES: frozenset = frozenset({"CC0", "Public Domain", "CC BY", "PDM"})
+ACCEPTED_LICENSES: frozenset = frozenset({"CC0", "Public Domain", "CC BY", "PDM", "AI Generated"})
 ACCEPTED_PREFIXES: tuple = (
     "CC0", "Public Domain",
     "CC BY 1", "CC BY 2", "CC BY 3", "CC BY 4",
@@ -1179,7 +1179,7 @@ def fetch_sfx(
             else:                    dur_bucket = "long"
             ov_headers: dict = {"User-Agent": _USER_AGENT}
             if token: ov_headers["Authorization"] = f"Bearer {token}"
-            ov_max_page = 500 if token else 20  # anon limit is 20
+            ov_max_page = 50 if token else 20  # authenticated limit is 50, anon is 20
             ov_params = {
                 "q": query, "license": "cc0,by",
                 "duration": dur_bucket, "source": "freesound,wikimedia_audio",
