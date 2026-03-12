@@ -70,6 +70,21 @@ import tempfile as _tempfile
 _jobs: dict = {}          # job_key → {"log": str, "done": bool, "rc": int|None}
 _jobs_lock = threading.Lock()
 
+# ── Per-episode VO write lock (INVARIANT G) ────────────────────────────────────
+# Keyed by ep_dir string. Acquired before any write to *.wav, *.source.wav,
+# vo_trim_overrides.json, vo_merge_log.json, AssetManifest_merged, or
+# tts_review_complete.json. Different episodes run concurrently (not global).
+_vo_locks: dict[str, threading.Lock] = {}
+_vo_locks_meta = threading.Lock()   # protects _vo_locks dict itself
+
+
+def _get_vo_lock(ep_dir: str) -> threading.Lock:
+    """Get (or create) the per-episode VO write lock."""
+    with _vo_locks_meta:
+        if ep_dir not in _vo_locks:
+            _vo_locks[ep_dir] = threading.Lock()
+        return _vo_locks[ep_dir]
+
 
 def _job_log_path(job_key: str) -> str:
     """Stable tmp path for this job's output log."""
@@ -182,7 +197,8 @@ def _tail_log_to_sse(wfile, log_path: str) -> None:
     Blocks until the D (done) sentinel is read or the caller catches
     BrokenPipeError / ConnectionResetError.
 
-    Tags: O\\t → 'line' event, E\\t → 'error_line' event, D\\t{rc} → 'done' event.
+    Tags: O\\t → 'line' event, E\\t → 'error_line' event,
+          D\\t{rc} → 'done' event, V\\t{json} → 'vo_review_ready' event.
     """
     deadline = time.time() + 10.0
     while not os.path.exists(log_path) and time.time() < deadline:
@@ -200,6 +216,9 @@ def _tail_log_to_sse(wfile, log_path: str) -> None:
                 wfile.flush()
             elif line.startswith("E\t"):
                 wfile.write(sse("error_line", line[2:]))
+                wfile.flush()
+            elif line.startswith("V\t"):
+                wfile.write(sse("vo_review_ready", line[2:]))
                 wfile.flush()
             elif line.startswith("D\t"):
                 wfile.write(sse("done", line[2:]))
@@ -365,6 +384,205 @@ try:
 except ImportError:
     _retune_vo_items  = None   # type: ignore
     _RETUNE_AVAILABLE = False
+
+# ── VO utils (shared with gen_tts_cloud) ──────────────────────────────────────
+try:
+    from vo_utils import (
+        apply_vo_trims_for_item   as _apply_vo_trims_for_item,
+        invalidate_vo_state       as _invalidate_vo_state,
+        load_vo_trim_overrides    as _load_vo_trim_overrides,
+        save_vo_trim_overrides    as _save_vo_trim_overrides,
+        get_primary_locale        as _get_primary_locale,
+        compute_sentinel_hashes   as _compute_sentinel_hashes,
+        write_sentinel            as _write_sentinel,
+        verify_sentinel           as _verify_sentinel,
+        wav_duration              as _wav_duration,
+    )
+    _VO_UTILS_AVAILABLE = True
+except ImportError as _vo_import_err:
+    print(f"[WARN] vo_utils not available: {_vo_import_err}")
+    _VO_UTILS_AVAILABLE = False
+
+# ── VO item synthesis (P1-[B]) ────────────────────────────────────────────────
+# Threshold constants for ⚠ short / long detection (P4-[P])
+_VO_EXPECTED_SEC_PER_CHAR = 0.065   # ~15 chars/sec for English TTS
+_VO_SHORT_RATIO = 0.70              # actual < expected * SHORT_RATIO  → ⚠ short
+_VO_LONG_RATIO  = 1.50              # actual > expected * LONG_RATIO   → ⚠ long
+
+
+def _vo_badge(text: str, actual_sec: float) -> str:
+    """Return 'short', 'long', or 'ok' based on text length vs WAV duration."""
+    expected = len(text) * _VO_EXPECTED_SEC_PER_CHAR
+    if expected > 0 and actual_sec < expected * _VO_SHORT_RATIO:
+        return "short"
+    if expected > 0 and actual_sec > expected * _VO_LONG_RATIO:
+        return "long"
+    return "ok"
+
+
+def _vo_resolve_ep_dir(ep_dir_param: str) -> str:
+    """Resolve ep_dir to an absolute path under PIPE_DIR/projects/."""
+    if os.path.isabs(ep_dir_param):
+        return ep_dir_param
+    return os.path.join(PIPE_DIR, ep_dir_param)
+
+
+_RE_LOCALE  = re.compile(r'^[a-zA-Z]{2,8}(-[a-zA-Z0-9]{2,8})*$')
+_RE_ITEM_ID = re.compile(r'^vo-[a-zA-Z0-9_]+(-[a-zA-Z0-9]+)+$')
+
+
+def _vo_validate_inputs(ep_dir: str, locale: str, item_id: str | None = None) -> None:
+    """Raise ValueError for invalid VO endpoint inputs."""
+    if not ep_dir or ".." in ep_dir:
+        raise ValueError("Invalid ep_dir")
+    if not _RE_LOCALE.match(locale):
+        raise ValueError(f"Invalid locale: {locale!r}")
+    if item_id is not None and not _RE_ITEM_ID.match(item_id):
+        raise ValueError(f"Invalid item_id: {item_id!r}")
+    # Path escape check
+    full = _vo_resolve_ep_dir(ep_dir)
+    projects_root = os.path.realpath(os.path.join(PIPE_DIR, "projects"))
+    if not os.path.realpath(full).startswith(projects_root + os.sep):
+        raise ValueError("ep_dir outside projects/ tree")
+
+
+def _ensure_source_wav(item_id: str, full_ep: str, locale: str) -> None:
+    """Migration helper: if source.wav is missing but .wav exists, copy .wav → source.wav.
+
+    Called before any trim/reset operation so that projects synthesised before
+    the two-file WAV model was introduced can still use VO trim controls.
+    """
+    import shutil as _shutil
+    vo_dir    = os.path.join(full_ep, "assets", locale, "audio", "vo")
+    wav_path  = os.path.join(vo_dir, f"{item_id}.wav")
+    src_path  = os.path.join(vo_dir, f"{item_id}.source.wav")
+    if not os.path.isfile(src_path) and os.path.isfile(wav_path):
+        tmp = src_path + ".tmp"
+        _shutil.copy2(wav_path, tmp)
+        os.replace(tmp, src_path)
+        print(f"[migration] Created source.wav from existing .wav for {item_id}")
+
+
+def synthesize_vo_item(
+    item_id: str,
+    text: str,
+    params: dict,
+    ep_dir: str,
+    locale: str,
+    write_cache: bool = True,
+) -> dict:
+    """Synthesize a single VO item and write {item_id}.source.wav + {item_id}.wav.
+
+    Caller must hold _get_vo_lock(ep_dir) before calling this.
+
+    Args:
+        item_id:     e.g. "vo-sc01-001"
+        text:        Text to synthesize
+        params:      dict with voice, style, rate, style_degree, locale fields
+        ep_dir:      Absolute path to episode directory
+        locale:      Locale string (e.g. "en")
+        write_cache: True → write to tts_cache (vo_save), False → bypass (vo_recreate/vo_merge)
+
+    Returns:
+        { "source_duration_sec": float, "trimmed_duration_sec": float }
+
+    Calls:
+        apply_vo_trims_for_item()  → writes {item_id}.wav
+        invalidate_vo_state()      → deletes sentinel, durations, marks stale
+    """
+    if not _TTS_AVAILABLE:
+        raise RuntimeError("Azure TTS SDK not available")
+    if not _VO_UTILS_AVAILABLE:
+        raise RuntimeError("vo_utils not available")
+
+    full_ep  = _vo_resolve_ep_dir(ep_dir)
+    vo_dir   = os.path.join(full_ep, "assets", locale, "audio", "vo")
+    os.makedirs(vo_dir, exist_ok=True)
+
+    # Build SSML for a single item
+    azure_voice    = params.get("voice", "")
+    azure_locale   = '-'.join(azure_voice.split('-')[:2]) if azure_voice else locale
+    style          = params.get("style", "")
+    style_degree   = float(params.get("style_degree", 1.5))
+    rate           = params.get("rate", "0%")
+    pitch          = params.get("pitch", "")
+    break_ms       = int(params.get("break_ms", 0))
+
+    if not azure_voice:
+        raise ValueError("voice is required in params")
+
+    ssml = _preview_build_ssml(
+        text, azure_voice, azure_locale, style,
+        style_degree=style_degree, rate=rate,
+        pitch=pitch, break_ms=break_ms,
+    )
+
+    # TTS call (with or without cache)
+    # write_cache=True  → used by vo_save (new params → deterministic new entry)
+    # write_cache=False → used by vo_recreate and vo_merge (non-deterministic)
+    import tempfile as _tf
+    from pathlib import Path as _Path
+
+    if write_cache:
+        # Cache key based on SSML content
+        cache_key_dict = {
+            "v": azure_voice, "l": azure_locale, "s": style or "",
+            "d": style_degree, "r": rate, "p": pitch or "",
+            "b": break_ms, "t": text,
+        }
+        h = hashlib.sha256(
+            json.dumps(cache_key_dict, sort_keys=True).encode()
+        ).hexdigest()[:16]
+        voice_dir  = azure_voice.replace(":", "_")
+        cache_path = (_Path(PIPE_DIR) / "projects" / "resources" / "azure_tts"
+                      / voice_dir / f"{h}.mp3")
+        if cache_path.exists():
+            # Cache hit — still need to convert mp3 to wav
+            # For simplicity: just re-call TTS (mp3 is preview cache, not WAV cache)
+            # TODO: if full WAV cache is needed, add here
+            pass
+
+    # Always synthesize fresh WAV for actual VO items
+    result = _tts_throttled_call(_get_synth(), ssml)
+    wav_bytes = result.audio_data  # PCM WAV bytes from Azure
+
+    # Write {item_id}.source.wav (raw TTS output, INVARIANT A)
+    source_path = os.path.join(vo_dir, f"{item_id}.source.wav")
+    _write_wav_bytes_atomic(source_path, wav_bytes)
+
+    # Call apply_vo_trims_for_item → writes {item_id}.wav (INVARIANT B)
+    from pathlib import Path as _P
+    primary_locale = _get_primary_locale(_P(full_ep))
+    trimmed_dur = _apply_vo_trims_for_item(item_id, full_ep, locale)
+
+    # Measure source duration
+    source_dur = _wav_duration(_P(source_path))
+
+    # Invalidate VO state (INVARIANT H)
+    _invalidate_vo_state(full_ep, primary_locale)
+
+    return {
+        "source_duration_sec":  round(source_dur,    3),
+        "trimmed_duration_sec": round(trimmed_dur,   3),
+    }
+
+
+def _write_wav_bytes_atomic(path: str, wav_bytes: bytes) -> None:
+    """Write WAV bytes atomically (write to .tmp then rename)."""
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(wav_bytes)
+    os.replace(tmp, path)
+
+
+def _json_resp(handler, data: dict, status: int = 200) -> None:
+    """Send a JSON response helper for VO endpoints."""
+    body = json.dumps(data).encode()
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 # ── Story-file helpers ─────────────────────────────────────────────────────────
@@ -1901,6 +2119,26 @@ HTML = r"""<!DOCTYPE html>
   #sr-next-step.ns-action  { display: block; background: #1a2f4a; color: var(--blue);  border: 1px solid #5b9cf650; }
   #sr-next-step.ns-running { display: block; background: #2a2010; color: var(--gold);  border: 1px solid #b8860b80; }
   #sr-next-step.ns-done    { display: block; background: #0e2718; color: var(--green); border: 1px solid #4caf5060; }
+  /* ── Run-tab VO review banner (Stage 7.5) ─────────────────────────────── */
+  #run-vo-review-banner {
+    display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: #0d2318; border: 1px solid #4caf5060; border-radius: 8px;
+    padding: 10px 16px; margin: 8px 0; font-size: 0.85em;
+  }
+  #run-vo-review-banner.visible { display: flex; }
+  #run-vo-review-banner .rvr-msg {
+    flex: 1; color: var(--green); font-weight: 600; font-family: var(--mono);
+  }
+  #run-vo-review-banner button {
+    background: #1a3a28; color: var(--green); border: 1px solid #4caf5070;
+    border-radius: 5px; padding: 5px 12px; font-size: 0.85em;
+    cursor: pointer; white-space: nowrap; font-weight: 600;
+  }
+  #run-vo-review-banner button:hover { background: #244d35; }
+  #run-vo-review-banner button.primary {
+    background: #1a3060; color: var(--blue); border-color: #5b9cf660;
+  }
+  #run-vo-review-banner button.primary:hover { background: #1f3c80; }
   #sr-banner-row { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
   #sr-banner-row #sr-next-step { flex: 1; }
   #btn-diagnose {
@@ -2122,6 +2360,13 @@ placeholder="Enter your story here"></textarea>
       <button id="btn-stop"  onclick="stopRun()">■ Stop</button>
       <button id="btn-clear" onclick="clearOutput()">✕ Clear</button>
     </div>
+    <button id="btn-stage75" onclick="runStage75()"
+            title="Stage 7.5 — run manifest_merge + gen_tts for primary locale, then pause for VO review"
+            style="font-size:0.82em;font-family:var(--mono);padding:5px 10px;
+                   background:#1a3060;color:var(--blue);border:1px solid #5b9cf650;
+                   border-radius:5px;cursor:pointer;white-space:nowrap;">
+      🎙 TTS Preview
+    </button>
   </div>
 
   <!-- Info bar — shown after Prepare -->
@@ -2224,6 +2469,13 @@ placeholder="Enter your story here"></textarea>
     <span class="spinner" id="stage-progress-spinner"></span>
     <span id="stage-progress-label"></span>
     <div id="stage-progress-dots"></div>
+  </div>
+
+  <!-- ── Stage 7.5 VO review banner ── -->
+  <div id="run-vo-review-banner">
+    <span class="rvr-msg">🎙 TTS complete — VO ready for review</span>
+    <button onclick="switchTab('vo'); populateVoEpSelect()">→ Open VO Tab</button>
+    <button class="primary" onclick="document.getElementById('run-vo-review-banner').classList.remove('visible')" title="Dismiss this banner">✕ Dismiss</button>
   </div>
 
   <!-- ── Output ── -->
@@ -2418,6 +2670,16 @@ placeholder="Enter your story here"></textarea>
     .vo-resynth-btn:hover{background:rgba(0,0,0,0.12);color:var(--text)}
     .vo-resynth-btn:disabled{opacity:.4;cursor:default}
     .vo-col-headers{display:flex;align-items:center;gap:6px;padding:2px 4px;font-size:0.68em;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+    .vo-badge{font-size:0.7em;padding:1px 6px;border-radius:10px;font-weight:600;flex-shrink:0}
+    .vo-badge-ok{background:#1c3a1c;color:#6ec96e}
+    .vo-badge-short{background:#4a2200;color:#f0963c}
+    .vo-badge-long{background:#3a1a3a;color:#c070d0}
+    .vo-badge-stale{background:#3a2200;color:#c09030}
+    .vo-trim-row{display:flex;align-items:center;gap:6px;padding:2px 4px 4px 160px;font-size:0.78em;flex-wrap:wrap}
+    .vo-trim-input{width:70px;background:var(--hover-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 5px;font-size:0.9em;font-family:monospace}
+    .vo-trim-btn{font-size:0.78em;padding:2px 8px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:4px;cursor:pointer}
+    .vo-trim-btn:hover{background:rgba(0,0,0,0.12);color:var(--text)}
+    .vo-timing-stale{text-decoration:line-through;color:var(--dim);font-style:italic}
   </style>
   <div class="vo-toolbar">
     <span class="section-label" style="margin:0">Episode</span>
@@ -2429,6 +2691,34 @@ placeholder="Enter your story here"></textarea>
       <option value="">— select locale —</option>
     </select>
     <button class="vo-scene-btn" onclick="loadVoItems()" style="margin-left:4px">↺ Refresh</button>
+    <button class="vo-scene-btn" id="vo-preview-all-btn" onclick="_voPreviewAll()"
+            style="margin-left:8px;color:#4fc3f7;border-color:#4fc3f7aa" title="Play all VO items sequentially">
+      ▶ Generate Preview</button>
+    <button class="vo-scene-btn" id="vo-stop-preview-btn" onclick="_voStopPreview()"
+            style="display:none;margin-left:4px;color:#f88;border-color:#f88aa" title="Stop playback">
+      ■ Stop</button>
+  </div>
+  <!-- VO approval banner — shown during Stage 7.5 pause and post-edit -->
+  <div id="vo-approve-banner" style="display:none;flex-direction:column;gap:6px;
+       padding:10px 14px;background:#1a3a1a;border:1px solid #2d6a2d;
+       border-radius:6px;font-size:0.85em;color:#a8e6a8;margin-bottom:4px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span id="vo-approve-icon">🎙</span>
+      <span id="vo-approve-msg">Azure TTS complete — please review your voice-over before continuing.</span>
+      <button id="vo-approve-btn" onclick="voApproveTTS()"
+        style="margin-left:auto;padding:5px 14px;background:#2d7a2d;color:#fff;
+               border:none;border-radius:5px;cursor:pointer;font-size:0.95em;font-weight:600">
+        ✓ VO Approved — Continue
+      </button>
+    </div>
+    <div id="vo-approve-error" style="display:none;color:#f88;font-size:0.9em;padding:2px 0"></div>
+  </div>
+  <!-- sentinel status indicator (shown after approval) -->
+  <div id="vo-sentinel-status" style="display:none;align-items:center;gap:8px;
+       padding:5px 10px;border-radius:5px;font-size:0.8em">
+    <span id="vo-sentinel-icon">✓</span>
+    <span id="vo-sentinel-text">VO Approved</span>
+    <span id="vo-sentinel-time" style="color:var(--dim)"></span>
   </div>
   <!-- downstream-rerun warning — shown after any VO retune succeeds -->
   <div id="vo-retune-banner" style="display:none;align-items:center;gap:8px;
@@ -2893,12 +3183,78 @@ placeholder="Enter your story here"></textarea>
 
   function stopRun() {
     if (es)         { es.close();         es = null;         }
+    if (es75)       { es75.close();       es75 = null;       }
     if (pipeStepEs) { pipeStepEs.close(); pipeStepEs = null; }
     fetch('/stop', { method: 'POST' }).catch(() => {});
     appendLine('[ Stopped by user ]', 'sys');
     pipeRunning = null;
     hideStageProgress();
     setStatus('idle');
+  }
+
+  // ── Stage 7.5 — TTS Preview for primary locale ───────────────────────────────
+  let es75 = null;
+
+  function showRunVoReviewBanner() {
+    const banner = document.getElementById('run-vo-review-banner');
+    if (banner) banner.classList.add('visible');
+  }
+
+  async function runStage75() {
+    if (!currentSlug || !currentEpId) {
+      appendLine('⚠  No episode selected — Prepare a story first.', 'err');
+      return;
+    }
+    if (es75) { es75.close(); es75 = null; }
+    if (es)   { es.close();   es  = null;  }
+
+    // Hide any previous VO review banner
+    const banner = document.getElementById('run-vo-review-banner');
+    if (banner) banner.classList.remove('visible');
+
+    const profile = renderProd ? 'high' : 'preview_local';
+    outputEl.innerHTML = '';
+    lineCount = 0;
+    lineCountEl.textContent = '0 lines';
+    setStatus('running');
+
+    appendLine('── Stage 7.5 — TTS Preview (primary locale) ───────────────', 'sys');
+
+    const url = `/run_stage75?slug=${encodeURIComponent(currentSlug)}&ep_id=${encodeURIComponent(currentEpId)}&profile=${encodeURIComponent(profile)}`;
+    es75 = new EventSource(url);
+
+    es75.addEventListener('line', e => {
+      queueLine(e.data, '');
+    });
+
+    es75.addEventListener('error_line', e => appendLine(e.data, 'err'));
+
+    es75.addEventListener('vo_review_ready', e => {
+      try {
+        const d = JSON.parse(e.data);
+        appendLine(`  ✓ TTS complete for locale: ${d.locale || '?'}`, 'sys');
+      } catch (_) {}
+      showRunVoReviewBanner();
+    });
+
+    es75.addEventListener('done', e => {
+      es75.close(); es75 = null;
+      const code = parseInt(e.data);
+      if (code === 0) {
+        appendLine('[ ✓ Stage 7.5 complete — open VO tab to review ]', 'done');
+        showRunVoReviewBanner();
+        setStatus('idle');
+      } else {
+        appendLine(`[ Stage 7.5 exited with code ${code} ]`, 'err');
+        setStatus('error');
+      }
+    });
+
+    es75.onerror = () => {
+      if (es75) { es75.close(); es75 = null; }
+      appendLine('[ Connection lost ]', 'err');
+      setStatus('error');
+    };
   }
 
   // ── Confirm modal ────────────────────────────────────────────────────────────
@@ -3262,6 +3618,7 @@ placeholder="Enter your story here"></textarea>
           return;
         }
         _renderVoItems(data.items || [], slug, epId, locale, data.voice_catalog || {});
+        _voLoadSentinel(epDir, locale);
       })
       .catch(e => {
         body.innerHTML = '<span class="vo-empty" style="color:#f88">Failed: ' +
@@ -3299,8 +3656,12 @@ placeholder="Enter your story here"></textarea>
       const slugJ = JSON.stringify(slug);
       const epIdJ = JSON.stringify(epId);
       const locJ  = JSON.stringify(locale);
+      const scIdE = escHtml(sc.replace(/[^a-zA-Z0-9_-]/g, '_'));
       html += `<div class="vo-scene-header">
         <span class="vo-scene-label">${escHtml(sc)}</span>
+        <button class="vo-scene-btn" id="vo-scene-preview-${scIdE}"
+          onclick='_voPreviewScene(${scJ},${slugJ},${epIdJ},${locJ},this)'>
+          ▶ Preview</button>
         <button class="vo-scene-btn"
           onclick='_voResynthScene(${scJ},${slugJ},${epIdJ},${locJ})'>
           ⟳ Re-generate</button></div>`;
@@ -3311,6 +3672,12 @@ placeholder="Enter your story here"></textarea>
         const iidJ = JSON.stringify(iid);
         const dur  = it.duration_sec != null
                      ? it.duration_sec.toFixed(2) + 's' : '—';
+        const srcDur = it.source_duration_sec != null
+                     ? it.source_duration_sec.toFixed(2) + 's' : null;
+        const badge      = it.badge || 'ok';   // 'ok', 'short', 'long'
+        const staleClass = it.timing_stale ? ' vo-timing-stale' : '';
+        const hasTrim    = it.has_trim_override || false;
+        const pauseMs    = it.pause_after_ms ?? 300;
         const currentVoice = tp.azure_voice || '';
         const voiceEntry   = _voVoiceCatalog[currentVoice] || {};
         const voiceStyles  = voiceEntry.styles || [];
@@ -3349,12 +3716,30 @@ placeholder="Enter your story here"></textarea>
         const origDegree = escHtml(String(tp.azure_style_degree??''));
         const breakMs    = tp.azure_break_ms ?? 0;
 
+        // Badge label
+        const badgeLabel = badge === 'short' ? '⚠ short' : badge === 'long' ? '⚠ long' : '● ok';
+        const badgeClass = badge === 'short' ? 'vo-badge-short' : badge === 'long' ? 'vo-badge-long' : 'vo-badge-ok';
+
+        // Timing display (stale if any edit since last approval)
+        const startSec = it.start_sec != null ? it.start_sec.toFixed(3) : '—';
+        const endSec   = it.end_sec   != null ? it.end_sec.toFixed(3)   : '—';
+
+        // Duration display: trimmed + pause (NEVER summed — plan §C3)
+        const durLabel = it.duration_sec != null
+          ? `${it.duration_sec.toFixed(2)}s | pause:${pauseMs}ms` : '—';
+
+        const epDir = `projects/${slug}/episodes/${epId}`;
+        const epDirJ = JSON.stringify(epDir);
+        const locJ   = JSON.stringify(locale);
+
         html += `<div class="vo-item-row" id="vo-row-${iidE}" data-item-id="${iidE}"
             data-orig-text="${origText}" data-orig-voice="${origVoice}"
             data-orig-style="${origStyle}" data-orig-rate="${origRate}"
             data-orig-pitch="${origPitch}" data-orig-degree="${origDegree}"
-            data-break-ms="${breakMs}">
+            data-break-ms="${breakMs}" data-ep-dir="${escHtml(epDir)}"
+            data-locale="${escHtml(locale)}">
           <span class="vo-item-id">${iidE}</span>
+          <span class="vo-badge ${badgeClass}" title="${escHtml(badge)}">${badgeLabel}</span>
           <input  class="vo-field vo-text"   id="vo-text-${iidE}"   value="${origText}" title="text"/>
           <select class="vo-field vo-voice"  id="vo-voice-${iidE}"
                   onchange='_voVoiceChanged(${iidJ})'>${vOpts}</select>
@@ -3365,15 +3750,41 @@ placeholder="Enter your story here"></textarea>
                   value="${origPitch}" placeholder="pitch" title="azure_pitch"/>
           <input  class="vo-field vo-degree" id="vo-degree-${iidE}"
                   value="${origDegree}" placeholder="deg" title="azure_style_degree"/>
-          <span   class="vo-dur"             id="vo-dur-${iidE}" title="WAV duration">${escHtml(dur)}</span>
-          <button class="vo-preview-btn"     id="vo-preview-${iidE}" title="Preview current audio"
+          <span   class="vo-dur${staleClass}" id="vo-dur-${iidE}"
+                  title="Trimmed duration | Pause after (INVARIANT E: not summed)">${escHtml(durLabel)}</span>
+          <button class="vo-preview-btn"     id="vo-preview-${iidE}" title="Preview active .wav"
                   onclick='_voPreviewItem(${iidJ},${slugJ},${epIdJ},${locJ})'>▶</button>
-          <button class="vo-resynth-btn"     id="vo-btn-${iidE}"
-                  onclick='_voResynthItem(${iidJ},${slugJ},${epIdJ},${locJ})'>Save</button>
+          <button class="vo-resynth-btn"     id="vo-recreate-${iidE}" title="Re-Create: fresh TTS with same params (bypasses cache)"
+                  onclick='_voRecreateItem(${iidJ},${epDirJ},${locJ})'>🔄 Re-Create</button>
+          <button class="vo-resynth-btn"     id="vo-btn-${iidE}" title="Save: re-synthesize with changed params"
+                  onclick='_voSaveItem(${iidJ},${epDirJ},${locJ})'>💾 Save</button>
+        </div>
+        <div class="vo-trim-row" id="vo-trim-row-${iidE}">
+          <span style="color:var(--dim);font-size:0.85em">Trim:</span>
+          <input class="vo-trim-input" id="vo-trim-start-${iidE}" type="number"
+                 step="0.01" min="0" placeholder="start s" title="trim_start_sec"/>
+          <span style="color:var(--dim)">→</span>
+          <input class="vo-trim-input" id="vo-trim-end-${iidE}" type="number"
+                 step="0.01" min="0" placeholder="end s" title="trim_end_sec"/>
+          <span style="color:var(--dim);font-size:0.8em">(src: ${escHtml(srcDur || dur)})</span>
+          <button class="vo-trim-btn" onclick='_voApplyTrim(${iidJ},${epDirJ},${locJ})'>Apply Trim</button>
+          <button class="vo-trim-btn" onclick='_voResetTrim(${iidJ},${epDirJ},${locJ})'
+                  ${hasTrim?'style="color:#f0963c"':''}
+                  title="Reset to full source.wav">Reset Trim</button>
+          <span style="color:var(--dim);margin-left:8px">Pause:</span>
+          <input class="vo-trim-input" id="vo-pause-${iidE}" type="number"
+                 step="50" min="0" value="${pauseMs}" title="pause_after_ms (ms)"/>
+          <span style="color:var(--dim);font-size:0.8em">ms</span>
+          <button class="vo-trim-btn" onclick='_voSavePause(${iidJ},${epDirJ},${locJ})'>Save Pause</button>
         </div>`;
       });
     });
     body.innerHTML = html;
+
+    // Auto-expand trim rows for short/long items (plan §P4-[P])
+    items.filter(it => it.badge !== 'ok').forEach(it => {
+      // Trim row is always visible now (no collapse in this simplified version)
+    });
   }
 
   function _voVoiceChanged(itemId) {
@@ -3405,6 +3816,111 @@ placeholder="Enter your story here"></textarea>
     audio.onended = reset;
     audio.onerror = reset;
     audio.play().catch(reset);
+  }
+
+  // ── Sequential scene / all-episode preview ──────────────────────────────────
+
+  // Global sequential-playback state (separate from single-item _voAudio)
+  window._voSeqAbort = false;
+
+  function _voStopPreview() {
+    window._voSeqAbort = true;
+    if (window._voAudio) { window._voAudio.pause(); window._voAudio = null; }
+    // Reset all scene preview buttons
+    document.querySelectorAll('.vo-scene-btn.vo-scene-playing').forEach(b => {
+      b.textContent = b.textContent.replace('■', '▶');
+      b.classList.remove('vo-scene-playing');
+    });
+    const stopBtn = document.getElementById('vo-stop-preview-btn');
+    const allBtn  = document.getElementById('vo-preview-all-btn');
+    if (stopBtn) stopBtn.style.display = 'none';
+    if (allBtn)  allBtn.style.display  = '';
+  }
+
+  // Play an ordered array of {epDir, locale, item_id} sequentially.
+  // pauseMs is the gap between clips (from pause_after_ms, default 300ms).
+  async function _voPlaySequence(clips, ctxBtn) {
+    window._voSeqAbort = false;
+    const stopBtn = document.getElementById('vo-stop-preview-btn');
+    const allBtn  = document.getElementById('vo-preview-all-btn');
+    if (stopBtn) stopBtn.style.display = '';
+    if (allBtn && ctxBtn !== allBtn) allBtn.style.display = 'none';
+    if (ctxBtn) { ctxBtn.textContent = ctxBtn.textContent.replace('▶', '■'); ctxBtn.classList.add('vo-scene-playing'); }
+
+    for (const clip of clips) {
+      if (window._voSeqAbort) break;
+      const url = `/api/vo_audio?ep_dir=${encodeURIComponent(clip.epDir)}`
+                + `&locale=${encodeURIComponent(clip.locale)}`
+                + `&item_id=${encodeURIComponent(clip.item_id)}`;
+      // Highlight the item row
+      const previewBtn = document.getElementById('vo-preview-' + clip.item_id);
+      if (previewBtn) { previewBtn.textContent = '■'; previewBtn.classList.add('playing'); }
+      await new Promise(resolve => {
+        if (window._voSeqAbort) { resolve(); return; }
+        const audio = new Audio(url);
+        window._voAudio = audio;
+        const done = () => {
+          window._voAudio = null;
+          if (previewBtn) { previewBtn.textContent = '▶'; previewBtn.classList.remove('playing'); }
+          resolve();
+        };
+        audio.onended = done;
+        audio.onerror = done;
+        audio.play().catch(done);
+      });
+      // Pause gap between clips
+      if (!window._voSeqAbort && clip.pauseMs > 0) {
+        await new Promise(r => setTimeout(r, clip.pauseMs));
+      }
+    }
+    _voStopPreview();
+  }
+
+  // Preview all items in one scene sequentially.
+  function _voPreviewScene(scene, slug, epId, locale, btn) {
+    // Stop any in-progress playback first
+    if (window._voAudio) { window._voAudio.pause(); window._voAudio = null; }
+    window._voSeqAbort = true;
+    setTimeout(() => {
+      window._voSeqAbort = false;
+      const epDir = `projects/${slug}/episodes/${epId}`;
+      const clips = [];
+      document.querySelectorAll('.vo-item-row').forEach(row => {
+        const iid = row.dataset.itemId;
+        if (!iid) return;
+        const sc = (iid.match(/sc\d+/) || [''])[0];
+        if (sc !== scene) return;
+        const pauseEl = document.getElementById('vo-pause-' + iid);
+        const pauseMs = parseInt(pauseEl?.value || '300', 10);
+        clips.push({ epDir, locale, item_id: iid, pauseMs });
+      });
+      if (clips.length) _voPlaySequence(clips, btn);
+    }, 50);
+  }
+
+  // Preview all VO items in the current episode sequentially.
+  function _voPreviewAll() {
+    const epSel  = document.getElementById('vo-ep-select');
+    const locSel = document.getElementById('vo-locale-select');
+    const epDir  = epSel?.value;
+    const locale = locSel?.value;
+    if (!epDir || !locale) return;
+    // Stop any in-progress playback
+    if (window._voAudio) { window._voAudio.pause(); window._voAudio = null; }
+    window._voSeqAbort = true;
+    setTimeout(() => {
+      window._voSeqAbort = false;
+      const clips = [];
+      document.querySelectorAll('.vo-item-row').forEach(row => {
+        const iid = row.dataset.itemId;
+        if (!iid) return;
+        const pauseEl = document.getElementById('vo-pause-' + iid);
+        const pauseMs = parseInt(pauseEl?.value || '300', 10);
+        clips.push({ epDir, locale, item_id: iid, pauseMs });
+      });
+      const allBtn = document.getElementById('vo-preview-all-btn');
+      if (clips.length) _voPlaySequence(clips, allBtn);
+    }, 50);
   }
 
   async function _voPreviewItem(itemId, slug, epId, locale) {
@@ -3581,6 +4097,241 @@ placeholder="Enter your story here"></textarea>
         });
         console.error('retune_vo fetch failed:', e);
       });
+  }
+
+  // ── New VO Review endpoints (P3) ─────────────────────────────────────────────
+
+  // Helper: POST a VO endpoint and update the item row
+  async function _voPost(endpoint, body, itemId) {
+    const btn = document.getElementById('vo-btn-' + itemId);
+    const dur = document.getElementById('vo-dur-' + itemId);
+    if (btn) { btn.disabled = true; }
+    try {
+      const r = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (data.error) throw new Error(data.error);
+      return data;
+    } finally {
+      if (btn) { btn.disabled = false; }
+    }
+  }
+
+  // POST /api/vo_save — save with (possibly changed) voice/style/rate/text
+  async function _voSaveItem(itemId, epDir, locale) {
+    const btn = document.getElementById('vo-btn-' + itemId);
+    if (btn) { btn.textContent = '⏳ Saving…'; btn.disabled = true; }
+    try {
+      const text   = (document.getElementById('vo-text-'   + itemId)?.value ?? '').trim();
+      const voice  = (document.getElementById('vo-voice-'  + itemId)?.value ?? '').trim();
+      const style  = (document.getElementById('vo-style-'  + itemId)?.value ?? '').trim();
+      const rate   = (document.getElementById('vo-rate-'   + itemId)?.value ?? '').trim() || '0%';
+      const pitch  = (document.getElementById('vo-pitch-'  + itemId)?.value ?? '').trim();
+      const degree = parseFloat(document.getElementById('vo-degree-' + itemId)?.value ?? '1.5');
+      const data = await _voPost('/api/vo_save', {
+        ep_dir: epDir, locale, item_id: itemId,
+        text, voice, style, rate, pitch, style_degree: degree,
+      }, itemId);
+      if (btn) { btn.textContent = '✓ Saved'; setTimeout(() => { if (btn) btn.textContent = '💾 Save'; }, 2500); }
+      _voUpdateDur(itemId, data.trimmed_duration_sec);
+      _voMarkSentinelInvalid();
+      document.getElementById('vo-retune-banner').style.display = 'flex';
+    } catch(e) {
+      if (btn) { btn.textContent = '✗'; setTimeout(() => { if (btn) btn.textContent = '💾 Save'; btn.disabled = false; }, 2500); }
+      alert('vo_save error: ' + e.message);
+    }
+  }
+
+  // POST /api/vo_recreate — fresh TTS with same params, bypass cache
+  async function _voRecreateItem(itemId, epDir, locale) {
+    const btn = document.getElementById('vo-recreate-' + itemId);
+    if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+    try {
+      const data = await _voPost('/api/vo_recreate', {
+        ep_dir: epDir, locale, item_id: itemId,
+      }, itemId);
+      if (btn) { btn.textContent = '✓'; setTimeout(() => { if (btn) { btn.textContent = '🔄 Re-Create'; btn.disabled = false; } }, 2500); }
+      _voUpdateDur(itemId, data.trimmed_duration_sec);
+      _voMarkSentinelInvalid();
+    } catch(e) {
+      if (btn) { btn.textContent = '✗'; setTimeout(() => { if (btn) { btn.textContent = '🔄 Re-Create'; btn.disabled = false; } }, 2500); }
+      alert('vo_recreate error: ' + e.message);
+    }
+  }
+
+  // POST /api/vo_trim — apply trim handles
+  async function _voApplyTrim(itemId, epDir, locale) {
+    const startEl = document.getElementById('vo-trim-start-' + itemId);
+    const endEl   = document.getElementById('vo-trim-end-'   + itemId);
+    const start   = parseFloat(startEl?.value || '0');
+    const end     = parseFloat(endEl?.value   || '0');
+    if (isNaN(start) || isNaN(end) || end <= start) {
+      alert('Invalid trim range. End must be greater than start.');
+      return;
+    }
+    try {
+      const data = await _voPost('/api/vo_trim', {
+        ep_dir: epDir, locale, item_id: itemId,
+        trim_start_sec: start, trim_end_sec: end,
+      }, itemId);
+      _voUpdateDur(itemId, data.trimmed_duration_sec);
+      _voMarkSentinelInvalid();
+    } catch(e) {
+      alert('vo_trim error: ' + e.message);
+    }
+  }
+
+  // POST /api/vo_reset_trim — restore full source.wav
+  async function _voResetTrim(itemId, epDir, locale) {
+    try {
+      const data = await _voPost('/api/vo_reset_trim', {
+        ep_dir: epDir, locale, item_id: itemId,
+      }, itemId);
+      // Clear trim inputs
+      const startEl = document.getElementById('vo-trim-start-' + itemId);
+      const endEl   = document.getElementById('vo-trim-end-'   + itemId);
+      if (startEl) startEl.value = '';
+      if (endEl)   endEl.value   = '';
+      _voUpdateDur(itemId, data.source_duration_sec);
+      _voMarkSentinelInvalid();
+    } catch(e) {
+      alert('vo_reset_trim error: ' + e.message);
+    }
+  }
+
+  // POST /api/vo_pause — update pause_after_ms
+  async function _voSavePause(itemId, epDir, locale) {
+    const pauseEl = document.getElementById('vo-pause-' + itemId);
+    const pauseMs = parseInt(pauseEl?.value ?? '300', 10);
+    if (isNaN(pauseMs) || pauseMs < 0) {
+      alert('Invalid pause value');
+      return;
+    }
+    try {
+      await _voPost('/api/vo_pause', {
+        ep_dir: epDir, locale, item_id: itemId, pause_ms: pauseMs,
+      }, itemId);
+      _voMarkSentinelInvalid();
+    } catch(e) {
+      alert('vo_pause error: ' + e.message);
+    }
+  }
+
+  // Helper: update duration display for an item row
+  function _voUpdateDur(itemId, durSec) {
+    const dur = document.getElementById('vo-dur-' + itemId);
+    if (dur) {
+      dur.textContent = durSec != null ? durSec.toFixed(2) + 's' : '—';
+      dur.classList.add('vo-timing-stale');   // timing is stale until re-approved
+    }
+  }
+
+  // Mark sentinel as invalid in UI (show Re-approve state)
+  function _voMarkSentinelInvalid() {
+    const sentinelEl = document.getElementById('vo-sentinel-status');
+    if (sentinelEl) {
+      sentinelEl.style.display = 'flex';
+      sentinelEl.style.background = '#3a2200';
+      sentinelEl.style.color = '#f0963c';
+      sentinelEl.style.border = '1px solid #7a4400';
+      document.getElementById('vo-sentinel-icon').textContent = '⚠';
+      document.getElementById('vo-sentinel-text').textContent = 'VO edits made — click Re-approve when ready';
+    }
+    const approveBtn = document.getElementById('vo-approve-btn');
+    if (approveBtn) {
+      approveBtn.textContent = '↻ Re-approve';
+      const banner = document.getElementById('vo-approve-banner');
+      if (banner) {
+        banner.style.display = 'flex';
+        document.getElementById('vo-approve-msg').textContent =
+          'VO edits made — re-approve before continuing to Stage 8.';
+      }
+    }
+  }
+
+  // POST /api/vo_approve — run post_tts_analysis and write sentinel
+  async function voApproveTTS() {
+    const epSel  = document.getElementById('vo-ep-select');
+    const locSel = document.getElementById('vo-locale-select');
+    const epDir  = epSel.value;
+    const locale = locSel.value;
+    if (!epDir || !locale) { alert('Select episode and locale first.'); return; }
+
+    const btn     = document.getElementById('vo-approve-btn');
+    const errEl   = document.getElementById('vo-approve-error');
+    const bannerEl = document.getElementById('vo-approve-banner');
+    if (btn) { btn.textContent = '⏳ Approving…'; btn.disabled = true; }
+    if (errEl) errEl.style.display = 'none';
+
+    try {
+      const r = await fetch('/api/vo_approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ep_dir: epDir, locale }),
+      });
+      const data = await r.json();
+      if (data.error) throw new Error(data.detail ? data.error + ': ' + data.detail : data.error);
+
+      // Success — update UI
+      if (btn) { btn.textContent = '✓ VO Approved — Continue'; btn.disabled = false; }
+      const sentinelEl = document.getElementById('vo-sentinel-status');
+      if (sentinelEl) {
+        sentinelEl.style.display = 'flex';
+        sentinelEl.style.background = '#1a3a1a';
+        sentinelEl.style.color = '#6ec96e';
+        sentinelEl.style.border = '1px solid #2d6a2d';
+        document.getElementById('vo-sentinel-icon').textContent = '✓';
+        document.getElementById('vo-sentinel-text').textContent =
+          `VO Approved — ${data.items_measured || 0} items measured`;
+        document.getElementById('vo-sentinel-time').textContent = new Date().toLocaleTimeString();
+      }
+      if (bannerEl) {
+        document.getElementById('vo-approve-msg').textContent =
+          `✓ VO Approved — ${data.items_measured || 0} items measured. Pipeline may continue.`;
+      }
+      // Remove stale indicator from all rows
+      document.querySelectorAll('.vo-timing-stale').forEach(el =>
+        el.classList.remove('vo-timing-stale'));
+
+    } catch(e) {
+      if (btn) { btn.textContent = '✓ VO Approved — Continue'; btn.disabled = false; }
+      if (errEl) { errEl.textContent = '✗ ' + e.message; errEl.style.display = 'block'; }
+    }
+  }
+
+  // Load sentinel status when VO tab loads
+  async function _voLoadSentinel(epDir, locale) {
+    if (!epDir || !locale) return;
+    try {
+      const r = await fetch(`/api/vo_sentinel?ep_dir=${encodeURIComponent(epDir)}&locale=${encodeURIComponent(locale)}`);
+      const data = await r.json();
+      const approveBanner = document.getElementById('vo-approve-banner');
+      const sentinelEl    = document.getElementById('vo-sentinel-status');
+      if (data.valid) {
+        if (approveBanner) {
+          approveBanner.style.display = 'flex';
+          document.getElementById('vo-approve-msg').textContent =
+            '✓ VO Approved — pipeline may continue. Edit any item and Re-approve if needed.';
+          document.getElementById('vo-approve-btn').textContent = '↻ Re-approve';
+        }
+        if (sentinelEl) {
+          sentinelEl.style.display = 'flex';
+          sentinelEl.style.background = '#1a3a1a';
+          sentinelEl.style.color = '#6ec96e';
+          sentinelEl.style.border = '1px solid #2d6a2d';
+          document.getElementById('vo-sentinel-icon').textContent = '✓';
+          document.getElementById('vo-sentinel-text').textContent = 'VO Approved';
+          document.getElementById('vo-sentinel-time').textContent = data.completed_at || '';
+        }
+      } else if (data.exists) {
+        // Sentinel exists but hashes don't match (edits since last approval)
+        _voMarkSentinelInvalid();
+        if (approveBanner) approveBanner.style.display = 'flex';
+      }
+    } catch(e) {}
   }
 
   // ── Test / Production mode toggle ────────────────────────────────────────────
@@ -11180,6 +11931,85 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(_b)
             return
 
+        # ── VO Review: serve source.wav for waveform canvas (GET /api/vo_source_audio) ─
+        # Serves {item_id}.source.wav — used by the waveform canvas (INVARIANT J).
+        # Falls back to .wav if source.wav does not yet exist (backward compat).
+        elif parsed.path == "/api/vo_source_audio":
+            params  = parse_qs(parsed.query)
+            ep_dir  = unquote_plus(params.get("ep_dir",  [""])[0]).strip()
+            locale  = unquote_plus(params.get("locale",  [""])[0]).strip()
+            item_id = unquote_plus(params.get("item_id", [""])[0]).strip()
+            if not ep_dir or not locale or not item_id or ".." in item_id:
+                self.send_response(400); self.end_headers(); return
+            full_ep = _vo_resolve_ep_dir(ep_dir)
+            # Migration: create source.wav from .wav if missing (pre-two-file projects)
+            _ensure_source_wav(item_id, full_ep, locale)
+            source_p = os.path.join(full_ep, "assets", locale, "audio", "vo",
+                                    item_id + ".source.wav")
+            wav_p    = os.path.join(full_ep, "assets", locale, "audio", "vo",
+                                    item_id + ".wav")
+            serve_p  = source_p if os.path.isfile(source_p) else wav_p
+            if os.path.isfile(serve_p):
+                with open(serve_p, "rb") as _wf:
+                    data = _wf.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(data)
+            else:
+                self.send_response(404)
+                _b = b'{"error":"source wav not found"}'
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(_b)))
+                self.end_headers()
+                self.wfile.write(_b)
+            return
+
+        # ── VO Review: sentinel status (GET /api/vo_sentinel?ep_dir=...&locale=...) ──
+        elif parsed.path == "/api/vo_sentinel":
+            params = parse_qs(parsed.query)
+            ep_dir = unquote_plus(params.get("ep_dir",  [""])[0]).strip()
+            locale = unquote_plus(params.get("locale",  [""])[0]).strip()
+            if not ep_dir or not locale:
+                _json_resp(self, {"error": "ep_dir and locale required"}, 400)
+                return
+            full_ep = _vo_resolve_ep_dir(ep_dir)
+            sentinel_path = os.path.join(full_ep, "tts_review_complete.json")
+            exists  = os.path.isfile(sentinel_path)
+            valid   = False
+            sentinel_data = {}
+            if exists and _VO_UTILS_AVAILABLE:
+                try:
+                    valid = _verify_sentinel(full_ep, locale)
+                    with open(sentinel_path, encoding="utf-8") as _sf:
+                        sentinel_data = json.load(_sf)
+                except Exception:
+                    pass
+            _json_resp(self, {
+                "exists":       exists,
+                "valid":        valid,
+                "completed_at": sentinel_data.get("completed_at"),
+            })
+            return
+
+        # ── VO Review: vo_trim_overrides for locale ────────────────────────────────
+        elif parsed.path == "/api/vo_trim_overrides":
+            params = parse_qs(parsed.query)
+            ep_dir = unquote_plus(params.get("ep_dir",  [""])[0]).strip()
+            locale = unquote_plus(params.get("locale",  [""])[0]).strip()
+            if not ep_dir or not locale:
+                _json_resp(self, {"error": "ep_dir and locale required"}, 400)
+                return
+            full_ep = _vo_resolve_ep_dir(ep_dir)
+            if _VO_UTILS_AVAILABLE:
+                overrides = _load_vo_trim_overrides(full_ep, locale)
+            else:
+                overrides = {}
+            _json_resp(self, {"overrides": overrides})
+            return
+
         # ── VO Retune: available locales (GET /api/vo_locales?ep_dir=...) ──────────
         elif parsed.path == "/api/vo_locales":
             params = parse_qs(parsed.query)
@@ -11222,19 +12052,33 @@ class Handler(BaseHTTPRequestHandler):
                     with open(mpath, encoding="utf-8") as fh:
                         manifest = json.load(fh)
                     items = manifest.get("vo_items", [])
-                    # Annotate each item with current WAV duration
-                    wav_dir = os.path.join(full_ep_dir, "assets", locale, "audio", "vo")
+                    # Annotate each item with WAV duration, source duration, and badge
+                    wav_dir   = os.path.join(full_ep_dir, "assets", locale, "audio", "vo")
+                    overrides = _load_vo_trim_overrides(full_ep_dir, locale) \
+                                if _VO_UTILS_AVAILABLE else {}
+                    sentinel_valid = _verify_sentinel(full_ep_dir, locale) \
+                                     if _VO_UTILS_AVAILABLE else False
                     for it in items:
-                        wav_p = os.path.join(wav_dir, it["item_id"] + ".wav")
-                        dur = None
-                        if os.path.isfile(wav_p):
-                            try:
-                                import wave as _wave
+                        iid    = it["item_id"]
+                        wav_p  = os.path.join(wav_dir, iid + ".wav")
+                        src_p  = os.path.join(wav_dir, iid + ".source.wav")
+                        dur    = None
+                        src_dur = None
+                        try:
+                            import wave as _wave
+                            if os.path.isfile(wav_p):
                                 with _wave.open(wav_p) as wf:
                                     dur = round(wf.getnframes() / wf.getframerate(), 3)
-                            except Exception:
-                                pass
-                        it["duration_sec"] = dur
+                            if os.path.isfile(src_p):
+                                with _wave.open(src_p) as wf:
+                                    src_dur = round(wf.getnframes() / wf.getframerate(), 3)
+                        except Exception:
+                            pass
+                        it["duration_sec"]        = dur
+                        it["source_duration_sec"] = src_dur
+                        it["badge"]               = _vo_badge(it.get("text", ""), src_dur or dur or 0)
+                        it["has_trim_override"]   = iid in overrides
+                        it["timing_stale"]        = not sentinel_valid
                     # Build voice catalog from the full Azure TTS catalog so the
                     # voice dropdown shows ALL available voices for this locale,
                     # not just the one voice assigned in VoiceCast.json.
@@ -11969,9 +12813,46 @@ class Handler(BaseHTTPRequestHandler):
                     write_log("D", "1")
                     return
 
+                # Determine primary locale and sentinel validity for Stage 9 skip guard
+                _ep_dir_s10_full = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                _primary_locale_s10 = "en"
+                if _VO_UTILS_AVAILABLE:
+                    try:
+                        from pathlib import Path as _P
+                        _primary_locale_s10 = _get_primary_locale(_P(_ep_dir_s10_full))
+                    except Exception:
+                        pass
+
+                # Steps to skip for primary locale when sentinel is valid (INVARIANT I)
+                _TTS_STEPS_TO_SKIP = {"manifest_merge", "gen_tts", "post_tts"}
+
                 for _locale in _locales_s10:
                     write_log("O", f"\n── locale: {_locale} ────────────────────────────────")
+
+                    # Check sentinel for primary locale (INVARIANT I)
+                    _sentinel_valid_for_locale = False
+                    if (_locale == _primary_locale_s10 and _VO_UTILS_AVAILABLE):
+                        try:
+                            _sentinel_valid_for_locale = _verify_sentinel(
+                                _ep_dir_s10_full, _locale
+                            )
+                            if _sentinel_valid_for_locale:
+                                write_log("O",
+                                    f"  ✓ Sentinel valid for primary locale {_locale!r} — "
+                                    "skipping manifest_merge, gen_tts, post_tts"
+                                )
+                        except Exception as _sv_exc:
+                            write_log("O", f"  [warn] Sentinel check error: {_sv_exc}")
+
                     for _step in _LOCALE_STEPS_ALL:
+                        # Skip manifest_merge/gen_tts/post_tts for primary locale
+                        # if sentinel is valid (INVARIANT I)
+                        if _sentinel_valid_for_locale and _step in _TTS_STEPS_TO_SKIP:
+                            write_log("O",
+                                f"  ✓ {_step} [{_locale}] — skipped (VO approved, sentinel valid)"
+                            )
+                            continue
+
                         write_log("O", f"\n── {_step} [{_locale}] ──────────────────────────")
                         _cmd = _build_step_cmd(_step, slug, ep_id, _locale, profile, no_music)
                         if _cmd is None:
@@ -11994,6 +12875,93 @@ class Handler(BaseHTTPRequestHandler):
                 write_log("D", "0")
 
             log_path = _launch_fn_job(job_key, _run_stage10_job)
+            try:
+                _tail_log_to_sse(self.wfile, log_path)
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # client disconnected — job keeps running in background
+            except Exception as exc:
+                try:
+                    self.wfile.write(sse("error_line", f"Server error: {exc}"))
+                    self.wfile.write(sse("done", "1"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+
+        # SSE stream: Stage 7.5 — run manifest_merge + gen_tts for primary locale only
+        elif parsed.path == "/run_stage75":
+            params  = parse_qs(parsed.query)
+            slug    = unquote_plus(params.get("slug",    [""])[0]).strip()
+            ep_id   = unquote_plus(params.get("ep_id",   [""])[0]).strip()
+            profile = unquote_plus(params.get("profile", ["preview_local"])[0]).strip()
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            if not slug or not ep_id:
+                self.wfile.write(sse("error_line", "Missing slug or ep_id"))
+                self.wfile.write(sse("done", "1"))
+                self.wfile.flush()
+                return
+
+            step_env = os.environ.copy()
+            step_env.pop("CLAUDECODE", None)
+            client   = self.client_address
+            job_key  = f"run_stage75\x00{slug}\x00{ep_id}"
+
+            def _run_stage75_job(write_log):
+                import json as _json
+                _ep_dir_75 = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+
+                # Determine primary locale
+                _locale_75 = "en"
+                if _VO_UTILS_AVAILABLE:
+                    try:
+                        from pathlib import Path as _P75
+                        _locale_75 = _get_primary_locale(_P75(_ep_dir_75))
+                    except Exception:
+                        pass
+
+                write_log("O", f"\n── Stage 7.5 — primary locale: {_locale_75} ──────────────────")
+
+                _s75_steps = ["manifest_merge", "gen_tts"]
+                for _step in _s75_steps:
+                    write_log("O", f"\n── {_step} [{_locale_75}] ──────────────────────────────")
+                    _cmd = _build_step_cmd(_step, slug, ep_id, _locale_75, profile, False)
+                    if _cmd is None:
+                        write_log("E", f"Unknown step: {_step!r}")
+                        write_log("D", "1")
+                        return
+                    if _cmd == []:
+                        write_log("O", f"  ✓ {_step} — skipped (no plan file)")
+                        continue
+                    _p75 = subprocess.Popen(
+                        _cmd,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                    )
+                    with _lock:
+                        _procs[client] = _p75
+                    for _raw in _p75.stdout:
+                        write_log("O", _raw.rstrip("\n"))
+                    _p75.wait()
+                    with _lock:
+                        _procs.pop(client, None)
+                    if _p75.returncode != 0:
+                        write_log("E", f"✗ {_step} [{_locale_75}] failed (exit {_p75.returncode})")
+                        write_log("D", str(_p75.returncode))
+                        return
+                    write_log("O", f"✓ {_step} [{_locale_75}]")
+
+                # All TTS steps done — emit vo_review_ready event before done
+                write_log("V", _json.dumps({"locale": _locale_75, "slug": slug, "ep_id": ep_id}))
+                write_log("O", "\n✓ Stage 7.5 complete — VO ready for review")
+                write_log("D", "0")
+
+            log_path = _launch_fn_job(job_key, _run_stage75_job)
             try:
                 _tail_log_to_sse(self.wfile, log_path)
             except (BrokenPipeError, ConnectionResetError):
@@ -12775,6 +13743,517 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        # ── VO Review endpoints (P3) ──────────────────────────────────────────────
+
+        # POST /api/vo_recreate — re-synthesize with same params, bypass cache
+        elif self.path == "/api/vo_recreate":
+            try:
+                if not _VO_UTILS_AVAILABLE:
+                    raise RuntimeError("vo_utils not available")
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                ep_dir  = req.get("ep_dir",  "").strip()
+                locale  = req.get("locale",  "").strip()
+                item_id = req.get("item_id", "").strip()
+                _vo_validate_inputs(ep_dir, locale, item_id)
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+
+                # Read current params from manifest
+                mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
+                with open(mpath, encoding="utf-8") as _mf:
+                    _mani = json.load(_mf)
+                _item = next((v for v in _mani.get("vo_items", [])
+                              if v["item_id"] == item_id), None)
+                if _item is None:
+                    raise ValueError(f"item_id {item_id!r} not found in manifest")
+
+                tp = _item.get("tts_prompt", {})
+                params = {
+                    "voice":        tp.get("azure_voice") or tp.get("voice", ""),
+                    "style":        tp.get("azure_style") or tp.get("style", ""),
+                    "style_degree": tp.get("azure_style_degree", 1.5),
+                    "rate":         tp.get("azure_rate") or tp.get("rate", "0%"),
+                    "pitch":        tp.get("azure_pitch", ""),
+                    "break_ms":     tp.get("azure_break_ms", 0),
+                }
+                text = _item.get("text", "")
+
+                with _get_vo_lock(full_ep):
+                    result = synthesize_vo_item(
+                        item_id, text, params, full_ep, locale,
+                        write_cache=False,  # INVARIANT F: vo_recreate bypasses cache
+                    )
+                _json_resp(self, {"item_id": item_id, **result})
+
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
+        # POST /api/vo_save — re-synthesize with new params, write to cache
+        elif self.path == "/api/vo_save":
+            try:
+                if not _VO_UTILS_AVAILABLE:
+                    raise RuntimeError("vo_utils not available")
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                ep_dir  = req.get("ep_dir",  "").strip()
+                locale  = req.get("locale",  "").strip()
+                item_id = req.get("item_id", "").strip()
+                _vo_validate_inputs(ep_dir, locale, item_id)
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+
+                new_voice        = req.get("voice", "").strip()
+                new_style        = req.get("style", "")
+                new_rate         = req.get("rate", "0%")
+                new_style_degree = float(req.get("style_degree", 1.5))
+                new_text         = req.get("text", "").strip()
+                if not new_voice:
+                    raise ValueError("voice is required")
+                if not new_text:
+                    raise ValueError("text is required")
+
+                params = {
+                    "voice":        new_voice,
+                    "style":        new_style,
+                    "style_degree": new_style_degree,
+                    "rate":         new_rate,
+                    "pitch":        req.get("pitch", ""),
+                    "break_ms":     int(req.get("break_ms", 0)),
+                }
+
+                with _get_vo_lock(full_ep):
+                    result = synthesize_vo_item(
+                        item_id, new_text, params, full_ep, locale,
+                        write_cache=True,   # INVARIANT F: vo_save writes cache
+                    )
+                    # Update manifest with new voice/style/rate/text
+                    mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
+                    with open(mpath, encoding="utf-8") as _mf:
+                        _mani = json.load(_mf)
+                    for _it in _mani.get("vo_items", []):
+                        if _it["item_id"] == item_id:
+                            _it["text"] = new_text
+                            tp = _it.setdefault("tts_prompt", {})
+                            tp["azure_voice"]        = new_voice
+                            tp["azure_style"]        = new_style
+                            tp["azure_style_degree"] = new_style_degree
+                            tp["azure_rate"]         = new_rate
+                            break
+                    _tmp = mpath + ".tmp"
+                    with open(_tmp, "w", encoding="utf-8") as _mf:
+                        json.dump(_mani, _mf, indent=2, ensure_ascii=False)
+                    os.replace(_tmp, mpath)
+                _json_resp(self, {"item_id": item_id, **result})
+
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
+        # POST /api/vo_trim — apply trim handles, write .wav via apply_vo_trims_for_item
+        elif self.path == "/api/vo_trim":
+            try:
+                if not _VO_UTILS_AVAILABLE:
+                    raise RuntimeError("vo_utils not available")
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                ep_dir          = req.get("ep_dir",         "").strip()
+                locale          = req.get("locale",         "").strip()
+                item_id         = req.get("item_id",        "").strip()
+                trim_start_sec  = float(req.get("trim_start_sec", 0.0))
+                trim_end_sec    = float(req.get("trim_end_sec",   0.0))
+                _vo_validate_inputs(ep_dir, locale, item_id)
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                from pathlib import Path as _P
+
+                with _get_vo_lock(full_ep):
+                    # Migration: create source.wav from .wav if missing (pre-two-file projects)
+                    _ensure_source_wav(item_id, full_ep, locale)
+                    # Step 1: Validate trim bounds against source.wav (INVARIANT K)
+                    src_p = (_P(full_ep) / "assets" / locale / "audio" / "vo"
+                             / f"{item_id}.source.wav")
+                    if not src_p.exists():
+                        raise FileNotFoundError(f"source.wav not found for {item_id}")
+                    src_dur = _wav_duration(src_p)
+                    if trim_end_sec > src_dur + 1e-6:
+                        raise ValueError(
+                            f"trim_end_sec ({trim_end_sec:.3f}) > source duration ({src_dur:.3f})"
+                        )
+                    if trim_start_sec < 0 or trim_end_sec <= trim_start_sec:
+                        raise ValueError(
+                            f"Invalid trim range: [{trim_start_sec:.3f}, {trim_end_sec:.3f}]"
+                        )
+
+                    # Step 2: Write override to sidecar
+                    overrides = _load_vo_trim_overrides(full_ep, locale)
+                    import time as _time
+                    overrides[item_id] = {
+                        "trim_start_sec":    trim_start_sec,
+                        "trim_end_sec":      trim_end_sec,
+                        "source_duration_sec": src_dur,
+                        "applied_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                    }
+                    _save_vo_trim_overrides(full_ep, locale, overrides)
+
+                    # Step 3: apply_vo_trims_for_item → writes .wav (INVARIANT B)
+                    trimmed_dur = _apply_vo_trims_for_item(item_id, full_ep, locale)
+
+                    # Step 4: Invalidate (INVARIANT H)
+                    primary = _get_primary_locale(_P(full_ep))
+                    _invalidate_vo_state(full_ep, primary)
+
+                _json_resp(self, {
+                    "item_id":            item_id,
+                    "source_duration_sec": round(src_dur,     3),
+                    "trimmed_duration_sec": round(trimmed_dur, 3),
+                })
+
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
+        # POST /api/vo_reset_trim — restore source.wav as active .wav
+        elif self.path == "/api/vo_reset_trim":
+            try:
+                if not _VO_UTILS_AVAILABLE:
+                    raise RuntimeError("vo_utils not available")
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                ep_dir  = req.get("ep_dir",  "").strip()
+                locale  = req.get("locale",  "").strip()
+                item_id = req.get("item_id", "").strip()
+                _vo_validate_inputs(ep_dir, locale, item_id)
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                from pathlib import Path as _P
+
+                with _get_vo_lock(full_ep):
+                    # Step 1: Delete override from sidecar (if present)
+                    overrides = _load_vo_trim_overrides(full_ep, locale)
+                    if item_id in overrides:
+                        del overrides[item_id]
+                        _save_vo_trim_overrides(full_ep, locale, overrides)
+
+                    # Migration: create source.wav from .wav if missing (pre-two-file projects)
+                    _ensure_source_wav(item_id, full_ep, locale)
+                    # Step 2: apply_vo_trims_for_item (no override → copy source → .wav)
+                    # (INVARIANT B: apply_vo_trims_for_item is ONLY writer of .wav)
+                    src_p = (_P(full_ep) / "assets" / locale / "audio" / "vo"
+                             / f"{item_id}.source.wav")
+                    if not src_p.exists():
+                        raise FileNotFoundError(f"source.wav not found for {item_id}")
+                    src_dur = _wav_duration(src_p)
+                    _apply_vo_trims_for_item(item_id, full_ep, locale)
+
+                    # Step 3: Invalidate (INVARIANT H)
+                    primary = _get_primary_locale(_P(full_ep))
+                    _invalidate_vo_state(full_ep, primary)
+
+                _json_resp(self, {
+                    "item_id":            item_id,
+                    "source_duration_sec": round(src_dur, 3),
+                })
+
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
+        # POST /api/vo_pause — update pause_after_ms in manifest (no WAV touched)
+        elif self.path == "/api/vo_pause":
+            try:
+                if not _VO_UTILS_AVAILABLE:
+                    raise RuntimeError("vo_utils not available")
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                ep_dir   = req.get("ep_dir",   "").strip()
+                locale   = req.get("locale",   "").strip()
+                item_id  = req.get("item_id",  "").strip()
+                pause_ms = int(req.get("pause_ms", 300))
+                _vo_validate_inputs(ep_dir, locale, item_id)
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                from pathlib import Path as _P
+
+                with _get_vo_lock(full_ep):
+                    # Update manifest pause_after_ms (no WAV touched — INVARIANT E)
+                    mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
+                    with open(mpath, encoding="utf-8") as _mf:
+                        _mani = json.load(_mf)
+                    found = False
+                    for _it in _mani.get("vo_items", []):
+                        if _it["item_id"] == item_id:
+                            _it["pause_after_ms"] = pause_ms
+                            found = True
+                            break
+                    if not found:
+                        raise ValueError(f"item_id {item_id!r} not found in manifest")
+                    _tmp = mpath + ".tmp"
+                    with open(_tmp, "w", encoding="utf-8") as _mf:
+                        json.dump(_mani, _mf, indent=2, ensure_ascii=False)
+                    os.replace(_tmp, mpath)
+
+                    # Invalidate (INVARIANT H)
+                    primary = _get_primary_locale(_P(full_ep))
+                    _invalidate_vo_state(full_ep, primary)
+
+                _json_resp(self, {"item_id": item_id, "pause_ms": pause_ms})
+
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
+        # POST /api/vo_merge — merge two adjacent VO items into one
+        elif self.path == "/api/vo_merge":
+            try:
+                if not _VO_UTILS_AVAILABLE:
+                    raise RuntimeError("vo_utils not available")
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                ep_dir      = req.get("ep_dir",      "").strip()
+                locale      = req.get("locale",      "").strip()
+                item_id     = req.get("item_id",     "").strip()
+                merge_with  = req.get("merge_with",  "").strip()
+                merged_text = req.get("merged_text", "").strip()
+                _vo_validate_inputs(ep_dir, locale, item_id)
+                _vo_validate_inputs(ep_dir, locale, merge_with)
+                if not merged_text:
+                    raise ValueError("merged_text is required")
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                from pathlib import Path as _P
+
+                with _get_vo_lock(full_ep):
+                    mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
+                    with open(mpath, encoding="utf-8") as _mf:
+                        _mani = json.load(_mf)
+
+                    vo_items = _mani.get("vo_items", [])
+
+                    # Step 1: Verify both items exist
+                    _primary_item = next((v for v in vo_items if v["item_id"] == item_id), None)
+                    _second_item  = next((v for v in vo_items if v["item_id"] == merge_with), None)
+                    if _primary_item is None:
+                        raise ValueError(f"item_id {item_id!r} not found")
+                    if _second_item is None:
+                        raise ValueError(f"merge_with {merge_with!r} not found")
+
+                    # Step 2: Verify same shot and adjacency
+                    shot_id = _primary_item.get("shot_id")
+                    shot_items = [v for v in vo_items
+                                  if v.get("shot_id") == shot_id]
+                    idx_primary = next((i for i, v in enumerate(shot_items)
+                                        if v["item_id"] == item_id), -1)
+                    idx_second  = next((i for i, v in enumerate(shot_items)
+                                        if v["item_id"] == merge_with), -1)
+                    if idx_primary < 0 or idx_second < 0:
+                        raise ValueError("Both items must be in the same shot")
+                    if abs(idx_primary - idx_second) != 1:
+                        raise ValueError("Items must be adjacent within their shot")
+
+                    # Step 3b: Clear item_id trim override BEFORE synthesizing
+                    overrides = _load_vo_trim_overrides(full_ep, locale)
+                    if item_id in overrides:
+                        del overrides[item_id]
+                        _save_vo_trim_overrides(full_ep, locale, overrides)
+
+                    # Step 4: Synthesize merged item (bypass cache — non-deterministic)
+                    tp = _primary_item.get("tts_prompt", {})
+                    params = {
+                        "voice":        tp.get("azure_voice") or tp.get("voice", ""),
+                        "style":        tp.get("azure_style") or tp.get("style", ""),
+                        "style_degree": tp.get("azure_style_degree", 1.5),
+                        "rate":         tp.get("azure_rate") or tp.get("rate", "0%"),
+                        "pitch":        tp.get("azure_pitch", ""),
+                        "break_ms":     tp.get("azure_break_ms", 0),
+                    }
+                    synth_result = synthesize_vo_item(
+                        item_id, merged_text, params, full_ep, locale,
+                        write_cache=False,  # INVARIANT F: vo_merge bypasses cache
+                    )
+
+                    # Step 5: Delete secondary item WAVs
+                    vo_dir = _P(full_ep) / "assets" / locale / "audio" / "vo"
+                    for _sfx in ("wav", "source.wav"):
+                        _p = vo_dir / f"{merge_with}.{_sfx}"
+                        if _p.exists():
+                            _p.unlink()
+
+                    # Step 6: Remove merge_with from trim overrides
+                    overrides = _load_vo_trim_overrides(full_ep, locale)
+                    if merge_with in overrides:
+                        del overrides[merge_with]
+                        _save_vo_trim_overrides(full_ep, locale, overrides)
+
+                    # Step 7: Update manifest
+                    _primary_item["text"] = merged_text
+                    _mani["vo_items"] = [v for v in vo_items if v["item_id"] != merge_with]
+
+                    # Step 8: Update ShotList.json
+                    _shotlist_ref = _mani.get("shotlist_ref", "")
+                    if _shotlist_ref:
+                        _sl_candidates = [
+                            _P(full_ep) / _shotlist_ref,
+                            _P(full_ep) / "ShotList.json",
+                        ]
+                        for _sl_path in _sl_candidates:
+                            if _sl_path.exists():
+                                try:
+                                    with open(_sl_path, encoding="utf-8") as _f:
+                                        _sl = json.load(_f)
+                                    for _shot in _sl.get("shots", []):
+                                        _ids = _shot.get("audio_intent", {}).get("vo_item_ids", [])
+                                        if merge_with in _ids:
+                                            _ids.remove(merge_with)
+                                    _tmp = str(_sl_path) + ".tmp"
+                                    with open(_tmp, "w", encoding="utf-8") as _f:
+                                        json.dump(_sl, _f, indent=2, ensure_ascii=False)
+                                    os.replace(_tmp, str(_sl_path))
+                                except Exception:
+                                    pass
+                                break
+
+                    # Write updated manifest
+                    _tmp = mpath + ".tmp"
+                    with open(_tmp, "w", encoding="utf-8") as _mf:
+                        json.dump(_mani, _mf, indent=2, ensure_ascii=False)
+                    os.replace(_tmp, mpath)
+
+                    # Step 9: Deep invalidation (item_id change → render plans invalid)
+                    primary = _get_primary_locale(_P(full_ep))
+                    _invalidate_vo_state(full_ep, primary)
+                    # Also delete RenderPlan and media manifests for all locales
+                    for _f in _P(full_ep).glob("RenderPlan.*.json"):
+                        _f.unlink(missing_ok=True)
+                    for _f in _P(full_ep).glob("AssetManifest.media.*.json"):
+                        _f.unlink(missing_ok=True)
+
+                    # Step 10: Append to merge log
+                    import time as _time
+                    _merge_log_path = _P(full_ep) / "vo_merge_log.json"
+                    _merge_log = []
+                    if _merge_log_path.exists():
+                        try:
+                            _merge_log = json.loads(_merge_log_path.read_text())
+                        except Exception:
+                            pass
+                    _merge_log.append({
+                        "item_id":     item_id,
+                        "retired_id":  merge_with,
+                        "merged_text": merged_text,
+                        "locale":      locale,
+                        "merged_at":   _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                    })
+                    _merge_log_path.write_text(
+                        json.dumps(_merge_log, indent=2, ensure_ascii=False)
+                    )
+
+                _json_resp(self, {
+                    "item_id":             item_id,
+                    "retired_id":          merge_with,
+                    "source_duration_sec": synth_result["source_duration_sec"],
+                    "trimmed_duration_sec": synth_result["trimmed_duration_sec"],
+                    "reload_required":     True,
+                })
+
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
+        # POST /api/vo_approve — validate and approve VO, write sentinel
+        elif self.path == "/api/vo_approve":
+            try:
+                if not _VO_UTILS_AVAILABLE:
+                    raise RuntimeError("vo_utils not available")
+                length = int(self.headers.get("Content-Length", 0))
+                req    = json.loads(self.rfile.read(length))
+                ep_dir = req.get("ep_dir", "").strip()
+                locale = req.get("locale", "").strip()
+                _vo_validate_inputs(ep_dir, locale)
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                from pathlib import Path as _P
+                import subprocess as _sp
+
+                with _get_vo_lock(full_ep):
+                    # Pre-flight check (a): no synthesis jobs in-flight
+                    # (Always true under synchronous lock design)
+
+                    # Pre-flight check (e): locale must be primary_locale
+                    primary = _get_primary_locale(_P(full_ep))
+                    if locale != primary:
+                        raise ValueError(
+                            f"Must approve primary locale ({primary!r}), not {locale!r}"
+                        )
+
+                    # Pre-flight check (c): all trim overrides valid (INVARIANT K)
+                    overrides = _load_vo_trim_overrides(full_ep, locale)
+                    vo_dir    = _P(full_ep) / "assets" / locale / "audio" / "vo"
+                    for _iid, _ov in overrides.items():
+                        _src = vo_dir / f"{_iid}.source.wav"
+                        if _src.exists():
+                            _src_dur = _wav_duration(_src)
+                            if _ov.get("trim_end_sec", 0) > _src_dur + 1e-6:
+                                raise ValueError(
+                                    f"Trim override for {_iid} is out of bounds "
+                                    f"(trim_end={_ov['trim_end_sec']:.3f} > "
+                                    f"source_dur={_src_dur:.3f})"
+                                )
+
+                    # Pre-flight check (d): manifest structurally valid
+                    mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
+                    if not os.path.isfile(mpath):
+                        raise FileNotFoundError(
+                            f"AssetManifest_merged.{locale}.json not found"
+                        )
+                    with open(mpath, encoding="utf-8") as _mf:
+                        _mani = json.load(_mf)
+
+                    # Run post_tts_analysis under lock (INVARIANT C, G)
+                    # post_tts_analysis must NOT acquire _vo_locks internally (deadlock)
+                    _pta_script = os.path.join(os.path.dirname(__file__), "post_tts_analysis.py")
+                    _pta_cmd = [
+                        "python3", _pta_script,
+                        "--manifest", mpath,
+                    ]
+                    _pta_env = os.environ.copy()
+                    _pta_env.pop("CLAUDECODE", None)
+                    _pta_result = _sp.run(
+                        _pta_cmd, capture_output=True, text=True,
+                        cwd=PIPE_DIR, env=_pta_env, timeout=120,
+                    )
+                    if _pta_result.returncode != 0:
+                        raise RuntimeError(
+                            f"post_tts_analysis failed (exit {_pta_result.returncode}):\n"
+                            + _pta_result.stderr[:500]
+                        )
+
+                    # Count items processed
+                    import re as _re_pta
+                    _items_measured = len(_re_pta.findall(r"\[OK\]", _pta_result.stdout))
+
+                    # Write sentinel (INVARIANT I)
+                    _hashes = _compute_sentinel_hashes(full_ep, locale)
+                    _write_sentinel(full_ep, locale, _hashes)
+
+                    # Export {primary_locale}_vo_durations.json
+                    # Re-read manifest (post_tts_analysis mutated it in-place)
+                    with open(mpath, encoding="utf-8") as _mf:
+                        _mani = json.load(_mf)
+                    _durations = {
+                        v["item_id"]: round(
+                            v.get("end_sec", 0) - v.get("start_sec", 0), 3
+                        )
+                        for v in _mani.get("vo_items", [])
+                        if "start_sec" in v and "end_sec" in v
+                    }
+                    _dur_path = os.path.join(full_ep, f"{primary}_vo_durations.json")
+                    _dur_tmp  = _dur_path + ".tmp"
+                    with open(_dur_tmp, "w", encoding="utf-8") as _df:
+                        json.dump(_durations, _df, indent=2)
+                    os.replace(_dur_tmp, _dur_path)
+
+                _json_resp(self, {
+                    "approved":        True,
+                    "items_measured":  _items_measured,
+                    "locale":          locale,
+                })
+                print(f"[vo_approve] ✓ {locale} approved — "
+                      f"{_items_measured} items measured")
+
+            except ValueError as exc:
+                _json_resp(self, {"error": "Validation failed", "detail": str(exc)}, 409)
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc), "detail": ""}, 409)
 
         # TTS preview — F0-throttled, disk-cached  (POST /api/preview_voice)
         elif self.path == "/api/preview_voice":

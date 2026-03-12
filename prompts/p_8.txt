@@ -3,11 +3,12 @@
 # ══════════════════════════════════════════════════════════════════════
 #
 # 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
-#     {{PROJECT_SLUG}}    →  e.g. "the-pharaoh-who-defied-death"
-#     {{EPISODE_ID}}      →  e.g. "s01e02"
-#     {{LOCALES}}         →  e.g. "en, zh-Hans"
-#     {{PRIMARY_LOCALE}}  →  e.g. "en" or "zh-Hans" — the source locale for translation
-#     {{STORY_FORMAT}}    →  e.g. "episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"
+#     {{PROJECT_SLUG}}         →  e.g. "the-pharaoh-who-defied-death"
+#     {{EPISODE_ID}}           →  e.g. "s01e02"
+#     {{LOCALES}}              →  e.g. "en, zh-Hans"
+#     {{PRIMARY_LOCALE}}       →  e.g. "en" or "zh-Hans" — the source locale for translation
+#     {{PRIMARY_LOCALE_NAME}}  →  e.g. "English" or "Chinese (Simplified)" — human-readable name
+#     {{STORY_FORMAT}}         →  e.g. "episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"
 #
 # 📥 FILES READ (written by earlier stages):
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json                    (Stage 2)
@@ -53,6 +54,11 @@ for certain story formats, e.g. StoryPrompt.json is absent for ssml_narration):
   6. projects/{{PROJECT_SLUG}}/canon.json
   7. projects/{{PROJECT_SLUG}}/VoiceCast.json
   8. contracts/schemas/AssetManifest.v1.json
+
+  9. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/{{PRIMARY_LOCALE}}_vo_durations.json
+     (Written by the VO review approval step — contains measured WAV durations keyed
+     by item_id.  Present only after VO has been reviewed and approved.
+     If found, use it as the authoritative source-duration data for Duration Matching.)
 
 For each non-primary locale, also try to read (if it exists):
   • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/vo_hints.<locale>.json
@@ -139,7 +145,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
   Method: copy the primary-locale artifact as base, then translate ONLY the fields
   listed below.  All other fields must remain IDENTICAL to the primary-locale source.
 
-  **Exception — AssetManifest**: do NOT copy the full English manifest.
+  **Exception — AssetManifest**: do NOT copy the full {{PRIMARY_LOCALE_NAME}} manifest.
   Instead produce a brand-new locale-scoped manifest (see below).
 
   ### Fields TO translate per artifact
@@ -155,7 +161,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
                 shots[].action_beat, shots[].audio_intent.vo_text,
                 shots[].audio_intent.music_mood
 
-  **AssetManifest** — locale-scoped manifest (DO NOT copy full English source):
+  **AssetManifest** — locale-scoped manifest (DO NOT copy full {{PRIMARY_LOCALE_NAME}} source):
 
   Produce a NEW file with ONLY these top-level fields:
   ```json
@@ -212,7 +218,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
   Do NOT re-derive emotion from the translated text (Chinese translations can
   shift tone unpredictably).  Instead:
 
-    1. Read the English tts_prompt.azure_style from the source vo_item.
+    1. Read the {{PRIMARY_LOCALE_NAME}} tts_prompt.azure_style from the source vo_item.
     2. Check if that exact style name exists in
        VoiceCast.json character[<locale>].available_styles.
        If yes → use it directly.
@@ -230,12 +236,12 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
        Only omit azure_style if VoiceCast.json also has no azure_style for this locale.
 
   Example A (standard voice with emotion styles):
-    English vo_item: azure_style = "terrified"
+    {{PRIMARY_LOCALE_NAME}} vo_item: azure_style = "terrified"
     zh-Hans available_styles: ["angry", "fearful", "sad", "excited", ...]
     Fallback chain: terrified → fearful (found) → use "fearful"
 
   Example B (Dragon HD voice with archetype styles):
-    English vo_item: azure_style = "whispering"
+    {{PRIMARY_LOCALE_NAME}} vo_item: azure_style = "whispering"
     zh-Hans available_styles: ["assassin", "captain", "cavalier", "drake", "gamenarrator", "geomancer", "poet"]
     Fallback chain: no match found → use VoiceCast.json character[zh-Hans].azure_style = "gamenarrator"
 
@@ -262,18 +268,25 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
 
     ### Step 1 — Determine the target character count for this item
 
-    **If vo_hints.<locale>.json was loaded successfully:**
-      Find the entry with matching item_id.  Use its `target_chars` value
-      directly as your target character count.  Also note `fragment_type`:
-        • fragment_type = "normal"  (source_duration_sec > 1.5 s)  — standard line
-        • fragment_type = "short"   (source_duration_sec ≤ 1.5 s)  — see short note below
+    **Priority order for source duration (use the first available):**
 
-    **If vo_hints.<locale>.json is not available (first run):**
-      Estimate from word count of the source text:
-        estimated_sec  = word_count(source_text) / 2.5
-        (narration at normal pace ≈ 2.5 words / second for Latin-script locales)
-        target_chars   = round(estimated_sec × chars_per_sec_for_target_locale)
-        (zh-Hans narration at normal pace ≈ 3.2 chars / second)
+    1. **`{{PRIMARY_LOCALE}}_vo_durations.json`** (most accurate — post-review measured WAVs):
+       Find the entry with matching item_id.  Use `duration_sec` as `source_duration_sec`.
+       Derive `target_chars = round(source_duration_sec × chars_per_sec_for_target_locale)`.
+       A `duration_sec` ≤ 1.5 s means this is a short fragment (see short note below).
+
+    2. **`vo_hints.<locale>.json`** (good — from previous Stage 9 run):
+       Find the entry with matching item_id.  Use its `target_chars` value
+       directly as your target character count.  Also note `fragment_type`:
+         • fragment_type = "normal"  (source_duration_sec > 1.5 s)  — standard line
+         • fragment_type = "short"   (source_duration_sec ≤ 1.5 s)  — see short note below
+
+    3. **Word-count estimation** (fallback — first run only):
+       Estimate from word count of the source text:
+         estimated_sec  = word_count(source_text) / 2.5
+         (narration at normal pace ≈ 2.5 words / second for Latin-script locales)
+         target_chars   = round(estimated_sec × chars_per_sec_for_target_locale)
+         (zh-Hans narration at normal pace ≈ 3.2 chars / second)
 
     ### Step 2 — Adjust translation to hit target_chars if needed
 
@@ -317,7 +330,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
              world_facts[], unresolved_threads[],
              episode_summaries[].summary
 
-  ### Fields NEVER to translate (keep identical to English)
+  ### Fields NEVER to translate (keep identical to {{PRIMARY_LOCALE_NAME}})
   All *_id fields, schema_id, schema_version, license_type,
   camera_framing, camera_movement, timing_lock_hash, created_at,
   series.title, series.genre, knows[],

@@ -3794,7 +3794,12 @@ def main() -> None:
     all_manifest_ids: set[str] = {
         it["item_id"] for it in manifest.get("vo_items", [])}
     for wav in out_dir.glob("*.wav"):
-        if wav.stem not in all_manifest_ids:
+        # Extract item_id: "vo-sc01-001.wav" → "vo-sc01-001"
+        #                   "vo-sc01-001.source.wav" → "vo-sc01-001"
+        stem = wav.stem
+        if stem.endswith(".source"):
+            stem = stem[:-len(".source")]
+        if stem not in all_manifest_ids:
             wav.unlink()
             print(f"  [STALE] Deleted orphaned WAV: {wav.name}")
     # ── end stale cleanup ─────────────────────────────────────────────────
@@ -3825,6 +3830,54 @@ def main() -> None:
     )
     stats["wall_time_sec"] = round(time.time() - t_start, 1)
     _append_tts_audit_log(meta_dir, locale, stats)
+
+    # ── Two-file WAV model: create source.wav + apply trim overrides (INVARIANT A/B) ──
+    # After synthesis, for each successfully written {item_id}.wav:
+    #   1. Copy/rename to {item_id}.source.wav  (raw TTS output, never trimmed)
+    #   2. Call apply_vo_trims_for_item()        (writes {item_id}.wav)
+    # On first run, no trim overrides exist → .wav = copy of source.wav.
+    try:
+        import sys as _sys
+        import os as _os
+        _sys.path.insert(0, _os.path.dirname(__file__))
+        from vo_utils import apply_vo_trims_for_item as _apply_trim
+        from vo_utils import invalidate_vo_state as _invalidate
+        from vo_utils import get_primary_locale as _get_primary_locale
+
+        ep_dir = assets_dir.parent  # assets_dir = ep_dir/assets
+        _n_converted = 0
+        for r in results:
+            if r.get("status") != "success":
+                continue
+            item_id  = r.get("item_id", "")
+            wav_path = out_dir / f"{item_id}.wav"
+            src_path = out_dir / f"{item_id}.source.wav"
+            if not wav_path.exists():
+                continue
+            # Step 1: copy .wav → .source.wav (raw output)
+            import shutil as _shutil
+            _shutil.copy2(str(wav_path), str(src_path))
+            # Step 2: apply_vo_trims_for_item writes .wav (first run: .wav = source copy)
+            try:
+                _apply_trim(item_id, ep_dir, locale)
+            except FileNotFoundError:
+                pass  # source.wav just created — should not happen
+            _n_converted += 1
+
+        if _n_converted > 0:
+            print(f"\n[SOURCE.WAV] Created {_n_converted} .source.wav files.")
+            # Invalidate sentinel since TTS just ran
+            _primary = _get_primary_locale(ep_dir)
+            _invalidate(ep_dir, _primary)
+            print(f"[SOURCE.WAV] VO state invalidated (sentinel deleted).")
+
+    except ImportError:
+        print("[WARN] vo_utils not available — skipping source.wav creation.",
+              file=__import__("sys").stderr)
+    except Exception as _exc:
+        print(f"[WARN] source.wav post-processing error: {_exc}",
+              file=__import__("sys").stderr)
+    # ── end two-file WAV model ────────────────────────────────────────────────
 
     # ── ssml_narration: patch manifest vo_items text with source-locale text ──
     # The zh-Hans manifest may have been copied from en with English text.

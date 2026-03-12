@@ -32,6 +32,16 @@ from pathlib import Path
 
 PIPE_DIR = Path(__file__).resolve().parent.parent.parent
 
+# Import sentinel verification from vo_utils (same directory)
+try:
+    import sys as _sys
+    import os as _os
+    _sys.path.insert(0, _os.path.dirname(__file__))
+    from vo_utils import verify_sentinel, get_primary_locale
+    _VO_UTILS_AVAILABLE = True
+except ImportError:
+    _VO_UTILS_AVAILABLE = False
+
 
 # ── Manifest helpers ──────────────────────────────────────────────────────────
 
@@ -296,6 +306,32 @@ def main():
 
     shared_path = Path(args.shared).resolve()
     locale_path = Path(args.locale).resolve()
+
+    # ── Stage 9 sentinel check (INVARIANT I) ─────────────────────────────────
+    # If the locale manifest's locale matches primary_locale AND the sentinel
+    # exists with all four hashes matching, exit 0 without writing.
+    # This prevents re-running manifest_merge from overwriting the post-review
+    # merged manifest and reverting all VO edits made during Stage 7.5 review.
+    if _VO_UTILS_AVAILABLE:
+        try:
+            # Read locale from the locale manifest file
+            with open(locale_path, encoding="utf-8") as _f:
+                _locale_manifest = json.load(_f)
+            _manifest_locale = _locale_manifest.get("locale", "")
+            _ep_dir = locale_path.parent  # manifests live in ep_dir/
+            _primary_locale = get_primary_locale(_ep_dir)
+            if _manifest_locale == _primary_locale:
+                if verify_sentinel(_ep_dir, _primary_locale):
+                    print(
+                        f"[manifest_merge] Sentinel valid for {_primary_locale} — "
+                        "skipping merge (VO review already approved)."
+                    )
+                    sys.exit(0)
+        except Exception as _exc:
+            # Non-fatal: if sentinel check fails, proceed with normal merge
+            print(f"[manifest_merge] Sentinel check error (ignored): {_exc}",
+                  file=sys.stderr)
+    # ── end sentinel check ────────────────────────────────────────────────────
 
     for label, path in [("shared", shared_path), ("locale", locale_path)]:
         if not path.exists():

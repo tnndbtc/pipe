@@ -384,6 +384,23 @@ fill_and_run() {
   echo "══════════════════════════════════════════════════════════════"
 
   # 1. Substitute all {{PLACEHOLDER}} tokens
+  # Derive human-readable name for PRIMARY_LOCALE
+  local _primary_locale_name
+  case "${PRIMARY_LOCALE:-en}" in
+    en)       _primary_locale_name="English" ;;
+    zh-Hans)  _primary_locale_name="Chinese (Simplified)" ;;
+    zh-Hant)  _primary_locale_name="Chinese (Traditional)" ;;
+    ja)       _primary_locale_name="Japanese" ;;
+    ko)       _primary_locale_name="Korean" ;;
+    es)       _primary_locale_name="Spanish" ;;
+    fr)       _primary_locale_name="French" ;;
+    de)       _primary_locale_name="German" ;;
+    pt)       _primary_locale_name="Portuguese" ;;
+    ar)       _primary_locale_name="Arabic" ;;
+    hi)       _primary_locale_name="Hindi" ;;
+    *)        _primary_locale_name="${PRIMARY_LOCALE:-en}" ;;
+  esac
+
   sed \
     -e "s|{{EPISODE_DIR}}|${EP_DIR}|g" \
     -e "s|{{STORY_FILE}}|${STORY_FILE}|g" \
@@ -397,6 +414,7 @@ fill_and_run() {
     -e "s|{{LOCALES}}|${LOCALES:-en}|g" \
     -e "s|{{STORY_FORMAT}}|${STORY_FORMAT:-episodic}|g" \
     -e "s|{{PRIMARY_LOCALE}}|${PRIMARY_LOCALE:-en}|g" \
+    -e "s|{{PRIMARY_LOCALE_NAME}}|${_primary_locale_name}|g" \
     "$prompt_src" > "$tmp"
 
   # 2. Pre-embed referenced input files → eliminate Read tool calls
@@ -690,6 +708,32 @@ for N in 1 2 3 4 5 6 7 8 9; do
         fi
       fi
       continue
+    fi
+
+    # ── Stage 8 VO review gate (INVARIANT I) ────────────────────────────
+    # Stage 8 translation calibrates VO text length against primary-locale
+    # WAV durations.  Without an approved VO sentinel those durations are
+    # absent or stale, so Stage 8 should not run.
+    if [[ "$N" -eq 8 ]]; then
+      _sentinel_file="${EP_DIR}/tts_review_complete.json"
+      if [[ ! -f "$_sentinel_file" ]]; then
+        echo ""
+        echo "══════════════════════════════════════════════════════════════"
+        echo "  ⛔  Stage 8 gate — VO review not yet approved"
+        echo ""
+        echo "  ${_sentinel_file}"
+        echo "  not found."
+        echo ""
+        echo "  Before running Stage 8 (translation):"
+        echo "    1. Click  🎙 TTS Preview  in the Run tab"
+        echo "       (runs manifest_merge + gen_tts for ${PRIMARY_LOCALE:-en})"
+        echo "    2. Switch to the VO tab and review every line"
+        echo "    3. Click  ✓ VO Approved — Continue  to write the sentinel"
+        echo "    4. Then re-run Stage 8"
+        echo "══════════════════════════════════════════════════════════════"
+        exit 1
+      fi
+      echo "  ✓ VO sentinel found — Stage 8 proceeding with approved timings"
     fi
 
     # ── Pre-Stage 8 hook: compute locale character-count hints ──────────

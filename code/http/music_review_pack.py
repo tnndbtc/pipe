@@ -357,11 +357,13 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
 
             if has_timing:
                 start = vo.get("start_sec", 0.0)
+                # start_sec is absolute global time; offset already baked in
+                s = int(start * SAMPLE_RATE)
             else:
                 start = vo_cursor
                 vo_cursor += vo_dur + DEFAULT_PAUSE_SEC
-
-            s = offset_samples + int(start * SAMPLE_RATE)
+                # vo_cursor is shot-relative; add shot offset to get global pos
+                s = offset_samples + int(start * SAMPLE_RATE)
             e = min(s + len(vo_data), n_samples)
             length = e - s
             if length > 0:
