@@ -5648,6 +5648,33 @@ placeholder="Enter your story here"></textarea>
         ps[sid].segments.push(seg);
         _mediaRebalanceImages(sid, ps[sid].segments);
         _mediaRenderShotRow(targetBgId, sid);
+
+        // Also inject into the target card's search results + thumbnail grid
+        // so the video/image appears in the collection, not just the segment row.
+        if (_mediaResults && _mediaResults[targetBgId]) {
+          var targetItem = _mediaResults[targetBgId];
+          var listKey = type === 'video' ? 'videos' : 'images';
+          var list = targetItem[listKey] || [];
+          // Only add if not already present (by URL)
+          var entryUrl = entry.url || '';
+          var alreadyInList = list.some(function(e) { return e.url === entryUrl; });
+          if (!alreadyInList) {
+            list.push(entry);
+            targetItem[listKey] = list;
+            // Append thumbnail to the grid
+            var card = document.getElementById('media-card-' + targetBgId);
+            if (card) {
+              var rows = card.querySelectorAll('.media-thumb-row');
+              // videos row is the second .media-thumb-row (images first, videos second)
+              var targetRow = type === 'video' ? rows[rows.length - 1] : rows[0];
+              if (targetRow) {
+                var th = _mediaThumb(targetBgId, type, entry, list.length - 1);
+                th.classList.add('selected');
+                targetRow.appendChild(th);
+              }
+            }
+          }
+        }
       });
       _mediaMarkCrossCardUsed();
     });

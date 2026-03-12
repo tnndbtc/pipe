@@ -84,6 +84,57 @@
         "music_asset_id": {
           "type": ["string", "null"],
           "description": "Resolved asset_id for the background music track in this shot. Null if no music or the item is pending. Must match an asset_id present in resolved_assets[] when not null."
+        },
+        "background_segments": {
+          "type": ["array", "null"],
+          "description": "Multi-segment background sequence (v3). When present, the renderer concatenates these segments in order instead of using background_asset_id as a single looped source. Null or absent for single-background shots.",
+          "items": {
+            "$ref": "#/$defs/BackgroundSegment"
+          }
+        }
+      }
+    },
+    "BackgroundSegment": {
+      "type": "object",
+      "required": ["asset_id", "uri", "media_type"],
+      "additionalProperties": true,
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "description": "Resolved background asset ID. Must match an entry in resolved_assets[]."
+        },
+        "uri": {
+          "type": "string",
+          "description": "File URI for the background media (e.g. file:///path/to/image.jpg)."
+        },
+        "media_type": {
+          "type": "string",
+          "enum": ["image", "video"],
+          "description": "Whether this segment is a static image or a video clip."
+        },
+        "duration_sec": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Effective playback duration in seconds. For video segments with start_sec/end_sec, this is derived as (end_sec - start_sec). For images, null (use hold_sec instead)."
+        },
+        "hold_sec": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Display duration for image segments. Null for video segments."
+        },
+        "animation_type": {
+          "type": ["string", "null"],
+          "description": "Optional animation effect for image segments (e.g. zoom_in, pan_lr, ken_burns). Null for video segments."
+        },
+        "start_sec": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Clip trim start point in seconds from beginning of source video. Default 0 (or null/absent). Used with end_sec for sub-clip selection."
+        },
+        "end_sec": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Clip trim end point in seconds from beginning of source video. Null/absent means play to natural end. Must be > start_sec when set."
         }
       }
     },
