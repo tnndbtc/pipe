@@ -309,6 +309,8 @@ def parse_args():
     p.add_argument("--ckpt-dir", default=None, metavar="DIR",
                    help="Directory for CLAP checkpoint. "
                         "Default: ~/.cache/laion_clap/")
+    p.add_argument("--ignore-music-plan", action="store_true",
+                   help="Ignore MusicPlan.json user assignments and regenerate all shots.")
     p.add_argument("--force", action="store_true", default=False,
                    help="Overwrite existing clips (default: skip items whose "
                         ".wav and .license.json already exist).")
@@ -374,6 +376,28 @@ def main():
     if not music_items:
         print("[INFO] No music_items in manifest — nothing to do.")
         return
+
+    # ── Respect Music-tab user assignments (MusicPlan.json) ──────────────────
+    # If the user has already assigned custom clips to shots via the Music tab,
+    # skip those shots entirely so gen_music_clip does not overwrite their work.
+    _user_assigned_items: set = set()
+    _music_plan_path = out_dir / "music" / "MusicPlan.json"
+    if _music_plan_path.exists() and not getattr(args, "ignore_music_plan", False):
+        try:
+            with open(_music_plan_path, encoding="utf-8") as _mpf:
+                _music_plan = json.load(_mpf)
+            for _ovr in _music_plan.get("shot_overrides", []):
+                _iid = _ovr.get("item_id")
+                if _iid:
+                    _user_assigned_items.add(_iid)
+            if _user_assigned_items:
+                print(
+                    f"  [INFO] MusicPlan.json found — "
+                    f"{len(_user_assigned_items)} shot(s) have user-assigned clips "
+                    f"and will be skipped.  Pass --ignore-music-plan to override."
+                )
+        except Exception as _exc:
+            print(f"  [WARN] Could not read MusicPlan.json: {_exc}", file=sys.stderr)
 
     # ── Auto-detect resources dir (now that we have project_id) ──────────────
     if _resources_arg:
@@ -472,6 +496,18 @@ def main():
         license_path = licenses_dir / f"{item_id}.license.json"
 
         print(f"\n[{idx}/{total}] {item_id}  ({duration}s)")
+
+        # ── Skip if user has assigned a custom clip in the Music tab ─────────
+        if item_id in _user_assigned_items:
+            print(f"  [SKIP] {item_id} — user clip assigned in MusicPlan.json")
+            results.append({
+                "item_id":   item_id,
+                "shot_id":   shot_id,
+                "output":    str(out_path),
+                "status":    "user_override",
+                "note":      "user clip assigned in MusicPlan.json",
+            })
+            continue
 
         # ── Skip if already done (unless --force) ────────────────────────────
         if not args.force and out_path.exists() and license_path.exists():

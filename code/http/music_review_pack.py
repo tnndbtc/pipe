@@ -315,6 +315,27 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
     locale = manifest.get("locale", "en")
 
     n_samples = int(total_dur * SAMPLE_RATE) + SAMPLE_RATE  # +1s safety
+
+    # ── Build scene-shift lookup so VO gets the same inter-scene pauses
+    # that the VO-tab "Generate Preview" adds (scene_tails from manifest). ──────
+    _scene_tails_cfg = manifest.get("scene_tails", {})
+    _DEFAULT_SCENE_TAIL_MS = 2000
+    _vo_scene_shift: dict = {}   # item_id → extra seconds from accumulated scene pauses
+    _prev_scene_id  = None
+    _shift_acc      = 0.0
+    for _vo_item in manifest.get("vo_items", []):
+        _iid   = _vo_item.get("item_id", "")
+        _parts = _iid.split("-")
+        _scn   = _parts[1] if len(_parts) >= 3 else ""   # "sc01" from "vo-sc01-001"
+        if _prev_scene_id is not None and _scn != _prev_scene_id:
+            _tail_ms = int(_scene_tails_cfg.get(
+                _scn, _scene_tails_cfg.get(_prev_scene_id, _DEFAULT_SCENE_TAIL_MS)))
+            _shift_acc += _tail_ms / 1000.0
+        _vo_scene_shift[_iid] = _shift_acc
+        _prev_scene_id = _scn
+    # Grow buffer to fit the extra scene-tail time
+    n_samples += int(_shift_acc * SAMPLE_RATE)
+
     buf = np.zeros((n_samples, CHANNELS), dtype=np.float64)
 
     episode_dir = PIPE_DIR / "projects" / project_id / "episodes" / episode_id
@@ -357,7 +378,10 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
 
             if has_timing:
                 start = vo.get("start_sec", 0.0)
-                # start_sec is absolute global time; offset already baked in
+                # start_sec is absolute global time; offset already baked in.
+                # Add per-item scene-tail shift so scene boundaries match the
+                # VO-tab preview (which inserts scene_tails silence).
+                start += _vo_scene_shift.get(item_id, 0.0)
                 s = int(start * SAMPLE_RATE)
             else:
                 start = vo_cursor
@@ -439,7 +463,9 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         for vo in entry.get("vo_lines", []):
             end = vo.get("end_sec")
             if end is not None:
-                last_vo_end_sec = max(last_vo_end_sec, end)
+                # Account for scene-tail shift applied during VO placement
+                shifted_end = end + _vo_scene_shift.get(vo.get("item_id", ""), 0.0)
+                last_vo_end_sec = max(last_vo_end_sec, shifted_end)
     VO_OUTRO_SEC = 5.0
     trim_sec = min(last_vo_end_sec + VO_OUTRO_SEC, total_dur) if last_vo_end_sec > 0 else total_dur
     trim_samples = int(trim_sec * SAMPLE_RATE)
@@ -567,37 +593,54 @@ def main():
     )
 
     # Apply user overrides on top of timeline (duck_db, fade_sec, music_asset_id, etc.)
+    # Helper: apply a list of override dicts to timeline_shots in-place
+    def _apply_overrides(override_list, source_name):
+        ovr_by_item = {o["item_id"]: o for o in override_list if "item_id" in o}
+        applied = 0
+        for entry in timeline_shots:
+            mid = entry.get("music_item_id", "")
+            if mid in ovr_by_item:
+                ovr = ovr_by_item[mid]
+                if "duck_db" in ovr:
+                    entry["duck_db"] = float(ovr["duck_db"])
+                if "fade_sec" in ovr:
+                    entry["fade_sec"] = float(ovr["fade_sec"])
+                if "start_sec" in ovr:
+                    entry["start_sec"] = float(ovr["start_sec"])
+                if "duration_sec" in ovr:
+                    entry["duration_sec"] = float(ovr["duration_sec"])
+                if "music_asset_id" in ovr:
+                    # Store override separately — keep original music_item_id
+                    # for UI (timeline.json). Renderer uses _override for audio.
+                    entry["music_item_id_override"] = ovr["music_asset_id"]
+                # Recompute duck intervals with new fade_sec
+                vo_items_for_shot = vo_shot_map.get(entry["shot_id"], [])
+                if vo_items_for_shot:
+                    entry["duck_intervals"] = compute_duck_intervals(
+                        vo_items_for_shot, float(entry.get("fade_sec", DEFAULT_FADE_SEC)))
+                applied += 1
+        if applied:
+            print(f"  [INFO] Applied {applied} user override(s) from {source_name}")
+
+    # Step 1: auto-load MusicPlan.json from the episode's music dir (always honoured)
+    music_plan_path = episode_dir / "assets" / "music" / "MusicPlan.json"
+    if music_plan_path.exists():
+        try:
+            with open(music_plan_path, encoding="utf-8") as f:
+                music_plan = json.load(f)
+            plan_overrides = music_plan.get("shot_overrides", [])
+            if plan_overrides:
+                _apply_overrides(plan_overrides, "MusicPlan.json")
+        except Exception as exc:
+            print(f"  [WARN] Could not read MusicPlan.json: {exc}", file=sys.stderr)
+
+    # Step 2: explicit --overrides file takes precedence over MusicPlan.json
     if args.overrides:
         overrides_path = Path(args.overrides).resolve()
         if overrides_path.exists():
             with open(overrides_path, encoding="utf-8") as f:
                 user_overrides = json.load(f)
-            ovr_by_item = {o["item_id"]: o for o in user_overrides
-                           if "item_id" in o}
-            applied = 0
-            for entry in timeline_shots:
-                mid = entry.get("music_item_id", "")
-                if mid in ovr_by_item:
-                    ovr = ovr_by_item[mid]
-                    if "duck_db" in ovr:
-                        entry["duck_db"] = float(ovr["duck_db"])
-                    if "fade_sec" in ovr:
-                        entry["fade_sec"] = float(ovr["fade_sec"])
-                    if "start_sec" in ovr:
-                        entry["start_sec"] = float(ovr["start_sec"])
-                    if "duration_sec" in ovr:
-                        entry["duration_sec"] = float(ovr["duration_sec"])
-                    if "music_asset_id" in ovr:
-                        # Store override separately — keep original music_item_id
-                        # for UI (timeline.json). Renderer uses _override for audio.
-                        entry["music_item_id_override"] = ovr["music_asset_id"]
-                    # Recompute duck intervals with new fade_sec
-                    vo_items_for_shot = vo_shot_map.get(entry["shot_id"], [])
-                    if vo_items_for_shot:
-                        entry["duck_intervals"] = compute_duck_intervals(
-                            vo_items_for_shot, float(entry.get("fade_sec", DEFAULT_FADE_SEC)))
-                    applied += 1
-            print(f"  [INFO] Applied {applied} user override(s) from {overrides_path.name}")
+            _apply_overrides(user_overrides, overrides_path.name)
         else:
             print(f"  [WARN] Overrides file not found: {overrides_path}")
 
