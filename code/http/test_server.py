@@ -9135,6 +9135,12 @@ placeholder="Enter your story here"></textarea>
 
       // Step 2: Generate review pack (timeline + preview audio) with current overrides
       _musicSetStatus('Step 2/2 — Generating review pack (VO + music preview) …', true);
+      // Re-fetch user_cut_clips.json — may have been written after tab loaded
+      try {
+        const ucR = await fetch('/api/episode_file?slug=' + encodeURIComponent(_musicSlug)
+          + '&ep_id=' + encodeURIComponent(_musicEpId) + '&file=assets/music/user_cut_clips.json');
+        if (ucR.ok) { _musicCutClips = await ucR.json(); }
+      } catch (_) {}
       const currentOverrides = Object.values(_musicOverrides).filter(o => o.item_id);
       const r2 = await fetch('/api/music_review_pack', {
         method: 'POST',
@@ -9263,7 +9269,11 @@ placeholder="Enter your story here"></textarea>
           const duckVal  = ovr.duck_db  != null ? ovr.duck_db  : 0;
           const fadeVal  = ovr.fade_sec != null ? ovr.fade_sec : (s.fade_sec != null ? s.fade_sec : 0.15);
           const col      = shotColors[i % shotColors.length];
-          const currentClipId = ovr.music_clip_id || itemToClipId[origMid] || origMid;
+          // currentClipId: use saved override if present, else empty (no auto-default)
+          // IMPORTANT: do NOT fall back to origMid ("music-sc01-sh01") — it's not a real
+          // clip ID and causes the browser to silently show the first option without
+          // triggering onchange, leaving the override unregistered.
+          const currentClipId = ovr.music_clip_id || itemToClipId[origMid] || '';
 
           ovrHtml += '<div class="music-shot-block">'
             // header: shot id + episode time range
@@ -9272,9 +9282,10 @@ placeholder="Enter your story here"></textarea>
             + '<span class="music-shot-hdr-ep">episode&nbsp;' + fmtEp(epStart) + ' – ' + fmtEp(epEnd)
             + '&nbsp;(' + shotDur.toFixed(1) + 's)</span>'
             + '</div>'
-            // clip dropdown
+            // clip dropdown — first option is explicit "none" so unassigned shots are visible
             + '<div class="music-shot-clip">'
-            + '<select style="width:100%" onchange="_musicSetClipOverride(\'' + origMid + '\',this.value)">';
+            + '<select style="width:100%" onchange="_musicSetClipOverride(\'' + origMid + '\',this.value)">'
+            + '<option value=""' + (currentClipId === '' ? ' selected' : '') + '>— no clip —</option>';
           allClips.forEach(c => {
             ovrHtml += '<option value="' + c.clip_id + '"' + (c.clip_id === currentClipId ? ' selected' : '') + '>'
               + c.clip_id + '</option>';
@@ -9518,24 +9529,39 @@ placeholder="Enter your story here"></textarea>
 
   // ── Set clip override from visual timeline dropdown ──
   function _musicSetClipOverride(itemId, clipId) {
+    // Empty clipId means "no clip" — clear the override entirely
+    if (!clipId) {
+      delete _musicOverrides[itemId];
+      _musicAutoSave();
+      return;
+    }
     if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
     // Store full clip_id for UI dropdown matching
     _musicOverrides[itemId].music_clip_id = clipId;
     // Resolve to WAV filename stem via lookup (for backend)
     const info = _musicClipLookup[clipId];
-    if (info) {
+    if (info && info.wavStem) {
       _musicOverrides[itemId].music_asset_id = info.wavStem;
     } else {
-      // Fallback: parse stem from clip_id
+      // Fallback: reconstruct the filename stem from clip_id format
+      // "cher1:11.1s-23.0s"  →  "cher1_11_1s-23_0s"  (matches WAV on disk)
       const m = clipId.match(/^(.+?):(\d+\.?\d*)s-(\d+\.?\d*)s$/);
-      _musicOverrides[itemId].music_asset_id = m ? m[1] : clipId;
+      if (m) {
+        const startFmt = m[2].replace('.', '_');
+        const endFmt   = m[3].replace('.', '_');
+        _musicOverrides[itemId].music_asset_id = `${m[1]}_${startFmt}s-${endFmt}s`;
+      } else {
+        _musicOverrides[itemId].music_asset_id = clipId;
+      }
     }
-    // Also store clip timing for apply_music_plan
+    // Store clip timing for apply_music_plan
     const m = clipId.match(/^(.+?):(\d+\.?\d*)s-(\d+\.?\d*)s$/);
     if (m) {
-      _musicOverrides[itemId].clip_start_sec = parseFloat(m[2]);
+      _musicOverrides[itemId].clip_start_sec    = parseFloat(m[2]);
       _musicOverrides[itemId].clip_duration_sec = parseFloat(m[3]) - parseFloat(m[2]);
     }
+    // Persist immediately so a page reload or next Generate sees the selection
+    _musicAutoSave();
   }
 
   function _musicSetOverride(itemId, field, value) {
