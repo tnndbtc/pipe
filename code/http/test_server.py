@@ -10896,7 +10896,7 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
     elif step == "apply_music_plan":
         music_plan = os.path.join(ep_dir, "assets", "music", "MusicPlan.json")
         if not os.path.isfile(music_plan):
-            return None   # skip silently if no MusicPlan.json exists
+            return []   # [] = intentional skip (no MusicPlan.json); None = unknown step
         return [
             "python3", os.path.join(code_dir, "apply_music_plan.py"),
             "--plan",     music_plan,
@@ -11592,9 +11592,14 @@ class Handler(BaseHTTPRequestHandler):
             _step_payload = {"asset_ids": asset_ids} if asset_ids else None
             cmd = _build_step_cmd(step, slug, ep_id, locale, profile, no_music,
                                   payload=_step_payload)
-            if not cmd:
+            if cmd is None:
                 self.wfile.write(sse("error_line", f"Unknown step: {step!r}"))
                 self.wfile.write(sse("done", "1"))
+                self.wfile.flush()
+                return
+            if cmd == []:
+                self.wfile.write(sse("line", f"  ✓ {step} — skipped (no plan file)"))
+                self.wfile.write(sse("done", "0"))
                 self.wfile.flush()
                 return
 
@@ -11697,10 +11702,13 @@ class Handler(BaseHTTPRequestHandler):
                     write_log("O", f"\n── {step} ──────────────────────────────────────────")
 
                     cmd = _build_step_cmd(step, slug, ep_id, locale, profile, no_music)
-                    if not cmd:
+                    if cmd is None:
                         write_log("E", f"Unknown step: {step!r}")
                         write_log("D", "1")
                         return
+                    if cmd == []:
+                        write_log("O", f"  ✓ {step} — skipped (no plan file)")
+                        continue
 
                     proc = subprocess.Popen(
                         cmd,
@@ -11810,10 +11818,13 @@ class Handler(BaseHTTPRequestHandler):
                 for _step in _SHARED_STEPS[from_idx:]:
                     write_log("O", f"\n── {_step} (shared) ────────────────────────────────")
                     _cmd = _build_step_cmd(_step, slug, ep_id, "", profile, no_music)
-                    if not _cmd:
+                    if _cmd is None:
                         write_log("E", f"Unknown step: {_step!r}")
                         write_log("D", "1")
                         return
+                    if _cmd == []:
+                        write_log("O", f"  ✓ {_step} — skipped (no plan file)")
+                        continue
                     _rc = _run_cmd(_cmd)
                     if _rc != 0:
                         write_log("E", f"✗ {_step} failed (exit {_rc})")
@@ -11832,10 +11843,13 @@ class Handler(BaseHTTPRequestHandler):
                     for _step in _LOCALE_STEPS_ALL:
                         write_log("O", f"\n── {_step} [{_locale}] ──────────────────────────")
                         _cmd = _build_step_cmd(_step, slug, ep_id, _locale, profile, no_music)
-                        if not _cmd:
+                        if _cmd is None:
                             write_log("E", f"Unknown step: {_step!r}")
                             write_log("D", "1")
                             return
+                        if _cmd == []:
+                            write_log("O", f"  ✓ {_step} — skipped (no plan file)")
+                            continue
                         _rc = _run_cmd(_cmd)
                         if _rc != 0:
                             write_log("E", f"✗ {_step} [{_locale}] failed (exit {_rc})")
