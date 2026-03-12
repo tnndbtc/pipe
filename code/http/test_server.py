@@ -2652,6 +2652,37 @@ placeholder="Enter your story here"></textarea>
     .vo-scene-break{display:flex;align-items:center;gap:6px;padding:4px 8px;margin:6px 0 0;background:var(--active-bg);border-radius:4px;border:1px dashed var(--border)}
     .vo-break-label{font-size:0.72em;color:var(--dim);flex:1}
     .vo-break-input{width:60px;font-size:0.8em;padding:2px 4px;background:var(--input-bg,#1e1e1e);color:var(--text);border:1px solid var(--border);border-radius:3px;text-align:right}
+    /* ── VO Timeline Player ─────────────────────────────────────── */
+    #vo-timeline-bar{display:none;flex-direction:column;gap:4px;padding:8px 12px;
+      margin:6px 0;background:#0e1f2e;border:1px solid #2a4a6a;border-radius:6px;
+      position:sticky;top:0;z-index:20}
+    #vo-timeline-bar.active{display:flex}
+    .vo-tl-top{display:flex;align-items:center;gap:10px}
+    .vo-tl-playbtn{width:28px;height:28px;border-radius:50%;background:#1e6fa8;
+      border:none;color:#fff;font-size:1em;cursor:pointer;flex-shrink:0;line-height:1}
+    .vo-tl-playbtn:hover{background:#2a8fd8}
+    .vo-tl-time{font-size:0.78em;color:#7ecfff;font-variant-numeric:tabular-nums;min-width:80px}
+    .vo-tl-label{font-size:0.75em;color:#9ab;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .vo-tl-close{background:none;border:none;color:#678;font-size:1em;cursor:pointer;padding:0 2px}
+    .vo-tl-close:hover{color:#f88}
+    .vo-tl-track{position:relative;height:28px;margin:0 2px}
+    .vo-tl-scenes{position:absolute;top:0;left:0;right:0;height:10px;display:flex;overflow:hidden;border-radius:3px 3px 0 0}
+    .vo-tl-seg{height:100%;opacity:.55;transition:opacity .15s}
+    .vo-tl-seg:hover{opacity:.85}
+    .vo-tl-seg-label{font-size:9px;color:#fff;overflow:hidden;padding:0 2px;white-space:nowrap;line-height:10px}
+    .vo-tl-scrubber{position:absolute;bottom:0;left:0;right:0;height:16px;
+      -webkit-appearance:none;appearance:none;width:100%;margin:0;
+      background:transparent;cursor:pointer;outline:none}
+    .vo-tl-scrubber::-webkit-slider-runnable-track{height:6px;border-radius:3px;background:#1a3a5a}
+    .vo-tl-scrubber::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;
+      border-radius:50%;background:#4fc3f7;margin-top:-4px;cursor:pointer;border:2px solid #0e1f2e}
+    .vo-tl-scrubber::-moz-range-track{height:6px;border-radius:3px;background:#1a3a5a}
+    .vo-tl-scrubber::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
+      background:#4fc3f7;border:2px solid #0e1f2e;cursor:pointer}
+    .vo-tl-progress{position:absolute;bottom:5px;left:0;height:6px;background:#4fc3f7;
+      border-radius:3px;pointer-events:none;transition:width .1s linear}
+    .vo-item-row.tl-active{outline:2px solid #4fc3f780;outline-offset:-2px}
+    .vo-item-row:hover{background:transparent!important}
     .vo-scene-label{font-size:0.78em;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;flex:1}
     .vo-scene-btn{font-size:0.72em;padding:3px 10px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:5px;cursor:pointer}
     .vo-scene-btn:hover{background:rgba(0,0,0,0.12);color:var(--text)}
@@ -2700,6 +2731,25 @@ placeholder="Enter your story here"></textarea>
     <button class="vo-scene-btn" id="vo-stop-preview-btn" onclick="_voStopPreview()"
             style="display:none;margin-left:4px;color:#f88;border-color:#f88aa" title="Stop playback">
       ■ Stop</button>
+  </div>
+  <!-- VO Timeline Player — shown after Generate Preview -->
+  <div id="vo-timeline-bar">
+    <audio id="vo-tl-audio" preload="auto" style="display:none"></audio>
+    <div class="vo-tl-top">
+      <button class="vo-tl-playbtn" id="vo-tl-playbtn" onclick="_voTlToggle()" title="Play / Pause">▶</button>
+      <span class="vo-tl-time" id="vo-tl-time">0:00 / 0:00</span>
+      <span class="vo-tl-label" id="vo-tl-label">—</span>
+      <button class="vo-tl-close" onclick="_voTlClose()" title="Close timeline">✕</button>
+    </div>
+    <div class="vo-tl-track" id="vo-tl-track">
+      <div  class="vo-tl-scenes"  id="vo-tl-scenes"></div>
+      <div  class="vo-tl-progress" id="vo-tl-progress" style="width:0"></div>
+      <input class="vo-tl-scrubber" id="vo-tl-scrubber" type="range" min="0" max="1000"
+             value="0" step="1"
+             oninput="_voTlSeek(this.value)"
+             onmousedown="_voTlScrubStart()" onmouseup="_voTlScrubEnd()"
+             ontouchstart="_voTlScrubStart()" ontouchend="_voTlScrubEnd()"/>
+    </div>
   </div>
   <!-- VO approval banner — always visible; locks in current WAVs via sentinel -->
   <div id="vo-approve-banner" style="display:flex;flex-direction:column;gap:6px;
@@ -3928,29 +3978,191 @@ placeholder="Enter your story here"></textarea>
     }, 50);
   }
 
-  // Preview all VO items in the current episode sequentially.
-  function _voPreviewAll() {
+  // ── VO Timeline Player ───────────────────────────────────────────────────
+  window._voTlClips   = [];   // [{item_id, scene_id, text, start_sec, duration_sec}]
+  window._voTlScrubbing = false;
+  window._voTlRaf    = null;
+
+  function _fmtSec(s) {
+    const m = Math.floor(s / 60);
+    const ss = String(Math.floor(s % 60)).padStart(2, '0');
+    return `${m}:${ss}`;
+  }
+
+  function _voTlClipAt(t) {
+    const clips = window._voTlClips;
+    for (let i = clips.length - 1; i >= 0; i--) {
+      if (t >= clips[i].start_sec) return clips[i];
+    }
+    return clips[0] || null;
+  }
+
+  function _voTlHighlightRow(itemId) {
+    document.querySelectorAll('.vo-item-row.tl-active')
+      .forEach(r => r.classList.remove('tl-active'));
+    if (!itemId) return;
+    const row = document.getElementById('vo-row-' + itemId);
+    if (row) {
+      row.classList.add('tl-active');
+      row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+
+  function _voTlTick() {
+    const audio = document.getElementById('vo-tl-audio');
+    const scrubber = document.getElementById('vo-tl-scrubber');
+    const progress = document.getElementById('vo-tl-progress');
+    const timeEl   = document.getElementById('vo-tl-time');
+    const label    = document.getElementById('vo-tl-label');
+    const track    = document.getElementById('vo-tl-track');
+    if (!audio || audio.paused) { window._voTlRaf = null; return; }
+
+    const t   = audio.currentTime;
+    const dur = audio.duration || 1;
+    const pct = t / dur;
+
+    if (!window._voTlScrubbing) {
+      scrubber.value = Math.round(pct * 1000);
+      if (track) progress.style.width = (pct * 100).toFixed(2) + '%';
+    }
+    timeEl.textContent = `${_fmtSec(t)} / ${_fmtSec(dur)}`;
+
+    const clip = _voTlClipAt(t);
+    if (clip) {
+      label.textContent = `${clip.scene_id || ''}: ${clip.text.slice(0, 80)}${clip.text.length > 80 ? '…' : ''}`;
+      if (window._voTlLastId !== clip.item_id) {
+        window._voTlLastId = clip.item_id;
+        _voTlHighlightRow(clip.item_id);
+      }
+    }
+    window._voTlRaf = requestAnimationFrame(_voTlTick);
+  }
+
+  function _voTlToggle() {
+    const audio = document.getElementById('vo-tl-audio');
+    const btn   = document.getElementById('vo-tl-playbtn');
+    if (!audio || !audio.src) return;
+    if (audio.paused) {
+      audio.play();
+      btn.textContent = '⏸';
+      window._voTlRaf = requestAnimationFrame(_voTlTick);
+    } else {
+      audio.pause();
+      btn.textContent = '▶';
+    }
+  }
+
+  function _voTlScrubStart() { window._voTlScrubbing = true; }
+  function _voTlScrubEnd()   {
+    window._voTlScrubbing = false;
+    const audio    = document.getElementById('vo-tl-audio');
+    const scrubber = document.getElementById('vo-tl-scrubber');
+    if (audio && audio.duration) {
+      audio.currentTime = (parseInt(scrubber.value) / 1000) * audio.duration;
+    }
+  }
+  function _voTlSeek(val) {
+    // Update progress bar visually while dragging; actual seek on mouseup
+    const track = document.getElementById('vo-tl-track');
+    const progress = document.getElementById('vo-tl-progress');
+    if (progress) progress.style.width = (val / 10).toFixed(1) + '%';
+    // Also update time label
+    const audio = document.getElementById('vo-tl-audio');
+    if (audio && audio.duration) {
+      const t = (val / 1000) * audio.duration;
+      const timeEl = document.getElementById('vo-tl-time');
+      if (timeEl) timeEl.textContent = `${_fmtSec(t)} / ${_fmtSec(audio.duration)}`;
+    }
+  }
+
+  function _voTlClose() {
+    const audio = document.getElementById('vo-tl-audio');
+    if (audio) { audio.pause(); audio.src = ''; }
+    if (window._voTlRaf) { cancelAnimationFrame(window._voTlRaf); window._voTlRaf = null; }
+    document.getElementById('vo-timeline-bar').classList.remove('active');
+    document.getElementById('vo-tl-playbtn').textContent = '▶';
+    document.querySelectorAll('.vo-item-row.tl-active').forEach(r => r.classList.remove('tl-active'));
+    window._voTlClips = [];
+    window._voTlLastId = null;
+  }
+
+  function _voTlBuild(data) {
+    // data = { wav_url, total_sec, clips: [{item_id, scene_id, text, start_sec, duration_sec}] }
+    window._voTlClips  = data.clips || [];
+    window._voTlLastId = null;
+    const total = data.total_sec || 1;
+
+    // Build coloured scene segments
+    const sceneColors = ['#1565c0','#2e7d32','#6a1b9a','#c62828','#e65100','#00695c','#4e342e','#37474f'];
+    const sceneMap = {};
+    let colorIdx = 0;
+    const scenesEl = document.getElementById('vo-tl-scenes');
+    scenesEl.innerHTML = '';
+    for (const clip of data.clips) {
+      const sc = clip.scene_id || 'sc';
+      if (!(sc in sceneMap)) { sceneMap[sc] = sceneColors[colorIdx++ % sceneColors.length]; }
+      const pct = (clip.duration_sec / total * 100).toFixed(3);
+      const seg = document.createElement('div');
+      seg.className = 'vo-tl-seg';
+      seg.style.cssText = `width:${pct}%;background:${sceneMap[sc]}`;
+      seg.title = `${sc}: ${clip.text.slice(0,60)}`;
+      // Label on first clip of each scene
+      if (data.clips.indexOf(clip) === data.clips.findIndex(c => c.scene_id === sc)) {
+        const lbl = document.createElement('span');
+        lbl.className = 'vo-tl-seg-label';
+        lbl.textContent = sc;
+        seg.appendChild(lbl);
+      }
+      scenesEl.appendChild(seg);
+    }
+
+    // Wire audio
+    const audio = document.getElementById('vo-tl-audio');
+    audio.src = data.wav_url + '&t=' + Date.now();
+    audio.onended = () => {
+      document.getElementById('vo-tl-playbtn').textContent = '▶';
+      window._voTlRaf && cancelAnimationFrame(window._voTlRaf);
+      window._voTlRaf = null;
+    };
+
+    // Show bar and auto-play
+    document.getElementById('vo-timeline-bar').classList.add('active');
+    document.getElementById('vo-tl-scrubber').value = 0;
+    document.getElementById('vo-tl-progress').style.width = '0';
+    document.getElementById('vo-tl-playbtn').textContent = '⏸';
+    audio.play().then(() => {
+      window._voTlRaf = requestAnimationFrame(_voTlTick);
+    }).catch(() => {
+      document.getElementById('vo-tl-playbtn').textContent = '▶';
+    });
+  }
+
+  // Preview all VO items — concat on server, show timeline.
+  async function _voPreviewAll() {
     const epSel  = document.getElementById('vo-ep-select');
     const locSel = document.getElementById('vo-locale-select');
     const epDir  = epSel?.value;
     const locale = locSel?.value;
     if (!epDir || !locale) return;
-    // Stop any in-progress playback
+
+    // Stop any in-progress per-item playback
     if (window._voAudio) { window._voAudio.pause(); window._voAudio = null; }
     window._voSeqAbort = true;
-    setTimeout(() => {
-      window._voSeqAbort = false;
-      const clips = [];
-      document.querySelectorAll('.vo-item-row').forEach(row => {
-        const iid = row.dataset.itemId;
-        if (!iid) return;
-        const pauseEl = document.getElementById('vo-pause-' + iid);
-        const pauseMs = parseInt(pauseEl?.value || '300', 10);
-        clips.push({ epDir, locale, item_id: iid, pauseMs });
-      });
-      const allBtn = document.getElementById('vo-preview-all-btn');
-      if (clips.length) _voPlaySequence(clips, allBtn);
-    }, 50);
+
+    const btn = document.getElementById('vo-preview-all-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Building…'; }
+    try {
+      const resp = await fetch(
+        `/api/vo_preview_concat?ep_dir=${encodeURIComponent(epDir)}&locale=${encodeURIComponent(locale)}`
+      );
+      if (!resp.ok) throw new Error(await resp.text());
+      const data = await resp.json();
+      _voTlBuild(data);
+    } catch(e) {
+      alert('Preview error: ' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '▶ Generate Preview'; }
+    }
   }
 
   async function _voPreviewItem(itemId, slug, epId, locale) {
@@ -11926,6 +12138,112 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(_b)))
                 self.end_headers()
                 self.wfile.write(_b)
+            return
+
+        # ── GET /api/vo_preview_concat — concatenate all WAVs into one seekable file ──
+        elif parsed.path == "/api/vo_preview_concat":
+            import wave as _wave, struct as _struct
+            params = parse_qs(parsed.query)
+            ep_dir  = unquote_plus(params.get("ep_dir",  [""])[0]).strip()
+            locale  = unquote_plus(params.get("locale",  [""])[0]).strip()
+            if not ep_dir or not locale or ".." in ep_dir:
+                self.send_response(400); self.end_headers(); return
+            try:
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                manifest_path = os.path.join(full_ep, "AssetManifest_merged.en.json") \
+                    if locale == "en" else \
+                    os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
+                if not os.path.exists(manifest_path):
+                    manifest_path = os.path.join(full_ep, "AssetManifest_merged.en.json")
+                with open(manifest_path, encoding="utf-8") as _mf:
+                    _mfdata = json.load(_mf)
+                vo_items = _mfdata.get("vo_items", [])
+                scene_tails = _mfdata.get("scene_tails", {})
+                vo_dir = os.path.join(full_ep, "assets", locale, "audio", "vo")
+
+                SAMPLE_RATE   = 24000
+                BYTES_PER_SEC = SAMPLE_RATE * 2  # 16-bit mono
+
+                pcm_chunks: list[bytes] = []
+                clips_meta: list[dict]  = []
+                current_sec = 0.0
+                prev_scene  = None
+
+                for _it in vo_items:
+                    _iid   = _it.get("item_id", "")
+                    _scn   = (_iid.split("-")[1] if "-" in _iid else "") # e.g. "sc01"
+                    _wav   = os.path.join(vo_dir, f"{_iid}.wav")
+                    if not os.path.isfile(_wav):
+                        continue
+                    # Inter-scene silence from scene_tails
+                    if prev_scene is not None and _scn != prev_scene:
+                        tail_ms = int(scene_tails.get(_scn, scene_tails.get(prev_scene, 2000)))
+                        _sil = b'\x00' * ((tail_ms * BYTES_PER_SEC // 1000 // 2) * 2)
+                        pcm_chunks.append(_sil)
+                        current_sec += tail_ms / 1000
+                    prev_scene = _scn
+                    try:
+                        with _wave.open(_wav) as _wf:
+                            _pcm = _wf.readframes(_wf.getnframes())
+                            _dur = _wf.getnframes() / _wf.getframerate()
+                    except Exception as _wav_err:
+                        raise RuntimeError(
+                            f"{_iid}.wav is corrupt or unreadable: {_wav_err}. "
+                            f"Re-create this item in the VO tab before generating preview."
+                        )
+                    clips_meta.append({
+                        "item_id":      _iid,
+                        "scene_id":     _scn,
+                        "text":         _it.get("text", ""),
+                        "start_sec":    round(current_sec, 3),
+                        "duration_sec": round(_dur, 3),
+                    })
+                    pcm_chunks.append(_pcm)
+                    current_sec += _dur
+                    # pause_after_ms gap
+                    _pause_ms = int(_it.get("pause_after_ms", 300))
+                    if _pause_ms > 0:
+                        _sil = b'\x00' * ((_pause_ms * BYTES_PER_SEC // 1000 // 2) * 2)
+                        pcm_chunks.append(_sil)
+                        current_sec += _pause_ms / 1000
+
+                all_pcm   = b"".join(pcm_chunks)
+                out_path  = os.path.join(full_ep, "assets", "meta",
+                                         f"vo_preview_{locale}.wav")
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                # Write RIFF WAV header + PCM
+                _data_size  = len(all_pcm)
+                _byte_rate  = SAMPLE_RATE * 2
+                _block_align = 2
+                _hdr = _struct.pack(
+                    "<4sI4s4sIHHIIHH4sI",
+                    b"RIFF", 36 + _data_size, b"WAVE",
+                    b"fmt ", 16, 1, 1, SAMPLE_RATE,
+                    _byte_rate, _block_align, 16,
+                    b"data", _data_size,
+                )
+                with open(out_path, "wb") as _of:
+                    _of.write(_hdr)
+                    _of.write(all_pcm)
+
+                _rel = os.path.relpath(out_path, PIPE_DIR).replace("\\", "/")
+                _resp = json.dumps({
+                    "wav_url":   "/serve_media?path=" + _rel,
+                    "total_sec": round(current_sec, 3),
+                    "clips":     clips_meta,
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(_resp)))
+                self.end_headers()
+                self.wfile.write(_resp)
+            except Exception as _exc:
+                _eb = json.dumps({"error": str(_exc)}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(_eb)))
+                self.end_headers()
+                self.wfile.write(_eb)
             return
 
         # ── VO Review: serve source.wav for waveform canvas (GET /api/vo_source_audio) ─
