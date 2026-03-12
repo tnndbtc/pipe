@@ -1840,6 +1840,24 @@ HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--border); border-radius: 3px;
     font-family: var(--mono); font-size: 0.95em; padding: 2px 4px;
   }
+  .music-shot-loop-btn {
+    font-size: 0.74em; padding: 2px 8px; cursor: pointer;
+    background: var(--active-bg); color: var(--dim);
+    border: 1px solid var(--border); border-radius: 4px;
+    white-space: nowrap;
+  }
+  .music-shot-loop-btn:hover { background: rgba(0,0,0,0.10); color: var(--text); }
+  .music-shot-loop-btn.active { background: #2e7d32; color: #fff; font-weight: 700; }
+  .music-shot-loop-btn:disabled { opacity: 0.35; cursor: default; }
+  .music-shot-loop-xfade {
+    display: inline-flex; align-items: center; gap: 3px; font-size: 0.74em;
+  }
+  .music-shot-loop-xfade label { color: var(--dim); }
+  .music-shot-loop-xfade input {
+    width: 54px; background: var(--input-bg, #1e1e2e); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 4px; font-size: 0.90em;
+  }
   .music-footer {
     flex-shrink: 0; display: flex; align-items: center; gap: 10px;
     padding-top: 8px; border-top: 1px solid var(--border);
@@ -8962,7 +8980,7 @@ placeholder="Enter your story here"></textarea>
   let _musicClipVolumes  = {};    // { item_id|clip_id: dB_offset }
                                   // auto clips  → keyed by item_id  (e.g. "music-s01e01_sh01")
                                   // user-cut    → keyed by clip_id  (e.g. "djokovic_bg_calm:19.4s-40.3s")
-  let _musicLoopSel   = {};       // { track_stem: {start_sec, duration_sec, mode, crossfade_ms} }
+  let _musicLoopSel   = {};       // { music_item_id: {source_stem, start_sec, duration_sec, mode, crossfade_ms} }
   let _musicBusy      = false;
 
   function _musicSetStatus(msg, spinning) {
@@ -9113,6 +9131,91 @@ placeholder="Enter your story here"></textarea>
     val = parseInt(val, 10);
     if (isNaN(val) || val === 0) { delete _musicTrackVolumes[stem]; }
     else                         { _musicTrackVolumes[stem] = val; }
+    _musicAutoSave();
+  }
+
+  // ── Build loop toggle controls HTML for one Shot Override row ─────────────────
+  // itemId = music_item_id (e.g. "music-sc01-sh01")
+  // assignedClip = clip object { clip_id, stem, start_sec, duration_sec } or null
+  function _musicBuildShotLoopControls(itemId, assignedClip) {
+    const loopSel  = _musicLoopSel[itemId];
+    const isLooped = !!loopSel;
+    const xfade    = loopSel ? loopSel.crossfade_ms : 100;
+    const hasClip  = !!(assignedClip && assignedClip.clip_id);
+
+    const safeId = itemId
+      .replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+      .replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\0/g, '');
+
+    let html = '<button class="music-shot-loop-btn' + (isLooped ? ' active' : '') + '"'
+      + (hasClip ? '' : ' disabled')
+      + ' onclick="_musicShotLoopToggle(\'' + safeId + '\')">'
+      + '🔁' + (isLooped ? ' Loop ON' : ' Loop OFF') + '</button>';
+
+    if (isLooped) {
+      html += '<span class="music-shot-loop-xfade">'
+        + '<label>xfade</label>'
+        + '<input type="number" step="10" min="0" max="2000" value="' + xfade + '"'
+        + ' title="Crossfade overlap at each loop join (ms)"'
+        + ' onchange="_musicShotLoopSetXfade(\'' + safeId + '\',parseInt(this.value))">'
+        + '<label>ms</label>'
+        + '</span>';
+    }
+
+    return html;
+  }
+
+  // ── Toggle loop on/off for a shot override ────────────────────────────────────
+  function _musicShotLoopToggle(itemId) {
+    if (_musicLoopSel[itemId]) {
+      delete _musicLoopSel[itemId];
+    } else {
+      // Find the assigned clip_id for this shot from overrides or auto-assignment
+      const ovr = _musicOverrides[itemId] || {};
+      const itemToClipId = {};
+      (_musicClipResults || []).forEach(c => {
+        if (c.status !== 'success') return;
+        const src = (c.source_file || '').replace(/\.[^.]+$/, '');
+        const endSec = (c.start_sec || 0) + (c.duration_sec || 0);
+        itemToClipId[c.item_id] = src + ':' + (c.start_sec || 0).toFixed(1) + 's-' + endSec.toFixed(1) + 's';
+      });
+      const clipId = ovr.music_clip_id || itemToClipId[itemId] || '';
+      if (!clipId) return;
+
+      // Look up clip metadata
+      const allClips = [];
+      (_musicClipResults || []).forEach(c => {
+        if (c.status !== 'success') return;
+        const src = (c.source_file || '').replace(/\.[^.]+$/, '');
+        const endSec = (c.start_sec || 0) + (c.duration_sec || 0);
+        allClips.push({ clip_id: src + ':' + (c.start_sec||0).toFixed(1) + 's-' + endSec.toFixed(1) + 's',
+          stem: src, start_sec: c.start_sec || 0, duration_sec: c.duration_sec || 0 });
+      });
+      (_musicCutClips || []).forEach(c => {
+        allClips.push({ clip_id: c.clip_id, stem: c.stem,
+          start_sec: c.start_sec, duration_sec: c.end_sec - c.start_sec });
+      });
+      const clip = allClips.find(c => c.clip_id === clipId);
+      if (!clip) return;
+
+      _musicLoopSel[itemId] = {
+        source_stem:  clip.stem,
+        start_sec:    clip.start_sec,
+        duration_sec: clip.duration_sec,
+        mode:         'loop',
+        crossfade_ms: 100,
+      };
+    }
+    _musicAutoSave();
+    _musicRenderBody();
+  }
+
+  // ── Update crossfade ms for a looped shot ────────────────────────────────────
+  function _musicShotLoopSetXfade(itemId, ms) {
+    if (!_musicLoopSel[itemId] || isNaN(ms)) return;
+    const dur = _musicLoopSel[itemId].duration_sec || 20;
+    ms = Math.max(0, Math.min(ms, Math.floor(dur * 500 - 1)));
+    _musicLoopSel[itemId].crossfade_ms = ms;
     _musicAutoSave();
   }
 
@@ -9309,6 +9412,7 @@ placeholder="Enter your story here"></textarea>
             + '<input type="number" step="0.05" min="0" max="3" value="' + fadeVal.toFixed(2) + '"'
             + ' onchange="_musicSetOverride(\'' + origMid + '\',\'fade_sec\',parseFloat(this.value))"'
             + ' style="width:50px">'
+            + _musicBuildShotLoopControls(origMid, currentClipId ? allClips.find(c => c.clip_id === currentClipId) || null : null)
             + '</div>'
             + '</div>';
         });

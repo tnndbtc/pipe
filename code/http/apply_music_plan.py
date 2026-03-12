@@ -137,6 +137,7 @@ def generate_loop_wav(
     resources_dir: Path,
     out_dir: Path,
     max_shot_duration: float,
+    out_stem: str | None = None,
 ) -> Path | None:
     """
     Generate a looped WAV from a source track segment.
@@ -145,7 +146,10 @@ def generate_loop_wav(
     2. Extract segment [start_sec, start_sec + duration_sec]
     3. Determine N = ceil(max_shot_duration / duration_sec) + 1
     4. Concatenate N copies with crossfade_ms overlap at each join
-    5. Write to out_dir/{stem}.loop.wav (48kHz 16bit mono)
+    5. Write to out_dir/{out_stem or stem}.loop.wav (48kHz 16bit mono)
+
+    out_stem: if provided, used as the output filename stem (e.g. music_item_id).
+              Defaults to stem for backward compatibility.
     """
     import soundfile as sf
 
@@ -218,13 +222,14 @@ def generate_loop_wav(
                     # Copy the rest of the segment after the crossfade
                     out_audio[xf_end:offset + seg_len] = segment[crossfade_samples:]
 
-    # Write output
-    out_path = out_dir / f"{stem}.loop.wav"
+    # Write output — use sanitized out_stem (e.g. music_item_id) if provided
+    safe_name = (out_stem or stem).replace(':', '_').replace('/', '_')
+    out_path = out_dir / f"{safe_name}.loop.wav"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(out_path), out_audio, SR, subtype="PCM_16")
 
     # License sidecar
-    license_path = out_dir / "licenses" / f"{stem}.loop.license.json"
+    license_path = out_dir / "licenses" / f"{safe_name}.loop.license.json"
     write_license_sidecar(license_path)
 
     size = out_path.stat().st_size
@@ -483,11 +488,13 @@ def main():
                   file=sys.stderr)
             loop_fail = len(loop_selections)
         else:
-            for stem, selection in loop_selections.items():
-                print(f"\n  [{stem}]")
+            for item_id, selection in loop_selections.items():
+                source_stem = selection.get("source_stem") or item_id
+                print(f"\n  [{item_id}]")
                 result = generate_loop_wav(
-                    stem, selection, resources_dir,
+                    source_stem, selection, resources_dir,
                     assets_music_dir, max_shot_duration,
+                    out_stem=item_id,
                 )
                 if result:
                     loop_ok += 1
