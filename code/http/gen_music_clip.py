@@ -32,6 +32,7 @@
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -427,6 +428,30 @@ def main():
         print(f"[SKIP] No audio files found in {resources_dir} — skipping music generation.",
               file=sys.stderr)
         return   # clean exit — not an error
+
+    # Auto-tag untagged files so users don't need to run tag_music.py manually
+    untagged = [c for c in candidates if not c["mood_tag"]]
+    if untagged:
+        tag_script = Path(__file__).parent / "tag_music.py"
+        if tag_script.exists():
+            print(f"\n── Auto-tagging {len(untagged)} untagged file(s) via tag_music.py ──")
+            try:
+                subprocess.run(
+                    [sys.executable, str(tag_script), "--dir", str(resources_dir)],
+                    check=True, timeout=600,
+                )
+                # Re-scan to pick up the new MOOD tags
+                print("\n── Re-scanning resource files ──────────────────────────")
+                candidates = scan_resources(resources_dir)
+            except subprocess.TimeoutExpired:
+                print("  [WARN] tag_music.py timed out — continuing with untagged files",
+                      file=sys.stderr)
+            except subprocess.CalledProcessError as exc:
+                print(f"  [WARN] tag_music.py failed (exit {exc.returncode}) — "
+                      "continuing with untagged files", file=sys.stderr)
+        else:
+            print(f"  [WARN] {len(untagged)} file(s) have no MOOD tag and "
+                  f"tag_music.py not found at {tag_script}", file=sys.stderr)
 
     # ── CLAP is loaded lazily — only when the first item actually needs it ─────
     model = None
