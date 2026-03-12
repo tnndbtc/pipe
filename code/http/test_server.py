@@ -1146,6 +1146,14 @@ HTML = r"""<!DOCTYPE html>
   }
   .media-thumb:hover   { border-color: #5b9cf6; }
   .media-thumb.selected { border-color: var(--gold); }
+  .media-thumb.used-elsewhere { border-color: #4fc3f7; }
+  .media-thumb.used-elsewhere .media-used-badge { display: block; }
+  .media-used-badge {
+    position: absolute; top: 4px; left: 4px;
+    background: #4fc3f7cc; color: #fff; font-size: 0.62em; font-weight: 700;
+    border-radius: 3px; padding: 2px 4px;
+    pointer-events: none; display: none;
+  }
   .media-thumb img,
   .media-thumb video {
     width: 160px; height: 90px; object-fit: cover; display: block;
@@ -5641,6 +5649,7 @@ placeholder="Enter your story here"></textarea>
         _mediaRebalanceImages(sid, ps[sid].segments);
         _mediaRenderShotRow(targetBgId, sid);
       });
+      _mediaMarkCrossCardUsed();
     });
     popup.appendChild(doneBtn);
 
@@ -5963,6 +5972,7 @@ placeholder="Enter your story here"></textarea>
 
       wrapEl.classList.add('selected');
       _mediaRenderShotRow(itemId, targetShot);
+      _mediaMarkCrossCardUsed();
     } else {
       // ── Single-selection mode (no ShotList) ──
       const card = document.getElementById('media-card-' + itemId);
@@ -5985,6 +5995,7 @@ placeholder="Enter your story here"></textarea>
       selBadge.className = 'media-sel-badge';
       selBadge.textContent = '\u2714 ' + type;
       wrapEl.appendChild(selBadge);
+      _mediaMarkCrossCardUsed();
     }
   }
 
@@ -6285,10 +6296,58 @@ placeholder="Enter your story here"></textarea>
   }
 
   // ── Reset all selections ──
+  // ── Mark thumbnails used in OTHER cards with a teal "used" indicator ──
+  // Called after every selection change so all cards stay in sync.
+  function _mediaMarkCrossCardUsed() {
+    // Build a map: url → Set of bgIds that use it
+    const urlToBgIds = {};
+    Object.keys(_mediaSelections).forEach(bgId => {
+      const ps = (_mediaSelections[bgId] || {}).per_shot || {};
+      Object.keys(ps).forEach(shotId => {
+        const segs = (ps[shotId] || {}).segments || [];
+        segs.forEach(s => {
+          if (!s.url) return;
+          if (!urlToBgIds[s.url]) urlToBgIds[s.url] = new Set();
+          urlToBgIds[s.url].add(bgId);
+        });
+      });
+      // Also handle legacy single-selection mode
+      if (_mediaSelections[bgId] && _mediaSelections[bgId].url) {
+        const u = _mediaSelections[bgId].url;
+        if (!urlToBgIds[u]) urlToBgIds[u] = new Set();
+        urlToBgIds[u].add(bgId);
+      }
+    });
+
+    // For every thumb in every card, add/remove .used-elsewhere and badge
+    document.querySelectorAll('.media-thumb').forEach(t => {
+      const url  = t.dataset.url;
+      const bgId = t.dataset.itemId;
+      if (!url) return;
+      const users = urlToBgIds[url];
+      const usedElsewhere = users && [...users].some(id => id !== bgId);
+      if (usedElsewhere) {
+        t.classList.add('used-elsewhere');
+        if (!t.querySelector('.media-used-badge')) {
+          const b = document.createElement('span');
+          b.className = 'media-used-badge';
+          b.textContent = '↗ used';
+          t.appendChild(b);
+        }
+      } else {
+        t.classList.remove('used-elsewhere');
+        const b = t.querySelector('.media-used-badge');
+        if (b) b.remove();
+      }
+    });
+  }
+
   function mediaReset() {
     _mediaSelections = {};
     document.querySelectorAll('.media-thumb.selected').forEach(t => t.classList.remove('selected'));
+    document.querySelectorAll('.media-thumb.used-elsewhere').forEach(t => t.classList.remove('used-elsewhere'));
     document.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
+    document.querySelectorAll('.media-used-badge').forEach(b => b.remove());
     // Reset per-shot rows (segments mode)
     document.querySelectorAll('.media-shot-bar-fill').forEach(b => { b.style.width = '0%'; });
     document.querySelectorAll('.media-shot-segments').forEach(c => { c.innerHTML = ''; });
@@ -6678,6 +6737,7 @@ placeholder="Enter your story here"></textarea>
         try { _mediaRenderShotRow(bgId, shotId); } catch (_) {}
       }
     }
+    _mediaMarkCrossCardUsed();
   }
 
   // ── Voice Cast editor ────────────────────────────────────────────────────────
