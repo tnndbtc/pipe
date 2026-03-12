@@ -4265,7 +4265,13 @@ placeholder="Enter your story here"></textarea>
   let _mediaSelections = {};
   let _mediaShotMap = null;  // { bg_id: [shot_id, ...] } or null if ShotList unavailable
   let _mediaShotDur = null;  // { shot_id: duration_sec } — flat lookup for shot durations
-  let _mediaActiveShot = {}; // { itemId: shot_id } — which shot row is active (target) per card
+  let _mediaActiveShot = {}; // { cardId: shot_id } — which shot row is active (target) per card
+  // Scene-based grouping (built alongside _mediaShotMap):
+  let _mediaSceneMap  = null; // { scene_id: [shot_id, ...] } ordered by appearance
+  let _mediaShotToBg  = null; // { shot_id: bg_id } reverse lookup
+  let _mediaSceneBgs  = null; // { scene_id: [bg_id, ...] } unique bg_ids per scene, ordered
+  let _mediaBgToScene = null; // { bg_id: scene_id } reverse lookup
+  let _mediaSceneOrder = null; // [scene_id, ...] ordered by first shot appearance
   var _mediaPlayingVid = null; // currently playing video element (limit 1 active stream)
   let _bgManifestData = {};    // { itemId: { ai_prompt, search_prompt, include_keywords, media_type, motion_level } }
 
@@ -4351,6 +4357,8 @@ placeholder="Enter your story here"></textarea>
       // Already populated — sync from Run tab, then fall back to localStorage
       _mediaSyncFromRunTab();
       _mediaRestoreLastEp();
+      // If episode is selected but no batch results loaded yet, try loading
+      if (_mediaSlug && _mediaEpId && !_mediaResults) mediaLoadExisting();
       return;
     }
     fetch('/list_projects').then(r => r.json()).then(data => {
@@ -4366,6 +4374,11 @@ placeholder="Enter your story here"></textarea>
       // Sync from Run tab first; fall back to last-used episode from localStorage
       _mediaSyncFromRunTab();
       _mediaRestoreLastEp();
+      // If still no episode selected, auto-select the first available episode
+      if (!_mediaSlug && !_mediaEpId && sel.options.length > 1) {
+        sel.selectedIndex = 1;
+        onMediaEpChange();
+      }
     }).catch(() => {});
   }
 
@@ -4407,27 +4420,62 @@ placeholder="Enter your story here"></textarea>
   }
 
   // ── Load ShotList.json to build bg_id → [shot_id, ...] map + durations ──
+  // Also builds scene-based grouping maps for UI card rendering.
   async function _mediaLoadShotMap() {
-    if (!_mediaSlug || !_mediaEpId) { _mediaShotMap = null; _mediaShotDur = null; return; }
+    if (!_mediaSlug || !_mediaEpId) {
+      _mediaShotMap = null; _mediaShotDur = null;
+      _mediaSceneMap = null; _mediaShotToBg = null; _mediaSceneBgs = null;
+      _mediaBgToScene = null; _mediaSceneOrder = null;
+      return;
+    }
     try {
       const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
           + '&ep_id=' + encodeURIComponent(_mediaEpId)
           + '&file=ShotList.json');
-      if (!r.ok) { _mediaShotMap = null; _mediaShotDur = null; return; }
+      if (!r.ok) {
+        _mediaShotMap = null; _mediaShotDur = null;
+        _mediaSceneMap = null; _mediaShotToBg = null; _mediaSceneBgs = null;
+        _mediaBgToScene = null; _mediaSceneOrder = null;
+        return;
+      }
       const d = await r.json();
       const shots = d.shots || [];
       const map = {};
       const durMap = {};
+      const sceneMap = {};
+      const shotToBg = {};
+      const sceneBgs = {};
+      const bgToScene = {};
+      const sceneOrder = [];
       shots.forEach(s => {
         const bg = s.background_id;
+        const sc = s.scene_id || bg;  // fallback to bg_id if no scene_id
+        const sid = s.shot_id;
         if (!bg) return;
+        // bg → shots map (existing)
         if (!map[bg]) map[bg] = [];
-        map[bg].push(s.shot_id);
-        durMap[s.shot_id] = s.duration_sec || 0;
+        map[bg].push(sid);
+        durMap[sid] = s.duration_sec || 0;
+        // scene maps
+        shotToBg[sid] = bg;
+        bgToScene[bg] = sc;
+        if (!sceneMap[sc]) { sceneMap[sc] = []; sceneOrder.push(sc); }
+        sceneMap[sc].push(sid);
+        if (!sceneBgs[sc]) sceneBgs[sc] = [];
+        if (sceneBgs[sc].indexOf(bg) === -1) sceneBgs[sc].push(bg);
       });
       _mediaShotMap = map;
       _mediaShotDur = durMap;
-    } catch (_) { _mediaShotMap = null; _mediaShotDur = null; }
+      _mediaSceneMap = sceneMap;
+      _mediaShotToBg = shotToBg;
+      _mediaSceneBgs = sceneBgs;
+      _mediaBgToScene = bgToScene;
+      _mediaSceneOrder = sceneOrder;
+    } catch (_) {
+      _mediaShotMap = null; _mediaShotDur = null;
+      _mediaSceneMap = null; _mediaShotToBg = null; _mediaSceneBgs = null;
+      _mediaBgToScene = null; _mediaSceneOrder = null;
+    }
   }
 
   // ── AI Generation Queue — persisted in localStorage per project/episode ──
@@ -4540,29 +4588,29 @@ placeholder="Enter your story here"></textarea>
   }
 
   // Inject a completed AI-generated candidate into the images section
-  function _aiGenInjectResult(itemId, candidate) {
-    if (!_mediaResults || !_mediaResults[itemId]) return;
-    const item = _mediaResults[itemId];
+  function _aiGenInjectResult(bgId, candidate) {
+    if (!_mediaResults || !_mediaResults[bgId]) return;
+    const item = _mediaResults[bgId];
     if (!item.images) item.images = [];
     item.images.push(candidate);
-    // Append a single thumb to the existing image row (avoid full re-render)
-    const card = document.getElementById('media-card-' + itemId);
+    // Find the card via scene-based ID, then the bg-content container
+    const cardId = (_mediaBgToScene && _mediaBgToScene[bgId]) || bgId;
+    const bgContent = document.getElementById('media-bg-content-' + bgId);
+    const card = bgContent || document.getElementById('media-card-' + cardId);
     if (!card) return;
     // Find or create the images thumb row
     let imgRow = card.querySelector('.media-thumb-row');
     if (!imgRow) {
-      // No images section yet — create it
       const lbl = document.createElement('div');
       lbl.className = 'media-section-label';
       lbl.textContent = 'Images';
-      const shotSection = card.querySelector('.media-shot-section');
-      card.insertBefore(lbl, shotSection || null);
+      card.appendChild(lbl);
       imgRow = document.createElement('div');
       imgRow.className = 'media-thumb-row';
-      card.insertBefore(imgRow, shotSection || null);
+      card.appendChild(imgRow);
     }
     const idx = item.images.length - 1;
-    const wrap = _mediaThumb(itemId, 'image', candidate, idx);
+    const wrap = _mediaThumb(cardId, 'image', candidate, idx);
     // AI badge
     const aiBadge = document.createElement('span');
     aiBadge.textContent = 'AI';
@@ -5172,188 +5220,246 @@ placeholder="Enter your story here"></textarea>
     obs.observe(sentinel);
   }
 
-  // ── Render results grid ──
+  // ── Helper: render one bg_id sub-section (search results + AI panel) inside a card ──
+  function _mediaRenderBgSection(card, bgId, cardId, items, d_topN) {
+    const item = items[bgId];
+    if (!item) return;
+
+    // Store manifest fields for info panel
+    _bgManifestData[bgId] = {
+      ai_prompt:        item.ai_prompt || '',
+      search_prompt:    item.search_prompt || '',
+      include_keywords: (item.include_keywords || []).join(', '),
+      media_type:       (item.search_filters || {}).media_type || 'mixed',
+      motion_level:     item.motion_level || '',
+    };
+    const mdata = _bgManifestData[bgId];
+
+    // Background sub-header (collapsible)
+    const bgHdr = document.createElement('div');
+    bgHdr.className = 'media-bg-header';
+    bgHdr.style.cssText = 'display:flex; align-items:center; flex-wrap:wrap; padding:4px 8px; margin-top:4px; background:var(--hover-bg); border-radius:4px; font-size:12px; color:var(--dim); cursor:pointer;';
+    const bgLabel = document.createElement('span');
+    bgLabel.style.cssText = 'font-weight:600; color:var(--text); font-size:11px;';
+    bgLabel.textContent = '\u25BC ' + bgId;
+    bgHdr.appendChild(bgLabel);
+
+    // Manifest info toggle
+    const infoBtn = document.createElement('button');
+    infoBtn.textContent = '\uD83D\uDCCB';
+    infoBtn.title = 'Show manifest details';
+    infoBtn.style.cssText = 'margin-left:6px; padding:2px 7px; font-size:11px; cursor:pointer; background:#dbe8f5; border:1px solid #a0c0e0; border-radius:4px; color:#2a5a8a; vertical-align:middle;';
+    (function(bid) {
+      infoBtn.onclick = function(ev) {
+        ev.stopPropagation();
+        const panel = document.getElementById('manifest-panel-' + bid);
+        if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+      };
+    })(bgId);
+    bgHdr.appendChild(infoBtn);
+
+    // AI Generate toggle button
+    const aiGenToggleBtn = document.createElement('button');
+    aiGenToggleBtn.textContent = '\u2728 AI';
+    aiGenToggleBtn.title = 'Generate image with AI';
+    aiGenToggleBtn.style.cssText = 'margin-left:6px; padding:2px 7px; font-size:11px; cursor:pointer; background:#e8f5e8; border:1px solid #a8d8a8; border-radius:4px; color:#2a7a2a; vertical-align:middle;';
+    (function(bid) {
+      aiGenToggleBtn.onclick = function(ev) {
+        ev.stopPropagation();
+        const p = document.getElementById('ai-gen-panel-' + bid);
+        if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
+      };
+    })(bgId);
+    bgHdr.appendChild(aiGenToggleBtn);
+
+    card.appendChild(bgHdr);
+
+    // Collapsible content wrapper
+    const bgContent = document.createElement('div');
+    bgContent.className = 'media-bg-content';
+    bgContent.id = 'media-bg-content-' + bgId;
+    bgContent.dataset.bgId = bgId;
+
+    // Toggle collapse on header click
+    (function(content, label) {
+      bgHdr.addEventListener('click', function() {
+        const hidden = content.style.display === 'none';
+        content.style.display = hidden ? '' : 'none';
+        label.textContent = (hidden ? '\u25BC ' : '\u25B6 ') + bgId;
+      });
+    })(bgContent, bgLabel);
+
+    // Manifest detail panel (hidden by default)
+    const manifestPanel = document.createElement('div');
+    manifestPanel.id = 'manifest-panel-' + bgId;
+    manifestPanel.style.cssText = 'display:none; background:var(--panel-bg); padding:6px 12px; font-size:11px; color:#888888; font-family:monospace; margin-top:2px; border-radius:4px;';
+    const aiPromptTrunc = mdata.ai_prompt.length > 120 ? mdata.ai_prompt.slice(0, 120) + '\u2026' : mdata.ai_prompt;
+    manifestPanel.innerHTML = '<b style="color:#6a8aaa">ai_prompt:</b> ' + aiPromptTrunc + '<br>'
+      + '<b style="color:#6a8aaa">search_prompt:</b> ' + mdata.search_prompt + '<br>'
+      + '<b style="color:#6a8aaa">include_keywords:</b> ' + mdata.include_keywords + '<br>'
+      + '<b style="color:#6a8aaa">media_type:</b> ' + mdata.media_type + ' &nbsp; <b style="color:#6a8aaa">motion_level:</b> ' + mdata.motion_level;
+    bgContent.appendChild(manifestPanel);
+
+    const prompt = document.createElement('div');
+    prompt.className = 'media-item-prompt';
+    prompt.textContent = item.search_prompt || '';
+    bgContent.appendChild(prompt);
+
+    // ── Inline AI Generate panel ──
+    const aiGenPanel = document.createElement('div');
+    aiGenPanel.id = 'ai-gen-panel-' + bgId;
+    aiGenPanel.style.cssText = 'display:none; background:#e8f5e8; border:1px solid #a8d8a8; border-radius:4px; padding:8px 10px; margin:4px 0 6px 0;';
+    const aiGenTA = document.createElement('textarea');
+    aiGenTA.id = 'ai-gen-prompt-' + bgId;
+    aiGenTA.rows = 3;
+    aiGenTA.value = mdata.ai_prompt;
+    aiGenTA.style.cssText = 'width:100%; box-sizing:border-box; background:var(--panel-bg); color:var(--text); border:1px solid #a8d8a8; border-radius:3px; font-size:11px; font-family:monospace; resize:vertical; padding:4px;';
+    aiGenPanel.appendChild(aiGenTA);
+    const aiGenRow = document.createElement('div');
+    aiGenRow.style.cssText = 'margin-top:5px; display:flex; align-items:center; gap:8px;';
+    const aiGenBtn = document.createElement('button');
+    aiGenBtn.id = 'ai-gen-btn-' + bgId;
+    aiGenBtn.textContent = '\u2728 Generate';
+    aiGenBtn.style.cssText = 'padding:3px 12px; font-size:12px; cursor:pointer; background:#d4eed4; border:1px solid #8aba8a; border-radius:4px; color:#2a6a2a;';
+    (function(bid) { aiGenBtn.onclick = function() { _aiGenStart(bid); }; })(bgId);
+    aiGenRow.appendChild(aiGenBtn);
+    const aiGenStatus = document.createElement('span');
+    aiGenStatus.id = 'ai-gen-status-' + bgId;
+    aiGenStatus.style.cssText = 'font-size:11px; color:#888888;';
+    aiGenRow.appendChild(aiGenStatus);
+    aiGenPanel.appendChild(aiGenRow);
+    bgContent.appendChild(aiGenPanel);
+
+    // Images section — lazy-scroll with pagination
+    const imgs = item.images || [];
+    if (imgs.length) {
+      const lbl = document.createElement('div');
+      lbl.className = 'media-section-label';
+      lbl.textContent = 'Images (' + (item.total_images || imgs.length) + ' found)';
+      bgContent.appendChild(lbl);
+      const row = document.createElement('div');
+      row.className = 'media-thumb-row';
+      _mediaAppendPage(row, imgs, cardId, 'image', 0, _MEDIA_PAGE, d_topN);
+      bgContent.appendChild(row);
+      if (imgs.length > _MEDIA_PAGE) _mediaObserveSentinel(row, imgs, cardId, 'image', d_topN);
+    }
+
+    // Videos section — lazy-scroll with pagination
+    const vids = item.videos || [];
+    if (vids.length) {
+      const lbl = document.createElement('div');
+      lbl.className = 'media-section-label';
+      lbl.textContent = 'Videos (' + (item.total_videos || vids.length) + ' found)';
+      bgContent.appendChild(lbl);
+      const row = document.createElement('div');
+      row.className = 'media-thumb-row';
+      _mediaAppendPage(row, vids, cardId, 'video', 0, _MEDIA_PAGE, d_topN);
+      bgContent.appendChild(row);
+      if (vids.length > _MEDIA_PAGE) _mediaObserveSentinel(row, vids, cardId, 'video', d_topN);
+    }
+
+    if (!imgs.length && !vids.length) {
+      const empty = document.createElement('div');
+      empty.className = 'media-empty';
+      empty.textContent = item.error || 'No results found.';
+      bgContent.appendChild(empty);
+    }
+
+    card.appendChild(bgContent);
+  }
+
+  // ── Render results grid (scene-grouped) ──
   function _mediaRenderResults(items) {
     const body = document.getElementById('media-body');
     body.innerHTML = '';
     const d_topN = _mediaResults?._topN || 5;
     _mediaItemIds = Object.keys(items);
     _mediaSelections = {};
-
     _bgManifestData = {};
-    _mediaItemIds.forEach(itemId => {
-      const item   = items[itemId];
-      // Store manifest fields for info panel
-      _bgManifestData[itemId] = {
-        ai_prompt:        item.ai_prompt || '',
-        search_prompt:    item.search_prompt || '',
-        include_keywords: (item.include_keywords || []).join(', '),
-        media_type:       (item.search_filters || {}).media_type || 'mixed',
-        motion_level:     item.motion_level || '',
-      };
-      const card   = document.createElement('div');
-      card.className = 'media-item-card';
-      card.id = 'media-card-' + itemId;
 
-      // Card header: show shot info when _mediaShotMap is available
+    // Build ordered card list: one card per scene (or per orphan bg_id)
+    const cardOrder = [];   // { cardId, sceneShotIds, bgIds }
+    const assignedBgs = new Set();
+
+    if (_mediaSceneOrder && _mediaSceneBgs) {
+      _mediaSceneOrder.forEach(sceneId => {
+        const bgIds = (_mediaSceneBgs[sceneId] || []).filter(bg => items[bg]);
+        if (bgIds.length === 0) return;
+        bgIds.forEach(bg => assignedBgs.add(bg));
+        const shotIds = _mediaSceneMap[sceneId] || [];
+        cardOrder.push({ cardId: sceneId, sceneShotIds: shotIds, bgIds: bgIds });
+      });
+    }
+    // Orphan bg_ids (in results but not in any scene) — standalone cards
+    _mediaItemIds.forEach(bgId => {
+      if (bgId === '_topN') return;
+      if (assignedBgs.has(bgId)) return;
+      const shotIds = _mediaShotMap ? (_mediaShotMap[bgId] || []) : [];
+      cardOrder.push({ cardId: bgId, sceneShotIds: shotIds, bgIds: [bgId] });
+    });
+
+    cardOrder.forEach(entry => {
+      const { cardId, sceneShotIds, bgIds } = entry;
+      const card = document.createElement('div');
+      card.className = 'media-item-card';
+      card.id = 'media-card-' + cardId;
+
+      // Card header
       const hdr = document.createElement('div');
       hdr.className = 'media-item-header';
       hdr.style.display = 'flex';
       hdr.style.alignItems = 'center';
       hdr.style.flexWrap = 'wrap';
-      const shotIds = _mediaShotMap ? (_mediaShotMap[itemId] || []) : [];
       const hdrLabel = document.createElement('span');
-      if (shotIds.length > 0) {
-        hdrLabel.textContent = itemId + ' \u2014 ' + shotIds.length + ' shot' + (shotIds.length > 1 ? 's' : '')
-            + ': ' + shotIds.join(', ');
+      if (sceneShotIds.length > 0) {
+        hdrLabel.textContent = cardId + ' \u2014 ' + sceneShotIds.length + ' shot'
+            + (sceneShotIds.length > 1 ? 's' : '') + ': ' + sceneShotIds.join(', ');
       } else {
-        hdrLabel.textContent = itemId;
+        hdrLabel.textContent = cardId;
       }
       hdr.appendChild(hdrLabel);
-
-
-      // Manifest info toggle button
-      const infoBtn = document.createElement('button');
-      infoBtn.textContent = '\uD83D\uDCCB';
-      infoBtn.title = 'Show manifest details';
-      infoBtn.style.cssText = 'margin-left:6px; padding:2px 7px; font-size:11px; cursor:pointer; background:#dbe8f5; border:1px solid #a0c0e0; border-radius:4px; color:#2a5a8a; vertical-align:middle;';
-      (function(iid) {
-        infoBtn.onclick = function() {
-          const panel = document.getElementById('manifest-panel-' + iid);
-          if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-        };
-      })(itemId);
-      hdr.appendChild(infoBtn);
-
       card.appendChild(hdr);
 
-      // Manifest detail panel (hidden by default)
-      const mdata = _bgManifestData[itemId];
-      const manifestPanel = document.createElement('div');
-      manifestPanel.id = 'manifest-panel-' + itemId;
-      manifestPanel.style.cssText = 'display:none; background:var(--panel-bg); padding:6px 12px; font-size:11px; color:#888888; font-family:monospace; margin-top:2px; border-radius:4px;';
-      const aiPromptTrunc = mdata.ai_prompt.length > 120 ? mdata.ai_prompt.slice(0, 120) + '\u2026' : mdata.ai_prompt;
-      manifestPanel.innerHTML = '<b style="color:#6a8aaa">ai_prompt:</b> ' + aiPromptTrunc + '<br>'
-        + '<b style="color:#6a8aaa">search_prompt:</b> ' + mdata.search_prompt + '<br>'
-        + '<b style="color:#6a8aaa">include_keywords:</b> ' + mdata.include_keywords + '<br>'
-        + '<b style="color:#6a8aaa">media_type:</b> ' + mdata.media_type + ' &nbsp; <b style="color:#6a8aaa">motion_level:</b> ' + mdata.motion_level;
-      card.appendChild(manifestPanel);
+      // Render each bg_id's search results as a sub-section
+      bgIds.forEach(bgId => {
+        _mediaRenderBgSection(card, bgId, cardId, items, d_topN);
+      });
 
-      const prompt = document.createElement('div');
-      prompt.className = 'media-item-prompt';
-      prompt.textContent = item.search_prompt || '';
-      card.appendChild(prompt);
-
-      // ── Inline AI Generate panel ──
-      const aiGenPanel = document.createElement('div');
-      aiGenPanel.id = 'ai-gen-panel-' + itemId;
-      aiGenPanel.style.cssText = 'display:none; background:#e8f5e8; border:1px solid #a8d8a8; border-radius:4px; padding:8px 10px; margin:4px 0 6px 0;';
-      const aiGenTA = document.createElement('textarea');
-      aiGenTA.id = 'ai-gen-prompt-' + itemId;
-      aiGenTA.rows = 3;
-      aiGenTA.value = mdata.ai_prompt;
-      aiGenTA.style.cssText = 'width:100%; box-sizing:border-box; background:var(--panel-bg); color:var(--text); border:1px solid #a8d8a8; border-radius:3px; font-size:11px; font-family:monospace; resize:vertical; padding:4px;';
-      aiGenPanel.appendChild(aiGenTA);
-      const aiGenRow = document.createElement('div');
-      aiGenRow.style.cssText = 'margin-top:5px; display:flex; align-items:center; gap:8px;';
-      const aiGenBtn = document.createElement('button');
-      aiGenBtn.id = 'ai-gen-btn-' + itemId;
-      aiGenBtn.textContent = '\u2728 Generate';
-      aiGenBtn.style.cssText = 'padding:3px 12px; font-size:12px; cursor:pointer; background:#d4eed4; border:1px solid #8aba8a; border-radius:4px; color:#2a6a2a;';
-      (function(iid) { aiGenBtn.onclick = function() { _aiGenStart(iid); }; })(itemId);
-      aiGenRow.appendChild(aiGenBtn);
-      const aiGenStatus = document.createElement('span');
-      aiGenStatus.id = 'ai-gen-status-' + itemId;
-      aiGenStatus.style.cssText = 'font-size:11px; color:#888888;';
-      aiGenRow.appendChild(aiGenStatus);
-      aiGenPanel.appendChild(aiGenRow);
-      card.appendChild(aiGenPanel);
-
-      // ── AI Generate toggle button (in header) ──
-      const aiGenToggleBtn = document.createElement('button');
-      aiGenToggleBtn.textContent = '\u2728 AI';
-      aiGenToggleBtn.title = 'Generate image with AI';
-      aiGenToggleBtn.style.cssText = 'margin-left:6px; padding:2px 7px; font-size:11px; cursor:pointer; background:#e8f5e8; border:1px solid #a8d8a8; border-radius:4px; color:#2a7a2a; vertical-align:middle;';
-      (function(iid) {
-        aiGenToggleBtn.onclick = function() {
-          const p = document.getElementById('ai-gen-panel-' + iid);
-          if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
-        };
-      })(itemId);
-      hdr.appendChild(aiGenToggleBtn);
-
-      // Images section — lazy-scroll with pagination
-      const imgs = item.images || [];
-      if (imgs.length) {
-        const lbl = document.createElement('div');
-        lbl.className = 'media-section-label';
-        lbl.textContent = 'Images (' + (item.total_images || imgs.length) + ' found)';
-        card.appendChild(lbl);
-        const row = document.createElement('div');
-        row.className = 'media-thumb-row';
-        _mediaAppendPage(row, imgs, itemId, 'image', 0, _MEDIA_PAGE, d_topN);
-        card.appendChild(row);
-        if (imgs.length > _MEDIA_PAGE) _mediaObserveSentinel(row, imgs, itemId, 'image', d_topN);
-      }
-
-      // Videos section — lazy-scroll with pagination
-      const vids = item.videos || [];
-      if (vids.length) {
-        const lbl = document.createElement('div');
-        lbl.className = 'media-section-label';
-        lbl.textContent = 'Videos (' + (item.total_videos || vids.length) + ' found)';
-        card.appendChild(lbl);
-        const row = document.createElement('div');
-        row.className = 'media-thumb-row';
-        _mediaAppendPage(row, vids, itemId, 'video', 0, _MEDIA_PAGE, d_topN);
-        card.appendChild(row);
-        if (vids.length > _MEDIA_PAGE) _mediaObserveSentinel(row, vids, itemId, 'video', d_topN);
-      }
-
-      if (!imgs.length && !vids.length) {
-        const empty = document.createElement('div');
-        empty.className = 'media-empty';
-        empty.textContent = item.error || 'No results found.';
-        card.appendChild(empty);
-      }
-
-      // Per-shot assignment rows (only when ShotList is available and this bg has shots)
-      if (_mediaShotMap && shotIds.length > 0) {
+      // Per-shot assignment rows (all shots in this scene card)
+      if (_mediaShotMap && sceneShotIds.length > 0) {
         const shotSection = document.createElement('div');
         shotSection.className = 'media-shot-section';
-        shotSection.id = 'media-shots-' + itemId;
+        shotSection.id = 'media-shots-' + cardId;
 
-        // Auto-assign button (only when >1 shot for variety)
-        if (shotIds.length > 1) {
+        // Auto-assign button (only when >1 shot)
+        if (sceneShotIds.length > 1) {
           const autoBtn = document.createElement('button');
           autoBtn.className = 'media-btn-auto-assign';
           autoBtn.textContent = '\u26A1 Auto-assign';
-          autoBtn.onclick = function() { mediaAutoAssign(itemId); };
+          autoBtn.onclick = function() { mediaAutoAssign(cardId); };
           shotSection.appendChild(autoBtn);
         }
 
-        shotIds.forEach(function(sid, idx) {
+        sceneShotIds.forEach(function(sid, idx) {
           const row = document.createElement('div');
           row.className = 'media-shot-row' + (idx === 0 ? ' media-shot-active' : '');
-          row.id = 'media-shot-row-' + itemId + '-' + sid;
+          row.id = 'media-shot-row-' + cardId + '-' + sid;
           const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
           const durLabel = shotDur > 0 ? ' (' + shotDur.toFixed(1) + 's)' : '';
           row.innerHTML = '<span class="media-shot-label">' + sid + durLabel + ':</span>'
               + '<div class="media-shot-bar"><div class="media-shot-bar-fill" style="width:0%"></div></div>'
               + '<div class="media-shot-segments"></div>'
               + '<span class="media-shot-gap">\u2014 not assigned \u2014</span>';
-          // Click row to make it the active target for thumbnail selections
-          (function(iid, s) {
+          (function(cid, s) {
             row.addEventListener('click', function(e) {
-              // Don't activate if clicking the remove button inside a segment
               if (e.target.closest('.media-seg-remove')) return;
-              mediaSetActiveShot(iid, s);
+              mediaSetActiveShot(cid, s);
             });
-          })(itemId, sid);
+          })(cardId, sid);
           shotSection.appendChild(row);
         });
         // First shot is active by default
-        if (shotIds.length > 0) _mediaActiveShot[itemId] = shotIds[0];
+        _mediaActiveShot[cardId] = sceneShotIds[0];
         card.appendChild(shotSection);
       }
 
@@ -5617,12 +5723,15 @@ placeholder="Enter your story here"></textarea>
       checkboxes.forEach(function(cb) {
         if (!cb.checked || cb.disabled) return;
         var sid = cb.dataset.shotId;
-        // Find which bgId owns this shot
-        var targetBgId = null;
-        Object.keys(_mediaShotMap || {}).forEach(function(bgId) {
-          if ((_mediaShotMap[bgId] || []).indexOf(sid) !== -1) targetBgId = bgId;
-        });
+        // Find which bgId owns this shot, and the scene-based cardId for DOM
+        var targetBgId = (_mediaShotToBg && _mediaShotToBg[sid]) || null;
+        if (!targetBgId) {
+          Object.keys(_mediaShotMap || {}).forEach(function(bgId) {
+            if ((_mediaShotMap[bgId] || []).indexOf(sid) !== -1) targetBgId = bgId;
+          });
+        }
         if (!targetBgId) return;
+        var targetCardId = (_mediaBgToScene && _mediaBgToScene[targetBgId]) || targetBgId;
         // Build canonical segment copy (A2 contract)
         var naturalDur = type === 'video' ? (entry.duration_sec || 0) : 0;
         var shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
@@ -5634,13 +5743,13 @@ placeholder="Enter your story here"></textarea>
           natural_duration_sec:  type === 'video' ? naturalDur : null,
           duration_override_sec: null,
           duration_sec:          type === 'video' ? naturalDur : null,
-          hold_sec:              null,  // will be rebalanced
+          hold_sec:              null,
           source:                entry.source || null,
           animation_type:        (type === 'image' && wrapEl && wrapEl.dataset.animType) ? wrapEl.dataset.animType : null,
           start_sec:             null,
           end_sec:               null,
         };
-        // Insert into target
+        // Insert into target (selections keyed by bg_id)
         if (!_mediaSelections[targetBgId]) _mediaSelections[targetBgId] = { per_shot: {} };
         var ps = _mediaSelections[targetBgId].per_shot;
         if (!ps[sid]) ps[sid] = { segments: [] };
@@ -5650,65 +5759,49 @@ placeholder="Enter your story here"></textarea>
         }
         ps[sid].segments.push(seg);
         _mediaRebalanceImages(sid, ps[sid].segments);
-        _mediaRenderShotRow(targetBgId, sid);
+        _mediaRenderShotRow(targetCardId, sid);
 
-        // Also inject into the target card's search results + thumbnail grid
-        // so the video/image appears in the collection, not just the segment row.
+        // Also inject into the target bg's search results + thumbnail grid
         if (_mediaResults && _mediaResults[targetBgId]) {
           var targetItem = _mediaResults[targetBgId];
           var listKey = type === 'video' ? 'videos' : 'images';
           var list = targetItem[listKey] || [];
-          // Only add if not already present (by URL)
           var entryUrl = entry.url || '';
           var alreadyInList = list.some(function(e) { return e.url === entryUrl; });
           if (!alreadyInList) {
             list.push(entry);
             targetItem[listKey] = list;
-            // Append thumbnail to the grid — create the row if it doesn't exist yet
-            var card = document.getElementById('media-card-' + targetBgId);
+            // Find the bg-content container for this bg within the scene card
+            var bgContent = document.getElementById('media-bg-content-' + targetBgId);
+            var card = bgContent || document.getElementById('media-card-' + targetCardId);
             if (card) {
-              var rows = card.querySelectorAll('.media-thumb-row');
               var isVideo = (type === 'video');
-              var imgRows = [], vidRows = [];
-              // Classify existing rows by checking their first thumb's data-type,
-              // or by position relative to section labels
               var labels = card.querySelectorAll('.media-section-label');
               var targetRow = null;
               labels.forEach(function(lbl) {
                 if (lbl.textContent.toLowerCase().indexOf(isVideo ? 'video' : 'image') >= 0) {
-                  // The thumb-row is the next sibling
                   var sib = lbl.nextElementSibling;
                   if (sib && sib.classList.contains('media-thumb-row')) targetRow = sib;
                 }
               });
-              // If no matching row exists, create label + row before the shot section
               if (!targetRow) {
                 var newLbl = document.createElement('div');
                 newLbl.className = 'media-section-label';
                 newLbl.textContent = (isVideo ? 'Videos' : 'Images') + ' (1 found)';
                 var newRow = document.createElement('div');
                 newRow.className = 'media-thumb-row';
-                // Insert before the shot-section or at end of card
-                var shotSec = card.querySelector('.media-shot-section');
-                if (shotSec) {
-                  card.insertBefore(newLbl, shotSec);
-                  card.insertBefore(newRow, shotSec);
-                } else {
-                  card.appendChild(newLbl);
-                  card.appendChild(newRow);
-                }
-                // Remove "No results found" placeholder if present
+                card.appendChild(newLbl);
+                card.appendChild(newRow);
                 var emptyEl = card.querySelector('.media-empty');
                 if (emptyEl) emptyEl.remove();
                 targetRow = newRow;
               } else {
-                // Update the count in the existing label
                 var prevLbl = targetRow.previousElementSibling;
                 if (prevLbl && prevLbl.classList.contains('media-section-label')) {
                   prevLbl.textContent = (isVideo ? 'Videos' : 'Images') + ' (' + list.length + ' found)';
                 }
               }
-              var th = _mediaThumb(targetBgId, type, entry, list.length - 1);
+              var th = _mediaThumb(targetCardId, type, entry, list.length - 1);
               th.classList.add('selected');
               targetRow.appendChild(th);
             }
@@ -5889,22 +5982,26 @@ placeholder="Enter your story here"></textarea>
 
   // ── Update animation_type on any existing segment that matches this thumb's URL ──
   function _mediaUpdateSegmentAnim(wrapEl, animKey) {
-    const itemId = wrapEl.dataset.itemId;
+    const cardId = wrapEl.dataset.itemId;  // cardId = scene_id
     const url    = wrapEl.dataset.url || '';
-    if (!itemId || !url) return;
-    const sel = _mediaSelections[itemId];
-    if (!sel || !sel.per_shot) return;
+    if (!cardId || !url) return;
+    // Search across all bg_ids in this card's scene
+    const bgIds = (_mediaSceneBgs && _mediaSceneBgs[cardId]) || [cardId];
     let updated = false;
-    Object.keys(sel.per_shot).forEach(function(sid) {
-      const ps = sel.per_shot[sid];
-      if (!ps.segments) return;
-      ps.segments.forEach(function(seg) {
-        if (seg.url === url) {
-          seg.animation_type = animKey || null;
-          updated = true;
-        }
+    bgIds.forEach(function(bgId) {
+      const sel = _mediaSelections[bgId];
+      if (!sel || !sel.per_shot) return;
+      Object.keys(sel.per_shot).forEach(function(sid) {
+        const ps = sel.per_shot[sid];
+        if (!ps.segments) return;
+        ps.segments.forEach(function(seg) {
+          if (seg.url === url) {
+            seg.animation_type = animKey || null;
+            updated = true;
+          }
+        });
+        if (updated) _mediaRenderShotRow(cardId, sid);
       });
-      if (updated) _mediaRenderShotRow(itemId, sid);
     });
   }
 
@@ -5966,28 +6063,32 @@ placeholder="Enter your story here"></textarea>
   }
 
   // ── Select / deselect a thumb ──
-  function mediaSelect(itemId, type, entry, wrapEl) {
-    const shotIds = _mediaShotMap ? (_mediaShotMap[itemId] || []) : [];
+  // cardId = scene_id (or bg_id for orphan cards). Selections are stored by bg_id.
+  function mediaSelect(cardId, type, entry, wrapEl) {
+    // Resolve all shots in this card (scene-based or legacy bg-based)
+    const sceneShotIds = _mediaSceneMap ? (_mediaSceneMap[cardId] || []) : [];
+    const legacyShotIds = _mediaShotMap ? (_mediaShotMap[cardId] || []) : [];
+    const shotIds = sceneShotIds.length > 0 ? sceneShotIds : legacyShotIds;
 
     if (_mediaShotMap && shotIds.length > 0) {
       // ── Multi-segment stacking mode ──
-      if (!_mediaSelections[itemId]) _mediaSelections[itemId] = { per_shot: {} };
-      const ps = _mediaSelections[itemId].per_shot;
       const clickUrl = entry.url || '';
 
-      // ── Toggle-off: if this URL is already in any shot, remove it ──
+      // ── Toggle-off: if this URL is already in any shot in this card, remove it ──
       let removed = false;
       for (const sid of shotIds) {
+        const bgId = (_mediaShotToBg && _mediaShotToBg[sid]) || cardId;
+        const ps = (_mediaSelections[bgId] && _mediaSelections[bgId].per_shot) || {};
         if (!ps[sid] || !ps[sid].segments) continue;
         const idx = ps[sid].segments.findIndex(function(s) { return s.url === clickUrl; });
         if (idx !== -1) {
           ps[sid].segments.splice(idx, 1);
           if (ps[sid].segments.length === 0) {
-            delete ps[sid];
+            delete _mediaSelections[bgId].per_shot[sid];
           } else {
             _mediaRebalanceImages(sid, ps[sid].segments);
           }
-          _mediaRenderShotRow(itemId, sid);
+          _mediaRenderShotRow(cardId, sid);
           removed = true;
           break;
         }
@@ -5998,12 +6099,14 @@ placeholder="Enter your story here"></textarea>
       }
 
       // ── Target: the user-selected active shot row ──
-      var targetShot = _mediaActiveShot[itemId] || shotIds[0];
+      var targetShot = _mediaActiveShot[cardId] || shotIds[0];
+      var targetBgId = (_mediaShotToBg && _mediaShotToBg[targetShot]) || cardId;
 
-      // Initialize segments array
+      // Initialize selections for the target bg_id
+      if (!_mediaSelections[targetBgId]) _mediaSelections[targetBgId] = { per_shot: {} };
+      const ps = _mediaSelections[targetBgId].per_shot;
       if (!ps[targetShot]) ps[targetShot] = { segments: [] };
       if (!ps[targetShot].segments) {
-        // Upgrade v2 single-entry to v3 segments if needed
         const old = ps[targetShot];
         ps[targetShot] = { segments: old.url ? [old] : [] };
       }
@@ -6013,10 +6116,7 @@ placeholder="Enter your story here"></textarea>
       const filled = _mediaSegmentTotal({ segments: segs });
       const remaining = Math.max(0, shotDur - filled);
 
-      // Video: use full natural duration (user can override per-segment).
-      // Image: hold for remaining gap after videos.
       const naturalDur = type === 'video' ? (entry.duration_sec || 0) : 0;
-
       const animType = (type === 'image' && wrapEl.dataset.animType) ? wrapEl.dataset.animType : null;
       segs.push({
         media_type:           type,
@@ -6024,36 +6124,33 @@ placeholder="Enter your story here"></textarea>
         path:                 entry.path || '',
         score:                entry.score,
         natural_duration_sec: type === 'video' ? naturalDur : null,
-        duration_override_sec:null,   // null = use natural; user sets via input
+        duration_override_sec:null,
         duration_sec:         type === 'video' ? naturalDur : null,
         hold_sec:             type === 'image' ? remaining : null,
         source:               entry.source || null,
         animation_type:       animType,
-        start_sec:            null,   // clip trim start (null = 0, beginning)
-        end_sec:              null,   // clip trim end (null = natural end)
+        start_sec:            null,
+        end_sec:              null,
       });
 
-      // Rebalance images to share the remaining gap equally
       _mediaRebalanceImages(targetShot, segs);
-
       wrapEl.classList.add('selected');
-      _mediaRenderShotRow(itemId, targetShot);
+      _mediaRenderShotRow(cardId, targetShot);
       _mediaMarkCrossCardUsed();
     } else {
       // ── Single-selection mode (no ShotList) ──
-      const card = document.getElementById('media-card-' + itemId);
+      const card = document.getElementById('media-card-' + cardId);
       if (card) {
         card.querySelectorAll('.media-thumb').forEach(t => t.classList.remove('selected'));
         card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
       }
 
-      // Check if clicking the already-selected item → deselect
-      if (_mediaSelections[itemId] && _mediaSelections[itemId].url === (entry.url || '')) {
-        delete _mediaSelections[itemId];
+      if (_mediaSelections[cardId] && _mediaSelections[cardId].url === (entry.url || '')) {
+        delete _mediaSelections[cardId];
         return;
       }
 
-      _mediaSelections[itemId] = { media_type: type, url: entry.url || '',
+      _mediaSelections[cardId] = { media_type: type, url: entry.url || '',
                                     path: entry.path || '', score: entry.score };
       wrapEl.classList.add('selected');
 
@@ -6066,14 +6163,16 @@ placeholder="Enter your story here"></textarea>
   }
 
   // ── Render a per-shot row with segment list and fill bar ──
-  function _mediaRenderShotRow(itemId, shotId) {
-    const row = document.getElementById('media-shot-row-' + itemId + '-' + shotId);
+  function _mediaRenderShotRow(cardId, shotId) {
+    const row = document.getElementById('media-shot-row-' + cardId + '-' + shotId);
     if (!row) return;
     const barFill = row.querySelector('.media-shot-bar-fill');
     const segContainer = row.querySelector('.media-shot-segments');
     const gapSpan = row.querySelector('.media-shot-gap');
 
-    const ps = (_mediaSelections[itemId] && _mediaSelections[itemId].per_shot) || {};
+    // Look up bg_id for this shot to find its selection data
+    const bgId = (_mediaShotToBg && _mediaShotToBg[shotId]) || cardId;
+    const ps = (_mediaSelections[bgId] && _mediaSelections[bgId].per_shot) || {};
     const shotEntry = ps[shotId];
     const shotDur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
 
@@ -6113,7 +6212,7 @@ placeholder="Enter your story here"></textarea>
           inp.value       = (ovr != null && ovr > 0) ? ovr : '';
           inp.title       = 'Override duration (s). Blank = natural ' + natDur.toFixed(1) + 's';
           inp.style.cssText = 'width:54px;font-size:11px;background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:3px;padding:1px 3px;';
-          (function(iid, sid, i, s) {
+          (function(cid, bid, sid, i, s) {
             inp.addEventListener('change', function() {
               var v = parseFloat(this.value);
               if (isNaN(v) || v <= 0) {
@@ -6124,10 +6223,10 @@ placeholder="Enter your story here"></textarea>
                 s.duration_override_sec = v;
                 s.duration_sec = v;
               }
-              _mediaRebalanceImages(sid, (_mediaSelections[iid].per_shot[sid] || {segments:[]}).segments);
-              _mediaRenderShotRow(iid, sid);
+              _mediaRebalanceImages(sid, (_mediaSelections[bid].per_shot[sid] || {segments:[]}).segments);
+              _mediaRenderShotRow(cid, sid);
             });
-          })(itemId, shotId, idx, seg);
+          })(cardId, bgId, shotId, idx, seg);
           se.appendChild(document.createTextNode('\uD83C\uDFA5 '));
           const nameSpan = document.createElement('span');
           nameSpan.className = 'seg-name';
@@ -6172,35 +6271,31 @@ placeholder="Enter your story here"></textarea>
           endInp.value = (seg.end_sec != null) ? curEnd.toFixed(1) : '';
           endInp.placeholder = natDur > 0 ? natDur.toFixed(1) : '';
           // Change handlers
-          (function(iid, sid, i, s, sInp, eInp, rFill, nDur) {
+          (function(cid, bid, sid, i, s, sInp, eInp, rFill, nDur) {
             function applyTrim() {
               var sv = parseFloat(sInp.value);
               var ev = parseFloat(eInp.value);
-              // Validation
               if (isNaN(sv) || sv < 0) sv = 0;
               if (sv >= nDur) { sv = 0; sInp.value = ''; }
-              if (isNaN(ev) || ev <= sv) ev = 0;  // 0 = null (natural end)
+              if (isNaN(ev) || ev <= sv) ev = 0;
               if (ev > nDur) ev = nDur;
-              // Store
               s.start_sec = sv > 0 ? sv : null;
               s.end_sec   = ev > 0 ? ev : null;
-              // Recompute effective duration
               var effStart = s.start_sec || 0;
               var effEnd   = s.end_sec || nDur;
               var clipDur  = Math.max(0.1, effEnd - effStart);
               s.duration_override_sec = clipDur;
               s.duration_sec = clipDur;
-              // Update range bar
               if (nDur > 0) {
                 rFill.style.left  = ((effStart / nDur) * 100).toFixed(1) + '%';
                 rFill.style.width = (((effEnd - effStart) / nDur) * 100).toFixed(1) + '%';
               }
-              _mediaRebalanceImages(sid, (_mediaSelections[iid].per_shot[sid] || {segments:[]}).segments);
-              _mediaRenderShotRow(iid, sid);
+              _mediaRebalanceImages(sid, (_mediaSelections[bid].per_shot[sid] || {segments:[]}).segments);
+              _mediaRenderShotRow(cid, sid);
             }
             sInp.addEventListener('change', applyTrim);
             eInp.addEventListener('change', applyTrim);
-          })(itemId, shotId, idx, seg, startInp, endInp, rangeFill, natDur);
+          })(cardId, bgId, shotId, idx, seg, startInp, endInp, rangeFill, natDur);
           trimRow.appendChild(startLbl);
           trimRow.appendChild(startInp);
           trimRow.appendChild(rangeBar);
@@ -6234,7 +6329,7 @@ placeholder="Enter your story here"></textarea>
         rmBtn.textContent = '\u2715';
         rmBtn.onclick = (function(iid, sid, i) {
           return function() { mediaRemoveSegment(iid, sid, i); };
-        })(itemId, shotId, idx);
+        })(cardId, shotId, idx);
         se.appendChild(rmBtn);
         segContainer.appendChild(se);
       });
@@ -6260,61 +6355,66 @@ placeholder="Enter your story here"></textarea>
   }
 
   // ── Remove a segment from a shot ──
-  function mediaRemoveSegment(itemId, shotId, segIdx) {
-    if (!_mediaSelections[itemId] || !_mediaSelections[itemId].per_shot) return;
-    const shotEntry = _mediaSelections[itemId].per_shot[shotId];
+  function mediaRemoveSegment(cardId, shotId, segIdx) {
+    const bgId = (_mediaShotToBg && _mediaShotToBg[shotId]) || cardId;
+    if (!_mediaSelections[bgId] || !_mediaSelections[bgId].per_shot) return;
+    const shotEntry = _mediaSelections[bgId].per_shot[shotId];
     if (!shotEntry || !shotEntry.segments) return;
     shotEntry.segments.splice(segIdx, 1);
     if (shotEntry.segments.length === 0) {
-      delete _mediaSelections[itemId].per_shot[shotId];
+      delete _mediaSelections[bgId].per_shot[shotId];
     } else {
-      // Rebalance surviving images to absorb freed time
       _mediaRebalanceImages(shotId, shotEntry.segments);
     }
-    _mediaRenderShotRow(itemId, shotId);
+    _mediaRenderShotRow(cardId, shotId);
   }
 
   // ── Clear a single per-shot assignment (legacy + segments) ──
-  function mediaClearShot(itemId, shotId) {
-    if (!_mediaSelections[itemId] || !_mediaSelections[itemId].per_shot) return;
-    delete _mediaSelections[itemId].per_shot[shotId];
-    _mediaRenderShotRow(itemId, shotId);
+  function mediaClearShot(cardId, shotId) {
+    const bgId = (_mediaShotToBg && _mediaShotToBg[shotId]) || cardId;
+    if (!_mediaSelections[bgId] || !_mediaSelections[bgId].per_shot) return;
+    delete _mediaSelections[bgId].per_shot[shotId];
+    _mediaRenderShotRow(cardId, shotId);
   }
 
   // ── Auto-assign: stack segments to fill each shot's duration ──
-  function mediaAutoAssign(itemId) {
-    const shotIds = _mediaShotMap ? (_mediaShotMap[itemId] || []) : [];
+  function mediaAutoAssign(cardId) {
+    // Resolve shots: scene-based or legacy bg-based
+    const sceneShotIds = _mediaSceneMap ? (_mediaSceneMap[cardId] || []) : [];
+    const legacyShotIds = _mediaShotMap ? (_mediaShotMap[cardId] || []) : [];
+    const shotIds = sceneShotIds.length > 0 ? sceneShotIds : legacyShotIds;
     if (shotIds.length === 0) return;
-    const item = _mediaResults[itemId];
-    if (!item) return;
 
-    // Build ranked candidate list: videos first (by score desc), then images
+    // Merge candidates from all bg_ids in the scene
+    const bgIds = (_mediaSceneBgs && _mediaSceneBgs[cardId]) || [cardId];
     const candidates = [];
-    const vids = (item.videos || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
-    const imgs = (item.images || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
-    vids.forEach(v => candidates.push({ type: 'video', entry: v }));
-    imgs.forEach(v => candidates.push({ type: 'image', entry: v }));
+    const allImgs = [];
+    bgIds.forEach(function(bid) {
+      const item = _mediaResults[bid];
+      if (!item) return;
+      const vids = (item.videos || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+      const imgs = (item.images || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+      vids.forEach(v => candidates.push({ type: 'video', entry: v }));
+      imgs.forEach(v => { candidates.push({ type: 'image', entry: v }); allImgs.push(v); });
+    });
     if (candidates.length === 0) return;
 
-    if (!_mediaSelections[itemId]) _mediaSelections[itemId] = { per_shot: {} };
-    const ps = _mediaSelections[itemId].per_shot;
     const usedUrls = new Set();
     let candIdx = 0;
 
     shotIds.forEach(function(sid) {
+      const bgId = (_mediaShotToBg && _mediaShotToBg[sid]) || cardId;
+      if (!_mediaSelections[bgId]) _mediaSelections[bgId] = { per_shot: {} };
+      const ps = _mediaSelections[bgId].per_shot;
       const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
       ps[sid] = { segments: [] };
       let filled = 0;
 
-      // Stack candidates until shot duration is filled
       while (filled < shotDur && candIdx < candidates.length * 2) {
         const idx = candIdx % candidates.length;
         const cand = candidates[idx];
         candIdx++;
-
-        // Skip duplicates within the same shot
         if (ps[sid].segments.some(function(s) { return s.url === cand.entry.url; })) continue;
-
         const remaining = Math.max(0, shotDur - filled);
         if (cand.type === 'video') {
           const dur = cand.entry.duration_sec || remaining;
@@ -6326,7 +6426,6 @@ placeholder="Enter your story here"></textarea>
           filled += dur;
           usedUrls.add(cand.entry.url);
         } else {
-          // Image: fill remaining gap
           ps[sid].segments.push({
             media_type: 'image', url: cand.entry.url || '',
             path: cand.entry.path || '', score: cand.entry.score,
@@ -6337,21 +6436,19 @@ placeholder="Enter your story here"></textarea>
         }
       }
 
-      // If no candidates were added (edge case), add best image for full duration
-      if (ps[sid].segments.length === 0 && imgs.length > 0) {
+      if (ps[sid].segments.length === 0 && allImgs.length > 0) {
         ps[sid].segments.push({
-          media_type: 'image', url: imgs[0].url || '',
-          path: imgs[0].path || '', score: imgs[0].score,
+          media_type: 'image', url: allImgs[0].url || '',
+          path: allImgs[0].path || '', score: allImgs[0].score,
           duration_sec: null, hold_sec: shotDur,
         });
-        usedUrls.add(imgs[0].url);
+        usedUrls.add(allImgs[0].url);
       }
 
-      _mediaRenderShotRow(itemId, sid);
+      _mediaRenderShotRow(cardId, sid);
     });
 
-    // Visual: mark used thumbs as selected in the grid
-    const card = document.getElementById('media-card-' + itemId);
+    const card = document.getElementById('media-card-' + cardId);
     if (card) {
       card.querySelectorAll('.media-thumb').forEach(t => {
         const url = t.dataset.url;
@@ -6365,33 +6462,35 @@ placeholder="Enter your story here"></textarea>
   // ── Mark thumbnails used in OTHER cards with a teal "used" indicator ──
   // Called after every selection change so all cards stay in sync.
   function _mediaMarkCrossCardUsed() {
-    // Build a map: url → Set of bgIds that use it
-    const urlToBgIds = {};
+    // Build a map: url → Set of cardIds (scene_ids) that use it
+    const urlToCardIds = {};
     Object.keys(_mediaSelections).forEach(bgId => {
+      const cid = (_mediaBgToScene && _mediaBgToScene[bgId]) || bgId;
       const ps = (_mediaSelections[bgId] || {}).per_shot || {};
       Object.keys(ps).forEach(shotId => {
         const segs = (ps[shotId] || {}).segments || [];
         segs.forEach(s => {
           if (!s.url) return;
-          if (!urlToBgIds[s.url]) urlToBgIds[s.url] = new Set();
-          urlToBgIds[s.url].add(bgId);
+          if (!urlToCardIds[s.url]) urlToCardIds[s.url] = new Set();
+          urlToCardIds[s.url].add(cid);
         });
       });
       // Also handle legacy single-selection mode
       if (_mediaSelections[bgId] && _mediaSelections[bgId].url) {
         const u = _mediaSelections[bgId].url;
-        if (!urlToBgIds[u]) urlToBgIds[u] = new Set();
-        urlToBgIds[u].add(bgId);
+        if (!urlToCardIds[u]) urlToCardIds[u] = new Set();
+        urlToCardIds[u].add(cid);
       }
     });
 
     // For every thumb in every card, add/remove .used-elsewhere and badge
+    // t.dataset.itemId is now the cardId (scene_id)
     document.querySelectorAll('.media-thumb').forEach(t => {
-      const url  = t.dataset.url;
-      const bgId = t.dataset.itemId;
+      const url    = t.dataset.url;
+      const cardId = t.dataset.itemId;
       if (!url) return;
-      const users = urlToBgIds[url];
-      const usedElsewhere = users && [...users].some(id => id !== bgId);
+      const users = urlToCardIds[url];
+      const usedElsewhere = users && [...users].some(id => id !== cardId);
       if (usedElsewhere) {
         t.classList.add('used-elsewhere');
         if (!t.querySelector('.media-used-badge')) {
@@ -6421,13 +6520,13 @@ placeholder="Enter your story here"></textarea>
       g.textContent = '\u2014 not assigned \u2014';
     });
     document.querySelectorAll('.media-shot-row').forEach(r => r.classList.remove('media-shot-filled'));
-    // Reset active shot to first shot per card
+    // Reset active shot to first shot per card (scene-based)
     document.querySelectorAll('.media-shot-row').forEach(r => r.classList.remove('media-shot-active'));
-    for (var iid in _mediaActiveShot) {
-      var sids = _mediaShotMap ? (_mediaShotMap[iid] || []) : [];
+    for (var cid in _mediaActiveShot) {
+      var sids = (_mediaSceneMap && _mediaSceneMap[cid]) || (_mediaShotMap ? (_mediaShotMap[cid] || []) : []);
       if (sids.length > 0) {
-        _mediaActiveShot[iid] = sids[0];
-        var firstRow = document.getElementById('media-shot-row-' + iid + '-' + sids[0]);
+        _mediaActiveShot[cid] = sids[0];
+        var firstRow = document.getElementById('media-shot-row-' + cid + '-' + sids[0]);
         if (firstRow) firstRow.classList.add('media-shot-active');
       }
     }
@@ -6440,15 +6539,14 @@ placeholder="Enter your story here"></textarea>
     // Reset current selections first
     mediaReset();
     let applied = 0;
-    for (const [itemId, cand] of Object.entries(_mediaRecommendedSeq)) {
+    for (const [bgId, cand] of Object.entries(_mediaRecommendedSeq)) {
       if (!cand || !cand.url) continue;
-      const shotIds = _mediaShotMap ? (_mediaShotMap[itemId] || []) : [];
+      const shotIds = _mediaShotMap ? (_mediaShotMap[bgId] || []) : [];
+      const sceneId = (_mediaBgToScene && _mediaBgToScene[bgId]) || bgId;
 
       if (_mediaShotMap && shotIds.length > 0) {
-        // Per-shot mode: distribute ranked candidates across shots
-        const item = _mediaResults[itemId];
+        const item = _mediaResults[bgId];
         if (!item) continue;
-        // Build ranked candidate list from full results
         const candidates = [];
         const vids = (item.videos || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
         const imgs = (item.images || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -6456,8 +6554,8 @@ placeholder="Enter your story here"></textarea>
         imgs.forEach(v => candidates.push({ type: 'image', entry: v }));
         if (candidates.length === 0) continue;
 
-        if (!_mediaSelections[itemId]) _mediaSelections[itemId] = { per_shot: {} };
-        const ps = _mediaSelections[itemId].per_shot;
+        if (!_mediaSelections[bgId]) _mediaSelections[bgId] = { per_shot: {} };
+        const ps = _mediaSelections[bgId].per_shot;
         const usedUrls = new Set();
         let ci = 0;
 
@@ -6465,7 +6563,6 @@ placeholder="Enter your story here"></textarea>
           const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
           ps[sid] = { segments: [] };
           let filled = 0;
-          // Stack candidates until shot duration is filled
           while (filled < shotDur && ci < candidates.length * 2) {
             const pick = candidates[ci % candidates.length];
             ci++;
@@ -6489,11 +6586,11 @@ placeholder="Enter your story here"></textarea>
             }
             usedUrls.add(pick.entry.url);
           }
-          _mediaRenderShotRow(itemId, sid);
+          _mediaRenderShotRow(sceneId, sid);
         });
 
         // Mark used thumbs
-        const card = document.getElementById('media-card-' + itemId);
+        const card = document.getElementById('media-card-' + sceneId);
         if (card) {
           card.querySelectorAll('.media-thumb').forEach(t => {
             if (usedUrls.has(t.dataset.url)) t.classList.add('selected');
@@ -6501,17 +6598,15 @@ placeholder="Enter your story here"></textarea>
         }
         applied++;
       } else {
-        // Single-selection mode (no ShotList)
         const ext = (cand.path || cand.url || '').split('.').pop().toLowerCase();
         const type = ['mp4', 'mov', 'webm', 'mkv'].includes(ext) ? 'video' : 'image';
-        _mediaSelections[itemId] = {
+        _mediaSelections[bgId] = {
           media_type: type,
           url:   cand.url  || '',
           path:  cand.path || '',
           score: cand.score || 0,
         };
-        // Visually mark the matching thumb in the grid
-        const card = document.getElementById('media-card-' + itemId);
+        const card = document.getElementById('media-card-' + sceneId);
         if (card) {
           card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
           let matched = false;
@@ -6797,10 +6892,10 @@ placeholder="Enter your story here"></textarea>
   function _mediaApplySavedToGrid(selections) {
     // When batch results are available, restore selection highlights
     for (const [bgId, data] of Object.entries(selections)) {
+      const cardId = (_mediaBgToScene && _mediaBgToScene[bgId]) || bgId;
       const perShot = data.per_shot || {};
       for (const [shotId, shotData] of Object.entries(perShot)) {
-        // Refresh shot row display if it exists
-        try { _mediaRenderShotRow(bgId, shotId); } catch (_) {}
+        try { _mediaRenderShotRow(cardId, shotId); } catch (_) {}
       }
     }
     _mediaMarkCrossCardUsed();
