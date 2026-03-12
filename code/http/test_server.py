@@ -5664,17 +5664,53 @@ placeholder="Enter your story here"></textarea>
           if (!alreadyInList) {
             list.push(entry);
             targetItem[listKey] = list;
-            // Append thumbnail to the grid
+            // Append thumbnail to the grid — create the row if it doesn't exist yet
             var card = document.getElementById('media-card-' + targetBgId);
             if (card) {
               var rows = card.querySelectorAll('.media-thumb-row');
-              // videos row is the second .media-thumb-row (images first, videos second)
-              var targetRow = type === 'video' ? rows[rows.length - 1] : rows[0];
-              if (targetRow) {
-                var th = _mediaThumb(targetBgId, type, entry, list.length - 1);
-                th.classList.add('selected');
-                targetRow.appendChild(th);
+              var isVideo = (type === 'video');
+              var imgRows = [], vidRows = [];
+              // Classify existing rows by checking their first thumb's data-type,
+              // or by position relative to section labels
+              var labels = card.querySelectorAll('.media-section-label');
+              var targetRow = null;
+              labels.forEach(function(lbl) {
+                if (lbl.textContent.toLowerCase().indexOf(isVideo ? 'video' : 'image') >= 0) {
+                  // The thumb-row is the next sibling
+                  var sib = lbl.nextElementSibling;
+                  if (sib && sib.classList.contains('media-thumb-row')) targetRow = sib;
+                }
+              });
+              // If no matching row exists, create label + row before the shot section
+              if (!targetRow) {
+                var newLbl = document.createElement('div');
+                newLbl.className = 'media-section-label';
+                newLbl.textContent = (isVideo ? 'Videos' : 'Images') + ' (1 found)';
+                var newRow = document.createElement('div');
+                newRow.className = 'media-thumb-row';
+                // Insert before the shot-section or at end of card
+                var shotSec = card.querySelector('.media-shot-section');
+                if (shotSec) {
+                  card.insertBefore(newLbl, shotSec);
+                  card.insertBefore(newRow, shotSec);
+                } else {
+                  card.appendChild(newLbl);
+                  card.appendChild(newRow);
+                }
+                // Remove "No results found" placeholder if present
+                var emptyEl = card.querySelector('.media-empty');
+                if (emptyEl) emptyEl.remove();
+                targetRow = newRow;
+              } else {
+                // Update the count in the existing label
+                var prevLbl = targetRow.previousElementSibling;
+                if (prevLbl && prevLbl.classList.contains('media-section-label')) {
+                  prevLbl.textContent = (isVideo ? 'Videos' : 'Images') + ' (' + list.length + ' found)';
+                }
               }
+              var th = _mediaThumb(targetBgId, type, entry, list.length - 1);
+              th.classList.add('selected');
+              targetRow.appendChild(th);
             }
           }
         }
