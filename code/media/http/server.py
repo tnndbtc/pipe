@@ -975,7 +975,8 @@ async def sfx_save(body: SfxSaveRequest, _: None = Depends(require_auth)):
     # SSRF protection: validate hostname against allowlist
     SFX_DOWNLOAD_ALLOWLIST = [
         "cdn.freesound.org", "freesound.org",
-        "*.openverse.engineering", "cdn.openverse.engineering",
+        "*.openverse.engineering", "cdn.openverse.engineering",  # legacy domain
+        "api.openverse.org", "*.openverse.org",                  # current domain
         "*.wikimedia.org",
     ]
     try:
