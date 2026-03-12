@@ -440,6 +440,11 @@ def _load_selections(selections_path: Path) -> dict[str, dict]:
                             resolved["hold_sec"]     = seg.get("hold_sec")
                             resolved["duration_override_sec"] = seg.get("duration_override_sec")
                             resolved["natural_duration_sec"]  = seg.get("natural_duration_sec")
+                            # Clip trim range (start_sec / end_sec) for video segments
+                            if seg.get("start_sec") is not None:
+                                resolved["start_sec"] = seg["start_sec"]
+                            if seg.get("end_sec") is not None:
+                                resolved["end_sec"] = seg["end_sec"]
                             resolved_segs.append(resolved)
                     if resolved_segs:
                         per_shot_resolved[shot_id] = {"segments": resolved_segs}
@@ -544,6 +549,11 @@ def resolve_all(
                                 item["hold_sec"]      = seg.get("hold_sec")
                                 if seg.get("animation_type"):
                                     item["animation_type"] = seg["animation_type"]
+                                # Clip trim range for video segments
+                                if seg.get("start_sec") is not None:
+                                    item["start_sec"] = seg["start_sec"]
+                                if seg.get("end_sec") is not None:
+                                    item["end_sec"] = seg["end_sec"]
                                 items.append(item)
                                 n_found += 1
                             else:

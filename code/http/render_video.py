@@ -376,11 +376,19 @@ def render_shot(
                 # duration_override_sec: user-specified trim (play first N seconds).
                 # Falls back to natural duration_sec, then full shot dur_sec.
                 seg_dur = seg.get("duration_override_sec") or seg.get("duration_sec") or dur_sec
+                # Clip trim range: start_sec / end_sec allow sub-clip selection.
+                # Uses ffmpeg trim filter (frame-accurate) rather than input-level -ss.
+                seg_start = float(seg.get("start_sec") or 0)
                 # Don't loop — use natural duration, trim if needed
                 seg_idx = add_input([], str(seg_path))
+                if seg_start > 0:
+                    # Frame-accurate seek + trim via filter
+                    trim_frag = f"trim=start={seg_start:.3f}:duration={seg_dur:.3f}"
+                else:
+                    trim_frag = f"trim=duration={seg_dur:.3f}"
                 filter_parts.append(
                     f"[{seg_idx}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-                    f"crop={W}:{H},setsar=1,trim=duration={seg_dur:.3f},"
+                    f"crop={W}:{H},setsar=1,{trim_frag},"
                     f"setpts=PTS-STARTPTS[seg{si}]"
                 )
             elif seg_path and seg_path.exists():

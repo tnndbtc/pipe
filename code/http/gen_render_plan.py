@@ -279,14 +279,25 @@ def build_shot(
                 path_part = uri.split("://", 1)[-1] if "://" in uri else uri
                 ext = Path(path_part).suffix.lower()
                 media_type = "video" if ext in {".mp4", ".mov", ".webm", ".mkv"} else "image"
-                bg_segments.append({
+                seg_entry = {
                     "asset_id":       seg_item["asset_id"],
                     "uri":            uri,
                     "media_type":     media_type,
                     "duration_sec":   seg_item.get("duration_sec"),
                     "hold_sec":       seg_item.get("hold_sec"),
                     "animation_type": seg_item.get("animation_type"),  # e.g. zoom_in / pan_lr / ken_burns
-                })
+                }
+                # Clip trim range — start_sec / end_sec for video sub-clips.
+                # When present, renderer seeks to start_sec and plays until end_sec.
+                # duration_sec is recomputed as (end_sec - start_sec) for consistency.
+                if seg_item.get("start_sec") is not None:
+                    seg_entry["start_sec"] = seg_item["start_sec"]
+                if seg_item.get("end_sec") is not None:
+                    seg_entry["end_sec"] = seg_item["end_sec"]
+                    # Recompute duration_sec from trim range (source of truth: start_sec + end_sec)
+                    s = seg_entry.get("start_sec", 0)
+                    seg_entry["duration_sec"] = seg_item["end_sec"] - s
+                bg_segments.append(seg_entry)
             # Set primary bg from first segment (for backward compat fields)
             bg_media = seg_list[0]
         else:
