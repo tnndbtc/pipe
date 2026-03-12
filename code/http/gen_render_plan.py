@@ -243,6 +243,7 @@ def build_shot(
     story_format:   str = "episodic",
     ref_dur_map:    dict | None = None,
     tts_chunk_info: dict | None = None,
+    scene_tails:    dict | None = None,
 ) -> dict:
     """
     Build one RenderedShot entry for RenderPlan.shots[].
@@ -397,13 +398,17 @@ def build_shot(
             vo_line["audio_end_sec"]    = chunk_info["end_sec"]
         vo_lines.append(vo_line)
 
-    # Ensure at least VO_TAIL_MS of silence after the last spoken line.
+    # Ensure at least tail_ms of silence after the last spoken line.
+    # tail_ms: per-scene override from manifest scene_tails dict, else VO_TAIL_MS default.
     # When VO overflows the ShotList estimate this also prevents the shot from
     # ending at the exact frame "Good night." finishes (zero-tail bug observed
     # in production: sh02/sh04/sh05 had duration_ms == last_vo_out_ms).
+    tail_ms = VO_TAIL_MS
+    if scene_tails:
+        tail_ms = int(scene_tails.get(scene_id, scene_tails.get(shot_id, VO_TAIL_MS)))
     if vo_lines:
         vo_end_ms = vo_lines[-1]["timeline_out_ms"]
-        duration_ms = max(duration_ms, vo_end_ms + VO_TAIL_MS)
+        duration_ms = max(duration_ms, vo_end_ms + tail_ms)
 
     # sfx_asset_ids — skip placeholder SFX
     sfx_asset_ids: list[str] = []
@@ -459,7 +464,7 @@ def build_shot(
     # For episodic / monologue we keep creative timing — only the floor applies.
     if story_format in NARRATIVE_FORMATS and vo_lines:
         last_vo_out_ms = vo_lines[-1]["timeline_out_ms"]
-        ceiling_ms = last_vo_out_ms + VO_TAIL_MS
+        ceiling_ms = last_vo_out_ms + tail_ms
         if duration_ms > ceiling_ms:
             print(f"  [CEILING] {shot_id}: {duration_ms} ms → {ceiling_ms} ms "
                   f"(VO ends {last_vo_out_ms} ms, format={story_format})")
@@ -573,9 +578,11 @@ def build_plan(
     # ── end VO completeness guard ──────────────────────────────────────────
 
     # shots: one RenderedShot per ShotList shot
+    scene_tails = merged.get("scene_tails", {})
     shots = [
         build_shot(shot, media_map, vo_map, music_map, override_map,
-                   story_format, ref_dur_map or {}, tts_chunk_info)
+                   story_format, ref_dur_map or {}, tts_chunk_info,
+                   scene_tails)
         for shot in shotlist.get("shots", [])
     ]
 

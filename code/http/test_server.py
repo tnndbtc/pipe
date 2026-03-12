@@ -2649,6 +2649,9 @@ placeholder="Enter your story here"></textarea>
     .vo-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:0}
     .vo-empty{color:var(--dim);font-size:0.85em;padding:20px 0}
     .vo-scene-header{display:flex;align-items:center;gap:8px;padding:8px 4px 4px;border-top:1px solid var(--border);margin-top:6px}
+    .vo-scene-break{display:flex;align-items:center;gap:6px;padding:4px 8px;margin:6px 0 0;background:var(--active-bg);border-radius:4px;border:1px dashed var(--border)}
+    .vo-break-label{font-size:0.72em;color:var(--dim);flex:1}
+    .vo-break-input{width:60px;font-size:0.8em;padding:2px 4px;background:var(--input-bg,#1e1e1e);color:var(--text);border:1px solid var(--border);border-radius:3px;text-align:right}
     .vo-scene-label{font-size:0.78em;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;flex:1}
     .vo-scene-btn{font-size:0.72em;padding:3px 10px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:5px;cursor:pointer}
     .vo-scene-btn:hover{background:rgba(0,0,0,0.12);color:var(--text)}
@@ -2698,13 +2701,13 @@ placeholder="Enter your story here"></textarea>
             style="display:none;margin-left:4px;color:#f88;border-color:#f88aa" title="Stop playback">
       ■ Stop</button>
   </div>
-  <!-- VO approval banner — shown during Stage 7.5 pause and post-edit -->
-  <div id="vo-approve-banner" style="display:none;flex-direction:column;gap:6px;
+  <!-- VO approval banner — always visible; locks in current WAVs via sentinel -->
+  <div id="vo-approve-banner" style="display:flex;flex-direction:column;gap:6px;
        padding:10px 14px;background:#1a3a1a;border:1px solid #2d6a2d;
        border-radius:6px;font-size:0.85em;color:#a8e6a8;margin-bottom:4px">
     <div style="display:flex;align-items:center;gap:8px">
       <span id="vo-approve-icon">🎙</span>
-      <span id="vo-approve-msg">Azure TTS complete — please review your voice-over before continuing.</span>
+      <span id="vo-approve-msg">Review each VO item, then approve to lock in your audio and continue.</span>
       <button id="vo-approve-btn" onclick="voApproveTTS()"
         style="margin-left:auto;padding:5px 14px;background:#2d7a2d;color:#fff;
                border:none;border-radius:5px;cursor:pointer;font-size:0.95em;font-weight:600">
@@ -2719,18 +2722,6 @@ placeholder="Enter your story here"></textarea>
     <span id="vo-sentinel-icon">✓</span>
     <span id="vo-sentinel-text">VO Approved</span>
     <span id="vo-sentinel-time" style="color:var(--dim)"></span>
-  </div>
-  <!-- downstream-rerun warning — shown after any VO retune succeeds -->
-  <div id="vo-retune-banner" style="display:none;align-items:center;gap:8px;
-       padding:7px 12px;background:#7c4f1220;border:1px solid #c0743050;
-       border-radius:6px;font-size:0.8em;color:#e8a87c">
-    <span>⚠</span>
-    <span>VO re-synthesized — downstream steps must re-run to update the video:</span>
-    <code style="background:var(--active-bg);padding:1px 5px;border-radius:3px;font-size:0.9em">
-      [7] post_tts → [8] apply_music_plan → [10] gen_render_plan → [11] render_video
-    </code>
-    <button onclick="document.getElementById('vo-retune-banner').style.display='none'"
-            style="margin-left:auto;background:none;border:none;color:#e8a87c;cursor:pointer;font-size:1.1em">✕</button>
   </div>
   <!-- column headers -->
   <div class="vo-col-headers" style="margin-top:2px">
@@ -3617,7 +3608,9 @@ placeholder="Enter your story here"></textarea>
           }
           return;
         }
-        _renderVoItems(data.items || [], slug, epId, locale, data.voice_catalog || {});
+        const items = data.items || [];
+        items._scene_tails = data.scene_tails || {};
+        _renderVoItems(items, slug, epId, locale, data.voice_catalog || {});
         _voLoadSentinel(epDir, locale);
       })
       .catch(e => {
@@ -3630,6 +3623,7 @@ placeholder="Enter your story here"></textarea>
 
   function _renderVoItems(items, slug, epId, locale, voiceCatalog) {
     _voVoiceCatalog = voiceCatalog || {};
+    const epDir = `projects/${slug}/episodes/${epId}`;
     const body = document.getElementById('vo-body');
     if (!items.length) {
       body.innerHTML = '<span class="vo-empty">No VO items found.</span>';
@@ -3650,21 +3644,36 @@ placeholder="Enter your story here"></textarea>
       const lb = (_voVoiceCatalog[b].local_name || b).toLowerCase();
       return la < lb ? -1 : la > lb ? 1 : 0;
     });
+    // Build scene_tails lookup from items list (server injects it) or default 2000
+    const sceneTails = items._scene_tails || {};
+
     let html = '';
-    sceneOrder.forEach(sc => {
+    sceneOrder.forEach((sc, scIdx) => {
       const scJ = JSON.stringify(sc);
       const slugJ = JSON.stringify(slug);
       const epIdJ = JSON.stringify(epId);
       const locJ  = JSON.stringify(locale);
+      const epDirJ = JSON.stringify(epDir);
       const scIdE = escHtml(sc.replace(/[^a-zA-Z0-9_-]/g, '_'));
+
+      // Inter-scene break separator (shown BEFORE every scene except the first)
+      if (scIdx > 0) {
+        const tailMs = sceneTails[sc] ?? 2000;
+        html += `<div class="vo-scene-break" id="vo-break-${scIdE}">
+          <span class="vo-break-label">↕ break before ${escHtml(sc)}</span>
+          <input  class="vo-break-input" id="vo-tail-${scIdE}" type="number"
+                  value="${tailMs}" min="0" max="30000" step="100" title="Silence before this scene (ms)"/>
+          <span style="font-size:0.75em;color:var(--dim)">ms</span>
+          <button class="vo-scene-btn" style="padding:2px 8px"
+                  onclick='_voSaveSceneTail(${scJ},${epDirJ},${locJ})'>Save</button>
+        </div>`;
+      }
+
       html += `<div class="vo-scene-header">
         <span class="vo-scene-label">${escHtml(sc)}</span>
         <button class="vo-scene-btn" id="vo-scene-preview-${scIdE}"
           onclick='_voPreviewScene(${scJ},${slugJ},${epIdJ},${locJ},this)'>
-          ▶ Preview</button>
-        <button class="vo-scene-btn"
-          onclick='_voResynthScene(${scJ},${slugJ},${epIdJ},${locJ})'>
-          ⟳ Re-generate</button></div>`;
+          ▶ Preview</button></div>`;
       scenes[sc].forEach(it => {
         const tp  = it.tts_prompt || {};
         const iid = it.item_id;
@@ -3740,16 +3749,21 @@ placeholder="Enter your story here"></textarea>
             data-locale="${escHtml(locale)}">
           <span class="vo-item-id">${iidE}</span>
           <span class="vo-badge ${badgeClass}" title="${escHtml(badge)}">${badgeLabel}</span>
-          <input  class="vo-field vo-text"   id="vo-text-${iidE}"   value="${origText}" title="text"/>
+          <input  class="vo-field vo-text"   id="vo-text-${iidE}"   value="${origText}" title="text"
+                  oninput='_voParamChanged(${iidJ})'/>
           <select class="vo-field vo-voice"  id="vo-voice-${iidE}"
                   onchange='_voVoiceChanged(${iidJ})'>${vOpts}</select>
-          <select class="vo-field vo-style"  id="vo-style-${iidE}">${sOpts}</select>
+          <select class="vo-field vo-style"  id="vo-style-${iidE}"
+                  onchange='_voParamChanged(${iidJ})'>${sOpts}</select>
           <input  class="vo-field vo-rate"   id="vo-rate-${iidE}"
-                  value="${origRate}" placeholder="rate" title="azure_rate"/>
+                  value="${origRate}" placeholder="rate" title="azure_rate"
+                  oninput='_voParamChanged(${iidJ})'/>
           <input  class="vo-field vo-pitch"  id="vo-pitch-${iidE}"
-                  value="${origPitch}" placeholder="pitch" title="azure_pitch"/>
+                  value="${origPitch}" placeholder="pitch" title="azure_pitch"
+                  oninput='_voParamChanged(${iidJ})'/>
           <input  class="vo-field vo-degree" id="vo-degree-${iidE}"
-                  value="${origDegree}" placeholder="deg" title="azure_style_degree"/>
+                  value="${origDegree}" placeholder="deg" title="azure_style_degree"
+                  oninput='_voParamChanged(${iidJ})'/>
           <span   class="vo-dur${staleClass}" id="vo-dur-${iidE}"
                   title="Trimmed duration | Pause after (INVARIANT E: not summed)">${escHtml(durLabel)}</span>
           <button class="vo-preview-btn"     id="vo-preview-${iidE}" title="Preview active .wav"
@@ -3787,7 +3801,18 @@ placeholder="Enter your story here"></textarea>
     });
   }
 
+  // Called whenever any TTS param field changes after a Re-Create.
+  // Clears keep_audio flag and restores Save button label so next Save calls Azure TTS.
+  function _voParamChanged(itemId) {
+    if (window._voKeepAudio && window._voKeepAudio[itemId]) {
+      delete window._voKeepAudio[itemId];
+      const saveBtn = document.getElementById('vo-btn-' + itemId);
+      if (saveBtn && saveBtn.textContent === '📌 Keep') saveBtn.textContent = '💾 Save';
+    }
+  }
+
   function _voVoiceChanged(itemId) {
+    _voParamChanged(itemId);
     const voice  = document.getElementById('vo-voice-' + itemId)?.value || '';
     const sel    = document.getElementById('vo-style-' + itemId);
     if (!sel) return;
@@ -3808,10 +3833,14 @@ placeholder="Enter your story here"></textarea>
     window._voAudio   = audio;
     window._voAudioId = itemId;
     if (btn) { btn.textContent = '■'; btn.classList.add('playing'); btn.disabled = false; }
+    // Show the top-level Stop button so single-item playback can also be stopped.
+    const stopBtn = document.getElementById('vo-stop-preview-btn');
+    if (stopBtn) stopBtn.style.display = '';
     const reset = () => {
       window._voAudio   = null;
       window._voAudioId = null;
       if (btn) { btn.textContent = '▶'; btn.classList.remove('playing'); btn.disabled = false; }
+      if (stopBtn) stopBtn.style.display = 'none';
     };
     audio.onended = reset;
     audio.onerror = reset;
@@ -3834,7 +3863,7 @@ placeholder="Enter your story here"></textarea>
     const stopBtn = document.getElementById('vo-stop-preview-btn');
     const allBtn  = document.getElementById('vo-preview-all-btn');
     if (stopBtn) stopBtn.style.display = 'none';
-    if (allBtn)  allBtn.style.display  = '';
+    if (allBtn)  { allBtn.style.display = ''; allBtn.disabled = false; }
   }
 
   // Play an ordered array of {epDir, locale, item_id} sequentially.
@@ -3844,7 +3873,8 @@ placeholder="Enter your story here"></textarea>
     const stopBtn = document.getElementById('vo-stop-preview-btn');
     const allBtn  = document.getElementById('vo-preview-all-btn');
     if (stopBtn) stopBtn.style.display = '';
-    if (allBtn && ctxBtn !== allBtn) allBtn.style.display = 'none';
+    // Disable (never hide) Generate Preview during any sequence playback
+    if (allBtn) allBtn.disabled = (ctxBtn !== allBtn);
     if (ctxBtn) { ctxBtn.textContent = ctxBtn.textContent.replace('▶', '■'); ctxBtn.classList.add('vo-scene-playing'); }
 
     for (const clip of clips) {
@@ -3926,13 +3956,23 @@ placeholder="Enter your story here"></textarea>
   async function _voPreviewItem(itemId, slug, epId, locale) {
     const btn = document.getElementById('vo-preview-' + itemId);
 
-    // Toggle off if already playing this item
+    // Toggle off: if THIS button is already in playing state, stop it.
+    if (btn && btn.classList.contains('playing')) {
+      if (window._voAudio) { window._voAudio.pause(); window._voAudio = null; }
+      btn.textContent = '▶'; btn.classList.remove('playing'); btn.disabled = false;
+      window._voAudioId = null;
+      const stopBtn = document.getElementById('vo-stop-preview-btn');
+      if (stopBtn) stopBtn.style.display = 'none';
+      return;
+    }
+
+    // Stop any other audio that might be playing before starting this one.
     if (window._voAudio) {
       window._voAudio.pause();
       const prev = document.getElementById('vo-preview-' + (window._voAudioId || ''));
       if (prev) { prev.textContent = '▶'; prev.classList.remove('playing'); prev.disabled = false; }
       window._voAudio = null;
-      if (window._voAudioId === itemId) { window._voAudioId = null; return; }
+      window._voAudioId = null;
     }
 
     // Read current UI values
@@ -4016,88 +4056,6 @@ placeholder="Enter your story here"></textarea>
     return patch;
   }
 
-  function _voResynthItem(itemId, slug, epId, locale) {
-    _voSubmitRetune([_collectPatch(itemId)], slug, epId, locale);
-  }
-
-  function _voResynthScene(scene, slug, epId, locale) {
-    const rows  = document.querySelectorAll('.vo-item-row');
-    const items = [];
-    rows.forEach(row => {
-      const iid = row.dataset.itemId;
-      if (!iid) return;
-      const sc = (iid.match(/sc\d+/) || [''])[0];
-      if (sc === scene) items.push(_collectPatch(iid));
-    });
-    if (!items.length) return;
-    _voSubmitRetune(items, slug, epId, locale);
-  }
-
-  function _voSubmitRetune(items, slug, epId, locale) {
-    // Set loading state
-    items.forEach(it => {
-      const btn = document.getElementById('vo-btn-' + it.item_id);
-      const dur = document.getElementById('vo-dur-' + it.item_id);
-      if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
-      if (dur) dur.textContent = '…';
-    });
-    fetch('/api/retune_vo', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ slug, ep_id: epId, locale,
-                                dry_run: false, backup: false, items }),
-    })
-      .then(r => r.json())
-      .then(data => {
-        let anyOk = false;
-        (data.results || []).forEach(r => {
-          const btn = document.getElementById('vo-btn-' + r.item_id);
-          const dur = document.getElementById('vo-dur-' + r.item_id);
-          if (r.status === 'ok') {
-            anyOk = true;
-            if (btn) { btn.textContent = '✓'; btn.disabled = false;
-                       setTimeout(() => { if (btn) btn.textContent = 'Save'; }, 2500); }
-            if (dur) {
-              const after = r.after_duration_sec != null
-                            ? r.after_duration_sec.toFixed(2) + 's' : '—';
-              const warn  = r.duration_warn ? ' ⚠️' : '';
-              dur.textContent = after + warn;
-              dur.title = 'Before: ' + (r.before_duration_sec?.toFixed(2) ?? '?') +
-                          's → After: ' + (r.after_duration_sec?.toFixed(2) ?? '?') + 's';
-            }
-            // Sync data-orig-* so the next ▶ press takes the fast path (WAV on disk).
-            const row = document.getElementById('vo-row-' + r.item_id);
-            if (row) {
-              const g = id => document.getElementById(id)?.value ?? '';
-              row.dataset.origText   = g('vo-text-'   + r.item_id);
-              row.dataset.origVoice  = g('vo-voice-'  + r.item_id);
-              row.dataset.origStyle  = g('vo-style-'  + r.item_id);
-              row.dataset.origRate   = g('vo-rate-'   + r.item_id);
-              row.dataset.origPitch  = g('vo-pitch-'  + r.item_id);
-              row.dataset.origDegree = g('vo-degree-' + r.item_id);
-            }
-          } else {
-            if (btn) { btn.textContent = '✗'; btn.disabled = false;
-                       setTimeout(() => { if (btn) btn.textContent = 'Save'; }, 3000); }
-            if (dur) { dur.textContent = 'ERR'; dur.title = r.error || 'unknown error'; }
-            console.error('retune error', r.item_id, r.error);
-          }
-        });
-        // Show downstream-rerun banner whenever at least one item was re-synthesized.
-        if (anyOk) {
-          const banner = document.getElementById('vo-retune-banner');
-          if (banner) banner.style.display = 'flex';
-        }
-        if (data.error) console.error('retune_vo API error:', data.error);
-      })
-      .catch(e => {
-        items.forEach(it => {
-          const btn = document.getElementById('vo-btn-' + it.item_id);
-          if (btn) { btn.textContent = '✗'; btn.disabled = false; }
-        });
-        console.error('retune_vo fetch failed:', e);
-      });
-  }
 
   // ── New VO Review endpoints (P3) ─────────────────────────────────────────────
 
@@ -4120,9 +4078,16 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  // POST /api/vo_save — save with (possibly changed) voice/style/rate/text
+  // Tracks items where Re-Create succeeded and user hasn't changed params since.
+  // When set, Save will send keep_audio=true (skip Azure TTS, keep existing WAV).
+  window._voKeepAudio = window._voKeepAudio || {};
+
+  // POST /api/vo_save — save with (possibly changed) voice/style/rate/text.
+  // If keep_audio flag is set for this item (Re-Create was run and params unchanged),
+  // skips Azure TTS and just commits the existing WAV + updates manifest.
   async function _voSaveItem(itemId, epDir, locale) {
     const btn = document.getElementById('vo-btn-' + itemId);
+    const keepAudio = !!window._voKeepAudio[itemId];
     if (btn) { btn.textContent = '⏳ Saving…'; btn.disabled = true; }
     try {
       const text   = (document.getElementById('vo-text-'   + itemId)?.value ?? '').trim();
@@ -4134,13 +4099,14 @@ placeholder="Enter your story here"></textarea>
       const data = await _voPost('/api/vo_save', {
         ep_dir: epDir, locale, item_id: itemId,
         text, voice, style, rate, pitch, style_degree: degree,
+        keep_audio: keepAudio,
       }, itemId);
+      delete window._voKeepAudio[itemId];
       if (btn) { btn.textContent = '✓ Saved'; setTimeout(() => { if (btn) btn.textContent = '💾 Save'; }, 2500); }
       _voUpdateDur(itemId, data.trimmed_duration_sec);
       _voMarkSentinelInvalid();
-      document.getElementById('vo-retune-banner').style.display = 'flex';
     } catch(e) {
-      if (btn) { btn.textContent = '✗'; setTimeout(() => { if (btn) btn.textContent = '💾 Save'; btn.disabled = false; }, 2500); }
+      if (btn) { btn.textContent = '✗'; setTimeout(() => { if (btn) btn.textContent = keepAudio ? '📌 Keep' : '💾 Save'; btn.disabled = false; }, 2500); }
       alert('vo_save error: ' + e.message);
     }
   }
@@ -4153,6 +4119,11 @@ placeholder="Enter your story here"></textarea>
       const data = await _voPost('/api/vo_recreate', {
         ep_dir: epDir, locale, item_id: itemId,
       }, itemId);
+      // Re-Create succeeded: set keep_audio flag and change Save button to "📌 Keep"
+      // so user can commit this audio without triggering another Azure TTS call.
+      window._voKeepAudio[itemId] = true;
+      const saveBtn = document.getElementById('vo-btn-' + itemId);
+      if (saveBtn) saveBtn.textContent = '📌 Keep';
       if (btn) { btn.textContent = '✓'; setTimeout(() => { if (btn) { btn.textContent = '🔄 Re-Create'; btn.disabled = false; } }, 2500); }
       _voUpdateDur(itemId, data.trimmed_duration_sec);
       _voMarkSentinelInvalid();
@@ -4217,6 +4188,32 @@ placeholder="Enter your story here"></textarea>
       _voMarkSentinelInvalid();
     } catch(e) {
       alert('vo_pause error: ' + e.message);
+    }
+  }
+
+  // POST /api/vo_scene_tail — save inter-scene break duration
+  async function _voSaveSceneTail(scene, epDir, locale) {
+    const scIdE = scene.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const input = document.getElementById('vo-tail-' + scIdE);
+    const tailMs = parseInt(input?.value ?? '2000', 10);
+    if (isNaN(tailMs) || tailMs < 0 || tailMs > 30000) {
+      alert('Invalid tail value (0–30000 ms)');
+      return;
+    }
+    try {
+      const r = await fetch('/api/vo_scene_tail', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ep_dir: epDir, locale, scene, tail_ms: tailMs }),
+      });
+      const data = await r.json();
+      if (data.error) throw new Error(data.error);
+      _voMarkSentinelInvalid();
+      // Flash the input green briefly
+      if (input) { input.style.outline = '2px solid #6ec96e';
+                   setTimeout(() => { input.style.outline = ''; }, 1500); }
+    } catch(e) {
+      alert('vo_scene_tail error: ' + e.message);
     }
   }
 
@@ -12102,7 +12099,9 @@ class Handler(BaseHTTPRequestHandler):
                         for e in _full_cat.get(_cat_key, [])
                         if e.get("voice")
                     }
-                    body = json.dumps({"items": items, "voice_catalog": voice_catalog}).encode()
+                    scene_tails = manifest.get("scene_tails", {})
+                    body = json.dumps({"items": items, "voice_catalog": voice_catalog,
+                                       "scene_tails": scene_tails}).encode()
                     self.send_response(200)
                 except FileNotFoundError:
                     body = json.dumps({"error": f"Manifest not found: {mpath}"}).encode()
@@ -13790,6 +13789,8 @@ class Handler(BaseHTTPRequestHandler):
                 _json_resp(self, {"error": str(exc)}, 409)
 
         # POST /api/vo_save — re-synthesize with new params, write to cache
+        # Special case: keep_audio=true skips Azure TTS and keeps existing WAV on disk.
+        # Used when user liked a Re-Created result and just wants to commit the manifest.
         elif self.path == "/api/vo_save":
             try:
                 if not _VO_UTILS_AVAILABLE:
@@ -13807,26 +13808,45 @@ class Handler(BaseHTTPRequestHandler):
                 new_rate         = req.get("rate", "0%")
                 new_style_degree = float(req.get("style_degree", 1.5))
                 new_text         = req.get("text", "").strip()
+                keep_audio       = bool(req.get("keep_audio", False))
                 if not new_voice:
                     raise ValueError("voice is required")
                 if not new_text:
                     raise ValueError("text is required")
 
-                params = {
-                    "voice":        new_voice,
-                    "style":        new_style,
-                    "style_degree": new_style_degree,
-                    "rate":         new_rate,
-                    "pitch":        req.get("pitch", ""),
-                    "break_ms":     int(req.get("break_ms", 0)),
-                }
-
                 with _get_vo_lock(full_ep):
-                    result = synthesize_vo_item(
-                        item_id, new_text, params, full_ep, locale,
-                        write_cache=True,   # INVARIANT F: vo_save writes cache
-                    )
-                    # Update manifest with new voice/style/rate/text
+                    if keep_audio:
+                        # Skip Azure TTS — keep existing source.wav / .wav on disk.
+                        # Just update manifest params and return current durations.
+                        from pathlib import Path as _P
+                        vo_dir     = os.path.join(full_ep, "assets", locale, "audio", "vo")
+                        src_path   = os.path.join(vo_dir, f"{item_id}.source.wav")
+                        wav_path   = os.path.join(vo_dir, f"{item_id}.wav")
+                        if not os.path.exists(src_path):
+                            raise FileNotFoundError(f"source.wav not found for {item_id} — cannot keep audio")
+                        source_dur  = _wav_duration(_P(src_path))
+                        trimmed_dur = _wav_duration(_P(wav_path)) if os.path.exists(wav_path) else source_dur
+                        primary_locale = _get_primary_locale(_P(full_ep))
+                        _invalidate_vo_state(full_ep, primary_locale)
+                        result = {
+                            "source_duration_sec":  round(source_dur,  3),
+                            "trimmed_duration_sec": round(trimmed_dur, 3),
+                        }
+                    else:
+                        params = {
+                            "voice":        new_voice,
+                            "style":        new_style,
+                            "style_degree": new_style_degree,
+                            "rate":         new_rate,
+                            "pitch":        req.get("pitch", ""),
+                            "break_ms":     int(req.get("break_ms", 0)),
+                        }
+                        result = synthesize_vo_item(
+                            item_id, new_text, params, full_ep, locale,
+                            write_cache=True,   # INVARIANT F: vo_save writes cache
+                        )
+
+                    # Update manifest with voice/style/rate/text (always)
                     mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
                     with open(mpath, encoding="utf-8") as _mf:
                         _mani = json.load(_mf)
@@ -13992,6 +14012,36 @@ class Handler(BaseHTTPRequestHandler):
 
                 _json_resp(self, {"item_id": item_id, "pause_ms": pause_ms})
 
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
+        # POST /api/vo_scene_tail — set inter-scene tail silence (ms) for a scene
+        elif self.path == "/api/vo_scene_tail":
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                req     = json.loads(self.rfile.read(length))
+                ep_dir  = req.get("ep_dir",   "").strip()
+                locale  = req.get("locale",   "").strip()
+                scene   = req.get("scene",    "").strip()
+                tail_ms = int(req.get("tail_ms", 2000))
+                if not ep_dir or not locale or not scene:
+                    raise ValueError("ep_dir, locale, scene required")
+                if tail_ms < 0 or tail_ms > 30000:
+                    raise ValueError("tail_ms must be 0–30000")
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                from pathlib import Path as _P
+                with _get_vo_lock(full_ep):
+                    mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
+                    with open(mpath, encoding="utf-8") as _mf:
+                        _mani = json.load(_mf)
+                    _mani.setdefault("scene_tails", {})[scene] = tail_ms
+                    _tmp = mpath + ".tmp"
+                    with open(_tmp, "w", encoding="utf-8") as _mf:
+                        json.dump(_mani, _mf, indent=2, ensure_ascii=False)
+                    os.replace(_tmp, mpath)
+                    primary = _get_primary_locale(_P(full_ep))
+                    _invalidate_vo_state(full_ep, primary)
+                _json_resp(self, {"scene": scene, "tail_ms": tail_ms})
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 409)
 
