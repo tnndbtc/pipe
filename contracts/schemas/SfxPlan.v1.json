@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SfxPlan",
+  "description": "User-selected SFX assignments with per-shot timing. Written by /api/sfx_save_all when the user clicks 'Save SFX Selections' in the SFX tab. Consumed by gen_render_plan.py (injected as sfx_plan_entries per shot) and render_video.py (mixed into the shot audio at the specified delay/trim).",
+  "type": "object",
+  "required": ["schema_id", "schema_version", "sfx_entries"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "SfxPlan"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "saved_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp when the file was last written (e.g. '2026-03-12T10:00:00Z')"
+    },
+    "sfx_entries": {
+      "type": "array",
+      "description": "One entry per selected SFX, one per item_id. Multiple entries for the same shot_id are allowed (stack multiple SFX on one shot).",
+      "items": {
+        "type": "object",
+        "required": ["item_id", "shot_id", "source_file", "start_sec"],
+        "additionalProperties": false,
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "pattern": "^sfx-",
+            "description": "SFX item ID from AssetManifest (e.g. 'sfx-sc01-sh01')"
+          },
+          "shot_id": {
+            "type": "string",
+            "description": "Shot this SFX is assigned to (e.g. 'sh-sc01-sh01'). Must match a shot_id in the ShotList."
+          },
+          "source_file": {
+            "type": "string",
+            "description": "Absolute local path to the downloaded SFX audio file (MP3 or WAV). Written under {ep_dir}/assets/sfx/{item_id}/{item_id}.mp3 by sfx_save_all."
+          },
+          "candidate_idx": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Index into the sfx_search_results.json candidates[] array for this item_id. Used by the UI on reload to restore the selected candidate dropdown."
+          },
+          "start_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Shot-relative delay in seconds: when to start playing this SFX within the shot. Applied as adelay in render_video.py."
+          },
+          "end_sec": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Shot-relative stop time in seconds. The SFX plays for (end_sec - start_sec) seconds. null or omitted means play the full clip from start_sec to natural end (capped at shot duration)."
+          }
+        }
+      }
+    }
+  }
+}

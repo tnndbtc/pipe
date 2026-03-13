@@ -76,6 +76,7 @@ _jobs_lock = threading.Lock()
 # tts_review_complete.json. Different episodes run concurrently (not global).
 _vo_locks: dict[str, threading.Lock] = {}
 _vo_locks_meta = threading.Lock()   # protects _vo_locks dict itself
+_sfx_preview_locks = {}   # per-episode lock for sfx preview generation
 
 
 def _get_vo_lock(ep_dir: str) -> threading.Lock:
@@ -583,6 +584,39 @@ def _json_resp(handler, data: dict, status: int = 200) -> None:
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _resolve_sfx_local_path(ep_dir: str, item_id: str, candidate: dict):
+    """Find the local audio file for a selected SFX candidate. Returns path or None."""
+    url = candidate.get("preview_url", "")
+    if "/serve_media?path=" in url:
+        from urllib.parse import unquote, urlparse, parse_qs
+        qs = parse_qs(urlparse(url).query)
+        rel_path = unquote(qs.get("path", [""])[0])
+        abs_path = os.path.join(PIPE_DIR, rel_path)
+        if os.path.isfile(abs_path):
+            return abs_path
+    basename_hint = None
+    for key in ("filename", "name"):
+        if candidate.get(key):
+            basename_hint = candidate[key]
+            break
+    if not basename_hint and url:
+        from urllib.parse import urlparse as _up
+        basename_hint = os.path.basename(_up(url).path) or None
+    item_dir = os.path.join(ep_dir, "assets", "sfx", item_id)
+    if os.path.isdir(item_dir):
+        audio_files = [f for f in sorted(os.listdir(item_dir), reverse=True)
+                       if f.lower().endswith((".wav", ".mp3", ".flac", ".ogg"))]
+        if basename_hint:
+            for f in audio_files:
+                if f == basename_hint or os.path.splitext(f)[0] == os.path.splitext(basename_hint)[0]:
+                    return os.path.join(item_dir, f)
+        if audio_files:
+            if len(audio_files) > 1:
+                print(f"[WARN] {item_id}: {len(audio_files)} audio files found, using {audio_files[0]} (ambiguous)")
+            return os.path.join(item_dir, audio_files[0])
+    return None
 
 
 # ── Story-file helpers ─────────────────────────────────────────────────────────
@@ -2615,13 +2649,47 @@ placeholder="Enter your story here"></textarea>
            value="{{MEDIA_SERVER_URL}}" />
     <button id="sfx-btn-search" onclick="sfxSearchAll()" disabled>🔍 Search All SFX</button>
     <span id="sfx-count-label" style="font-size:0.82em;color:var(--dim)"></span>
+    <label style="display:flex;align-items:center;gap:4px;margin-left:auto;font-size:0.80em">
+      <input type="checkbox" id="sfx-include-music" checked onchange="sfxUpdatePreviewLabel()">
+      <span>Include music</span>
+    </label>
+    <button id="sfx-btn-preview" onclick="sfxGeneratePreview()" disabled
+            style="padding:5px 14px;font-size:0.82em;background:var(--active-bg);
+                   color:var(--dim);border:1px solid var(--border);border-radius:4px;
+                   cursor:pointer">
+      🔊 Generate Preview
+    </button>
   </div>
 
   <!-- status bar -->
   <div class="sfx-status-bar" id="sfx-status-bar">Select an episode to begin.</div>
 
-  <!-- results body -->
-  <div class="sfx-body" id="sfx-body"></div>
+  <!-- sfx preview player + visual timeline -->
+  <div id="sfx-preview-wrap" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border)">
+    <div style="font-size:0.78em;font-weight:600;margin-bottom:4px;color:var(--dim)">
+      Preview Audio (VO + SFX<span id="sfx-preview-music-label"> + Music</span>)
+    </div>
+    <audio id="sfx-preview-audio" controls style="width:100%"></audio>
+    <div id="sfx-timeline" style="position:relative;height:80px;margin-top:6px;
+         background:var(--bg);border:1px solid var(--border);border-radius:4px;
+         overflow:hidden;cursor:pointer">
+      <div id="sfx-tl-music" style="position:absolute;bottom:0;left:0;right:0;height:24px"></div>
+      <div id="sfx-tl-sfx"   style="position:absolute;bottom:24px;left:0;right:0;height:24px"></div>
+      <div id="sfx-tl-vo"    style="position:absolute;top:0;left:0;right:0;height:24px"></div>
+      <div id="sfx-tl-shots" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none"></div>
+      <div id="sfx-tl-cursor" style="position:absolute;top:0;bottom:0;width:2px;background:red;pointer-events:none;z-index:10;left:0"></div>
+    </div>
+    <div style="display:flex;gap:12px;font-size:0.70em;color:var(--dim);margin-top:3px">
+      <span><span style="display:inline-block;width:10px;height:10px;background:#4a9eff;border-radius:2px;vertical-align:middle"></span> VO</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:#ff9f43;border-radius:2px;vertical-align:middle"></span> SFX</span>
+      <span><span style="display:inline-block;width:10px;height:10px;background:#2ecc71;border-radius:2px;vertical-align:middle"></span> Music</span>
+    </div>
+  </div>
+
+  <!-- results body (scrollable; shot overrides rendered inside as first child) -->
+  <div class="sfx-body" id="sfx-body">
+    <div id="sfx-overrides" style="display:none"></div>
+  </div>
 
   <!-- footer -->
   <div class="sfx-footer" id="sfx-footer" style="display:none">
@@ -4656,12 +4724,17 @@ placeholder="Enter your story here"></textarea>
   let _sfxItems      = [];
   let _sfxResults    = {};   // { item_id: { item, candidates[] } }
   let _sfxSelected   = {};   // { item_id: index }
+  let _sfxBusy     = false;
+  let _sfxTimeline = null;
+  let _sfxTiming   = {};   // { item_id: { start: Number, end: Number|null } }
   let _sfxServerError= null; // set when media server is unreachable
   let _sfxAiState    = {};   // { item_id: { open, prompt, generating, statusText } }
   let _sfxAudioEl    = null;
   let _sfxPlayingUrl = null;
   let _sfxPlayGen    = 0;
   let _sfxPlayingBtn = null;  // DOM button currently showing ⏸
+  let _sfxShotTimeline = [];  // [{shot_id, epStart, epEnd, duration_sec, sfx_items:[]}]
+  let _sfxManifest   = null;  // raw manifest JSON (cached per episode)
 
   function sfxInit() {
     const sel = document.getElementById('sfx-ep-select');
@@ -4704,6 +4777,172 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
+  async function _sfxLoadShotTimeline() {
+    if (!_sfxSlug || !_sfxEpId) return;
+    _sfxShotTimeline = [];
+    _sfxManifest = null;
+    try {
+      // Load manifest
+      const mr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
+                           + '&ep_id=' + encodeURIComponent(_sfxEpId)
+                           + '&file=AssetManifest_draft.shared.json');
+      if (!mr.ok) return;
+      _sfxManifest = await mr.json();
+      // Load ShotList
+      const slr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
+                            + '&ep_id=' + encodeURIComponent(_sfxEpId)
+                            + '&file=ShotList.json');
+      if (!slr.ok) return;
+      const sl = await slr.json();
+      const shots = sl.shots || [];
+      // Group SFX items by shot_id
+      const sfxByShot = {};
+      (_sfxManifest.sfx_items || []).forEach(s => {
+        const sid = s.shot_id || '';
+        if (sid) { sfxByShot[sid] = sfxByShot[sid] || []; sfxByShot[sid].push(s); }
+      });
+      // Compute scene-tail shifts (mirrors sfx_preview_pack.py logic)
+      const sceneTails = _sfxManifest.scene_tails || {};
+      const DEFAULT_TAIL_MS = 2000;
+      const sceneShiftMap = {};
+      let shiftAcc = 0.0;
+      let prevSc = null;
+      shots.forEach(s => {
+        const sc = s.scene_id || '';
+        if (prevSc !== null && sc !== prevSc) {
+          const tailMs = sceneTails[sc] != null ? sceneTails[sc]
+                       : sceneTails[prevSc] != null ? sceneTails[prevSc]
+                       : DEFAULT_TAIL_MS;
+          shiftAcc += tailMs / 1000.0;
+        }
+        if (sc && !(sc in sceneShiftMap)) sceneShiftMap[sc] = shiftAcc;
+        prevSc = sc;
+      });
+      // Build shot timeline entries with episode-absolute start/end
+      let cumSec = 0.0;
+      _sfxShotTimeline = shots.map(s => {
+        const sc = s.scene_id || '';
+        const scShift = (sc && sceneShiftMap[sc] != null) ? sceneShiftMap[sc] : 0.0;
+        const dur = s.duration_sec || 0;
+        const epStart = Math.round((cumSec + scShift) * 10) / 10;
+        const epEnd   = Math.round((epStart + dur) * 10) / 10;
+        cumSec += dur;
+        return {
+          shot_id: s.shot_id,
+          scene_id: sc,
+          epStart,
+          epEnd,
+          duration_sec: dur,
+          sfx_items: sfxByShot[s.shot_id] || [],
+        };
+      });
+    } catch(e) {
+      console.warn('_sfxLoadShotTimeline failed:', e);
+    }
+  }
+
+  function _sfxShotOvrSelect(itemId, val) {
+    if (val === '') {
+      delete _sfxSelected[itemId];
+      delete _sfxTiming[itemId];
+    } else {
+      _sfxSelected[itemId] = parseInt(val, 10);
+    }
+    try { sessionStorage.setItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId, JSON.stringify(_sfxSelected)); } catch(e) {}
+    const res = _sfxResults[itemId];
+    if (res) sfxRenderCard(res.item, res.candidates);
+    sfxUpdateCountLabel();
+    sfxUpdatePreviewLabel();
+    sfxRenderShotOverrides();
+  }
+
+  function sfxRenderShotOverrides() {
+    const wrap = document.getElementById('sfx-overrides');
+    if (!wrap) return;
+    const shotsWithSfx = _sfxShotTimeline.filter(s => s.sfx_items.length > 0);
+    if (!shotsWithSfx.length) { wrap.style.display = 'none'; return; }
+
+    const totalDur = _sfxShotTimeline.reduce((a, s) => Math.max(a, s.epEnd), 0) || 1;
+    const shotColors = ['#3b6ea5','#8b5e3c','#5e8c5a','#8b3e6e','#6e6e3e','#3e6e8b','#8b6e3e'];
+    const fmtEp = t => t.toFixed(1) + 's';
+
+    let html = '<div class="music-card-hdr">Shot Overrides</div>'
+      + '<div class="music-card-sub">Candidate, timing window (episode-absolute start/end) per SFX item.</div>';
+
+    // ── Visual timeline bar (identical to Music tab) ──
+    html += '<div class="music-vtl-bar">';
+    _sfxShotTimeline.forEach((s, i) => {
+      const pct = (s.duration_sec / totalDur * 100).toFixed(2);
+      const col = shotColors[i % shotColors.length];
+      html += '<div class="music-vtl-shot" style="width:' + pct + '%;background:' + col + '"'
+        + ' title="' + s.shot_id + '  ' + fmtEp(s.epStart) + '\u2013' + fmtEp(s.epEnd)
+        + '  (' + s.duration_sec.toFixed(1) + 's)">'
+        + s.shot_id.replace(/^s\d+e\d+_/, '') + '</div>';
+    });
+    html += '</div>';
+
+    // ── Per-shot stacked blocks (only shots with SFX items) ──
+    _sfxShotTimeline.forEach((s, i) => {
+      if (!s.sfx_items.length) return;
+      const col     = shotColors[i % shotColors.length];
+      const epStart = s.epStart;
+      const epEnd   = s.epEnd;
+      const shotDur = s.duration_sec;
+
+      html += '<div class="music-shot-block">'
+        // header: shot id + episode time range
+        + '<div class="music-shot-hdr" style="border-left:4px solid ' + col + '">'
+        + '<span class="music-shot-hdr-id">' + s.shot_id.replace(/^s\d+e\d+_/, '') + '</span>'
+        + '<span class="music-shot-hdr-ep">episode&nbsp;' + fmtEp(epStart) + ' \u2013 ' + fmtEp(epEnd)
+        + '&nbsp;(' + shotDur.toFixed(1) + 's)</span>'
+        + '</div>';
+
+      s.sfx_items.forEach(item => {
+        const iid      = item.item_id || '';
+        const safeIid  = iid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const selIdx   = _sfxSelected[iid];          // undefined = no selection
+        const t        = _sfxTiming[iid] || {};
+        const startWithin = t.start != null ? t.start : 0;
+        const endWithin   = t.end   != null ? t.end   : shotDur;
+        const dispStart   = (epStart + startWithin).toFixed(1);
+        const dispEnd     = (epStart + endWithin).toFixed(1);
+        const candidates  = (_sfxResults[iid] || {}).candidates || [];
+
+        // ── Candidate dropdown (mirrors music-shot-clip select) ──
+        html += '<div class="music-shot-clip">'
+          + '<select style="width:100%" onchange="_sfxShotOvrSelect(\'' + safeIid + '\',this.value)">'
+          + '<option value=""' + (selIdx === undefined ? ' selected' : '') + '>\u2014 no sfx \u2014 (' + iid + ')</option>';
+        candidates.forEach((c, idx) => {
+          const label = (c.title || '(untitled)') + '  ' + (c.duration_sec || 0).toFixed(1) + 's'
+            + (c.source_site ? '  [' + c.source_site + ']' : '');
+          html += '<option value="' + idx + '"' + (selIdx === idx ? ' selected' : '') + '>'
+            + label.replace(/"/g, '&quot;') + '</option>';
+        });
+        if (!candidates.length) {
+          html += '<option disabled>\u2014 run Search All SFX first \u2014</option>';
+        }
+        html += '</select></div>'
+
+        // ── Params: start / end (episode-absolute, identical layout to Music tab) ──
+          + '<div class="music-shot-params">'
+          + '<label title="Episode time when SFX begins (seconds)">\u25b6 start</label>'
+          + '<input type="number" step="0.1" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispStart + '"'
+          + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'start\',parseFloat(this.value)-' + epStart + ')"'
+          + ' style="width:64px">'
+          + '<label title="Episode time when SFX stops (seconds)">\u23f9 end</label>'
+          + '<input type="number" step="0.1" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispEnd + '"'
+          + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'end\',parseFloat(this.value)-' + epStart + ')"'
+          + ' style="width:64px">'
+          + '</div>';
+      });
+
+      html += '</div>';  // music-shot-block
+    });
+
+    wrap.innerHTML = '<div class="music-card">' + html + '</div>';
+    wrap.style.display = 'block';
+  }
+
   async function onSfxEpChange() {
     const val = document.getElementById('sfx-ep-select').value;
     if (!val) return;
@@ -4711,6 +4950,9 @@ placeholder="Enter your story here"></textarea>
     _sfxSlug = parts[0]; _sfxEpId = parts.slice(1).join('|');
     document.getElementById('sfx-btn-search').disabled = false;
     document.getElementById('sfx-status-bar').textContent = 'Episode selected. Loading previous results\u2026';
+    // Load shot timeline (ShotList + manifest) for Shot Overrides section
+    await _sfxLoadShotTimeline();
+    sfxRenderShotOverrides();
     // Try to load previously saved search results from disk
     await _sfxLoadExisting();
   }
@@ -4738,11 +4980,28 @@ placeholder="Enter your story here"></textarea>
       }
 
       _sfxResults  = saved.results;
-      _sfxSelected = saved.selected || {};
+      _sfxSelected = {};
+      _sfxTiming   = {};
       _sfxItems    = Object.values(_sfxResults).map(r => r.item);
 
-      // Render all cards
-      document.getElementById('sfx-body').innerHTML = '';
+      // Load confirmed selections + timing from SfxPlan.json (written by Save button)
+      try {
+        const rp = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
+                             + '&ep_id=' + encodeURIComponent(_sfxEpId)
+                             + '&file=assets/sfx/SfxPlan.json');
+        if (rp.ok) {
+          const plan = await rp.json();
+          (plan.sfx_entries || []).forEach(e => {
+            if (e.item_id && e.candidate_idx != null)
+              _sfxSelected[e.item_id] = e.candidate_idx;
+            if (e.item_id)
+              _sfxTiming[e.item_id] = { start: e.start_sec || 0, end: e.end_sec ?? null };
+          });
+        }
+      } catch(_) {}
+
+      // Render all cards (preserve sfx-overrides inside sfx-body)
+      _sfxClearCards();
       _sfxItems.forEach(item => {
         const res = _sfxResults[item.item_id || item.asset_id || ''];
         if (res) sfxRenderCard(res.item, res.candidates);
@@ -4751,8 +5010,13 @@ placeholder="Enter your story here"></textarea>
       document.getElementById('sfx-footer').style.display = 'flex';
       sfxUpdateCountLabel();
       document.getElementById('sfx-btn-search').disabled = false;
+      document.getElementById('sfx-btn-preview').disabled = false;
+      sfxUpdatePreviewLabel();
+      sfxRenderShotOverrides();  // re-render with loaded selections / timing
+      const nSel = Object.keys(_sfxSelected).length;
       statusBar.textContent =
         'Loaded ' + _sfxItems.length + ' items from previous search'
+        + (nSel ? ', ' + nSel + ' confirmed selection(s) restored' : '')
         + (saved.saved_at ? ' (' + new Date(saved.saved_at).toLocaleString() + ')' : '') + '.';
     } catch(e) {
       statusBar.textContent = 'No previous results found. Run a search to get started.';
@@ -4771,6 +5035,7 @@ placeholder="Enter your story here"></textarea>
           ep_id:    _sfxEpId,
           results:  _sfxResults,
           selected: _sfxSelected,
+          timing:   _sfxTiming,
         }),
       });
     } catch(e) {}
@@ -4783,7 +5048,7 @@ placeholder="Enter your story here"></textarea>
     }
     document.getElementById('sfx-btn-search').disabled = true;
     document.getElementById('sfx-status-bar').textContent = 'Loading manifest\u2026';
-    document.getElementById('sfx-body').innerHTML = '';
+    _sfxClearCards();
     document.getElementById('sfx-footer').style.display = 'none';
     _sfxItems = []; _sfxResults = {};
 
@@ -4872,7 +5137,19 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('sfx-footer').style.display = 'flex';
     sfxUpdateCountLabel();
     document.getElementById('sfx-btn-search').disabled = false;
+    document.getElementById('sfx-btn-preview').disabled = false;
+    sfxUpdatePreviewLabel();
+    sfxRenderShotOverrides();  // update ✓ badges after search populates selections
     _sfxSaveResults();  // persist to disk so results survive page reload
+  }
+
+  function _sfxClearCards() {
+    // Remove sfx-card-* elements from sfx-body while preserving sfx-overrides
+    const body = document.getElementById('sfx-body');
+    if (!body) return;
+    Array.from(body.children).forEach(el => {
+      if (el.id !== 'sfx-overrides') el.remove();
+    });
   }
 
   function sfxRenderCard(item, candidates) {
@@ -4914,6 +5191,22 @@ placeholder="Enter your story here"></textarea>
           <span class="sfx-cand-meta">${dur2}${stars?' '+stars:''}${dls?' '+dls:''}${lic?' '+lic:''}${src?' '+src:''}</span>
           <a class="sfx-link-btn" href="${linkUrl}" target="_blank" title="Open source page" onclick="event.stopPropagation()">\u2197</a>
         </div>`;
+        if (isSel) {
+          const t = _sfxTiming[itemId] || {};
+          const startVal = (t.start != null) ? t.start : 0;
+          const endVal = (t.end != null) ? t.end : '';
+          const safeItemId = itemId.replace(/'/g, "\\'");
+          rows += '<div class="sfx-timing-row" style="display:flex;align-items:center;gap:8px;'
+            + 'padding:4px 8px;font-size:0.78em;color:var(--dim);background:rgba(255,159,67,0.08)">'
+            + '<span>\u23f1</span>'
+            + '<label>Start: <input type="number" min="0" step="0.1" value="' + startVal + '"'
+            + ' data-sfx-timing-field="start" style="width:60px;padding:2px 4px"'
+            + ' onchange="sfxSetTiming(\'' + safeItemId + '\',\'start\',this.value)"> s</label>'
+            + '<label>End: <input type="number" min="0" step="0.1" value="' + endVal + '"'
+            + ' placeholder="auto" data-sfx-timing-field="end" style="width:60px;padding:2px 4px"'
+            + ' onchange="sfxSetTiming(\'' + safeItemId + '\',\'end\',this.value)"> s</label>'
+            + '<span style="opacity:0.6">(from shot start)</span></div>';
+        }
       });
     }
 
@@ -4947,6 +5240,7 @@ placeholder="Enter your story here"></textarea>
     _sfxPlayingUrl = null; _sfxPlayingBtn = null;
     if (_sfxSelected[itemId] === idx) {
       delete _sfxSelected[itemId];
+      delete _sfxTiming[itemId];   // clean up timing when deselected
     } else {
       _sfxSelected[itemId] = idx;
     }
@@ -4954,7 +5248,8 @@ placeholder="Enter your story here"></textarea>
     const res = _sfxResults[itemId];
     if (res) sfxRenderCard(res.item, res.candidates);
     sfxUpdateCountLabel();
-    _sfxSaveResults();  // persist selection change to disk
+    sfxUpdatePreviewLabel();
+    sfxRenderShotOverrides();  // update ✓ badges in Shot Overrides
   }
 
   function sfxUpdateCountLabel() {
@@ -5177,43 +5472,192 @@ placeholder="Enter your story here"></textarea>
     });
   }
 
-  async function sfxSaveAll() {
-    const keys = Object.keys(_sfxSelected);
-    if (!keys.length) { alert('No SFX selected.'); return; }
-    document.getElementById('sfx-confirm-msg').textContent = 'Saving\u2026';
-    let saved = 0, failed = 0;
-    for (const itemId of keys) {
-      const idx = _sfxSelected[itemId];
-      const res = _sfxResults[itemId];
-      if (!res) continue;
-      const cand = res.candidates[idx];
-      if (!cand) continue;
-      // AI-generated SFX are already saved to disk at generation time; no re-download needed.
-      if (cand.source_site === 'ai_gen') { saved++; continue; }
-      try {
-        const serverUrl = (document.getElementById('sfx-server-url').value || 'http://localhost:8200').trim();
-        const r = await fetch('/api/sfx_save', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            slug: _sfxSlug, ep_id: _sfxEpId, item_id: itemId,
-            server_url: serverUrl,
-            preview_url: cand.preview_url, source_site: cand.source_site,
-            attribution: {
-              source_id: cand.source_id || '',
-              author: cand.author || '',
-              license_summary: cand.license_summary || '',
-              license_url: cand.license_url || '',
-              asset_page_url: cand.asset_page_url || '',
-              attribution_text: cand.attribution_text || '',
-            }
-          })
+  // Auto-download any selected SFX files that are not yet on disk.
+  async function sfxGeneratePreview() {
+    if (!_sfxSlug || !_sfxEpId) return;
+    if (_sfxBusy) return;
+    _sfxBusy = true;
+    const btn = document.getElementById('sfx-btn-preview');
+    btn.disabled = true;
+    btn.textContent = '⏳ Generating…';
+    const includeMusic = document.getElementById('sfx-include-music').checked;
+    document.getElementById('sfx-preview-music-label').style.display = includeMusic ? '' : 'none';
+    try {
+      const r = await fetch('/api/sfx_preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          slug: _sfxSlug, ep_id: _sfxEpId,
+          selected: _sfxSelected,
+          include_music: includeMusic,
+          timing: _sfxTiming,
+        }),
+      });
+      const d = await r.json();
+      if (d.debug_log) console.log('[SFX server log]\n' + d.debug_log);
+      if (!r.ok || d.error) throw new Error(d.error || 'preview failed');
+      const previewPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
+        + '/assets/sfx/SfxPreviewPack/preview_audio.wav';
+      const audio = document.getElementById('sfx-preview-audio');
+      audio.src = '/serve_media?path=' + encodeURIComponent(previewPath) + '&t=' + Date.now();
+      document.getElementById('sfx-preview-wrap').style.display = '';
+      await sfxLoadTimeline();
+      // Log timeline so user can confirm SFX items were mixed in
+      if (_sfxTimeline && _sfxTimeline.sfx_items && _sfxTimeline.sfx_items.length) {
+        console.group('[SFX Preview] SFX mixed into preview (' + _sfxTimeline.sfx_items.length + ' items):');
+        _sfxTimeline.sfx_items.forEach(s => {
+          console.log('  ' + s.item_id + '  start=' + s.start_sec.toFixed(2) + 's  end=' + s.end_sec.toFixed(2) + 's  tag=' + (s.tag || ''));
         });
-        if (r.ok) saved++; else { failed++; console.warn('sfx_save failed', itemId, await r.text()); }
-      } catch(e) { failed++; }
+        console.groupEnd();
+      } else {
+        console.warn('[SFX Preview] No SFX items in timeline — files may have been skipped.');
+      }
+    } catch (err) {
+      alert('Preview error: ' + err.message);
+    } finally {
+      _sfxBusy = false;
+      btn.disabled = false;
+      sfxUpdatePreviewLabel();
     }
-    document.getElementById('sfx-confirm-msg').textContent =
-      saved + ' saved' + (failed ? ', ' + failed + ' failed' : '') + '.';
+  }
+
+  function sfxUpdatePreviewLabel() {
+    const btn = document.getElementById('sfx-btn-preview');
+    if (!btn) return;
+    const n = Object.keys(_sfxSelected || {}).length;
+    const music = document.getElementById('sfx-include-music')?.checked;
+    if (n === 0) {
+      btn.textContent = music ? '🔊 Preview (VO + Music)' : '🔊 Preview (VO only)';
+    } else {
+      btn.textContent = '🔊 Generate Preview';
+    }
+  }
+
+  let _sfxCursorRaf = null;
+
+  async function sfxLoadTimeline() {
+    const tlPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
+      + '/assets/sfx/SfxPreviewPack/timeline.json';
+    try {
+      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
+      if (!r.ok) return;
+      _sfxTimeline = await r.json();
+      sfxRenderTimeline();
+    } catch (e) { console.warn('timeline load failed', e); }
+  }
+
+  function sfxRenderTimeline() {
+    const tl = _sfxTimeline;
+    if (!tl || !tl.total_dur_sec) return;
+    const totalDur = tl.total_dur_sec;
+    const pct = (sec) => (sec / totalDur * 100).toFixed(3) + '%';
+    const w   = (s, e) => (Math.max(0, (e - s) / totalDur * 100)).toFixed(3) + '%';
+
+    const shotsDiv = document.getElementById('sfx-tl-shots');
+    shotsDiv.innerHTML = '';
+    let prevSceneId = null;
+    for (const sh of (tl.shots || [])) {
+      const absStart = sh.offset_sec;
+      const isScene = prevSceneId !== null && sh.scene_id !== prevSceneId;
+      const line = document.createElement('div');
+      line.style.cssText = 'position:absolute;top:0;bottom:0;width:'
+        + (isScene ? '2px' : '1px') + ';background:'
+        + (isScene ? 'var(--dim)' : 'rgba(128,128,128,0.3)')
+        + ';left:' + pct(absStart);
+      line.title = sh.shot_id + (isScene ? ' (scene break)' : '');
+      shotsDiv.appendChild(line);
+      prevSceneId = sh.scene_id;
+    }
+
+    const voDiv = document.getElementById('sfx-tl-vo');
+    voDiv.innerHTML = '';
+    for (const v of (tl.vo_items || [])) {
+      const el = document.createElement('div');
+      el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
+        + 'background:#4a9eff;opacity:0.85;left:' + pct(v.start_sec) + ';width:' + w(v.start_sec, v.end_sec);
+      el.title = v.item_id + ' (' + v.speaker_id + ')';
+      voDiv.appendChild(el);
+    }
+
+    const sfxDiv = document.getElementById('sfx-tl-sfx');
+    sfxDiv.innerHTML = '';
+    for (const s of (tl.sfx_items || [])) {
+      const el = document.createElement('div');
+      el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
+        + 'background:#ff9f43;opacity:0.85;left:' + pct(s.start_sec) + ';width:' + w(s.start_sec, s.end_sec);
+      el.title = s.item_id + ': ' + (s.tag || '');
+      sfxDiv.appendChild(el);
+    }
+
+    const musDiv = document.getElementById('sfx-tl-music');
+    musDiv.innerHTML = '';
+    for (const m of (tl.music_items || [])) {
+      const el = document.createElement('div');
+      el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
+        + 'background:#2ecc71;opacity:0.7;left:' + pct(m.start_sec) + ';width:' + w(m.start_sec, m.end_sec);
+      el.title = m.item_id + ': ' + (m.music_mood || '');
+      musDiv.appendChild(el);
+    }
+
+    const tlDiv = document.getElementById('sfx-timeline');
+    tlDiv.onclick = (e) => {
+      const rect = tlDiv.getBoundingClientRect();
+      const ratio = (e.clientX - rect.left) / rect.width;
+      document.getElementById('sfx-preview-audio').currentTime = ratio * totalDur;
+    };
+
+    if (_sfxCursorRaf) cancelAnimationFrame(_sfxCursorRaf);
+    const audio  = document.getElementById('sfx-preview-audio');
+    const cursor = document.getElementById('sfx-tl-cursor');
+    function tick() {
+      if (audio && cursor) {
+        cursor.style.left = (audio.currentTime / totalDur * 100).toFixed(2) + '%';
+      }
+      _sfxCursorRaf = requestAnimationFrame(tick);
+    }
+    tick();
+  }
+
+  function sfxSetTiming(itemId, field, value) {
+    if (!_sfxTiming[itemId]) _sfxTiming[itemId] = { start: 0, end: null };
+    if (field === 'start') {
+      _sfxTiming[itemId].start = value === '' ? 0 : Math.max(0, parseFloat(value) || 0);
+    } else {
+      const v = parseFloat(value);
+      _sfxTiming[itemId].end = (isNaN(v) || value === '') ? null : Math.max(0, v);
+    }
+    const t = _sfxTiming[itemId];
+    if (t.end !== null && t.start >= t.end) {
+      t.end = null;
+      const card = document.getElementById('sfx-card-' + itemId);
+      if (card) {
+        const endInput = card.querySelector('input[data-sfx-timing-field="end"]');
+        if (endInput) { endInput.value = ''; endInput.placeholder = 'auto'; }
+      }
+    }
+  }
+
+  async function sfxSaveAll() {
+    const msgEl = document.getElementById('sfx-confirm-msg');
+    msgEl.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/sfx_save_all', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          slug: _sfxSlug, ep_id: _sfxEpId,
+          selected: _sfxSelected,
+          timing: _sfxTiming,
+        })
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || 'save failed');
+      msgEl.textContent = d.saved + ' saved' + (d.failed ? ', ' + d.failed + ' failed' : '') + '. SfxPlan.json written.';
+      await _sfxSaveResults();  // persist selections+timing to disk now that user confirmed
+    } catch(e) {
+      msgEl.textContent = 'Error: ' + e.message;
+      console.error('[SFX] sfxSaveAll error', e);
+    }
   }
 
   function sfxReset() {
@@ -5224,6 +5668,7 @@ placeholder="Enter your story here"></textarea>
       if (res) sfxRenderCard(res.item, res.candidates);
     });
     sfxUpdateCountLabel();
+    sfxRenderShotOverrides();  // clear ✓ badges
     document.getElementById('sfx-confirm-msg').textContent = '';
   }
 
@@ -9089,27 +9534,6 @@ placeholder="Enter your story here"></textarea>
     _musicRenderBody();
   }
 
-  // Auto-save overrides to MusicPlan.json (silently, no UI feedback)
-  async function _musicAutoSave() {
-    if (!_musicSlug || !_musicEpId) return;
-    try {
-      const plan = {
-        schema_id: 'MusicPlan',
-        schema_version: '1.0',
-        loop_selections: _musicLoopSel,
-        shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id),
-      };
-      if (Object.keys(_musicTrackVolumes).length)
-        plan.track_volumes = _musicTrackVolumes;
-      if (Object.keys(_musicClipVolumes).length)
-        plan.clip_volumes = _musicClipVolumes;
-      await fetch('/api/music_plan_save', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ slug: _musicSlug, ep_id: _musicEpId, plan: plan }),
-      });
-    } catch (_) {}
-  }
 
   function _musicSetClipVolume(key, val) {
     val = parseInt(val, 10);
@@ -9124,14 +9548,12 @@ placeholder="Enter your story here"></textarea>
         a.volume = Math.min(1, Math.max(0, gain));
       }
     });
-    _musicAutoSave();
   }
 
   function _musicSetTrackVolume(stem, val) {
     val = parseInt(val, 10);
     if (isNaN(val) || val === 0) { delete _musicTrackVolumes[stem]; }
     else                         { _musicTrackVolumes[stem] = val; }
-    _musicAutoSave();
   }
 
   // ── Build loop toggle controls HTML for one Shot Override row ─────────────────
@@ -9206,7 +9628,6 @@ placeholder="Enter your story here"></textarea>
         crossfade_ms: 100,
       };
     }
-    _musicAutoSave();
     _musicRenderBody();
   }
 
@@ -9216,7 +9637,6 @@ placeholder="Enter your story here"></textarea>
     const dur = _musicLoopSel[itemId].duration_sec || 20;
     ms = Math.max(0, Math.min(ms, Math.floor(dur * 500 - 1)));
     _musicLoopSel[itemId].crossfade_ms = ms;
-    _musicAutoSave();
   }
 
   async function musicGenerateReview() {
@@ -9256,9 +9676,6 @@ placeholder="Enter your story here"></textarea>
       const d2 = await r2.json();
       if (!r2.ok || d2.error) throw new Error(d2.error || 'review pack failed');
       _musicTimeline = d2.timeline || null;
-
-      // Auto-save current overrides to MusicPlan.json so they survive page refresh
-      await _musicAutoSave();
 
       const nTracks = Object.keys(_musicCandidates.tracks || {}).length;
       _musicSetStatus('Review ready — ' + nTracks + ' tracks analysed. Listen to preview and adjust below.', false);
@@ -9636,7 +10053,6 @@ placeholder="Enter your story here"></textarea>
     // Empty clipId means "no clip" — clear the override entirely
     if (!clipId) {
       delete _musicOverrides[itemId];
-      _musicAutoSave();
       return;
     }
     if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
@@ -9664,8 +10080,6 @@ placeholder="Enter your story here"></textarea>
       _musicOverrides[itemId].clip_start_sec    = parseFloat(m[2]);
       _musicOverrides[itemId].clip_duration_sec = parseFloat(m[3]) - parseFloat(m[2]);
     }
-    // Persist immediately so a page reload or next Generate sees the selection
-    _musicAutoSave();
   }
 
   function _musicSetOverride(itemId, field, value) {
@@ -13765,6 +14179,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "assets/music/user_cut_clips.json",
                                        "assets/meta/gen_music_clip_results.json",
                                        "assets/sfx/sfx_search_results.json",
+                                       "assets/sfx/SfxPlan.json",
                                        "AssetManifest_draft.shared.json"}
             params   = parse_qs(parsed.query)
             slug     = params.get("slug", [""])[0].strip()
@@ -15462,6 +15877,292 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── SFX: download all selected SFX + write SfxPlan.json (POST /api/sfx_save_all) ──
+        elif self.path == "/api/sfx_save_all":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                payload  = json.loads(self.rfile.read(length))
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                selected = payload.get("selected", {})   # {item_id: candidate_idx}
+                timing   = payload.get("timing", {})     # {item_id: {start, end}}
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+
+                ep_dir  = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                sfx_dir = os.path.join(ep_dir, "assets", "sfx")
+
+                # Load search results to get preview_urls
+                results_path = os.path.join(sfx_dir, "sfx_search_results.json")
+                if not os.path.isfile(results_path):
+                    raise FileNotFoundError("sfx_search_results.json not found — run search first")
+                with open(results_path, encoding="utf-8") as _f:
+                    _sr = json.load(_f)
+                all_results = _sr.get("results", {})
+
+                # Load manifest to get shot_id per item
+                import glob as _gl2
+                _manifests = _gl2.glob(os.path.join(ep_dir, "AssetManifest_merged.*.json"))
+                _sfx_shot_map = {}   # item_id → shot_id
+                if _manifests:
+                    with open(sorted(_manifests)[0], encoding="utf-8") as _mf:
+                        _manifest = json.load(_mf)
+                    for _si in _manifest.get("sfx_items", []):
+                        _sfx_shot_map[_si.get("item_id", "")] = _si.get("shot_id", "")
+
+                import urllib.request as _ul_req3
+                from urllib.parse import urlparse as _urlparse3
+                saved = 0
+                failed = 0
+                sfx_plan_entries = []
+
+                for item_id, idx in selected.items():
+                    try:
+                        idx = int(idx)
+                    except (TypeError, ValueError):
+                        continue
+                    cands = all_results.get(item_id, {}).get("candidates", [])
+                    if idx < 0 or idx >= len(cands):
+                        continue
+                    cand = cands[idx]
+                    preview_url = cand.get("preview_url", "")
+                    source_site = cand.get("source_site", "")
+
+                    # AI-generated: already on disk, just find path
+                    if source_site == "ai_gen":
+                        _local = _resolve_sfx_local_path(ep_dir, item_id, cand)
+                        if _local:
+                            t = timing.get(item_id, {})
+                            sfx_plan_entries.append({
+                                "item_id":      item_id,
+                                "shot_id":      _sfx_shot_map.get(item_id, ""),
+                                "source_file":  _local,
+                                "candidate_idx": idx,
+                                "start_sec":    float(t.get("start", 0) or 0),
+                                "end_sec":      t.get("end"),
+                            })
+                            saved += 1
+                        continue
+
+                    if not preview_url:
+                        failed += 1
+                        continue
+
+                    # Download from CDN directly
+                    _ext = os.path.splitext(_urlparse3(preview_url).path)[1] or ".mp3"
+                    item_dir  = os.path.join(sfx_dir, item_id)
+                    os.makedirs(item_dir, exist_ok=True)
+                    dest_path = os.path.join(item_dir, item_id + _ext)
+                    try:
+                        _req3 = _ul_req3.Request(preview_url)
+                        _req3.add_header("User-Agent", "Mozilla/5.0")
+                        with _ul_req3.urlopen(_req3, timeout=60) as _resp3:
+                            with open(dest_path, "wb") as _fout3:
+                                _fout3.write(_resp3.read())
+                        _sz = os.path.getsize(dest_path)
+                        print(f"  [SFX] Saved {item_id} → {dest_path} ({_sz} bytes)")
+                        t = timing.get(item_id, {})
+                        sfx_plan_entries.append({
+                            "item_id":      item_id,
+                            "shot_id":      _sfx_shot_map.get(item_id, ""),
+                            "source_file":  dest_path,
+                            "candidate_idx": idx,
+                            "start_sec":    float(t.get("start", 0) or 0),
+                            "end_sec":      t.get("end"),
+                        })
+                        saved += 1
+                    except Exception as _dl_err:
+                        print(f"  [SFX] Download FAILED {item_id}: {_dl_err}")
+                        failed += 1
+
+                # Write SfxPlan.json
+                sfx_plan = {
+                    "schema_id": "SfxPlan",
+                    "schema_version": "1.0",
+                    "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "sfx_entries": sfx_plan_entries,
+                }
+                plan_path = os.path.join(sfx_dir, "SfxPlan.json")
+                with open(plan_path, "w", encoding="utf-8") as _pf:
+                    json.dump(sfx_plan, _pf, indent=2, ensure_ascii=False)
+                print(f"  [SFX] SfxPlan.json written: {len(sfx_plan_entries)} entries")
+                _json_resp(self, {"ok": True, "saved": saved, "failed": failed,
+                                  "plan_path": plan_path})
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 500)
+
+        # ── SFX Preview: render VO + SFX + optional Music preview WAV ───────
+        elif self.path == "/api/sfx_preview":
+            try:
+                payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                slug   = payload.get("slug", "").strip()
+                ep_id  = payload.get("ep_id", "").strip()
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                selected      = payload.get("selected", {})       # { item_id: candidate_idx }
+                include_music = payload.get("include_music", False)
+                timing        = payload.get("timing", {})          # { item_id: {start, end} }
+
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+
+                # ── Find merged manifest — inline ──────────────────────────────
+                import glob as _glob_mod
+                import re as _re_sfx
+                merged_manifests = _glob_mod.glob(
+                    os.path.join(ep_dir, "AssetManifest_merged.*.json"))
+                if not merged_manifests:
+                    raise FileNotFoundError(
+                        "No AssetManifest_merged.*.json found. Run stages 5+ first.")
+                _primary_locale = "en"
+                _vars_file = os.path.join(ep_dir, "pipeline_vars.sh")
+                if os.path.isfile(_vars_file):
+                    with open(_vars_file, encoding="utf-8") as _vf:
+                        _m = _re_sfx.search(
+                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                            _vf.read())
+                        if _m:
+                            _primary_locale = _m.group(1).strip()
+                _primary_manifest = os.path.join(ep_dir, f"AssetManifest_merged.{_primary_locale}.json")
+                if os.path.isfile(_primary_manifest):
+                    manifest_path = _primary_manifest
+                else:
+                    manifest_path = sorted(merged_manifests)[0]
+                    print(f"[WARN] Primary manifest for locale '{_primary_locale}' not found, "
+                          f"falling back to {os.path.basename(manifest_path)}")
+
+                # ── Build sfx_selections dict from selected + sfx_search_results.json ──
+                sfx_results_path = os.path.join(ep_dir, "assets", "sfx", "sfx_search_results.json")
+                sfx_sel = {}
+                if os.path.isfile(sfx_results_path):
+                    with open(sfx_results_path, encoding="utf-8") as f:
+                        saved = json.load(f)
+                    results = saved.get("results", {})
+                    for item_id, idx in selected.items():
+                        # Coerce idx to int (JSON may deliver strings)
+                        try:
+                            idx = int(idx)
+                        except (TypeError, ValueError):
+                            continue
+                        cands = results.get(item_id, {}).get("candidates", [])
+                        if idx < 0 or idx >= len(cands):
+                            continue
+                        _item_timing = timing.get(item_id, {})
+                        sfx_sel[item_id] = {
+                            "preview_url": cands[idx].get("preview_url", ""),
+                            "source_file": _resolve_sfx_local_path(ep_dir, item_id, cands[idx]),
+                            "start": _item_timing.get("start", 0),
+                            "end":   _item_timing.get("end", None),
+                        }
+
+                # ── Fallback: direct-download files that _resolve_sfx_local_path missed ──
+                # (e.g. files too large for /sfx_save but still servable by media server)
+                import urllib.request as _ul_req
+                _temp_dl_paths = []   # track temp files to clean up after preview
+                # Use ep_dir/assets/sfx/tmp/ for temp downloads so they're inside pipe_root
+                # (sfx_preview_pack.py path security check requires paths under PIPE_DIR)
+                _sfx_tmp_dir = os.path.join(ep_dir, "assets", "sfx", "_tmp_dl")
+                os.makedirs(_sfx_tmp_dir, exist_ok=True)
+                for _iid, _sel_entry in sfx_sel.items():
+                    if _sel_entry.get("source_file") is None:
+                        _pu = _sel_entry.get("preview_url", "")
+                        print(f"  [SFX] source_file=None for {_iid}, preview_url={_pu!r}")
+                        if _pu:
+                            try:
+                                # Preserve original extension (MP3, WAV, etc.) so librosa can detect format
+                                from urllib.parse import urlparse as _urlparse2
+                                _url_path = _urlparse2(_pu).path
+                                _ext = os.path.splitext(_url_path)[1] or ".mp3"
+                                import tempfile as _tf2
+                                _tfd, _tp = _tf2.mkstemp(suffix=_ext, prefix=f"sfx_dl_{_iid}_",
+                                                          dir=_sfx_tmp_dir)
+                                os.close(_tfd)
+                                # Use Request with headers in case media server requires auth
+                                _dl_req = _ul_req.Request(_pu)
+                                _dl_req.add_header("User-Agent", "Mozilla/5.0")
+                                try:
+                                    _api_key = os.environ.get("MEDIA_API_KEY", "")
+                                    if _api_key and ("localhost" in _pu or "127.0.0.1" in _pu):
+                                        _dl_req.add_header("X-Api-Key", _api_key)
+                                except Exception:
+                                    pass
+                                with _ul_req.urlopen(_dl_req, timeout=30) as _resp:
+                                    with open(_tp, "wb") as _tf_out:
+                                        _tf_out.write(_resp.read())
+                                _file_sz = os.path.getsize(_tp)
+                                _sel_entry["source_file"] = _tp
+                                _temp_dl_paths.append(_tp)
+                                print(f"  [SFX] Direct download OK for {_iid}: {_tp} ({_file_sz} bytes, ext={_ext})")
+                            except Exception as _de:
+                                print(f"  [SFX] Direct download FAILED for {_iid}: {type(_de).__name__}: {_de}")
+
+                # ── Log sfx_sel summary before writing ──
+                print(f"  [SFX] sfx_sel has {len(sfx_sel)} item(s):")
+                for _iid, _se in sfx_sel.items():
+                    _sf = _se.get("source_file")
+                    _pu = _se.get("preview_url", "")
+                    _sf_exists = os.path.isfile(_sf) if _sf else False
+                    print(f"    {_iid}: source_file={_sf!r} exists={_sf_exists} url={_pu!r}")
+
+                # ── Write sfx_selections temp file ──
+                import tempfile as _tempfile_sfx
+                sel_fd, sel_path = _tempfile_sfx.mkstemp(suffix=".json", prefix="sfx_sel_")
+                with os.fdopen(sel_fd, "w") as f:
+                    json.dump(sfx_sel, f)
+
+                # ── Per-episode lock ──────────────────────────────────────────
+                _ep_key = f"{slug}/{ep_id}"
+                if _ep_key not in _sfx_preview_locks:
+                    _sfx_preview_locks[_ep_key] = threading.Lock()
+                _lock = _sfx_preview_locks[_ep_key]
+                if not _lock.acquire(blocking=False):
+                    if os.path.exists(sel_path):
+                        os.unlink(sel_path)
+                    _json_resp(self, {"error": "Preview already generating for this episode"}, 409)
+                    return
+
+                # ── Build command ─────────────────────────────────────────────
+                cmd = ["python3", os.path.join(PIPE_DIR, "code", "http", "sfx_preview_pack.py"),
+                       "--manifest", manifest_path,
+                       "--sfx-selections", sel_path]
+                if include_music:
+                    cmd.append("--include-music")
+
+                _preview_output = os.path.join(
+                    ep_dir, "assets", "sfx", "SfxPreviewPack", "preview_audio.wav")
+
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True,
+                                            timeout=180, cwd=PIPE_DIR)
+                    # Always print stdout/stderr for debugging
+                    if result.stdout:
+                        print(f"  [SFX subprocess stdout]\n{result.stdout[-3000:]}")
+                    if result.stderr:
+                        print(f"  [SFX subprocess stderr]\n{result.stderr[-1000:]}")
+                    if result.returncode != 0:
+                        if os.path.exists(_preview_output):
+                            os.unlink(_preview_output)
+                        raise RuntimeError(result.stderr[-2000:] if result.stderr else "process failed")
+                except subprocess.TimeoutExpired:
+                    if os.path.exists(_preview_output):
+                        os.unlink(_preview_output)
+                    raise RuntimeError(
+                        "SFX preview timed out after 180s; episode may be too large "
+                        "or assets may be missing. Check timeline.json for debug info.")
+                finally:
+                    if os.path.exists(sel_path):
+                        os.unlink(sel_path)
+                    for _tp in _temp_dl_paths:
+                        if os.path.exists(_tp):
+                            os.unlink(_tp)
+                    _lock.release()
+
+                # Return subprocess logs in response for browser-side debugging
+                _debug_log = (result.stdout or "")[-3000:]
+                _json_resp(self, {"ok": True, "debug_log": _debug_log})
+
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 400)
+
         # ── AI SFX Generate: submit generation job to AI server ──────────────
         elif self.path == "/api/ai_sfx_generate":
             try:
@@ -16595,6 +17296,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/media_batches", "/api/media_batch_status",
                   "/api/media_batch", "/api/media_batch_resume", "/api/media_confirm",
                   "/api/sfx_search", "/api/sfx_save", "/api/sfx_results_save",
+                  "/api/sfx_save_all", "/api/sfx_preview",
                   "/api/ai_sfx_generate", "/api/ai_sfx_save",
                   "/api/ai_images", "/api/ai_job_status",
                   "/api/serve_media_file",

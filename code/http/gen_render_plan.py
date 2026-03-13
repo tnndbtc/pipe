@@ -235,15 +235,16 @@ def build_final(
 # ── RenderPlan shot builder ───────────────────────────────────────────────────
 
 def build_shot(
-    shot:           dict,
-    media_map:      dict[str, dict],
-    vo_map:         dict[str, dict],
-    music_map:      dict[str, dict],
-    override_map:   dict[str, float],
-    story_format:   str = "episodic",
-    ref_dur_map:    dict | None = None,
-    tts_chunk_info: dict | None = None,
-    scene_tails:    dict | None = None,
+    shot:              dict,
+    media_map:         dict[str, dict],
+    vo_map:            dict[str, dict],
+    music_map:         dict[str, dict],
+    override_map:      dict[str, float],
+    story_format:      str = "episodic",
+    ref_dur_map:       dict | None = None,
+    tts_chunk_info:    dict | None = None,
+    scene_tails:       dict | None = None,
+    sfx_plan_by_shot:  dict | None = None,
 ) -> dict:
     """
     Build one RenderedShot entry for RenderPlan.shots[].
@@ -495,6 +496,9 @@ def build_shot(
             duration_ms = en_dur_ms
     # ── end EN reference floor ────────────────────────────────────────────────
 
+    # sfx_plan_entries: user-selected SFX from SfxPlan.json (with timing)
+    sfx_plan_entries = (sfx_plan_by_shot or {}).get(shot_id, [])
+
     rendered: dict = {
         "shot_id":                shot_id,
         "scene_id":               scene_id,
@@ -505,6 +509,7 @@ def build_shot(
         "character_asset_ids":    character_asset_ids,
         "vo_lines":               vo_lines,
         "sfx_asset_ids":          sfx_asset_ids,
+        "sfx_plan_entries":       sfx_plan_entries,        # from SfxPlan.json
         "music_asset_id":         music_asset_id,
     }
     rendered.update(music_extra)
@@ -540,6 +545,24 @@ def build_plan(
         tts_chunk_info = load_tts_chunk_info(episode_dir)
         if tts_chunk_info:
             print(f"  [CHUNK-DEFERRED] {len(tts_chunk_info)} items have chunk WAV references")
+
+    # Load SfxPlan.json — user-selected SFX with timing from the SFX tab.
+    # Keyed by shot_id so build_shot() can inject sfx_plan_entries per shot.
+    sfx_plan_by_shot: dict[str, list] = {}
+    if episode_dir is not None:
+        sfx_plan_path = episode_dir / "assets" / "sfx" / "SfxPlan.json"
+        if sfx_plan_path.exists():
+            try:
+                sfx_plan = json.load(sfx_plan_path.open(encoding="utf-8"))
+                for entry in sfx_plan.get("sfx_entries", []):
+                    sid = entry.get("shot_id", "")
+                    if sid:
+                        sfx_plan_by_shot.setdefault(sid, []).append(entry)
+                n_sfx_entries = sum(len(v) for v in sfx_plan_by_shot.values())
+                print(f"  [SFX-PLAN] {n_sfx_entries} entries across "
+                      f"{len(sfx_plan_by_shot)} shot(s)")
+            except Exception as e:
+                print(f"  [WARN] Could not load SfxPlan.json: {e}", file=sys.stderr)
 
     # resolved_assets: flat view of AssetManifest_final.items[]
     resolved_assets = [
@@ -582,7 +605,7 @@ def build_plan(
     shots = [
         build_shot(shot, media_map, vo_map, music_map, override_map,
                    story_format, ref_dur_map or {}, tts_chunk_info,
-                   scene_tails)
+                   scene_tails, sfx_plan_by_shot)
         for shot in shotlist.get("shots", [])
     ]
 

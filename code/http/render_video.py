@@ -611,6 +611,34 @@ def render_shot(
         )
         all_audio.append(f"[{lbl}]")
 
+    # ── 5b. SFX plan entries (user-selected SFX with timing from SFX tab) ────
+    # sfx_plan_entries each carry source_file (local path), start_sec (delay
+    # from shot start), and optionally end_sec (trim length).
+    sfx_plan_amp = 10 ** (SFX_DB / 20.0)
+    for sp_i, sp_entry in enumerate(shot.get("sfx_plan_entries", [])):
+        sp_path_str = sp_entry.get("source_file", "")
+        if not sp_path_str:
+            continue
+        sp_path = Path(sp_path_str)
+        if not sp_path.exists():
+            print(f"  [WARN] SFX plan entry missing: {sp_path_str}")
+            continue
+        sp_start_sec = float(sp_entry.get("start_sec") or 0.0)
+        sp_end_sec   = sp_entry.get("end_sec")
+        sp_idx       = add_input([], str(sp_path))
+        lbl          = f"sfxp{sp_i}"
+        delay_ms_sp  = round(sp_start_sec * 1000)
+        filt = (
+            f"[{sp_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"volume={sfx_plan_amp:.6f}"
+        )
+        if sp_end_sec is not None and float(sp_end_sec) > sp_start_sec:
+            trim_dur = float(sp_end_sec) - sp_start_sec
+            filt += f",atrim=duration={trim_dur:.3f}"
+        filt += f",adelay={delay_ms_sp}|{delay_ms_sp}[{lbl}]"
+        filter_parts.append(filt)
+        all_audio.append(f"[{lbl}]")
+
     # ── 6. Music audio stream ──────────────────────────────────────────────
     music_id   = shot.get("music_asset_id")
     music_info = asset_map.get(music_id, {}) if music_id else {}
