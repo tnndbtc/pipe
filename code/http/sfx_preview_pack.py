@@ -539,10 +539,18 @@ def main():
     trim_samples = min(int((last_vo_sec + 5.0) * SAMPLE_RATE), n_samples)
     buf = buf[:trim_samples]
 
-    # Peak normalize
-    peak = np.abs(buf).max()
-    if peak > 1.0:
-        buf /= peak
+    # Loudnorm pass targeting −16 LUFS
+    try:
+        import pyloudnorm as pyln
+        _meter = pyln.Meter(SAMPLE_RATE)
+        _loud = _meter.integrated_loudness(buf)
+        if _loud is not None and not (_loud != _loud) and _loud > -70.0:  # finite and not silence
+            buf = pyln.normalize.loudness(buf, _loud, -16.0)
+    except Exception:
+        # Fallback: peak limiter at -1 dBFS
+        _peak = float(abs(buf).max()) if len(buf) else 0.0
+        if _peak > 0.891:
+            buf = buf * (0.891 / _peak)
 
     # Write timeline.json FIRST (survives crash)
     tl_path = output_dir / "timeline.json"
@@ -563,7 +571,7 @@ def main():
     tmp_path = output_path.with_suffix(".tmp.wav")
     sf.write(str(tmp_path), buf_out, SAMPLE_RATE, subtype="PCM_16")
     tmp_path.rename(output_path)
-    print(f"  [OK] {output_path}  ({peak:.3f} peak, {len(buf)/SAMPLE_RATE:.2f}s)")
+    print(f"  [OK] {output_path}  ({len(buf)/SAMPLE_RATE:.2f}s)")
 
 
 if __name__ == "__main__":

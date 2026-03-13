@@ -2098,6 +2098,25 @@ HTML = r"""<!DOCTYPE html>
     margin: 2px 2px 0 0;
   }
 
+  /* ── Approval dimming (FIX E) ── */
+  .step-approved {
+    opacity: 0.45;
+    filter: grayscale(60%);
+  }
+  .step-approved:hover {
+    opacity: 0.75;
+    filter: none;
+  }
+  .step-ready-to-render {
+    border: 2px solid #2ecc71 !important;
+    box-shadow: 0 0 6px #2ecc71aa;
+  }
+  #pipe-approvals-banner {
+    font-size: 0.78em; font-weight: 700; color: #2ecc71;
+    background: #2ecc7115; border: 1px solid #2ecc7140;
+    border-radius: 5px; padding: 5px 12px; margin: 6px 0 2px;
+  }
+
   /* ── Story Input tab bar ── */
   .story-tab-bar {
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -3076,6 +3095,9 @@ placeholder="Enter your story here"></textarea>
     </select>
     <button style="background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.76em;padding:5px 12px;cursor:pointer" onclick="refreshPipeline()">↺ Refresh</button>
   </div>
+
+  <!-- approvals banner (FIX E) — shown when all approvals complete -->
+  <div id="pipe-approvals-banner" style="display:none"></div>
 
   <!-- scrollable step list -->
   <div class="pipe-body" id="pipe-body">
@@ -10107,10 +10129,16 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('music-btn-confirm').disabled = true;
     document.getElementById('music-confirm-msg').textContent = 'Saving MusicPlan.json …';
     try {
+      // Strip source_stem (UI-only field) before persisting — not allowed by MusicPlan schema
+      const loopSelClean = {};
+      for (const [k, v] of Object.entries(_musicLoopSel)) {
+        const { source_stem: _dropped, ...rest } = v;
+        loopSelClean[k] = rest;
+      }
       const plan = {
         schema_id: 'MusicPlan',
         schema_version: '1.0',
-        loop_selections: _musicLoopSel,
+        loop_selections: loopSelClean,
         shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id),
       };
       if (Object.keys(_musicTrackVolumes).length)
@@ -10124,9 +10152,13 @@ placeholder="Enter your story here"></textarea>
       });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || 'save failed');
-      document.getElementById('music-confirm-msg').textContent =
-        '✔ MusicPlan.json saved → ' + (d.path || 'assets/music/MusicPlan.json')
-        + '. Resume pipeline with Stage 9 to apply.';
+      if (d.snapshot_exists) {
+        document.getElementById('music-confirm-msg').textContent =
+          '✔ MusicPlan.json + MusicApprovalSnapshot.json saved — ready to render (steps 10 → 11).';
+      } else {
+        document.getElementById('music-confirm-msg').textContent =
+          '✔ MusicPlan.json saved — ⚠ Generate Music Review first to save audio snapshot, then Confirm again.';
+      }
     } catch (err) {
       document.getElementById('music-confirm-msg').textContent = 'Error: ' + err.message;
     } finally {
@@ -10992,17 +11024,44 @@ placeholder="Enter your story here"></textarea>
     // Skip full DOM re-render when nothing has changed — prevents collapsing
     // expanded detail panels and resetting video tab state on every 5-second poll.
     const _fp = JSON.stringify({
-      llm:     status.llm_stages,
-      locale:  status.locale_steps,
-      shared:  status.shared_steps,
-      videos:  status.ready_videos,
-      dubbed:  status.ready_dubbed,
-      running: pipeRunning,   // client-side: forces re-render when run starts/stops
-      doneset: Array.from(_stagesDoneInCurrentRun).sort()  // forces re-render as stages complete
+      llm:        status.llm_stages,
+      locale:     status.locale_steps,
+      shared:     status.shared_steps,
+      videos:     status.ready_videos,
+      dubbed:     status.ready_dubbed,
+      approvals:  status.approvals,
+      rpStale:    status.render_plan_stale,   // stale guard included in fingerprint
+      running:  pipeRunning,   // client-side: forces re-render when run starts/stops
+      doneset:  Array.from(_stagesDoneInCurrentRun).sort()  // forces re-render as stages complete
     });
     if (_fp === _lastStatusFingerprint) return;
     _lastStatusFingerprint = _fp;
     _invalidateDiagnoseIfStale();   // clear cached diagnosis when pipeline state changes
+
+    // ── Approval status (FIX E) ───────────────────────────────────────────────
+    const _approvals      = status.approvals || {};
+    const _rpStale        = status.render_plan_stale || {};   // locale → bool
+    const _anyRpStale     = Object.values(_rpStale).some(Boolean);
+    const _appBanner      = document.getElementById('pipe-approvals-banner');
+    if (_anyRpStale) {
+      // VO was re-approved after RenderPlan was generated — SRT timestamps are stale
+      _appBanner.innerHTML =
+        '⚠️ VO was approved after the last RenderPlan — ' +
+        '<strong>re-run step 10 (gen_render_plan)</strong> before rendering, ' +
+        'or SRT timestamps and shot durations will be stale.';
+      _appBanner.style.display = '';
+      _appBanner.style.background = '#3a1a00';
+      _appBanner.style.color = '#ffaa44';
+    } else if (_approvals.all) {
+      _appBanner.textContent = '✓ All approvals complete — ready to render (steps 10 → 11)';
+      _appBanner.style.display = '';
+      _appBanner.style.background = '';
+      _appBanner.style.color = '';
+    } else {
+      _appBanner.style.display = 'none';
+      _appBanner.style.background = '';
+      _appBanner.style.color = '';
+    }
 
     const body = document.getElementById('pipe-body');
     body.innerHTML = '';
@@ -11158,6 +11217,14 @@ placeholder="Enter your story here"></textarea>
           const done = (sharedStepsMap[step] || {}).done || false;
           const row = document.createElement('div');
           row.className = 'pipe-substep-row';
+          // ── approval dimming (FIX E) ──────────────────────────────────────
+          const _sharedApproved =
+            (step === 'gen_music_clip' && _approvals.music) ||
+            (step === 'gen_sfx'        && _approvals.sfx);
+          if (_sharedApproved) {
+            row.classList.add('step-approved');
+            row.title = 'Already approved — click to re-run if content changes';
+          }
           row.appendChild(Object.assign(document.createElement('span'), {
             innerHTML: statusIcon(done), style: 'flex-shrink:0'
           }));
@@ -11199,6 +11266,26 @@ placeholder="Enter your story here"></textarea>
               const done = (lsteps[step] || {}).done || false;
               const row  = document.createElement('div');
               row.className = 'pipe-substep-row';
+              // ── approval dimming (FIX E) ────────────────────────────────
+              const _localeApproved =
+                (['manifest_merge', 'gen_tts', 'post_tts'].includes(step) && _approvals.vo) ||
+                (step === 'apply_music_plan' && _approvals.music) ||
+                (step === 'resolve_assets'   && _approvals.media) ||
+                (step === 'gen_render_plan'  && _approvals.all);
+              const _localeReadyToRender = (step === 'render_video' && _approvals.all && !_rpStale[locale]);
+              const _renderPlanStale     = (step === 'gen_render_plan' && !!_rpStale[locale]);
+              if (_localeApproved && !_renderPlanStale) {
+                row.classList.add('step-approved');
+                row.title = 'Already approved — click to re-run if content changes';
+              }
+              if (_renderPlanStale) {
+                // VO was re-approved after this RenderPlan was generated
+                row.style.cssText = 'outline:1px solid #c06000;background:#2a1500';
+                row.title = '⚠️ VO approval is newer than RenderPlan — re-run this step to update SRT timestamps and shot durations';
+              }
+              if (_localeReadyToRender) {
+                row.classList.add('step-ready-to-render');
+              }
               // status icon
               row.appendChild(Object.assign(document.createElement('span'), {
                 innerHTML: statusIcon(done), style: 'flex-shrink:0'
@@ -12294,6 +12381,34 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         except Exception:
             pass
 
+    # ── Approval checkpoints (FIX E) ──────────────────────────────────────────
+    approvals = {
+        "vo":    os.path.isfile(os.path.join(ep_dir, "tts_review_complete.json")),
+        "music": os.path.isfile(os.path.join(ep_dir, "assets", "music", "MusicApprovalSnapshot.json")),
+        "sfx":   os.path.isfile(os.path.join(ep_dir, "assets", "sfx", "SfxPlan.json")),
+        "media": os.path.isfile(os.path.join(ep_dir, "assets", "media", "selections.json")),
+    }
+    approvals["all"] = all(approvals.values())
+
+    # ── Staleness guard: is RenderPlan older than VO approval? ────────────────
+    # If tts_review_complete.json is newer than RenderPlan.{locale}.json, the
+    # RenderPlan was generated before the current VO approval — step 10 must be
+    # re-run or the SRT timestamps and shot durations will be stale.
+    _render_plan_stale: dict[str, bool] = {}   # keyed by locale
+    _tts_complete_path = os.path.join(ep_dir, "tts_review_complete.json")
+    _tts_mtime = os.path.getmtime(_tts_complete_path) if os.path.isfile(_tts_complete_path) else None
+    for _loc in (locales or ["en"]):
+        _rp_path = os.path.join(ep_dir, f"RenderPlan.{_loc}.json")
+        if _tts_mtime is not None:
+            if not os.path.isfile(_rp_path):
+                _render_plan_stale[_loc] = True   # RenderPlan not yet generated
+            elif os.path.getmtime(_rp_path) < _tts_mtime:
+                _render_plan_stale[_loc] = True   # RenderPlan predates VO approval
+            else:
+                _render_plan_stale[_loc] = False
+        else:
+            _render_plan_stale[_loc] = False      # no VO approval yet — not stale
+
     return {
         "slug": slug, "ep_id": ep_id,
         "llm_stages": llm_stages,
@@ -12310,8 +12425,10 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "locales_str":    meta_locales_str,
         "no_music":       meta_no_music,
         "purge_cache":    meta_purge_cache,
-        "music_plan_done": music_plan_done,
-        "tts_done":        tts_done,
+        "music_plan_done":      music_plan_done,
+        "tts_done":             tts_done,
+        "approvals":            approvals,
+        "render_plan_stale":    _render_plan_stale,   # locale→bool: RenderPlan older than VO approval
     }
 
 
@@ -12547,14 +12664,26 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
         # Read story_format from meta.json so the ceiling logic in gen_render_plan.py
         # knows whether this is a narrative format (continuous_narration, documentary,
         # illustrated_narration) or an episodic/monologue format.
-        _story_format = "episodic"
+        _story_format = ""
         _meta_path = ep("meta.json")
         if os.path.isfile(_meta_path):
             try:
                 _mj = json.load(open(_meta_path, encoding="utf-8"))
-                _story_format = _mj.get("story_format", "episodic")
+                _story_format = _mj.get("story_format", "")
             except Exception:
                 pass
+        if not _story_format:
+            # Fall back to pipeline_vars.sh
+            _pvars = os.path.join(ep_dir, "pipeline_vars.sh")
+            if os.path.isfile(_pvars):
+                with open(_pvars, encoding="utf-8") as _pf:
+                    for _line in _pf:
+                        _line = _line.strip()
+                        if _line.startswith("export STORY_FORMAT="):
+                            _story_format = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+        if not _story_format:
+            _story_format = "episodic"
         return [
             "python3", os.path.join(code_dir, "gen_render_plan.py"),
             "--manifest",     ep(f"AssetManifest_merged.{locale}.json"),
@@ -16691,10 +16820,17 @@ class Handler(BaseHTTPRequestHandler):
                     _pf.write("\n")
 
                 rel_path = os.path.relpath(plan_path, PIPE_DIR)
+                snapshot_path = os.path.join(music_dir, "MusicApprovalSnapshot.json")
+                snapshot_exists = os.path.isfile(snapshot_path)
                 print(f"  Saved MusicPlan  slug={slug}  ep={ep_id}  "
                       f"loops={len(plan.get('loop_selections', {}))}  "
-                      f"overrides={len(plan.get('shot_overrides', []))}")
-                body = json.dumps({"ok": True, "path": rel_path}).encode()
+                      f"overrides={len(plan.get('shot_overrides', []))}  "
+                      f"snapshot={'yes' if snapshot_exists else 'MISSING'}")
+                body = json.dumps({
+                    "ok": True,
+                    "path": rel_path,
+                    "snapshot_exists": snapshot_exists,
+                }).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))

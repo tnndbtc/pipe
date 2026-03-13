@@ -51,7 +51,9 @@
 # =============================================================================
 
 import argparse
+import hashlib
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -332,13 +334,14 @@ def render_shot(
     music_fadeout_sec:  float = MUSIC_FADEOUT_SEC,
     no_music:           bool  = False,
     verbose:            bool  = False,
+    music_snapshot:     dict  = None,
 ) -> Path:
     """
     Render one shot to an MKV intermediate.
     Returns the path to the output MKV (created or already-existing).
     """
     shot_id = shot["shot_id"]
-    dur_ms  = shot["duration_ms"]
+    dur_ms  = shot["duration_ms"]   # authoritative: set by gen_render_plan (VO ceiling)
     dur_sec = dur_ms / 1000.0
     vo_lines = shot.get("vo_lines", [])
 
@@ -568,11 +571,11 @@ def render_shot(
         if chunk_uri:
             chunk_path = uri_to_path(chunk_uri)
             if chunk_path and chunk_path.exists():
-                start_sec = float(vl.get("audio_start_sec", 0.0))
-                end_sec   = float(vl.get("audio_end_sec",   0.0))
-                dur_sec   = max(0.001, end_sec - start_sec)
+                start_sec  = float(vl.get("audio_start_sec", 0.0))
+                end_sec    = float(vl.get("audio_end_sec",   0.0))
+                vo_dur_sec = max(0.001, end_sec - start_sec)
                 v_idx = add_input(
-                    ["-ss", f"{start_sec:.4f}", "-t", f"{dur_sec:.4f}"],
+                    ["-ss", f"{start_sec:.4f}", "-t", f"{vo_dur_sec:.4f}"],
                     str(chunk_path),
                 )
                 filter_parts.append(
@@ -651,13 +654,67 @@ def render_shot(
         if _loop_path.exists():
             music_path = _loop_path
 
-    if not no_music and music_path and music_path.exists() and not music_info.get("is_placeholder", True):
-        duck_intervals = shot.get("duck_intervals", [])
-        duck_db        = shot.get("duck_db", -12.0)
-        fade_sec       = shot.get("music_fade_sec", 0.15)
-        music_base_db  = shot.get("base_db", BASE_MUSIC_DB)
-        duck_expr      = build_duck_expr(duck_intervals, duck_db, fade_sec,
-                                         base_db=music_base_db)
+    # ── 6a. Apply MusicApprovalSnapshot overrides (if provided) ───────────
+    _snap = (music_snapshot or {}).get(shot.get("shot_id") or shot.get("id", ""), {})
+    _snap_provided_music = False
+    if _snap:
+        _snap_music_id       = _snap.get("music_asset_id")
+        _snap_duck_intervals = _snap.get("duck_intervals")   # [[t0,t1],...]
+        _snap_duck_db        = _snap.get("duck_db")
+        _snap_base_db        = _snap.get("base_db")
+        _snap_fade_sec       = _snap.get("fade_sec")
+        _snap_loop_wav       = _snap.get("loop_wav_path")
+        _snap_music_delay    = _snap.get("music_delay_sec")  # delay before music starts in shot
+        _snap_music_end      = _snap.get("music_end_sec")    # music end position in shot (or None)
+
+        # Override music_id from snapshot if RenderPlan has none
+        if _snap_music_id and not music_id:
+            music_id = _snap_music_id
+        # Shot duration is NOT overridden from snapshot — it always comes from
+        # RenderPlan (set by gen_render_plan with VO-ceiling). VO tab is the hard truth.
+        if _snap_loop_wav and os.path.isfile(_snap_loop_wav):
+            music_path = Path(_snap_loop_wav)    # override file resolution
+            _snap_provided_music = True
+        if _snap_duck_intervals is not None:
+            shot = dict(shot)
+            shot["duck_intervals"] = _snap_duck_intervals
+        if _snap_duck_db is not None:
+            shot = dict(shot)
+            shot["duck_db"] = _snap_duck_db
+        if _snap_base_db is not None:
+            shot = dict(shot)
+            shot["base_db"] = _snap_base_db
+        if _snap_fade_sec is not None:
+            shot = dict(shot)
+            shot["music_fade_sec"] = _snap_fade_sec
+        if _snap_music_delay is not None:
+            shot = dict(shot)
+            shot["music_delay_sec"] = _snap_music_delay   # exact delay from approved preview
+        if _snap_music_end is not None:
+            shot = dict(shot)
+            shot["music_end_sec"] = _snap_music_end       # music stops before shot end
+        print(f"  [{shot_id}] Using MusicApprovalSnapshot — approved timing.")
+
+    if not no_music and music_path and music_path.exists() and (_snap_provided_music or not music_info.get("is_placeholder", True)):
+        duck_intervals  = shot.get("duck_intervals", [])
+        duck_db         = shot.get("duck_db", -12.0)
+        fade_sec        = shot.get("music_fade_sec", 0.15)
+        music_base_db   = shot.get("base_db", BASE_MUSIC_DB)
+        music_delay_sec = shot.get("music_delay_sec", 0.0)
+        music_end_sec   = shot.get("music_end_sec", None)  # None = play to shot end
+
+        # duck_intervals from snapshot are shot-relative (t=0 = shot start).
+        # The FFmpeg volume filter sees music-file-relative time (t=0 = first sample
+        # of the music WAV = shot t=music_delay_sec).  Subtract the delay to align.
+        _adj_duck = []
+        for _t0, _t1 in duck_intervals:
+            _t0a = _t0 - music_delay_sec
+            _t1a = _t1 - music_delay_sec
+            if _t1a <= 0:
+                continue    # interval ends before music starts — skip
+            _adj_duck.append([max(_t0a, 0.0), _t1a])
+        duck_expr = build_duck_expr(_adj_duck, duck_db, fade_sec,
+                                    base_db=music_base_db)
 
         # Seek to music_start_sec for seamless same-music continuation.
         # Do NOT use -stream_loop -1 here: an infinite loop combined with
@@ -668,14 +725,18 @@ def render_shot(
             m_extra = ["-ss", f"{music_start_sec:.3f}"]
         m_idx = add_input(m_extra, str(music_path))
 
-        # music_delay_sec: delay before music starts within the shot
-        # (set by MusicPlan override start_sec via gen_render_plan)
-        music_delay_sec = shot.get("music_delay_sec", 0.0)
+        music_filter = f"[{m_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
 
-        music_filter = (
-            f"[{m_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
-            f"volume=volume='{duck_expr}':eval=frame"
-        )
+        # Enforce music end time: if user set music to stop before shot end,
+        # trim the music clip to exactly that window duration.
+        if music_end_sec is not None:
+            _music_window = music_end_sec - music_delay_sec
+            if 0 < _music_window < dur_sec - 0.01:
+                music_filter += f"atrim=duration={_music_window:.3f},"
+
+        music_filter += f"volume=volume='{duck_expr}':eval=frame"
+
+        # music_delay_sec: delay before music starts within the shot
         if music_delay_sec > 0.001:
             delay_ms = round(music_delay_sec * 1000)
             music_filter += f",adelay={delay_ms}|{delay_ms}"
@@ -912,12 +973,37 @@ def main() -> None:
     shots_dir = output_dir / ".shots"
     shots_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Plan-hash cache invalidation ────────────────────────────────────────
+    _plan_hash = rp.get("timing_lock_hash") or hashlib.md5(json.dumps(rp, sort_keys=True).encode()).hexdigest()
+    _hash_file = shots_dir / ".plan_hash"
+    if _hash_file.exists() and _hash_file.read_text().strip() != _plan_hash:
+        print(f"  [render] RenderPlan changed — clearing cached shots")
+        shutil.rmtree(shots_dir)
+        shots_dir.mkdir(parents=True, exist_ok=True)
+    _hash_file.write_text(_plan_hash)
+
     fps          = rp.get("fps", FPS)
     profile_name = args.profile or rp.get("profile", DEFAULT_PROFILE)
     profile      = PROFILES.get(profile_name, PROFILES[DEFAULT_PROFILE])
 
     shots     = rp["shots"]
     asset_map = build_asset_map(rp)
+
+    # ── Load MusicApprovalSnapshot (once) ───────────────────────────────────
+    _snapshot_path = os.path.join(episode_dir, "assets", "music", "MusicApprovalSnapshot.json")
+    _music_snapshot = {}   # shot_id -> snapshot entry
+    if os.path.isfile(_snapshot_path):
+        try:
+            _snap_data = json.loads(open(_snapshot_path, encoding="utf-8").read())
+            for _se in _snap_data.get("shots", []):
+                if _se.get("shot_id"):
+                    _music_snapshot[_se["shot_id"]] = _se
+            print(f"  [render] MusicApprovalSnapshot loaded — {len(_music_snapshot)} shots")
+        except Exception as _se:
+            print(f"  [render] WARNING: Could not load MusicApprovalSnapshot: {_se}")
+    else:
+        print("  [render] WARNING: MusicApprovalSnapshot not found — music timing is approximate.")
+        print("           Confirm MusicPlan in Music tab for accurate results.")
 
     print("=" * 60)
     print("  render_video")
@@ -970,6 +1056,7 @@ def main() -> None:
             music_fadeout_sec=args.music_fadeout_sec,
             no_music=args.no_music,
             verbose=args.verbose,
+            music_snapshot=_music_snapshot,
         )
         shot_mkv_pairs.append((shot, mkv))
 
@@ -995,7 +1082,7 @@ def main() -> None:
     with open(concat_list, "w", encoding="utf-8") as f:
         for idx, (shot, mkv) in enumerate(shot_mkv_pairs):
             f.write(f"file '{mkv}'\n")
-            total_ms += shot["duration_ms"]
+            total_ms += shot["duration_ms"]   # RenderPlan duration (VO-ceiling authoritative)
 
             if idx < len(shot_mkv_pairs) - 1:
                 next_shot = shot_mkv_pairs[idx + 1][0]
@@ -1040,7 +1127,7 @@ def main() -> None:
 
     # ── Cleanup intermediates ───────────────────────────────────────────────
     if not args.keep_intermediates:
-        shutil.rmtree(shots_dir)
+        shutil.rmtree(shots_dir, ignore_errors=True)
         print(f"  Cleaned .shots/ scratch directory")
 
 
