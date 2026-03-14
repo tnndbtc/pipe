@@ -43,9 +43,29 @@ def load_json(path: Path) -> dict:
 def detect_shot_durations(ep_dir: Path, locale: str) -> tuple:
     """
     Returns (shot_id -> duration_ms dict, source_description).
-    Priority: RenderPlan > MusicApprovalSnapshot > AssetManifest_merged fallback.
+    Priority: ShotList.json > RenderPlan > MusicApprovalSnapshot.
+
+    ShotList.json is the authoritative timing source for all display tabs
+    (Media, SFX, Music).  The Media tab UI derives its shot duration labels
+    (e.g. "0:26.1 – 0:51.9") from ShotList; the preview must use the same
+    source so clip length matches the displayed range.  RenderPlan may be
+    stale (pre-Stage-10) and should only be used as a fallback.
     """
-    # Priority 1: RenderPlan
+    # Priority 1: ShotList.json — single authoritative timing source
+    shot_path = ep_dir / "ShotList.json"
+    if shot_path.exists():
+        sl = load_json(shot_path)
+        durations = {}
+        for shot in sl.get("shots", []):
+            sid = shot.get("shot_id", "")
+            dur_sec = shot.get("duration_sec", 0) or 0
+            if sid and dur_sec:
+                durations[sid] = round(dur_sec * 1000)
+        if durations:
+            print(f"  [dur] Using ShotList.json ({len(durations)} shots)")
+            return durations, "ShotList.json"
+
+    # Priority 2: RenderPlan (fallback — may be stale before Step 10)
     rp_path = ep_dir / f"RenderPlan.{locale}.json"
     if rp_path.exists():
         rp = load_json(rp_path)
@@ -53,10 +73,10 @@ def detect_shot_durations(ep_dir: Path, locale: str) -> tuple:
                      for s in rp.get("shots", [])
                      if "shot_id" in s and "duration_ms" in s}
         if durations:
-            print(f"  [dur] Using RenderPlan.{locale}.json ({len(durations)} shots)")
+            print(f"  [dur] Using RenderPlan.{locale}.json ({len(durations)} shots) — ShotList unavailable")
             return durations, f"RenderPlan.{locale}.json"
 
-    # Priority 2: MusicApprovalSnapshot
+    # Priority 3: MusicApprovalSnapshot
     snap_path = ep_dir / "assets" / "music" / "MusicApprovalSnapshot.json"
     if snap_path.exists():
         snap = load_json(snap_path)
@@ -67,26 +87,10 @@ def detect_shot_durations(ep_dir: Path, locale: str) -> tuple:
             print(f"  [dur] Using MusicApprovalSnapshot.json ({len(durations)} shots)")
             return durations, "MusicApprovalSnapshot.json"
 
-    # Priority 3: AssetManifest_merged / ShotList fallback
-    merged_path = ep_dir / f"AssetManifest_merged.{locale}.json"
-    shot_path = ep_dir / "ShotList.json"
-
-    if shot_path.exists():
-        sl = load_json(shot_path)
-        durations = {}
-        for shot in sl.get("shots", []):
-            sid = shot.get("shot_id", "")
-            dur_sec = shot.get("duration_sec", 0) or 0
-            if sid and dur_sec:
-                durations[sid] = round(dur_sec * 1000)
-        if durations:
-            print(f"  [dur] WARNING: Using ShotList fallback — preview timing is approximate")
-            return durations, "ShotList.json (approximate)"
-
     print(f"ERROR: No shot duration source found for locale '{locale}'.")
+    print(f"  Checked: {shot_path}")
     print(f"  Checked: {rp_path}")
     print(f"  Checked: {snap_path}")
-    print(f"  Checked: {shot_path}")
     sys.exit(1)
 
 
@@ -195,8 +199,14 @@ def main():
         for s in rp_data.get("shots", []):
             rp_shots[s["shot_id"]] = s
 
-    # Build ordered shot list from RenderPlan or shot_dur_ms
-    if rp_data:
+    # Build ordered shot list — prefer ShotList order (matches UI tab display).
+    # detect_shot_durations already loaded ShotList and preserves its insertion
+    # order in shot_dur_ms (Python 3.7+ dicts maintain insertion order), so
+    # list(shot_dur_ms.keys()) gives ShotList order when ShotList was the source.
+    # Fall back to RenderPlan order if ShotList was unavailable.
+    if "ShotList" in dur_source:
+        ordered_shots = list(shot_dur_ms.keys())
+    elif rp_data:
         ordered_shots = [s["shot_id"] for s in rp_data.get("shots", [])]
     else:
         ordered_shots = list(shot_dur_ms.keys())

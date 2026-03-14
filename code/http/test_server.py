@@ -7606,12 +7606,11 @@ placeholder="Enter your story here"></textarea>
     }
 
     // Browsers cannot load file:// URLs from an http:// page.
-    // Route them through the VC editor's /api/serve_media_file proxy instead.
-    // /files/… URLs are handled transparently by the VC editor's /files/ proxy route.
+    // Route them through /serve_media (range-capable: supports Accept-Ranges / 206).
+    // _mediaSegThumbUrl handles the same conversion for segment-row thumbnails;
+    // use it here too so both code paths stay in sync.
     const rawUrl    = entry.url || '';
-    const displayUrl = rawUrl.startsWith('file://')
-        ? '/api/serve_media_file?url=' + encodeURIComponent(rawUrl)
-        : rawUrl;
+    const displayUrl = _mediaSegThumbUrl(rawUrl) || rawUrl;
 
     if (type === 'image') {
       const img    = document.createElement('img');
