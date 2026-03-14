@@ -2038,7 +2038,7 @@ HTML = r"""<!DOCTYPE html>
   }
   .review-pane { display: none; }
   .review-pane.active { display: block; }
-  #pipe-video { width: 100%; max-height: 240px; background: #000; display: block; }
+  #pipe-video { width: 100%; max-height: 240px; background: var(--bg); display: block; }
   #pipe-audio { width: 100%; display: block; padding: 8px; box-sizing: border-box; }
   .pipe-body::-webkit-scrollbar { width: 6px; }
   .pipe-body::-webkit-scrollbar-track { background: transparent; }
@@ -2054,10 +2054,10 @@ HTML = r"""<!DOCTYPE html>
   .btn-expand.open  { transform: rotate(90deg); color: var(--gold); }
   .pipe-detail {
     display: none;
-    background: #0a0a0f; border-top: 1px solid var(--border);
+    background: var(--surface); border-top: 1px solid var(--border);
     padding: 8px 14px 8px 42px;
     font-family: var(--mono); font-size: 0.74em;
-    color: #6a7a9a; white-space: pre; line-height: 1.7;
+    color: var(--dim); white-space: pre; line-height: 1.7;
   }
   .pipe-detail.open { display: block; }
   .pipe-substep-row {
