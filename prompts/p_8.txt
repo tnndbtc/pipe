@@ -193,7 +193,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
     - tts_prompt.azure_break_ms → character[<locale>].azure_break_ms from VoiceCast.json
     - tts_prompt.azure_style_degree → character[<locale>].azure_style_degree from VoiceCast.json
     - tts_prompt.azure_rate   → character[<locale>].azure_rate from VoiceCast.json
-    - tts_prompt.azure_style  → apply Emotion Policy (see below)
+    - tts_prompt.azure_style  → character[<locale>].azure_style from VoiceCast.json (copy verbatim; omit if null/absent)
 
   **Keep unchanged (copy byte-for-byte from AssetManifest_draft.{{PRIMARY_LOCALE}}.json):**
     - item_id        ← CRITICAL: copy the exact string; never invent a new id
@@ -202,9 +202,6 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
     - type           (may be null — copy the null)
     - license_type
     - visual         (boolean)
-    - tts_prompt.voice_style  (gender hint — still valid across locales)
-    - tts_prompt.emotion      (English label kept for debugging)
-    - tts_prompt.pace         (same pace intent)
 
   **Whisper special case:**
     When azure_style resolves to "whispering":
@@ -213,44 +210,23 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
 
   **DO NOT add** start_sec, end_sec — those are written by post_tts_analysis.py
 
-  ### Emotion Policy for azure_style (locale voice replacement)
+  ### azure_style rule (VoiceCast.json is the sole authority)
 
-  Do NOT re-derive emotion from the translated text (Chinese translations can
-  shift tone unpredictably).  Instead:
+  Copy character[<locale>].azure_style from VoiceCast.json verbatim.
+  Do NOT derive style from the text emotion or the primary-locale azure_style.
+  If the field is null or absent in VoiceCast.json → omit azure_style from tts_prompt.
 
-    1. Read the {{PRIMARY_LOCALE_NAME}} tts_prompt.azure_style from the source vo_item.
-    2. Check if that exact style name exists in
-       VoiceCast.json character[<locale>].available_styles.
-       If yes → use it directly.
-    3. If not → walk the fallback chain below against the locale's
-       available_styles until a match is found:
-         angry     → shouting → unfriendly → serious → (omit)
-         fearful   → terrified → whispering → sad → (omit)
-         cheerful  → excited → friendly → hopeful → (omit)
-         sad       → disgruntled → (omit)
-         excited   → cheerful → friendly → (omit)
-         serious   → calm → (omit)
-    4. If no fallback matches → use character[<locale>].azure_style from VoiceCast.json
-       if that field is set (this handles voices like Dragon HD whose style vocabulary
-       is entirely different from English emotion labels).
-       Only omit azure_style if VoiceCast.json also has no azure_style for this locale.
-
-  Example A (standard voice with emotion styles):
-    {{PRIMARY_LOCALE_NAME}} vo_item: azure_style = "terrified"
-    zh-Hans available_styles: ["angry", "fearful", "sad", "excited", ...]
-    Fallback chain: terrified → fearful (found) → use "fearful"
-
-  Example B (Dragon HD voice with archetype styles):
-    {{PRIMARY_LOCALE_NAME}} vo_item: azure_style = "whispering"
-    zh-Hans available_styles: ["assassin", "captain", "cavalier", "drake", "gamenarrator", "geomancer", "poet"]
-    Fallback chain: no match found → use VoiceCast.json character[zh-Hans].azure_style = "gamenarrator"
+  Whisper special case:
+    If VoiceCast.json character[<locale>].azure_style = "whispering":
+      also set tts_prompt.azure_break_ms = 0 (overrides the character base value;
+      breaks inside whispers sound robotic)
 
   Duration Matching Rule — applies to every vo_item.text translation:
 
     The primary locale and the target locale speak at different natural rates.
     To keep dubbed audio aligned with video, write translated text that — at
-    the SAME tts_prompt.pace — takes approximately the same time to speak as
-    the source line.
+    the SAME azure_rate (copied verbatim from VoiceCast.json) — takes
+    approximately the same time to speak as the source line.
 
     ⚠️ FAITHFULNESS FIRST: Before adjusting for duration, always write the
     faithful literal translation. Only then adjust phrasing for timing.
@@ -314,7 +290,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
       • Use target_chars as a ceiling, not a floor
 
     ### Rules
-      • NEVER change tts_prompt.pace — voice quality is critical
+      • NEVER alter tts_prompt fields — copy all azure_* fields verbatim from VoiceCast.json
       • Tolerance: ±10 % of target_chars is acceptable
       • Faithful meaning takes absolute priority over exact timing
       • Do NOT pad with meaningless syllables or invented content
@@ -335,8 +311,8 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
   camera_framing, camera_movement, timing_lock_hash, created_at,
   series.title, series.genre, knows[],
   AssetManifest: search_prompt, ai_prompt, motion.description,
-                 search_filters (all subfields), tts_prompt.voice_style,
-                 tts_prompt.emotion, tts_prompt.pace
+                 search_filters (all subfields),
+                 tts_prompt.* (all TTS fields are replaced from VoiceCast.json, not translated)
 
   ### Validation and writing
 

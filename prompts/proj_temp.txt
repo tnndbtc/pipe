@@ -299,7 +299,10 @@ Required top-level fields:
 
 vo_items[] — one entry per dialogue line:
   item_id, speaker_id, text (English), license_type: "proprietary_cleared"
-  tts_prompt: { voice_style, emotion, pace, locale: "en" }
+  tts_prompt: copy ALL azure_* fields verbatim from VoiceCast.json character["en"]:
+    { locale: "en", azure_voice, azure_style (omit if null), azure_style_degree,
+      azure_rate, azure_pitch, azure_break_ms }
+  VoiceCast.json is the sole TTS authority. Do NOT invent voice_style/emotion/pace.
   DO NOT add start_sec, end_sec, or duration_sec — written by post_tts_analysis.py.
 
 Validate both artifacts against AssetManifest.v1.json before proceeding.
@@ -389,8 +392,10 @@ For each locale in {{LOCALES}} other than "en":
                     vo_items[]: copy from AssetManifest_draft.en.json, then:
                       ── Translate text to the target locale
                       ── Set tts_prompt.locale to target locale (e.g. "zh-Hans")
-                      ── Keep all other fields identical (item_id, speaker_id,
-                         license_type, tts_prompt.voice_style/emotion/pace)
+                      ── Replace ALL azure_* fields from VoiceCast.json character[<locale>]
+                         (azure_voice, azure_style, azure_style_degree, azure_rate,
+                          azure_pitch, azure_break_ms) — copy verbatim from VoiceCast.json
+                      ── Keep item_id, speaker_id, license_type unchanged
                     DO NOT include search_prompt, ai_prompt, motion.description —
                     those live in the shared manifest and are never translated.
     canon_diff  : added_characters[].role, added_characters[].relationships (values only),
@@ -403,8 +408,7 @@ For each locale in {{LOCALES}} other than "en":
     camera_framing, camera_movement, timing_lock_hash, created_at,
     series.title, series.genre, knows[],
     AssetManifest: search_prompt, ai_prompt, motion.description,
-                   search_filters (all subfields), tts_prompt.voice_style,
-                   tts_prompt.emotion, tts_prompt.pace
+                   search_filters (all subfields)
 
   canon.<locale>.json writes to the project root (same as canon.json).
 

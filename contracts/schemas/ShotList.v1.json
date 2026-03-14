@@ -94,6 +94,14 @@
         "duration_sec": {
           "type": "number"
         },
+        "start_sec": {
+          "type": "number",
+          "description": "Episode-cumulative start time of this shot's first VO item (seconds). Set by patch_shotlist_durations.py from vo_preview_approved. Absent for shots with no VO."
+        },
+        "end_sec": {
+          "type": "number",
+          "description": "Episode-cumulative end time of this shot's last VO item (seconds). Set by patch_shotlist_durations.py from vo_preview_approved. Absent for shots with no VO."
+        },
         "emotional_tag": {
           "type": [
             "string",

@@ -307,31 +307,12 @@ def main():
     shared_path = Path(args.shared).resolve()
     locale_path = Path(args.locale).resolve()
 
-    # ── Stage 9 sentinel check (INVARIANT I) ─────────────────────────────────
-    # If the locale manifest's locale matches primary_locale AND the sentinel
-    # exists with all four hashes matching, exit 0 without writing.
-    # This prevents re-running manifest_merge from overwriting the post-review
-    # merged manifest and reverting all VO edits made during Stage 7.5 review.
-    if _VO_UTILS_AVAILABLE:
-        try:
-            # Read locale from the locale manifest file
-            with open(locale_path, encoding="utf-8") as _f:
-                _locale_manifest = json.load(_f)
-            _manifest_locale = _locale_manifest.get("locale", "")
-            _ep_dir = locale_path.parent  # manifests live in ep_dir/
-            _primary_locale = get_primary_locale(_ep_dir)
-            if _manifest_locale == _primary_locale:
-                if verify_sentinel(_ep_dir, _primary_locale):
-                    print(
-                        f"[manifest_merge] Sentinel valid for {_primary_locale} — "
-                        "skipping merge (VO review already approved)."
-                    )
-                    sys.exit(0)
-        except Exception as _exc:
-            # Non-fatal: if sentinel check fails, proceed with normal merge
-            print(f"[manifest_merge] Sentinel check error (ignored): {_exc}",
-                  file=sys.stderr)
-    # ── end sentinel check ────────────────────────────────────────────────────
+    # NOTE: The old Stage 9 sentinel (sys.exit(0) when vo_preview_approved
+    # exists) has been removed.  manifest_merge must always run so that
+    # re-running Stages 5–8 regenerates AssetManifest_merged with the latest
+    # shared assets, ShotList, and duck_intervals.  Approved VO timing is
+    # applied below (see "Apply vo_preview_approved" block) so the merged
+    # manifest always carries the exact start_sec/end_sec the user approved.
 
     for label, path in [("shared", shared_path), ("locale", locale_path)]:
         if not path.exists():
@@ -340,6 +321,40 @@ def main():
 
     shared = load_manifest(shared_path)
     locale = load_manifest(locale_path)
+
+    # ── Apply vo_preview_approved timing as authoritative source ──────────────
+    # Override vo_items start_sec/end_sec/duration_sec with the approved values
+    # so duck_intervals and downstream tools always use the exact timing the user
+    # heard and approved (not the post_tts_analysis estimates or LLM guesses).
+    _ep_dir_for_approval = locale_path.parent
+    _locale_tag_for_approval = locale.get("locale", "")
+    if _locale_tag_for_approval:
+        _approved_path = _ep_dir_for_approval / f"vo_preview_approved.{_locale_tag_for_approval}.json"
+        if _approved_path.exists():
+            try:
+                with open(_approved_path, encoding="utf-8") as _af:
+                    _approved_data = json.load(_af)
+                _approved_map = {
+                    item["item_id"]: item
+                    for item in _approved_data.get("items", [])
+                }
+                _patched = 0
+                for _vo_item in locale.get("vo_items", []):
+                    _vid = _vo_item.get("item_id", "")
+                    if _vid in _approved_map:
+                        _ap = _approved_map[_vid]
+                        _vo_item["start_sec"]    = float(_ap["start_sec"])
+                        _vo_item["end_sec"]      = float(_ap["end_sec"])
+                        _vo_item["duration_sec"] = float(_ap["duration_sec"])
+                        _patched += 1
+                if _patched:
+                    print(f"  [VO-APPROVAL] Applied approved timing to {_patched} vo_items "
+                          f"from {_approved_path.name}")
+            except Exception as _exc:
+                print(f"  [WARN] Could not apply approved timing from "
+                      f"vo_preview_approved.{_locale_tag_for_approval}.json: {_exc}",
+                      file=sys.stderr)
+    # ── end vo_preview_approved override ─────────────────────────────────────
 
     # Guards
     shared_scope = shared.get("locale_scope")

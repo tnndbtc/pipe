@@ -7,6 +7,10 @@
 #     {{EPISODE_ID}}     →  e.g. "s01e02"
 #     {{STORY_FORMAT}}   →  e.g. "episodic", "continuous_narration", "illustrated_narration", "documentary", "monologue"
 #
+# NOTE: {{VO_DURATION_TABLE}} has been REMOVED. duration_sec is now patched
+# deterministically by patch_shotlist_durations.py after Stage 4 completes.
+# The LLM writes duration_sec = 0 for all shots with vo_item_ids.
+#
 # 📥 FILES READ (written by earlier stages):
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json   (Stage 3)
 #     contracts/schemas/ShotList.v1.json
@@ -139,6 +143,24 @@ Same VO-anchored formula as continuous_narration, but the 60-120s total constrai
 Total episode duration = sum of all VO durations. Use `pause_after_ms` from Script.json actions
 as `break_secs` instead of the default 0.6s per line:
   break_secs = sum(pause_after_ms for each VO line in shot) / 1000
+
+---
+
+## `duration_sec` in output JSON — WRITE ZERO
+
+**For every shot that has `vo_item_ids` (non-empty list): write `duration_sec = 0`.**
+
+Do NOT attempt to compute or estimate the real duration.
+`patch_shotlist_durations.py` runs immediately after Stage 4 and replaces every `0`
+with the exact value derived from `vo_preview_approved.{locale}.json` (the approved VO
+timings from Stage 3.5).
+
+The LLM's job is grouping VO lines into shots and applying the merge/split rules above
+(which use your internally-computed estimate). The final stored value is always 0 in the
+JSON you write — the patch script handles the rest.
+
+For shots WITHOUT `vo_item_ids` (pure action, title card, etc.): write your estimated
+duration normally (those shots are skipped by the patch script).
 
 ---
 

@@ -335,6 +335,7 @@ def render_shot(
     no_music:           bool  = False,
     verbose:            bool  = False,
     music_snapshot:     dict  = None,
+    sfx_plan_override:  dict  = None,
 ) -> Path:
     """
     Render one shot to an MKV intermediate.
@@ -617,8 +618,20 @@ def render_shot(
     # ── 5b. SFX plan entries (user-selected SFX with timing from SFX tab) ────
     # sfx_plan_entries each carry source_file (local path), start_sec (delay
     # from shot start), and optionally end_sec (trim length).
+    #
+    # Prefer live SfxPlan.json data (sfx_plan_override) over the potentially
+    # stale copy baked into RenderPlan at gen_render_plan time.  This mirrors
+    # how MusicApprovalSnapshot bypasses the stale music fields in RenderPlan.
+    if sfx_plan_override is not None:
+        # SfxPlan.json was loaded — it is the authoritative source.
+        # A missing key means the user placed no SFX on this shot (empty list).
+        # Do NOT fall back to a potentially stale RenderPlan entry.
+        _sfx_entries = sfx_plan_override.get(shot_id, [])
+    else:
+        # No live SfxPlan available — use whatever gen_render_plan baked in.
+        _sfx_entries = shot.get("sfx_plan_entries", [])
     sfx_plan_amp = 10 ** (SFX_DB / 20.0)
-    for sp_i, sp_entry in enumerate(shot.get("sfx_plan_entries", [])):
+    for sp_i, sp_entry in enumerate(_sfx_entries):
         sp_path_str = sp_entry.get("source_file", "")
         if not sp_path_str:
             continue
@@ -1005,6 +1018,26 @@ def main() -> None:
         print("  [render] WARNING: MusicApprovalSnapshot not found — music timing is approximate.")
         print("           Confirm MusicPlan in Music tab for accurate results.")
 
+    # ── Load SfxPlan.json (once) — live user selections from SFX tab ────────
+    # Read directly at render time so edits made in the SFX tab are honoured
+    # without requiring a gen_render_plan re-run (mirrors MusicApprovalSnapshot).
+    _sfx_plan_path = os.path.join(episode_dir, "assets", "sfx", "SfxPlan.json")
+    _sfx_plan_by_shot: dict = {}   # shot_id -> list[sfx_entry]
+    if os.path.isfile(_sfx_plan_path):
+        try:
+            _sfx_plan_data = json.loads(open(_sfx_plan_path, encoding="utf-8").read())
+            for _se in _sfx_plan_data.get("sfx_entries", []):
+                _sid = _se.get("shot_id", "")
+                if _sid:
+                    _sfx_plan_by_shot.setdefault(_sid, []).append(_se)
+            _n_sfx = sum(len(v) for v in _sfx_plan_by_shot.values())
+            print(f"  [render] SfxPlan.json loaded — {_n_sfx} entr{'y' if _n_sfx == 1 else 'ies'} "
+                  f"across {len(_sfx_plan_by_shot)} shot(s)")
+        except Exception as _sfx_err:
+            print(f"  [render] WARNING: Could not load SfxPlan.json: {_sfx_err}")
+    # If SfxPlan.json is absent, _sfx_plan_by_shot stays {} and render falls
+    # back to sfx_plan_entries already baked into RenderPlan.
+
     print("=" * 60)
     print("  render_video")
     print(f"  Plan    : {plan_path.name}")
@@ -1057,6 +1090,7 @@ def main() -> None:
             no_music=args.no_music,
             verbose=args.verbose,
             music_snapshot=_music_snapshot,
+            sfx_plan_override=_sfx_plan_by_shot or None,
         )
         shot_mkv_pairs.append((shot, mkv))
 

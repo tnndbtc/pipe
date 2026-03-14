@@ -17,6 +17,8 @@ Open:
 import glob
 import hashlib
 import json
+import logging
+import logging.handlers
 import os
 import re
 import shutil
@@ -45,6 +47,31 @@ _DEFAULT_CATEGORY = "24"
 
 PORT     = 8000
 PIPE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (pipe/)
+
+# ── Persistent server log ──────────────────────────────────────────────────────
+# Writes to code/http/logs/server.log (10 MB cap, 5 rotated backups).
+# Use:  _log.info("msg")  /  _log.debug("msg")  /  _log.warning("msg")
+_LOG_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_log = logging.getLogger("pipe_server")
+_log.setLevel(logging.DEBUG)
+if not _log.handlers:
+    _log_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(_LOG_DIR, "server.log"),
+        maxBytes=10 * 1024 * 1024,   # 10 MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    _log_handler.setFormatter(logging.Formatter(
+        "%(asctime)s  %(levelname)-7s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    _log.addHandler(_log_handler)
+    # Also mirror to stdout so the terminal still shows everything
+    _log_stdout = logging.StreamHandler()
+    _log_stdout.setFormatter(logging.Formatter("%(levelname)-7s  %(message)s"))
+    _log.addHandler(_log_stdout)
+# ──────────────────────────────────────────────────────────────────────────────
 
 # ── AI server connection (read once at startup from environment) ────────────────
 _AI_SERVER_URL = os.environ.get("AI_SERVER_URL", "http://192.168.86.27:8000").rstrip("/")
@@ -396,6 +423,7 @@ try:
         get_primary_locale        as _get_primary_locale,
         compute_sentinel_hashes   as _compute_sentinel_hashes,
         write_sentinel            as _write_sentinel,
+        write_vo_preview_approved as _write_vo_preview_approved,
         verify_sentinel           as _verify_sentinel,
         wav_duration              as _wav_duration,
     )
@@ -2431,8 +2459,8 @@ placeholder="Enter your story here"></textarea>
       <button id="btn-stop"  onclick="stopRun()">■ Stop</button>
       <button id="btn-clear" onclick="clearOutput()">✕ Clear</button>
     </div>
-    <button id="btn-stage75" onclick="runStage75()"
-            title="Stage 7.5 — run manifest_merge + gen_tts for primary locale, then pause for VO review"
+    <button id="btn-stage35" onclick="runStage35()"
+            title="Stage 3.5 — synthesize VO from Script.json, then pause for VO review before ShotList"
             style="font-size:0.82em;font-family:var(--mono);padding:5px 10px;
                    background:#1a3060;color:var(--blue);border:1px solid #5b9cf650;
                    border-radius:5px;cursor:pointer;white-space:nowrap;">
@@ -2789,6 +2817,7 @@ placeholder="Enter your story here"></textarea>
     .vo-item-row.tl-active{outline:2px solid #4fc3f780;outline-offset:-2px}
     .vo-item-row:hover{background:transparent!important}
     .vo-scene-label{font-size:0.78em;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;flex:1}
+    .vo-scene-time{font-size:0.78em;color:#7ecfff;font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
     .vo-scene-btn{font-size:0.72em;padding:3px 10px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:5px;cursor:pointer}
     .vo-scene-btn:hover{background:rgba(0,0,0,0.12);color:var(--text)}
     .vo-item-row{display:flex;align-items:center;gap:6px;padding:4px 4px;border-radius:5px}
@@ -3343,13 +3372,14 @@ placeholder="Enter your story here"></textarea>
 
   // ── Stage 7.5 — TTS Preview for primary locale ───────────────────────────────
   let es75 = null;
+  let _pendingApproveStage = null;   // set by vo_review_ready; consumed by voApproveTTS()
 
   function showRunVoReviewBanner() {
     const banner = document.getElementById('run-vo-review-banner');
     if (banner) banner.classList.add('visible');
   }
 
-  async function runStage75() {
+  async function runStage35() {
     if (!currentSlug || !currentEpId) {
       appendLine('⚠  No episode selected — Prepare a story first.', 'err');
       return;
@@ -3367,9 +3397,9 @@ placeholder="Enter your story here"></textarea>
     lineCountEl.textContent = '0 lines';
     setStatus('running');
 
-    appendLine('── Stage 7.5 — TTS Preview (primary locale) ───────────────', 'sys');
+    appendLine('── Stage 3.5 — TTS Preview from Script.json ───────────────', 'sys');
 
-    const url = `/run_stage75?slug=${encodeURIComponent(currentSlug)}&ep_id=${encodeURIComponent(currentEpId)}&profile=${encodeURIComponent(profile)}`;
+    const url = `/run_stage35?slug=${encodeURIComponent(currentSlug)}&ep_id=${encodeURIComponent(currentEpId)}&profile=${encodeURIComponent(profile)}`;
     es75 = new EventSource(url);
 
     es75.addEventListener('line', e => {
@@ -3382,6 +3412,7 @@ placeholder="Enter your story here"></textarea>
       try {
         const d = JSON.parse(e.data);
         appendLine(`  ✓ TTS complete for locale: ${d.locale || '?'}`, 'sys');
+        _pendingApproveStage = d.stage || null;  // e.g. "3.5"
       } catch (_) {}
       showRunVoReviewBanner();
     });
@@ -3390,11 +3421,11 @@ placeholder="Enter your story here"></textarea>
       es75.close(); es75 = null;
       const code = parseInt(e.data);
       if (code === 0) {
-        appendLine('[ ✓ Stage 7.5 complete — open VO tab to review ]', 'done');
+        appendLine('[ ✓ Stage 3.5 complete — open VO tab to review ]', 'done');
         showRunVoReviewBanner();
         setStatus('idle');
       } else {
-        appendLine(`[ Stage 7.5 exited with code ${code} ]`, 'err');
+        appendLine(`[ Stage 3.5 exited with code ${code} ]`, 'err');
         setStatus('error');
       }
     });
@@ -3770,6 +3801,9 @@ placeholder="Enter your story here"></textarea>
         items._scene_tails = data.scene_tails || {};
         _renderVoItems(items, slug, epId, locale, data.voice_catalog || {});
         _voLoadSentinel(epDir, locale);
+        // Load approved durations for drift detection (OPEN 3)
+        window._voApprovedDurations = {};
+        _voLoadApprovedDurations(epDir, locale);
       })
       .catch(e => {
         body.innerHTML = '<span class="vo-empty" style="color:#f88">Failed: ' +
@@ -3805,6 +3839,10 @@ placeholder="Enter your story here"></textarea>
     // Build scene_tails lookup from items list (server injects it) or default 2000
     const sceneTails = items._scene_tails || {};
 
+    // Store global state for _voRecalcSceneTimes()
+    window._voSceneOrder    = sceneOrder;
+    window._voItemsByScene  = {};   // scene_id → [{item_id, duration_sec, pause_after_ms}]
+
     let html = '';
     sceneOrder.forEach((sc, scIdx) => {
       const scJ = JSON.stringify(sc);
@@ -3814,13 +3852,23 @@ placeholder="Enter your story here"></textarea>
       const epDirJ = JSON.stringify(epDir);
       const scIdE = escHtml(sc.replace(/[^a-zA-Z0-9_-]/g, '_'));
 
+      // Pre-populate per-scene item list for the recalc function and approval
+      window._voItemsByScene[sc] = (scenes[sc] || []).map(it => ({
+        item_id:        it.item_id,
+        speaker_id:     it.speaker_id  || '',
+        text:           it.text        || '',
+        duration_sec:   it.duration_sec ?? 0,
+        pause_after_ms: it.pause_after_ms ?? 300,
+      }));
+
       // Inter-scene break separator (shown BEFORE every scene except the first)
       if (scIdx > 0) {
         const tailMs = sceneTails[sc] ?? 2000;
         html += `<div class="vo-scene-break" id="vo-break-${scIdE}">
           <span class="vo-break-label">↕ break before ${escHtml(sc)}</span>
           <input  class="vo-break-input" id="vo-tail-${scIdE}" type="number"
-                  value="${tailMs}" min="0" max="30000" step="100" title="Silence before this scene (ms)"/>
+                  value="${tailMs}" min="0" max="30000" step="100" title="Silence before this scene (ms)"
+                  oninput="_voRecalcSceneTimes()"/>
           <span style="font-size:0.75em;color:var(--dim)">ms</span>
           <button class="vo-scene-btn" style="padding:2px 8px"
                   onclick='_voSaveSceneTail(${scJ},${epDirJ},${locJ})'>Save</button>
@@ -3829,6 +3877,7 @@ placeholder="Enter your story here"></textarea>
 
       html += `<div class="vo-scene-header">
         <span class="vo-scene-label">${escHtml(sc)}</span>
+        <span class="vo-scene-time" id="vo-scene-time-${scIdE}"></span>
         <button class="vo-scene-btn" id="vo-scene-preview-${scIdE}"
           onclick='_voPreviewScene(${scJ},${slugJ},${epIdJ},${locJ},this)'>
           ▶ Preview</button></div>`;
@@ -3904,7 +3953,8 @@ placeholder="Enter your story here"></textarea>
             data-orig-style="${origStyle}" data-orig-rate="${origRate}"
             data-orig-pitch="${origPitch}" data-orig-degree="${origDegree}"
             data-break-ms="${breakMs}" data-ep-dir="${escHtml(epDir)}"
-            data-locale="${escHtml(locale)}">
+            data-locale="${escHtml(locale)}"
+            data-dur="${it.duration_sec ?? 0}">
           <span class="vo-item-id">${iidE}</span>
           <span class="vo-badge ${badgeClass}" title="${escHtml(badge)}">${badgeLabel}</span>
           <input  class="vo-field vo-text"   id="vo-text-${iidE}"   value="${origText}" title="text"
@@ -3945,7 +3995,8 @@ placeholder="Enter your story here"></textarea>
                   title="Reset to full source.wav">Reset Trim</button>
           <span style="color:var(--dim);margin-left:8px">Pause:</span>
           <input class="vo-trim-input" id="vo-pause-${iidE}" type="number"
-                 step="50" min="0" value="${pauseMs}" title="pause_after_ms (ms)"/>
+                 step="50" min="0" value="${pauseMs}" title="pause_after_ms (ms)"
+                 oninput="_voRecalcSceneTimes()"/>
           <span style="color:var(--dim);font-size:0.8em">ms</span>
           <button class="vo-trim-btn" onclick='_voSavePause(${iidJ},${epDirJ},${locJ})'>Save Pause</button>
         </div>`;
@@ -3957,6 +4008,9 @@ placeholder="Enter your story here"></textarea>
     items.filter(it => it.badge !== 'ok').forEach(it => {
       // Trim row is always visible now (no collapse in this simplified version)
     });
+
+    // Populate scene time labels after DOM is ready
+    _voRecalcSceneTimes();
   }
 
   // Called whenever any TTS param field changes after a Re-Create.
@@ -3981,6 +4035,53 @@ placeholder="Enter your story here"></textarea>
       styles.map(s =>
         `<option value="${escHtml(s)}"${s===cur?' selected':''}>${escHtml(s)}</option>`
       ).join('');
+  }
+
+  // ── Scene time labels ────────────────────────────────────────────────────────
+
+  // Recompute and display scene begin/end times in episode-timeline coordinates.
+  // Called on render and live whenever any pause input or inter-scene tail changes.
+  function _voRecalcSceneTimes() {
+    const sceneOrder   = window._voSceneOrder;
+    const itemsByScene = window._voItemsByScene;
+    if (!sceneOrder || !itemsByScene) return;
+
+    // Format seconds as  "3:07.4"  or  "12.3s"  (no leading zero in seconds part)
+    const fmt = s => {
+      if (s < 0) s = 0;
+      const m = Math.floor(s / 60);
+      const sec = (s % 60).toFixed(1);
+      return m > 0 ? `${m}:${sec.padStart(4, '0')}` : `${sec}s`;
+    };
+
+    let cursor = 0.0;
+    sceneOrder.forEach((sc, scIdx) => {
+      const scIdE = sc.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+      // Add inter-scene tail before every scene except the first.
+      // Read live from the DOM input so typing immediately updates the label.
+      if (scIdx > 0) {
+        const tailEl = document.getElementById('vo-tail-' + scIdE);
+        cursor += (tailEl ? (parseFloat(tailEl.value) || 0) : 2000) / 1000.0;
+      }
+
+      const sceneStart = cursor;
+
+      // Accumulate each item's trimmed duration + pause
+      (itemsByScene[sc] || []).forEach(it => {
+        // duration_sec: prefer live data-dur attribute (updated after re-synth)
+        const row = document.getElementById('vo-row-' + it.item_id);
+        const dur = row ? (parseFloat(row.dataset.dur) || 0) : (it.duration_sec || 0);
+        // pause_after_ms: read live from the input so typing updates immediately
+        const pauseEl = document.getElementById('vo-pause-' + it.item_id);
+        const pauseMs = pauseEl ? (parseFloat(pauseEl.value) || 0) : (it.pause_after_ms || 300);
+        cursor += dur + pauseMs / 1000.0;
+      });
+
+      const sceneEnd = cursor;
+      const lbl = document.getElementById('vo-scene-time-' + scIdE);
+      if (lbl) lbl.textContent = `${fmt(sceneStart)} – ${fmt(sceneEnd)}`;
+    });
   }
 
   // ── VO preview helpers ──────────────────────────────────────────────────────
@@ -4506,6 +4607,7 @@ placeholder="Enter your story here"></textarea>
         ep_dir: epDir, locale, item_id: itemId, pause_ms: pauseMs,
       }, itemId);
       _voMarkSentinelInvalid();
+      _voRecalcSceneTimes();
     } catch(e) {
       alert('vo_pause error: ' + e.message);
     }
@@ -4529,12 +4631,51 @@ placeholder="Enter your story here"></textarea>
       const data = await r.json();
       if (data.error) throw new Error(data.error);
       _voMarkSentinelInvalid();
+      _voRecalcSceneTimes();
       // Flash the input green briefly
       if (input) { input.style.outline = '2px solid #6ec96e';
                    setTimeout(() => { input.style.outline = ''; }, 1500); }
     } catch(e) {
       alert('vo_scene_tail error: ' + e.message);
     }
+  }
+
+  // Approved durations from vo_preview_approved.{locale}.json — {item_id: duration_sec}.
+  // Populated by _voLoadApprovedDurations() when the VO tab loads.
+  window._voApprovedDurations = window._voApprovedDurations || {};
+
+  // Fetch approved durations for drift detection (OPEN 3).
+  // Called after loadVoItems() renders the tab.
+  async function _voLoadApprovedDurations(epDir, locale) {
+    try {
+      const r = await fetch(
+        '/api/vo_approved_timing?ep_dir=' + encodeURIComponent(epDir) +
+        '&locale=' + encodeURIComponent(locale)
+      );
+      const data = await r.json();
+      window._voApprovedDurations = data.approved || {};
+    } catch (_e) {
+      window._voApprovedDurations = {};
+    }
+  }
+
+  // Show drift warning in the sentinel bar.
+  function _voShowDriftWarning(itemId, approvedSec, newSec) {
+    const sentinelEl = document.getElementById('vo-sentinel-status');
+    if (sentinelEl) {
+      sentinelEl.style.display  = 'flex';
+      sentinelEl.style.background = '#2a0038';
+      sentinelEl.style.color      = '#d78aff';
+      sentinelEl.style.border     = '1px solid #7a00b8';
+      document.getElementById('vo-sentinel-icon').textContent = '⚡';
+      document.getElementById('vo-sentinel-text').textContent =
+        'VO timing changed (>' + '100ms drift) — re-run Stage 4 and beyond after re-approving.';
+    }
+    const drift = Math.abs(newSec - approvedSec);
+    console.warn('[VO-DRIFT]', itemId,
+                 'approved=' + approvedSec.toFixed(3) + 's',
+                 'new=' + newSec.toFixed(3) + 's',
+                 'drift=' + (drift * 1000).toFixed(0) + 'ms');
   }
 
   // Helper: update duration display for an item row
@@ -4544,6 +4685,18 @@ placeholder="Enter your story here"></textarea>
       dur.textContent = durSec != null ? durSec.toFixed(2) + 's' : '—';
       dur.classList.add('vo-timing-stale');   // timing is stale until re-approved
     }
+    // Keep data-dur in sync so _voRecalcSceneTimes() uses the latest duration
+    const row = document.getElementById('vo-row-' + itemId);
+    if (row && durSec != null) row.dataset.dur = durSec;
+    // Drift detection (OPEN 3): compare new duration against approved timing.
+    // Threshold: 100ms — below this the render timing impact is negligible.
+    if (durSec != null) {
+      const approvedDur = (window._voApprovedDurations || {})[itemId];
+      if (approvedDur != null && Math.abs(durSec - approvedDur) > 0.1) {
+        _voShowDriftWarning(itemId, approvedDur, durSec);
+      }
+    }
+    _voRecalcSceneTimes();
   }
 
   // Mark sentinel as invalid in UI (show Re-approve state)
@@ -4583,16 +4736,56 @@ placeholder="Enter your story here"></textarea>
     if (btn) { btn.textContent = '⏳ Approving…'; btn.disabled = true; }
     if (errEl) errEl.style.display = 'none';
 
+    // Collect full timeline from DOM using the same cursor logic as
+    // _voRecalcSceneTimes — the single authoritative source of truth.
+    //
+    // Crucially: scene tail inputs (vo-tail-{scene}) are added to cursor
+    // BEFORE each scene starts (matching _voRecalcSceneTimes line-for-line).
+    // This is what makes sc02-001.start_sec include the user's 3 s break.
+    //
+    // start_sec / end_sec are computed here on the client and sent to the
+    // backend so it can store them verbatim — no arithmetic on the server.
+    const _approveItems = [];
+    let _approveCursor = 0.0;
+    (window._voSceneOrder || []).forEach((sc, scIdx) => {
+      // Scene tail: silence BEFORE this scene (same as _voRecalcSceneTimes)
+      if (scIdx > 0) {
+        const scIdE  = sc.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const tailEl = document.getElementById('vo-tail-' + scIdE);
+        _approveCursor += (tailEl ? (parseFloat(tailEl.value) || 2000) : 2000) / 1000.0;
+      }
+      (window._voItemsByScene[sc] || []).forEach(it => {
+        const row     = document.getElementById('vo-row-'   + it.item_id);
+        const pauseEl = document.getElementById('vo-pause-' + it.item_id);
+        const textEl  = document.getElementById('vo-text-'  + it.item_id);
+        const dur     = row     ? (parseFloat(row.dataset.dur)    || 0)   : (it.duration_sec   || 0);
+        const pauseMs = pauseEl ? (parseInt(pauseEl.value,   10)  || 300) : (it.pause_after_ms || 300);
+        const startSec = parseFloat(_approveCursor.toFixed(6));
+        const endSec   = parseFloat((_approveCursor + dur).toFixed(6));
+        _approveItems.push({
+          item_id:        it.item_id,
+          speaker_id:     it.speaker_id || '',
+          text:           textEl ? textEl.value : (it.text || ''),
+          duration_sec:   dur,
+          pause_after_ms: pauseMs,
+          start_sec:      startSec,
+          end_sec:        endSec,
+        });
+        _approveCursor += dur + pauseMs / 1000.0;
+      });
+    });
+
     try {
       const r = await fetch('/api/vo_approve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ep_dir: epDir, locale }),
+        body: JSON.stringify({ ep_dir: epDir, locale, stage: _pendingApproveStage || "", items: _approveItems }),
       });
       const data = await r.json();
       if (data.error) throw new Error(data.detail ? data.error + ': ' + data.detail : data.error);
 
-      // Success — update UI
+      // Success — clear pending stage and update UI
+      _pendingApproveStage = null;
       if (btn) { btn.textContent = '✓ VO Approved — Continue'; btn.disabled = false; }
       const sentinelEl = document.getElementById('vo-sentinel-status');
       if (sentinelEl) {
@@ -4804,13 +4997,13 @@ placeholder="Enter your story here"></textarea>
     _sfxShotTimeline = [];
     _sfxManifest = null;
     try {
-      // Load manifest
+      // Load manifest (needed for sfx_items grouping)
       const mr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
                            + '&ep_id=' + encodeURIComponent(_sfxEpId)
                            + '&file=AssetManifest_draft.shared.json');
       if (!mr.ok) return;
       _sfxManifest = await mr.json();
-      // Load ShotList
+      // Load ShotList (for shot order and scene_id)
       const slr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
                             + '&ep_id=' + encodeURIComponent(_sfxEpId)
                             + '&file=ShotList.json');
@@ -4823,35 +5016,40 @@ placeholder="Enter your story here"></textarea>
         const sid = s.shot_id || '';
         if (sid) { sfxByShot[sid] = sfxByShot[sid] || []; sfxByShot[sid].push(s); }
       });
-      // Compute scene-tail shifts (mirrors sfx_preview_pack.py logic)
-      const sceneTails = _sfxManifest.scene_tails || {};
-      const DEFAULT_TAIL_MS = 2000;
-      const sceneShiftMap = {};
-      let shiftAcc = 0.0;
-      let prevSc = null;
-      shots.forEach(s => {
-        const sc = s.scene_id || '';
-        if (prevSc !== null && sc !== prevSc) {
-          const tailMs = sceneTails[sc] != null ? sceneTails[sc]
-                       : sceneTails[prevSc] != null ? sceneTails[prevSc]
-                       : DEFAULT_TAIL_MS;
-          shiftAcc += tailMs / 1000.0;
+      // Load authoritative shot timeline from VOTimeline (RenderPlan-derived,
+      // no inter-scene gaps — shots concatenate directly in render_video.py).
+      // Falls back to ShotList duration_sec only if VOTimeline is unavailable.
+      let voShotMap = {};  // shot_id → {start_sec, end_sec, duration_sec}
+      try {
+        const vtResp = await fetch('/api/vo_timeline?slug='
+          + encodeURIComponent(_sfxSlug) + '&ep_id=' + encodeURIComponent(_sfxEpId));
+        if (vtResp.ok) {
+          const vtData = await vtResp.json();
+          (vtData.shots || []).forEach(s => { voShotMap[s.shot_id] = s; });
+          console.log('[SFX] VOTimeline loaded —', Object.keys(voShotMap).length, 'shots');
         }
-        if (sc && !(sc in sceneShiftMap)) sceneShiftMap[sc] = shiftAcc;
-        prevSc = sc;
-      });
-      // Build shot timeline entries with episode-absolute start/end
-      let cumSec = 0.0;
+      } catch(_vtErr) {
+        console.warn('[SFX] Could not load VOTimeline, will use ShotList durations:', _vtErr);
+      }
+
+      // If VOTimeline unavailable, fall back to cumulative ShotList durations
+      // (no scene gaps — same assumption as the RenderPlan-based path)
+      let cumFallback = 0.0;
       _sfxShotTimeline = shots.map(s => {
-        const sc = s.scene_id || '';
-        const scShift = (sc && sceneShiftMap[sc] != null) ? sceneShiftMap[sc] : 0.0;
-        const dur = s.duration_sec || 0;
-        const epStart = Math.round((cumSec + scShift) * 10) / 10;
-        const epEnd   = Math.round((epStart + dur) * 10) / 10;
-        cumSec += dur;
+        const vt  = voShotMap[s.shot_id];
+        const dur = vt ? vt.duration_sec : (s.duration_sec || 0);
+        let epStart, epEnd;
+        if (vt) {
+          epStart = vt.start_sec;
+          epEnd   = vt.end_sec;
+        } else {
+          epStart = Math.round(cumFallback * 1000) / 1000;
+          epEnd   = Math.round((cumFallback + dur) * 1000) / 1000;
+          cumFallback += dur;
+        }
         return {
           shot_id: s.shot_id,
-          scene_id: sc,
+          scene_id: s.scene_id || '',
           epStart,
           epEnd,
           duration_sec: dur,
@@ -9514,6 +9712,37 @@ placeholder="Enter your story here"></textarea>
         _musicTimeline = await tr.json();
       }
     } catch (_) {}
+    // Patch stale offset_sec values in _musicTimeline using VOTimeline (which is
+    // derived from the current RenderPlan and represents the true episode-absolute
+    // start times).  MusicReviewPack/timeline.json is generated at music-review
+    // time and may be stale after subsequent VO approvals that change duration_ms.
+    if (_musicTimeline && _musicTimeline.shots) {
+      try {
+        const vtResp = await fetch('/api/vo_timeline?slug=' + encodeURIComponent(_musicSlug)
+          + '&ep_id=' + encodeURIComponent(_musicEpId));
+        if (vtResp.ok) {
+          const vtData = await vtResp.json();
+          const voShotMap = {};
+          (vtData.shots || []).forEach(s => { voShotMap[s.shot_id] = s; });
+          let patched = 0;
+          _musicTimeline.shots.forEach(s => {
+            const vt = voShotMap[s.shot_id];
+            if (vt) {
+              s.offset_sec    = vt.start_sec;
+              s.duration_sec  = vt.duration_sec;
+              patched++;
+            }
+          });
+          // Also update total_duration_sec from VOTimeline
+          if (vtData.total_sec != null) {
+            _musicTimeline.total_duration_sec = vtData.total_sec;
+          }
+          if (patched) console.log('[Music] Patched', patched, 'shot offset(s) from VOTimeline');
+        }
+      } catch (_vtErr) {
+        console.warn('[Music] Could not load VOTimeline for offset patch:', _vtErr);
+      }
+    }
     // Load gen_music_clip_results.json — all available music clips for this episode
     try {
       const mr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_musicSlug)
@@ -12382,8 +12611,13 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             pass
 
     # ── Approval checkpoints (FIX E) ──────────────────────────────────────────
+    # VO approval: check vo_preview_approved.{primary_locale}.json (new) or
+    # tts_review_complete.json (legacy backward compat)
+    _vo_primary = meta_locales_str.split(",")[0].strip() if meta_locales_str else "en"
+    _vo_approved_new    = os.path.join(ep_dir, f"vo_preview_approved.{_vo_primary}.json")
+    _vo_approved_legacy = os.path.join(ep_dir, "tts_review_complete.json")
     approvals = {
-        "vo":    os.path.isfile(os.path.join(ep_dir, "tts_review_complete.json")),
+        "vo":    os.path.isfile(_vo_approved_new) or os.path.isfile(_vo_approved_legacy),
         "music": os.path.isfile(os.path.join(ep_dir, "assets", "music", "MusicApprovalSnapshot.json")),
         "sfx":   os.path.isfile(os.path.join(ep_dir, "assets", "sfx", "SfxPlan.json")),
         "media": os.path.isfile(os.path.join(ep_dir, "assets", "media", "selections.json")),
@@ -12391,11 +12625,12 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
     approvals["all"] = all(approvals.values())
 
     # ── Staleness guard: is RenderPlan older than VO approval? ────────────────
-    # If tts_review_complete.json is newer than RenderPlan.{locale}.json, the
-    # RenderPlan was generated before the current VO approval — step 10 must be
+    # If vo_preview_approved.{primary}.json is newer than RenderPlan.{locale}.json,
+    # the RenderPlan was generated before the current VO approval — step 10 must be
     # re-run or the SRT timestamps and shot durations will be stale.
     _render_plan_stale: dict[str, bool] = {}   # keyed by locale
-    _tts_complete_path = os.path.join(ep_dir, "tts_review_complete.json")
+    _tts_complete_path = _vo_approved_new if os.path.isfile(_vo_approved_new) \
+                         else _vo_approved_legacy
     _tts_mtime = os.path.getmtime(_tts_complete_path) if os.path.isfile(_tts_complete_path) else None
     for _loc in (locales or ["en"]):
         _rp_path = os.path.join(ep_dir, f"RenderPlan.{_loc}.json")
@@ -12964,7 +13199,10 @@ class Handler(BaseHTTPRequestHandler):
                 _json_resp(self, {"error": "ep_dir and locale required"}, 400)
                 return
             full_ep = _vo_resolve_ep_dir(ep_dir)
-            sentinel_path = os.path.join(full_ep, "tts_review_complete.json")
+            # Check new sentinel first, fall back to legacy
+            _new_s  = os.path.join(full_ep, f"vo_preview_approved.{locale}.json")
+            _leg_s  = os.path.join(full_ep, "tts_review_complete.json")
+            sentinel_path = _new_s if os.path.isfile(_new_s) else _leg_s
             exists  = os.path.isfile(sentinel_path)
             valid   = False
             sentinel_data = {}
@@ -12975,10 +13213,12 @@ class Handler(BaseHTTPRequestHandler):
                         sentinel_data = json.load(_sf)
                 except Exception:
                     pass
+            # Use approved_at (new) or completed_at (legacy) for the timestamp
+            timestamp = sentinel_data.get("approved_at") or sentinel_data.get("completed_at")
             _json_resp(self, {
                 "exists":       exists,
                 "valid":        valid,
-                "completed_at": sentinel_data.get("completed_at"),
+                "completed_at": timestamp,
             })
             return
 
@@ -13034,8 +13274,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 full_ep_dir = os.path.join(PIPE_DIR, ep_dir) \
                               if not os.path.isabs(ep_dir) else ep_dir
-                mpath = os.path.join(full_ep_dir,
-                                     f"AssetManifest_merged.{locale}.json")
+                # Prefer merged manifest (post Stage 9); fall back to draft manifest
+                # (Stage 3.5: only draft exists before ShotList is generated)
+                mpath = os.path.join(full_ep_dir, f"AssetManifest_merged.{locale}.json")
+                if not os.path.isfile(mpath):
+                    mpath = os.path.join(full_ep_dir, f"AssetManifest_draft.{locale}.json")
                 try:
                     with open(mpath, encoding="utf-8") as fh:
                         manifest = json.load(fh)
@@ -13105,6 +13348,37 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
                 self.end_headers()
                 self.wfile.write(body)
+
+        # ── GET /api/vo_approved_timing — approved durations for drift detection ──
+        # Returns {item_id: duration_sec} from vo_preview_approved.{locale}.json.
+        # Used by the VO tab JS to detect timing drift after re-synthesis.
+        elif parsed.path == "/api/vo_approved_timing":
+            params = parse_qs(parsed.query)
+            ep_dir = unquote_plus(params.get("ep_dir", [""])[0]).strip()
+            locale = unquote_plus(params.get("locale", [""])[0]).strip()
+            approved: dict = {}
+            if ep_dir and locale:
+                _full_ep = os.path.join(PIPE_DIR, ep_dir) \
+                           if not os.path.isabs(ep_dir) else ep_dir
+                _apath = os.path.join(_full_ep, f"vo_preview_approved.{locale}.json")
+                if os.path.isfile(_apath):
+                    try:
+                        with open(_apath, encoding="utf-8") as _fh:
+                            _adoc = json.load(_fh)
+                        approved = {
+                            _it["item_id"]: float(_it.get("duration_sec", 0))
+                            for _it in _adoc.get("items", [])
+                            if "item_id" in _it
+                        }
+                    except Exception:
+                        pass
+            body = json.dumps({"approved": approved}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(body)
 
         # Next available story_N number
         elif parsed.path == "/next_story_num":
@@ -13877,6 +14151,129 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+        # SSE stream: Stage 3.5 — run gen_tts (--script mode) + post_tts for primary locale
+        elif parsed.path == "/run_stage35":
+            params  = parse_qs(parsed.query)
+            slug    = unquote_plus(params.get("slug",    [""])[0]).strip()
+            ep_id   = unquote_plus(params.get("ep_id",   [""])[0]).strip()
+            profile = unquote_plus(params.get("profile", ["preview_local"])[0]).strip()
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            if not slug or not ep_id:
+                self.wfile.write(sse("error_line", "Missing slug or ep_id"))
+                self.wfile.write(sse("done", "1"))
+                self.wfile.flush()
+                return
+
+            step_env = os.environ.copy()
+            step_env.pop("CLAUDECODE", None)
+            client   = self.client_address
+            job_key  = f"run_stage35\x00{slug}\x00{ep_id}"
+
+            def _run_stage35_job(write_log):
+                import json as _json
+                _ep_dir_35  = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                _code_dir   = os.path.join(PIPE_DIR, "code", "http")
+                _script_35  = os.path.join(_ep_dir_35, "Script.json")
+                _vc_35      = os.path.join(PIPE_DIR, "projects", slug, "VoiceCast.json")
+
+                # Determine primary locale
+                _locale_35 = "en"
+                if _VO_UTILS_AVAILABLE:
+                    try:
+                        from pathlib import Path as _P35
+                        _locale_35 = _get_primary_locale(_P35(_ep_dir_35))
+                    except Exception:
+                        pass
+
+                write_log("O", f"\n── Stage 3.5 — primary locale: {_locale_35} ──────────────────")
+
+                # Check Script.json exists
+                if not os.path.isfile(_script_35):
+                    write_log("E", f"Script.json not found: {_script_35}")
+                    write_log("D", "1")
+                    return
+
+                # Step 1: gen_tts_cloud --script mode
+                write_log("O", f"\n── gen_tts (--script mode) [{_locale_35}] ─────────────────")
+                _cmd_tts = [
+                    "python3", os.path.join(_code_dir, "gen_tts_cloud.py"),
+                    "--script",    _script_35,
+                    "--voicecast", _vc_35,
+                    "--locale",    _locale_35,
+                    "--stage",     "3.5",
+                ]
+                _p35 = subprocess.Popen(
+                    _cmd_tts,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                )
+                with _lock:
+                    _procs[client] = _p35
+                for _raw in _p35.stdout:
+                    write_log("O", _raw.rstrip("\n"))
+                _p35.wait()
+                with _lock:
+                    _procs.pop(client, None)
+                if _p35.returncode != 0:
+                    write_log("E", f"✗ gen_tts [{_locale_35}] failed (exit {_p35.returncode})")
+                    write_log("D", str(_p35.returncode))
+                    return
+                write_log("O", f"✓ gen_tts [{_locale_35}]")
+
+                # Step 2: post_tts_analysis on draft manifest
+                write_log("O", f"\n── post_tts_analysis [{_locale_35}] ──────────────────────")
+                _draft_manifest = os.path.join(_ep_dir_35, f"AssetManifest_draft.{_locale_35}.json")
+                if not os.path.isfile(_draft_manifest):
+                    write_log("E", f"AssetManifest_draft.{_locale_35}.json not found after TTS")
+                    write_log("D", "1")
+                    return
+                _cmd_pta = [
+                    "python3", os.path.join(_code_dir, "post_tts_analysis.py"),
+                    "--manifest", _draft_manifest,
+                ]
+                _p35b = subprocess.Popen(
+                    _cmd_pta,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                )
+                with _lock:
+                    _procs[client] = _p35b
+                for _raw in _p35b.stdout:
+                    write_log("O", _raw.rstrip("\n"))
+                _p35b.wait()
+                with _lock:
+                    _procs.pop(client, None)
+                if _p35b.returncode != 0:
+                    write_log("E", f"✗ post_tts_analysis [{_locale_35}] failed (exit {_p35b.returncode})")
+                    write_log("D", str(_p35b.returncode))
+                    return
+                write_log("O", f"✓ post_tts_analysis [{_locale_35}]")
+
+                # All steps done — emit vo_review_ready event before done
+                write_log("V", _json.dumps({"locale": _locale_35, "slug": slug, "ep_id": ep_id, "stage": "3.5"}))
+                write_log("O", "\n✓ Stage 3.5 complete — VO ready for review")
+                write_log("D", "0")
+
+            log_path = _launch_fn_job(job_key, _run_stage35_job)
+            try:
+                _tail_log_to_sse(self.wfile, log_path)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as exc:
+                try:
+                    self.wfile.write(sse("error_line", f"Server error: {exc}"))
+                    self.wfile.write(sse("done", "1"))
+                    self.wfile.flush()
+                except Exception:
+                    pass
+
         # SSE stream: Stage 7.5 — run manifest_merge + gen_tts for primary locale only
         elif parsed.path == "/run_stage75":
             params  = parse_qs(parsed.query)
@@ -14342,6 +14739,134 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     self.wfile.write(data)
+
+        # ── RenderPlan shot durations — for SFX Shot Overrides timeline ─────
+        # GET /api/rp_shot_durations?slug=X&ep_id=Y
+        # Returns {durations: {shot_id: duration_sec}} from the locale-appropriate
+        # RenderPlan.  The frontend _sfxLoadShotTimeline() uses this to replace
+        # stale ShotList duration_sec values (which pre-date the VO-ceiling applied
+        # by gen_render_plan).  Locale is auto-detected via pipeline_vars.sh.
+        elif parsed.path == "/api/rp_shot_durations":
+            try:
+                params = parse_qs(parsed.query)
+                slug  = params.get("slug",  [""])[0].strip()
+                ep_id = params.get("ep_id", [""])[0].strip()
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                # Detect primary locale via pipeline_vars.sh (mirrors sfx_preview handler)
+                import re as _re_rpd
+                _primary_locale = "en"
+                _vars_file = os.path.join(ep_dir, "pipeline_vars.sh")
+                if os.path.isfile(_vars_file):
+                    with open(_vars_file, encoding="utf-8") as _vf:
+                        _m = _re_rpd.search(
+                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                            _vf.read())
+                        if _m:
+                            _primary_locale = _m.group(1).strip()
+                rp_path = os.path.join(ep_dir, f"RenderPlan.{_primary_locale}.json")
+                if not os.path.isfile(rp_path):
+                    # Fallback: first RenderPlan.*.json found alphabetically
+                    import glob as _glob_rpd
+                    _candidates = sorted(_glob_rpd.glob(
+                        os.path.join(ep_dir, "RenderPlan.*.json")))
+                    rp_path = _candidates[0] if _candidates else None
+                if not rp_path or not os.path.isfile(rp_path):
+                    _json_resp(self, {"durations": {}})
+                else:
+                    with open(rp_path, encoding="utf-8") as _rpf:
+                        _rp = json.load(_rpf)
+                    _durs = {
+                        s["shot_id"]: round(s["duration_ms"] / 1000.0, 4)
+                        for s in _rp.get("shots", [])
+                        if s.get("shot_id") and s.get("duration_ms") is not None
+                    }
+                    _json_resp(self, {"durations": _durs})
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 400)
+
+        # ── Authoritative episode shot timeline from RenderPlan ───────────────
+        # GET /api/vo_timeline?slug=X&ep_id=Y
+        # Computes episode-absolute start/end for every shot using the locale-
+        # appropriate RenderPlan duration_ms values.  Shots concatenate directly
+        # in render_video.py — there are NO inter-scene gaps in the output file.
+        # Result is also persisted to assets/meta/VOTimeline.json so the same
+        # data is available offline / between server restarts.
+        elif parsed.path == "/api/vo_timeline":
+            try:
+                params = parse_qs(parsed.query)
+                slug  = params.get("slug",  [""])[0].strip()
+                ep_id = params.get("ep_id", [""])[0].strip()
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                # Detect primary locale (same logic as /api/rp_shot_durations)
+                _primary_locale = "en"
+                _vars_file = os.path.join(ep_dir, "pipeline_vars.sh")
+                if os.path.isfile(_vars_file):
+                    with open(_vars_file, encoding="utf-8") as _vf:
+                        _lm = re.search(
+                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                            _vf.read())
+                        if _lm:
+                            _primary_locale = _lm.group(1).strip()
+                rp_path = os.path.join(ep_dir, f"RenderPlan.{_primary_locale}.json")
+                if not os.path.isfile(rp_path):
+                    _vot_cands = sorted(glob.glob(
+                        os.path.join(ep_dir, "RenderPlan.*.json")))
+                    rp_path = _vot_cands[0] if _vot_cands else None
+                if not rp_path or not os.path.isfile(rp_path):
+                    _json_resp(self, {"error": "RenderPlan not found"}, 404)
+                else:
+                    with open(rp_path, encoding="utf-8") as _rpf:
+                        _rp = json.load(_rpf)
+                    # Cumulative shot start/end — no inter-scene gaps (shots
+                    # are concatenated directly by render_video.py).
+                    _cum = 0.0
+                    _shot_entries = []
+                    _scene_map: dict = {}  # scene_id → {start_sec, end_sec}
+                    for _rs in _rp.get("shots", []):
+                        _sid  = _rs.get("shot_id", "")
+                        _dms  = _rs.get("duration_ms")
+                        _scid = _rs.get("scene_id", "")
+                        if not _sid or _dms is None:
+                            continue
+                        _dur   = round(_dms / 1000.0, 4)
+                        _t0    = round(_cum, 4)
+                        _t1    = round(_cum + _dur, 4)
+                        _shot_entries.append({
+                            "shot_id":      _sid,
+                            "scene_id":     _scid,
+                            "start_sec":    _t0,
+                            "end_sec":      _t1,
+                            "duration_sec": _dur,
+                        })
+                        if _scid:
+                            if _scid not in _scene_map:
+                                _scene_map[_scid] = {
+                                    "scene_id":  _scid,
+                                    "start_sec": _t0,
+                                    "end_sec":   _t1,
+                                }
+                            else:
+                                _scene_map[_scid]["end_sec"] = _t1
+                        _cum += _dur
+                    _total = round(_cum, 4)
+                    _vot_result = {
+                        "shots":     _shot_entries,
+                        "scenes":    list(_scene_map.values()),
+                        "total_sec": _total,
+                    }
+                    # Persist to assets/meta/VOTimeline.json
+                    _meta_dir = os.path.join(ep_dir, "assets", "meta")
+                    os.makedirs(_meta_dir, exist_ok=True)
+                    _vot_path = os.path.join(_meta_dir, "VOTimeline.json")
+                    with open(_vot_path, "w", encoding="utf-8") as _vtf:
+                        json.dump(_vot_result, _vtf, indent=2, ensure_ascii=False)
+                    _json_resp(self, _vot_result)
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 400)
 
         # ── NFS proxy: serve a file:// media file to the browser ─────────────
         # Browsers cannot load file:// URLs from an http:// page.  When the
@@ -15192,7 +15717,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 409)
 
-        # POST /api/vo_approve — validate and approve VO, write sentinel
+        # POST /api/vo_approve — validate and approve VO, write vo_preview_approved sentinel
         elif self.path == "/api/vo_approve":
             try:
                 if not _VO_UTILS_AVAILABLE:
@@ -15201,6 +15726,7 @@ class Handler(BaseHTTPRequestHandler):
                 req    = json.loads(self.rfile.read(length))
                 ep_dir = req.get("ep_dir", "").strip()
                 locale = req.get("locale", "").strip()
+                stage  = req.get("stage",  "").strip()   # "3.5", "8.5", or "" (legacy)
                 _vo_validate_inputs(ep_dir, locale)
                 full_ep = _vo_resolve_ep_dir(ep_dir)
                 from pathlib import Path as _P
@@ -15210,12 +15736,23 @@ class Handler(BaseHTTPRequestHandler):
                     # Pre-flight check (a): no synthesis jobs in-flight
                     # (Always true under synchronous lock design)
 
-                    # Pre-flight check (e): locale must be primary_locale
+                    # Pre-flight check (e): locale constraints by stage
                     primary = _get_primary_locale(_P(full_ep))
-                    if locale != primary:
-                        raise ValueError(
-                            f"Must approve primary locale ({primary!r}), not {locale!r}"
-                        )
+                    if stage == "8.5":
+                        # Stage 8.5 (explicit): allow non-primary locales
+                        pass
+                    elif locale != primary:
+                        # Non-primary locale without explicit stage="8.5" —
+                        # allow if their merged manifest exists (Stage 8.5 run from
+                        # run.sh, which never fires a vo_review_ready SSE, so the
+                        # JS cannot set _pendingApproveStage automatically).
+                        _merged_check = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
+                        if not os.path.isfile(_merged_check):
+                            raise ValueError(
+                                f"Cannot approve non-primary locale ({locale!r}) — "
+                                f"AssetManifest_merged.{locale}.json not found. "
+                                "Run Stage 8 (translation) before approving this locale."
+                            )
 
                     # Pre-flight check (c): all trim overrides valid (INVARIANT K)
                     overrides = _load_vo_trim_overrides(full_ep, locale)
@@ -15232,53 +15769,131 @@ class Handler(BaseHTTPRequestHandler):
                                 )
 
                     # Pre-flight check (d): manifest structurally valid
-                    mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
-                    if not os.path.isfile(mpath):
-                        raise FileNotFoundError(
-                            f"AssetManifest_merged.{locale}.json not found"
-                        )
+                    # Stage 3.5: use draft manifest (merged doesn't exist yet)
+                    # Stage 8.5 / legacy: use merged manifest
+                    if stage == "3.5":
+                        mpath = os.path.join(full_ep, f"AssetManifest_draft.{locale}.json")
+                        if not os.path.isfile(mpath):
+                            raise FileNotFoundError(
+                                f"AssetManifest_draft.{locale}.json not found — "
+                                "run Stage 3.5 TTS first"
+                            )
+                    else:
+                        mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
+                        if not os.path.isfile(mpath):
+                            raise FileNotFoundError(
+                                f"AssetManifest_merged.{locale}.json not found"
+                            )
                     with open(mpath, encoding="utf-8") as _mf:
                         _mani = json.load(_mf)
 
-                    # Run post_tts_analysis under lock (INVARIANT C, G)
-                    # post_tts_analysis must NOT acquire _vo_locks internally (deadlock)
-                    _pta_script = os.path.join(os.path.dirname(__file__), "post_tts_analysis.py")
-                    _pta_cmd = [
-                        "python3", _pta_script,
-                        "--manifest", mpath,
-                    ]
-                    _pta_env = os.environ.copy()
-                    _pta_env.pop("CLAUDECODE", None)
-                    _pta_result = _sp.run(
-                        _pta_cmd, capture_output=True, text=True,
-                        cwd=PIPE_DIR, env=_pta_env, timeout=120,
-                    )
-                    if _pta_result.returncode != 0:
-                        raise RuntimeError(
-                            f"post_tts_analysis failed (exit {_pta_result.returncode}):\n"
-                            + _pta_result.stderr[:500]
+                    # ── Request diagnostics ───────────────────────────────
+                    _dbg_items = req.get("items")
+                    _log.debug("[vo_approve] stage=%r  locale=%r  req_keys=%s  items=%s(len=%s)",
+                               stage, locale, list(req.keys()),
+                               type(_dbg_items).__name__,
+                               len(_dbg_items) if isinstance(_dbg_items, list) else "N/A")
+                    if isinstance(_dbg_items, list) and _dbg_items:
+                        _log.debug("[vo_approve] first=%s", _dbg_items[0])
+                        _log.debug("[vo_approve] last =%s", _dbg_items[-1])
+                        for _di in _dbg_items:
+                            if "sc02-001" in _di.get("item_id", ""):
+                                _log.debug("[vo_approve] sc02-001=%s", _di)
+                                break
+                    # ──────────────────────────────────────────────────────
+
+                    # Build authoritative timeline from frontend-provided items.
+                    # The frontend sends live DOM values (duration from data-dur,
+                    # pause from the pause input) — this is what the user heard and
+                    # approved.  We compute start_sec/end_sec here via simple
+                    # arithmetic; no manifest read, no post_tts_analysis needed.
+                    _req_items = req.get("items")  # list or None (legacy callers)
+                    _approval_items = []
+                    _items_measured = 0
+                    if _req_items:
+                        # start_sec/end_sec computed on the client with the same
+                        # cursor logic as _voRecalcSceneTimes (scene tails included).
+                        # Trust them verbatim — no recomputation on the server.
+                        for _it in _req_items:
+                            _dur   = float(_it.get("duration_sec", 0))
+                            _start = float(_it["start_sec"]) if "start_sec" in _it else 0.0
+                            _end   = float(_it["end_sec"])   if "end_sec"   in _it else _start + _dur
+                            _approval_items.append({
+                                "item_id":      _it["item_id"],
+                                "speaker_id":   _it.get("speaker_id", ""),
+                                "text":         _it.get("text", ""),
+                                "duration_sec": round(_dur, 3),
+                                "start_sec":    round(_start, 6),
+                                "end_sec":      round(_end, 6),
+                            })
+                        _items_measured = len(_approval_items)
+                    else:
+                        # Legacy fallback: items not provided — read manifest and
+                        # run post_tts_analysis to reconstruct the timeline.
+                        _pta_script = os.path.join(os.path.dirname(__file__), "post_tts_analysis.py")
+                        _pta_cmd = ["python3", _pta_script, "--manifest", mpath]
+                        _pta_env = os.environ.copy()
+                        _pta_env.pop("CLAUDECODE", None)
+                        _pta_result = _sp.run(
+                            _pta_cmd, capture_output=True, text=True,
+                            cwd=PIPE_DIR, env=_pta_env, timeout=120,
                         )
+                        if _pta_result.returncode != 0:
+                            raise RuntimeError(
+                                f"post_tts_analysis failed (exit {_pta_result.returncode}):\n"
+                                + _pta_result.stderr[:500]
+                            )
+                        import re as _re_pta
+                        _items_measured = len(_re_pta.findall(r"\[OK\]", _pta_result.stdout))
+                        with open(mpath, encoding="utf-8") as _mf:
+                            _mani = json.load(_mf)
+                        _approval_items = [
+                            {
+                                "item_id":      v["item_id"],
+                                "speaker_id":   v.get("speaker_id", ""),
+                                "text":         v.get("text", ""),
+                                "duration_sec": round(v.get("end_sec", 0) - v.get("start_sec", 0), 3),
+                                "start_sec":    round(v.get("start_sec", 0.0), 6),
+                                "end_sec":      round(v.get("end_sec",   0.0), 6),
+                            }
+                            for v in _mani.get("vo_items", [])
+                            if "start_sec" in v and "end_sec" in v
+                        ]
 
-                    # Count items processed
-                    import re as _re_pta
-                    _items_measured = len(_re_pta.findall(r"\[OK\]", _pta_result.stdout))
+                    # ── Write diagnostics ─────────────────────────────────
+                    _log.debug("[vo_approve] writing %d items  frontend_path=%s",
+                               len(_approval_items), bool(_req_items))
+                    if _approval_items:
+                        _w0 = _approval_items[0]
+                        _w4 = _approval_items[3] if len(_approval_items) > 3 else None
+                        _w5 = _approval_items[4] if len(_approval_items) > 4 else None
+                        _log.debug("[vo_approve] write[0] %s  start=%s  end=%s",
+                                   _w0["item_id"], _w0["start_sec"], _w0["end_sec"])
+                        if _w4:
+                            _log.debug("[vo_approve] write[3] %s  start=%s  end=%s",
+                                       _w4["item_id"], _w4["start_sec"], _w4["end_sec"])
+                        if _w4 and _w5:
+                            _log.debug("[vo_approve] write[4] %s  start=%s  end=%s  gap=%.3fs",
+                                       _w5["item_id"], _w5["start_sec"], _w5["end_sec"],
+                                       _w5["start_sec"] - _w4["end_sec"])
+                    # ──────────────────────────────────────────────────────
 
-                    # Write sentinel (INVARIANT I)
+                    # Compute hashes and write vo_preview_approved.{locale}.json
                     _hashes = _compute_sentinel_hashes(full_ep, locale)
-                    _write_sentinel(full_ep, locale, _hashes)
+                    _write_vo_preview_approved(
+                        full_ep, locale,
+                        stage or "legacy",
+                        _approval_items,
+                        _hashes,
+                    )
 
-                    # Export {primary_locale}_vo_durations.json
-                    # Re-read manifest (post_tts_analysis mutated it in-place)
-                    with open(mpath, encoding="utf-8") as _mf:
-                        _mani = json.load(_mf)
+                    # Export {locale}_vo_durations.json (used by Stage 8 p_8.txt)
                     _durations = {
-                        v["item_id"]: round(
-                            v.get("end_sec", 0) - v.get("start_sec", 0), 3
-                        )
-                        for v in _mani.get("vo_items", [])
-                        if "start_sec" in v and "end_sec" in v
+                        item["item_id"]: item["duration_sec"]
+                        for item in _approval_items
                     }
-                    _dur_path = os.path.join(full_ep, f"{primary}_vo_durations.json")
+                    _dur_locale = primary if stage != "8.5" else locale
+                    _dur_path = os.path.join(full_ep, f"{_dur_locale}_vo_durations.json")
                     _dur_tmp  = _dur_path + ".tmp"
                     with open(_dur_tmp, "w", encoding="utf-8") as _df:
                         json.dump(_durations, _df, indent=2)
@@ -15288,8 +15903,9 @@ class Handler(BaseHTTPRequestHandler):
                     "approved":        True,
                     "items_measured":  _items_measured,
                     "locale":          locale,
+                    "stage":           stage or "legacy",
                 })
-                print(f"[vo_approve] ✓ {locale} approved — "
+                print(f"[vo_approve] ✓ {locale} approved (stage={stage or 'legacy'}) — "
                       f"{_items_measured} items measured")
 
             except ValueError as exc:

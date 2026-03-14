@@ -399,70 +399,34 @@ Required fields per entry:
                  (do NOT use shot.audio_intent.vo_text — that is a summary)
   license_type : "commercial_reusable"
 
-**tts_prompt** per entry — set ALL fields below:
+**tts_prompt** per entry — copy ALL fields verbatim from VoiceCast.json:
 ```json
 {
-  "voice_style"        : "<gender + role quality — MUST start with gender, e.g. 'young female, fierce', 'deep male, commanding', 'elderly male, weary'>",
-  "emotion"            : "<human-readable emotion label, kept for debugging>",
-  "pace"               : "<slow|normal|fast — set to match azure_rate intent>",
   "locale"             : "en",
-  "azure_voice"        : "<character[en].azure_voice from VoiceCast.json>",
-  "azure_style"        : "<chosen per style selection rules below — omit if no match>",
+  "azure_voice"        : "<character[en].azure_voice from VoiceCast.json — copy exactly>",
+  "azure_style"        : "<character[en].azure_style from VoiceCast.json — omit if null or absent>",
   "azure_style_degree" : <character[en].azure_style_degree from VoiceCast.json — copy exactly>,
   "azure_rate"         : "<character[en].azure_rate from VoiceCast.json — copy exactly>",
-  "azure_pitch"        : "<character[en].azure_pitch from VoiceCast.json>",
-  "azure_break_ms"     : <character[en].azure_break_ms from VoiceCast.json>
+  "azure_pitch"        : "<character[en].azure_pitch from VoiceCast.json — copy exactly>",
+  "azure_break_ms"     : <character[en].azure_break_ms from VoiceCast.json — copy exactly>
 }
 ```
 
-voice_style MUST lead with the character's gender word ("female", "male", or "neutral")
-followed by their vocal qualities. This is the primary signal for TTS voice selection.
+VoiceCast.json is the SOLE authority for all TTS parameters. Copy each field
+verbatim from the character's locale entry. Do NOT invent voice_style, emotion,
+pace, or per-line azure_style overrides. Do NOT omit any field present in VoiceCast.json.
 
-NOTE on pace: retained for legacy compatibility.  When azure_rate is set,
-gen_tts_cloud.py uses azure_rate and ignores pace entirely.  Set pace to match
-the rate intent (slow/normal/fast) for human readability.
+If a character is not in VoiceCast.json:
+  - Omit all azure_* fields and leave just `"locale": "en"`
+  - Log: "⚠ No VoiceCast entry for <speaker_id> — tts_prompt will be minimal"
 
-### Style selection rules (applied per vo_item)
+### VoiceCast.json is the sole TTS authority
 
-  Step 1  Consult character[en].available_styles from VoiceCast.json.
-          NEVER choose a style not in this list.
+  Do NOT select per-line styles based on emotion or text content.
+  Copy all TTS parameters exactly as they appear in VoiceCast.json for this locale.
 
-  Step 2  Pick the closest available style for the VO line's emotion.
-          If no style fits after the fallback chain (Step 3), omit azure_style.
-
-  Step 3  Fallback chain — walk until a style in available_styles is found:
-            angry     → shouting → unfriendly → serious → (omit)
-            fearful   → terrified → whispering → sad → (omit)
-            cheerful  → excited → friendly → hopeful → (omit)
-            sad       → disgruntled → (omit)
-            excited   → cheerful → friendly → (omit)
-            serious   → calm → (omit)
-
-  Step 4  Style degree:
-            Copy character[en].azure_style_degree from VoiceCast.json exactly.
-            This is the user's tuned value — do NOT override it per line.
-            If the field is absent or null, use 1.5 as fallback.
-
-  Step 5  Rate:
-            Copy character[en].azure_rate from VoiceCast.json exactly.
-            This is the user's tuned value — do NOT override it per line.
-            If the field is absent or null, derive from pace:
-              pace=slow   → "-25%"  |  pace=normal → "0%"  |  pace=fast → "+25%"
-            Set pace label to describe the rate value for human readability.
-
-  Step 6  Whisper special case:
-            When azure_style is "whispering":
-              set azure_break_ms = 0  (breaks inside whispers sound robotic)
-              override the character's base azure_break_ms for this item only.
-
-  Step 7  Narrator lines (speaker_id "narrator"):
-            Use narrator entry from VoiceCast.json.
-            Prefer azure_style "narration-professional" or "newscast" if available.
-            Use azure_style_degree and azure_rate from VoiceCast.json (same as Step 4–5).
-
-  Step 8  No VoiceCast match (character_id not in VoiceCast.json):
-            Omit all azure_* fields except azure_voice.
-            Log: "⚠ No VoiceCast entry for <speaker_id> — using gender default"
+  Whisper special case (only if VoiceCast.json itself has azure_style = "whispering"):
+    set azure_break_ms = 0  (breaks inside whispers sound robotic)
 
 DO NOT add start_sec, end_sec, or duration_sec to vo_items —
 those are written by post_tts_analysis.py after WAV generation.

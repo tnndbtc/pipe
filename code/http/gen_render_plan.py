@@ -164,6 +164,25 @@ def build_music_map(merged: dict) -> dict[str, dict]:
     return {m["item_id"]: m for m in merged.get("music_items", [])}
 
 
+def load_vo_preview_approved(episode_dir: Path, locale: str) -> dict[str, dict]:
+    """Load vo_preview_approved.{locale}.json and return a timing map.
+
+    Returns {item_id → item_dict} where each item_dict has:
+        duration_sec, start_sec, end_sec, speaker_id, text
+
+    Returns {} if the file does not exist.
+    """
+    path = episode_dir / f"vo_preview_approved.{locale}.json"
+    if not path.exists():
+        return {}
+    try:
+        doc = load_json(path)
+        return {item["item_id"]: item for item in doc.get("items", [])}
+    except Exception as exc:
+        print(f"  [WARN] Could not load {path.name}: {exc}", file=sys.stderr)
+        return {}
+
+
 def build_override_map(merged: dict) -> dict[str, float]:
     """Build {shot_id → overridden_duration_sec} from background_overrides."""
     return {
@@ -399,14 +418,24 @@ def build_shot(
             vo_line["audio_end_sec"]    = chunk_info["end_sec"]
         vo_lines.append(vo_line)
 
-    # Ensure at least tail_ms of silence after the last spoken line.
-    # tail_ms: per-scene override from manifest scene_tails dict, else VO_TAIL_MS default.
-    # When VO overflows the ShotList estimate this also prevents the shot from
-    # ending at the exact frame "Good night." finishes (zero-tail bug observed
-    # in production: sh02/sh04/sh05 had duration_ms == last_vo_out_ms).
-    tail_ms = VO_TAIL_MS
+    # Derive per-shot tail from ShotList duration_sec (set by patch_shotlist_durations.py
+    # from vo_preview_approved).  This correctly reflects the actual inter-scene gap
+    # (e.g. 3300 ms for sc01→sc02, 2300 ms for subsequent boundaries) rather than
+    # the old fixed VO_TAIL_MS=2000 ms assumption which under-counted by up to 1300 ms
+    # per boundary and caused the narrative-format CEILING to clip shots incorrectly.
+    #
+    # Formula: tail_ms = shot.duration_sec × 1000 − last_vo_out_ms
+    # (shot.duration_sec already = vo_span + approved_tail from the patcher)
+    # Falls back to VO_TAIL_MS (2 s) when shot.duration_sec is absent or stale.
+    tail_ms = VO_TAIL_MS  # safety fallback
+    if vo_lines and shot.get("duration_sec"):
+        shot_dur_ms  = round(shot["duration_sec"] * 1000)
+        derived_tail = shot_dur_ms - vo_lines[-1]["timeline_out_ms"]
+        if derived_tail > 0:
+            tail_ms = derived_tail
+    # Explicit scene_tails override from merged manifest (highest priority)
     if scene_tails:
-        tail_ms = int(scene_tails.get(scene_id, scene_tails.get(shot_id, VO_TAIL_MS)))
+        tail_ms = int(scene_tails.get(scene_id, scene_tails.get(shot_id, tail_ms)))
     if vo_lines:
         vo_end_ms = vo_lines[-1]["timeline_out_ms"]
         duration_ms = max(duration_ms, vo_end_ms + tail_ms)
@@ -717,6 +746,29 @@ def main() -> None:
     merged = load_json(manifest_path)
     media  = load_json(media_path)
 
+    # ── Apply vo_preview_approved.{locale}.json as authoritative timing source ──
+    # If the user has reviewed and approved VO timing (Stage 3.5 or Stage 8.5),
+    # override the vo_items timing in the merged manifest with the approved values.
+    # This ensures the RenderPlan uses the EXACT durations the user heard and approved.
+    locale_for_approval = merged.get("locale", "")
+    if locale_for_approval:
+        approved_map = load_vo_preview_approved(manifest_path.parent, locale_for_approval)
+        if approved_map:
+            patched = 0
+            for vo_item in merged.get("vo_items", []):
+                vid = vo_item.get("item_id", "")
+                if vid in approved_map:
+                    ap = approved_map[vid]
+                    if "duration_sec" in ap:
+                        dur = float(ap["duration_sec"])
+                        vo_item["start_sec"] = float(ap.get("start_sec", vo_item.get("start_sec", 0.0)))
+                        vo_item["end_sec"]   = float(ap.get("end_sec",   vo_item.get("end_sec",   dur)))
+                        patched += 1
+            if patched:
+                print(f"  [VO-APPROVAL] Applied approved timing to {patched} vo_items "
+                      f"from vo_preview_approved.{locale_for_approval}.json")
+    # ── end vo_preview_approved override ─────────────────────────────────────
+
     # Guard: must be merged manifest
     locale_scope = merged.get("locale_scope")
     if locale_scope != "merged":
@@ -781,6 +833,11 @@ def main() -> None:
     print(f"  Format      : {args.story_format}")
     if ref_dur_map:
         print(f"  Ref-plan    : {Path(args.reference_plan).name}  ({len(ref_dur_map)} EN shots)")
+    _approval_path = manifest_path.parent / f"vo_preview_approved.{locale}.json"
+    if _approval_path.exists():
+        print(f"  VO-Approval : vo_preview_approved.{locale}.json  ✓ (timing override active)")
+    else:
+        print(f"  VO-Approval : not found (using post_tts_analysis timing)")
     print(f"  Out-final   : {out_final.name}")
     print(f"  Out-plan    : {out_plan.name}")
     print("=" * 60)

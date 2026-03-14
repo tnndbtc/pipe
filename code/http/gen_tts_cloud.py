@@ -3691,6 +3691,124 @@ def run(
 # CLI
 # ---------------------------------------------------------------------------
 
+def build_manifest_from_script(
+    script_path: Path,
+    voicecast_path: Path,
+    locale: str,
+) -> tuple[dict, Path]:
+    """Build a minimal locale AssetManifest from Script.json + VoiceCast.json.
+
+    Walks Script.json scenes[].actions for type="dialogue" entries and assigns
+    item_ids in the form "vo-{scene_id}-{NNN:03d}" (per-scene counter, 001-based).
+    TTS parameters are populated from VoiceCast.json character[locale] entries.
+
+    Returns:
+        (manifest_dict, manifest_path) — manifest_path is
+        {ep_dir}/AssetManifest_draft.{locale}.json
+    """
+    script = json.loads(script_path.read_text(encoding="utf-8"))
+
+    # Load VoiceCast.json
+    voice_cast_map: dict[str, dict] = {}
+    if voicecast_path.exists():
+        try:
+            vc_data = json.loads(voicecast_path.read_text(encoding="utf-8"))
+            for ch in vc_data.get("characters", []):
+                cid = ch.get("character_id", "")
+                if cid:
+                    voice_cast_map[cid] = ch
+            print(f"  [SCRIPT-MODE] Loaded VoiceCast.json ({len(voice_cast_map)} characters)")
+        except Exception as exc:
+            print(f"  [WARN] Could not load VoiceCast.json: {exc}")
+    else:
+        print(f"  [WARN] VoiceCast.json not found: {voicecast_path}")
+
+    # Build vo_items from Script.json scenes[].actions where type="dialogue"
+    vo_items = []
+    for scene in script.get("scenes", []):
+        scene_id = scene.get("scene_id", "sc01")
+        counter = 1
+        for action in scene.get("actions", []):
+            if action.get("type") != "dialogue":
+                continue
+            item_id = f"vo-{scene_id}-{counter:03d}"
+            counter += 1
+
+            speaker_id = (
+                action.get("speaker_id")
+                or action.get("character_id")
+                or "narrator"
+            )
+            text = (
+                action.get("text")
+                or action.get("line")
+                or action.get("content")
+                or ""
+            )
+
+            # Build tts_prompt from VoiceCast.json character[locale]
+            vc_char        = voice_cast_map.get(speaker_id, {})
+            vc_locale_entry = vc_char.get(locale, {})
+            tts_prompt: dict = {"locale": locale}
+            for field in ("azure_voice", "azure_style", "azure_style_degree",
+                          "azure_rate", "azure_pitch", "azure_break_ms"):
+                val = vc_locale_entry.get(field)
+                if val is not None:
+                    tts_prompt[field] = val
+
+            vo_items.append({
+                "item_id":    item_id,
+                "speaker_id": speaker_id,
+                "text":       text,
+                "license_type": "commercial_reusable",
+                "tts_prompt": tts_prompt,
+            })
+
+    print(f"  [SCRIPT-MODE] Built {len(vo_items)} vo_items from Script.json")
+
+    # Infer project_id / episode_id from script_path
+    # Expected path: …/projects/{project_id}/episodes/{episode_id}/Script.json
+    parts = script_path.resolve().parts
+    project_id = ""
+    episode_id = ""
+    try:
+        ep_idx = next(i for i, p in enumerate(parts) if p == "episodes")
+        project_id = parts[ep_idx - 1]
+        episode_id = parts[ep_idx + 1]
+    except (StopIteration, IndexError):
+        script_id  = script.get("script_id", "unknown-ep01")
+        parts_sid  = script_id.split("-")
+        project_id = parts_sid[0] if parts_sid else "unknown"
+        episode_id = parts_sid[-1] if len(parts_sid) > 1 else "ep01"
+
+    manifest_id = f"{project_id}-{episode_id}-{locale}-manifest"
+    manifest = {
+        "schema_id":            "AssetManifest",
+        "schema_version":       "1.0.0",
+        "manifest_id":          manifest_id,
+        "project_id":           project_id,
+        "episode_id":           episode_id,
+        "locale":               locale,
+        "locale_scope":         "locale",
+        "shared_ref":           "AssetManifest_draft.shared.json",
+        "shotlist_ref":         "ShotList.json",
+        "character_packs":      [],
+        "backgrounds":          [],
+        "background_overrides": [],
+        "vo_items":             vo_items,
+    }
+
+    # Write the draft manifest to ep_dir
+    ep_dir = script_path.resolve().parent
+    manifest_path = ep_dir / f"AssetManifest_draft.{locale}.json"
+    tmp = manifest_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(manifest_path)
+    print(f"  [SCRIPT-MODE] Wrote {manifest_path.name}  ({len(vo_items)} vo_items)")
+
+    return manifest, manifest_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -3709,8 +3827,26 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--manifest", type=str, required=True,
-        help="Path to a locale AssetManifest JSON (locale_scope='locale' or 'monolithic').",
+        "--manifest", type=str, required=False, default=None,
+        help="Path to a locale AssetManifest JSON (locale_scope='locale' or 'monolithic'). "
+             "Mutually exclusive with --script.",
+    )
+    parser.add_argument(
+        "--script", type=str, default=None, dest="script",
+        help="Path to Script.json. When set, builds a manifest from Script.json instead of "
+             "reading --manifest. Requires --voicecast and --locale.",
+    )
+    parser.add_argument(
+        "--voicecast", type=str, default=None, dest="voicecast",
+        help="Path to VoiceCast.json (required when --script is set).",
+    )
+    parser.add_argument(
+        "--locale", type=str, default=None, dest="locale_override",
+        help="Target locale (e.g. 'en', 'zh-Hans'). Required when --script is set.",
+    )
+    parser.add_argument(
+        "--stage", type=str, default=None, dest="stage",
+        help="Pipeline stage identifier (e.g. '3.5'). Used for logging only.",
     )
     parser.add_argument(
         "--asset-id", type=str, default=None, dest="asset_id",
@@ -3755,8 +3891,30 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    with open(args.manifest, encoding="utf-8") as f:
-        manifest = json.load(f)
+    # ── Input mode: --script or --manifest ────────────────────────────────────
+    if args.script:
+        # Stage 3.5 / --script mode: build manifest from Script.json
+        if not args.locale_override:
+            raise SystemExit("--script requires --locale (e.g. --locale en)")
+        if not args.voicecast:
+            raise SystemExit("--script requires --voicecast (e.g. --voicecast projects/slug/VoiceCast.json)")
+        script_path   = Path(args.script).resolve()
+        voicecast_path = Path(args.voicecast).resolve()
+        if not script_path.exists():
+            raise SystemExit(f"[ERROR] Script.json not found: {script_path}")
+        stage_label = f"Stage {args.stage}" if args.stage else "Script mode"
+        print(f"\n[{stage_label}] Building manifest from Script.json…")
+        manifest, manifest_path_obj = build_manifest_from_script(
+            script_path, voicecast_path, args.locale_override
+        )
+        manifest_path_str = str(manifest_path_obj)
+    elif args.manifest:
+        manifest_path_str = args.manifest
+        with open(manifest_path_str, encoding="utf-8") as f:
+            manifest = json.load(f)
+    else:
+        raise SystemExit("[ERROR] Either --manifest or --script is required.")
+    # ── end input mode ────────────────────────────────────────────────────────
 
     # Validate ssml_narration args
     if args.ssml_narration:
@@ -3770,7 +3928,7 @@ def main() -> None:
             "use a locale manifest (locale_scope='locale') instead."
         )
 
-    locale     = locale_from_manifest(manifest, args.manifest)
+    locale     = locale_from_manifest(manifest, manifest_path_str)
     assets_dir = assets_dir_from_manifest(manifest)
     out_dir    = assets_dir / locale / "audio" / "vo"
     meta_dir   = assets_dir / "meta"
@@ -3781,7 +3939,7 @@ def main() -> None:
     print(f"[ASSETS] {assets_dir}")
     print(f"[OUTPUT] {out_dir}")
 
-    items = load_items_from_manifest(manifest, args.manifest, args.asset_id)
+    items = load_items_from_manifest(manifest, manifest_path_str, args.asset_id)
 
     # ── Stale WAV cleanup ─────────────────────────────────────────────────
     # On re-runs the LLM may produce different item_id names (different scene
@@ -3893,7 +4051,7 @@ def main() -> None:
                 vo_items[idx]["text"] = frag["text"]
                 vo_items[idx]["pause_after_ms"] = frag["pause_ms"]
                 patched += 1
-        manifest_path = Path(args.manifest)
+        manifest_path = Path(manifest_path_str)
         manifest_path.write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False),
             encoding="utf-8",

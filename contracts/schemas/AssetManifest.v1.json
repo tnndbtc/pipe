@@ -226,11 +226,15 @@
           },
           "start_sec": {
             "type": "number",
-            "description": "Start time of this VO line within the shot, in seconds. Written by post_tts_analysis.py after WAV durations are measured. Absent in draft manifests."
+            "description": "Episode-cumulative start time of this VO item (seconds). Patched by patch_vo_draft_timings.py from vo_preview_approved.{locale}.json after Stage 5. Absent before Stage 3.5 approval."
           },
           "end_sec": {
             "type": "number",
-            "description": "End time of this VO line within the shot, in seconds. Written by post_tts_analysis.py after WAV durations are measured. Absent in draft manifests."
+            "description": "Episode-cumulative end time of this VO item (seconds). Patched by patch_vo_draft_timings.py from vo_preview_approved.{locale}.json after Stage 5. Absent before Stage 3.5 approval."
+          },
+          "duration_sec": {
+            "type": "number",
+            "description": "Actual spoken duration of this VO item (seconds) = end_sec − start_sec. Patched by patch_vo_draft_timings.py from vo_preview_approved. Replaces estimated_duration_sec as the authoritative timing value after approval."
           }
         }
       }
@@ -521,59 +525,41 @@
     "TtsPrompt": {
       "type": "object",
       "required": [
-        "voice_style",
-        "emotion",
-        "pace",
-        "locale"
+        "locale",
+        "azure_voice"
       ],
       "properties": {
-        "voice_style": {
-          "type": "string",
-          "description": "e.g. 'young female', 'deep male', 'elderly male'"
-        },
-        "emotion": {
-          "type": "string",
-          "description": "e.g. 'tense', 'commanding', 'fearful', 'reverent'"
-        },
-        "pace": {
-          "type": "string",
-          "enum": [
-            "slow",
-            "normal",
-            "fast"
-          ]
-        },
         "locale": {
           "type": "string",
           "description": "BCP-47 locale tag matching the text language, e.g. 'en', 'zh-Hans'"
         },
         "azure_voice": {
           "type": "string",
-          "description": "Azure TTS voice name, e.g. 'zh-CN-Xiaoxiao:DragonHDFlashLatestNeural' or 'zh-CN-XiaoxiaoNeural'. Ignored by non-Azure TTS backends."
+          "description": "Azure TTS voice name, e.g. 'zh-CN-Xiaoxiao:DragonHDFlashLatestNeural' or 'zh-CN-XiaoxiaoNeural'."
         },
         "azure_style": {
           "type": "string",
-          "description": "Azure express-as style name. Must be a style supported by azure_voice. e.g. 'sad', 'excited', 'newscast', 'whispering'. Omit to suppress express-as entirely. Ignored by non-Azure TTS backends."
+          "description": "Azure express-as style name. Must be a style supported by azure_voice. e.g. 'sad', 'excited', 'newscast', 'whispering'. Omit (or null) to suppress express-as entirely. Copied verbatim from VoiceCast.json — do NOT invent per-line values."
         },
         "azure_style_degree": {
           "type": "number",
           "minimum": 1.0,
           "maximum": 2.0,
-          "description": "Style intensity multiplier. 1.0 = subtle, 2.0 = maximum. Practical range: 1.0–1.8. Default 1.5. Ignored by non-Azure TTS backends."
+          "description": "Style intensity multiplier. 1.0 = subtle, 2.0 = maximum. Practical range: 1.0–1.8. Default 1.5. Copied verbatim from VoiceCast.json."
         },
         "azure_rate": {
           "type": "string",
-          "description": "Speech rate override, e.g. '-25%', '0%', '+15%'. When present, takes precedence over the pace field. Ignored by non-Azure TTS backends."
+          "description": "Speech rate override, e.g. '-25%', '0%', '+15%'. Copied verbatim from VoiceCast.json."
         },
         "azure_pitch": {
           "type": "string",
-          "description": "Pitch shift, e.g. '-10%' (deeper), '+5%' (higher). Typical range: -20% to +20%. Ignored by non-Azure TTS backends."
+          "description": "Pitch shift, e.g. '-10%' (deeper), '+5%' (higher). Typical range: -20% to +20%. Copied verbatim from VoiceCast.json."
         },
         "azure_break_ms": {
           "type": "integer",
           "minimum": 0,
           "maximum": 5000,
-          "description": "Pause inserted after each sentence terminator (ms). 0 = no breaks. Typical: 300–800. Must be 0 when azure_style is 'whispering' (breaks sound robotic). Ignored by non-Azure TTS backends."
+          "description": "Pause inserted after each sentence terminator (ms). 0 = no breaks. Typical: 300–800. Must be 0 when azure_style is 'whispering' (breaks sound robotic). Copied verbatim from VoiceCast.json."
         }
       }
     }

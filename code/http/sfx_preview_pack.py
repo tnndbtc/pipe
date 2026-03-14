@@ -261,6 +261,49 @@ def main():
         if sid:
             music_index[sid] = mi
 
+    # Feature C: auto-detect RenderPlan for VO timing parity
+    render_plan = None
+    render_plan_path = ep_dir / f"RenderPlan.{locale}.json"
+    if render_plan_path.exists():
+        try:
+            render_plan = json.loads(render_plan_path.read_text(encoding="utf-8"))
+            print(f"  [INFO] Using RenderPlan for VO timing: {render_plan_path.name}")
+        except Exception as e:
+            print(f"  [WARN] Failed to load RenderPlan: {e}")
+    else:
+        print(f"  [INFO] No RenderPlan found, using manifest start_sec")
+
+    # Build render_plan vo timing lookup if available
+    rp_vo_timing = {}  # { item_id: timeline_in_sec }
+    if render_plan:
+        for rp_shot in render_plan.get("shots", []):
+            for vo_line in rp_shot.get("vo_lines", []):
+                iid = vo_line.get("item_id", "")
+                t_ms = vo_line.get("timeline_in_ms")
+                if iid and t_ms is not None:
+                    rp_vo_timing[iid] = t_ms / 1000.0
+
+    # Patch ShotList durations with VO-ceiling values from RenderPlan.
+    # gen_render_plan applies a VO ceiling (last_vo_out_ms + tail) that makes
+    # many shots shorter than the ShotList estimate.  Without this patch, the
+    # SFX tab accumulates wrong offsets from shot 1 onward — exactly the same
+    # bug that music_review_pack.py fixes with its _rp_shot_dur block.
+    if render_plan:
+        _rp_shot_dur: dict[str, float] = {}
+        for _rs in render_plan.get("shots", []):
+            _sid = _rs.get("shot_id", "")
+            _dur_ms = _rs.get("duration_ms")
+            if _sid and _dur_ms is not None:
+                _rp_shot_dur[_sid] = _dur_ms / 1000.0
+        if _rp_shot_dur:
+            _patched = 0
+            for _shot in shots:
+                _sid = _shot.get("shot_id", "")
+                if _sid in _rp_shot_dur:
+                    _shot["duration_sec"] = _rp_shot_dur[_sid]
+                    _patched += 1
+            print(f"  [INFO] Patched {_patched} shot duration(s) from RenderPlan (VO ceiling applied)")
+
     # Build shot timeline
     timeline_shots, total_dur = build_shot_timeline(shots, manifest, vo_shot_map, music_index, {})
 
@@ -305,28 +348,6 @@ def main():
     shot_overrides = {o["item_id"]: o for o in shot_overrides_list if "item_id" in o}
     track_volumes = music_plan.get("track_volumes", {})
     clip_volumes = music_plan.get("clip_volumes", {})
-
-    # Feature C: auto-detect RenderPlan for VO timing parity
-    render_plan = None
-    render_plan_path = ep_dir / f"RenderPlan.{locale}.json"
-    if render_plan_path.exists():
-        try:
-            render_plan = json.loads(render_plan_path.read_text(encoding="utf-8"))
-            print(f"  [INFO] Using RenderPlan for VO timing: {render_plan_path.name}")
-        except Exception as e:
-            print(f"  [WARN] Failed to load RenderPlan: {e}")
-    else:
-        print(f"  [INFO] No RenderPlan found, using manifest start_sec")
-
-    # Build render_plan vo timing lookup if available
-    rp_vo_timing = {}  # { item_id: timeline_in_sec }
-    if render_plan:
-        for rp_shot in render_plan.get("shots", []):
-            for vo_line in rp_shot.get("vo_lines", []):
-                iid = vo_line.get("item_id", "")
-                t_ms = vo_line.get("timeline_in_ms")
-                if iid and t_ms is not None:
-                    rp_vo_timing[iid] = t_ms / 1000.0
 
     # Build sfx_index: { shot_id: [sel_entry] }
     print(f"  [SFX] Building sfx_index from {len(sfx_selections)} selection(s): {list(sfx_selections.keys())}")
@@ -459,8 +480,14 @@ def main():
             ovr = shot_overrides.get(mid, {})
             clip_id = ovr.get("music_clip_id", "")
 
-            duck_db = float(ovr.get("duck_db", DEFAULT_DUCK_DB))
-            fade_sec = float(ovr.get("fade_sec", DEFAULT_FADE_SEC))
+            # Manifest music item carries duck_db / fade_sec authored by the LLM.
+            # MusicPlan shot_overrides (ovr) take priority; fall back to manifest values
+            # before the hardcoded defaults so the preview matches the actual render.
+            manifest_music_item = music_index.get(shot_id, {})
+            manifest_duck_db  = float(manifest_music_item.get("duck_db",  DEFAULT_DUCK_DB))
+            manifest_fade_sec = float(manifest_music_item.get("fade_sec", DEFAULT_FADE_SEC))
+            duck_db  = float(ovr.get("duck_db",  manifest_duck_db))
+            fade_sec = float(ovr.get("fade_sec", manifest_fade_sec))
             music_start_sec = float(ovr.get("start_sec", 0.0))
 
             # Resolve base_db from track/clip volumes

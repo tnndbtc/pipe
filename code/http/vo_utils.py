@@ -5,14 +5,16 @@ vo_utils.py — Shared VO utility functions for the pipeline.
 Used by both test_server.py (server endpoints) and gen_tts_cloud.py (CLI).
 
 Core functions:
-  wav_duration(path)                           → float (seconds)
-  load_vo_trim_overrides(ep_dir, locale)       → dict
+  wav_duration(path)                                      → float (seconds)
+  load_vo_trim_overrides(ep_dir, locale)                  → dict
   save_vo_trim_overrides(ep_dir, locale, data)
   apply_vo_trims_for_item(item_id, ep_dir, locale, override=None) → float
-  get_primary_locale(ep_dir)                   → str
-  invalidate_vo_state(ep_dir, primary_locale)  → None
-  compute_sentinel_hashes(ep_dir, locale)      → dict
-  verify_sentinel(ep_dir, locale)              → bool
+  get_primary_locale(ep_dir)                              → str
+  invalidate_vo_state(ep_dir, primary_locale)             → None
+  compute_sentinel_hashes(ep_dir, locale)                 → dict
+  write_sentinel(ep_dir, locale, hashes)                  → None   [writes vo_preview_approved.{locale}.json]
+  verify_sentinel(ep_dir, locale)                         → bool   [checks vo_preview_approved.{locale}.json]
+  write_vo_preview_approved(ep_dir, locale, stage, items, hashes) → None
 """
 
 from __future__ import annotations
@@ -320,13 +322,28 @@ def invalidate_vo_state(ep_dir, primary_locale: str) -> None:
 
     Does NOT delete RenderPlan or media manifests (those are handled by
     vo_merge specifically, since item_id changes require deeper invalidation).
+
+    ── Asset Preservation rule (MUST NOT VIOLATE) ──────────────────────────────
+    This function and every caller MUST NOT delete or overwrite any files under:
+        assets/music/   — music loop WAVs, MusicPlan.json, MusicApprovalSnapshot.json
+        assets/sfx/     — SFX files and SfxPlan.json
+        assets/media/   — media selections and selections.json
+    These directories are owned exclusively by the Music, SFX, and Media tabs.
+    Music/SFX/Media curation is expensive user effort that survives VO re-runs.
+    Any timing misalignment after VO re-approval is the user's responsibility to
+    review and fix — the pipeline never auto-deletes or invalidates these assets.
+    ────────────────────────────────────────────────────────────────────────────
     """
     ep_dir = Path(ep_dir)
 
-    # Delete sentinel
+    # Delete legacy sentinel (tts_review_complete.json)
     sentinel = ep_dir / "tts_review_complete.json"
     if sentinel.exists():
         sentinel.unlink()
+
+    # Delete new vo_preview_approved.{locale}.json for ALL locales
+    for approved in ep_dir.glob("vo_preview_approved.*.json"):
+        approved.unlink()
 
     # Delete durations export
     durations = ep_dir / f"{primary_locale}_vo_durations.json"
@@ -400,41 +417,88 @@ def compute_sentinel_hashes(ep_dir, locale: str) -> dict:
 
 
 def write_sentinel(ep_dir, locale: str, hashes: dict) -> None:
-    """Write tts_review_complete.json sentinel with the given hashes."""
+    """Write vo_preview_approved.{locale}.json sentinel with the given hashes.
+
+    Also writes the legacy tts_review_complete.json for backward compatibility
+    with any existing scripts that check for it.
+    """
     ep_dir   = Path(ep_dir)
-    sentinel = ep_dir / "tts_review_complete.json"
+
+    # New sentinel: vo_preview_approved.{locale}.json
+    sentinel = ep_dir / f"vo_preview_approved.{locale}.json"
     doc = {
+        "approved_at":         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "locale":              locale,
-        "completed_at":        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "manifest_hash":       hashes["manifest_hash"],
-        "wav_set_hash":        hashes["wav_set_hash"],
-        "trim_overrides_hash": hashes["trim_overrides_hash"],
-        "merge_log_hash":      hashes["merge_log_hash"],
+        "stage":               "legacy",
+        "items":               [],   # populated by write_vo_preview_approved; empty from write_sentinel
+        "wav_set_hash":        hashes.get("wav_set_hash", ""),
+        "trim_overrides_hash": hashes.get("trim_overrides_hash", ""),
+        "manifest_hash":       hashes.get("manifest_hash", ""),
+        "merge_log_hash":      hashes.get("merge_log_hash", ""),
     }
     tmp = sentinel.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.rename(sentinel)
+
+    # Legacy sentinel for backward compat
+    legacy = ep_dir / "tts_review_complete.json"
+    legacy_doc = {
+        "locale":              locale,
+        "completed_at":        doc["approved_at"],
+        "manifest_hash":       hashes.get("manifest_hash", ""),
+        "wav_set_hash":        hashes.get("wav_set_hash", ""),
+        "trim_overrides_hash": hashes.get("trim_overrides_hash", ""),
+        "merge_log_hash":      hashes.get("merge_log_hash", ""),
+    }
+    ltmp = legacy.with_suffix(".tmp")
+    ltmp.write_text(json.dumps(legacy_doc, indent=2), encoding="utf-8")
+    ltmp.rename(legacy)
 
 
 def verify_sentinel(ep_dir, locale: str) -> bool:
-    """Return True iff tts_review_complete.json exists and all four hashes match.
+    """Return True iff a valid VO approval sentinel exists for the given locale.
 
-    File existence alone is never sufficient (INVARIANT I).
+    Checks vo_preview_approved.{locale}.json first (new format).
+    Falls back to tts_review_complete.json for backward compatibility.
+
+    For the new-format sentinel (stage != 'legacy'), existence alone is
+    sufficient (items and timing are already stored).
+    For hash-based sentinels, all four hashes must match (INVARIANT I).
     """
-    ep_dir   = Path(ep_dir)
-    sentinel = ep_dir / "tts_review_complete.json"
+    ep_dir = Path(ep_dir)
 
-    if not sentinel.exists():
+    # 1. Check new sentinel: vo_preview_approved.{locale}.json
+    new_sentinel = ep_dir / f"vo_preview_approved.{locale}.json"
+    if new_sentinel.exists():
+        try:
+            stored = json.loads(new_sentinel.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if stored.get("locale") != locale:
+            return False
+        stage = stored.get("stage", "legacy")
+        if stage not in ("legacy", ""):
+            # Non-legacy stages (3.5, 8.5): existence with correct locale is sufficient
+            return True
+        # Legacy stage: verify hashes
+        current = compute_sentinel_hashes(ep_dir, locale)
+        return (
+            stored.get("manifest_hash")       == current["manifest_hash"]
+            and stored.get("wav_set_hash")        == current["wav_set_hash"]
+            and stored.get("trim_overrides_hash") == current["trim_overrides_hash"]
+            and stored.get("merge_log_hash")      == current["merge_log_hash"]
+        )
+
+    # 2. Backward compat: check legacy tts_review_complete.json
+    legacy = ep_dir / "tts_review_complete.json"
+    if not legacy.exists():
         return False
-
     try:
-        stored = json.loads(sentinel.read_text(encoding="utf-8"))
+        stored = json.loads(legacy.read_text(encoding="utf-8"))
     except Exception:
         return False
-
     if stored.get("locale") != locale:
         return False
-
     current = compute_sentinel_hashes(ep_dir, locale)
     return (
         stored.get("manifest_hash")       == current["manifest_hash"]
@@ -442,3 +506,55 @@ def verify_sentinel(ep_dir, locale: str) -> bool:
         and stored.get("trim_overrides_hash") == current["trim_overrides_hash"]
         and stored.get("merge_log_hash")      == current["merge_log_hash"]
     )
+
+
+def write_vo_preview_approved(
+    ep_dir,
+    locale: str,
+    stage: str,
+    items: list,
+    hashes: dict,
+) -> None:
+    """Write vo_preview_approved.{locale}.json with full timing data.
+
+    Called by /api/vo_approve to record the user's VO approval.
+
+    Schema:
+      {
+        "approved_at":         ISO timestamp,
+        "locale":              "en",
+        "stage":               "3.5" | "8.5" | "legacy",
+        "items": [
+          {
+            "item_id":      "vo-sc01-001",
+            "speaker_id":   "narrator",
+            "text":         "...",
+            "duration_sec": 2.34,
+            "start_sec":    0.0,
+            "end_sec":      2.34
+          }, ...
+        ],
+        "wav_set_hash":        SHA256 of WAV set,
+        "trim_overrides_hash": SHA256 of trim overrides,
+      }
+
+    Args:
+        ep_dir:  Episode directory (absolute path).
+        locale:  Locale string (e.g. "en", "zh-Hans").
+        stage:   Pipeline stage ("3.5", "8.5", or "legacy").
+        items:   List of vo_item dicts with timing fields.
+        hashes:  Dict with wav_set_hash, trim_overrides_hash (from compute_sentinel_hashes).
+    """
+    ep_dir = Path(ep_dir)
+    path   = ep_dir / f"vo_preview_approved.{locale}.json"
+    doc = {
+        "approved_at":         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "locale":              locale,
+        "stage":               stage,
+        "items":               items,
+        "wav_set_hash":        hashes.get("wav_set_hash", ""),
+        "trim_overrides_hash": hashes.get("trim_overrides_hash", ""),
+    }
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.rename(path)

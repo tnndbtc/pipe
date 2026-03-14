@@ -65,7 +65,7 @@
     },
     "vo_items": {
       "type": "array",
-      "description": "VO items from the locale draft manifest. start_sec and end_sec are required (written by post_tts_analysis.py before merge).",
+      "description": "VO items from the locale draft manifest. start_sec and end_sec are required and must be episode-cumulative timestamps from vo_preview_approved.{locale}.json, applied by manifest_merge.py (approved override block) or by patch_vo_draft_timings.py before merge.",
       "items": {
         "type": "object",
         "required": ["item_id", "speaker_id", "text", "license_type", "start_sec", "end_sec"],
@@ -77,23 +77,23 @@
           "license_type": { "type": "string" },
           "start_sec": {
             "type": "number",
-            "description": "Start time of this VO line within the shot, in seconds"
+            "description": "Episode-cumulative start time of this VO item (seconds), sourced from vo_preview_approved.{locale}.json. NOT shot-relative."
           },
           "end_sec": {
             "type": "number",
-            "description": "End time of this VO line within the shot, in seconds"
+            "description": "Episode-cumulative end time of this VO item (seconds), sourced from vo_preview_approved.{locale}.json. NOT shot-relative."
           },
           "tts_prompt": {
             "type": "object",
+            "required": ["locale", "azure_voice"],
             "properties": {
-              "voice_style":          { "type": "string" },
-              "emotion":              { "type": "string" },
-              "pace":                 { "type": "string", "enum": ["slow", "normal", "fast"] },
               "locale":               { "type": "string" },
               "azure_voice":          { "type": "string" },
-              "azure_style":          { "type": "string" },
-              "azure_style_degree":   { "type": "number", "minimum": 0.01, "maximum": 2.0 },
-              "azure_rate":           { "type": "string" }
+              "azure_style":          { "type": "string", "description": "Omit or null to suppress express-as. Copied verbatim from VoiceCast.json — do NOT invent per-line values." },
+              "azure_style_degree":   { "type": "number", "minimum": 1.0, "maximum": 2.0 },
+              "azure_rate":           { "type": "string" },
+              "azure_pitch":          { "type": "string" },
+              "azure_break_ms":       { "type": "integer", "minimum": 0, "maximum": 5000 }
             }
           }
         }
