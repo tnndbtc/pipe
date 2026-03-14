@@ -16,7 +16,7 @@
 #                                        in-place (atomic write via temp+rename)
 #
 # Duration formula per shot:
-#   shot_vo_span + max(last_item.pause_after_ms / 1000, SCENE_TAIL_SEC)
+#   shot_vo_span + pause_sec + tail_sec
 #
 # Where:
 #   shot_vo_span           — last_item.end_sec - first_item.start_sec
@@ -25,17 +25,30 @@
 #                            before ShotList exists; all items share one cursor
 #                            under a single "__no_shot__" group).  Subtracting
 #                            the first item's start_sec gives the true shot span.
-#   pause_after_ms         — user-set break on last item (from manifest).
+#                            NOTE: voApproveTTS writes end_sec = start + dur
+#                            (pause NOT included), so the pause must be added
+#                            explicitly here.
+#   pause_sec              — last_item.pause_after_ms / 1000 (from manifest).
 #                            Default 300 ms; user may raise it to 2000–5000 ms
 #                            for an inter-scene or inter-act break.
+#                            voApproveTTS embeds this pause in the gap between
+#                            last_item.end_sec and next_shot.first_item.start_sec,
+#                            so gap = pause_sec + approved_tail_sec.
+#   tail_sec               — max(gap - pause_sec, SCENE_TAIL_SEC)
+#                            Strips the pause out of the raw gap to isolate the
+#                            approved tail, then enforces the 2.0 s minimum.
+#                            For the last shot (no next-shot look-ahead):
+#                            tail_sec = SCENE_TAIL_SEC always.
 #   SCENE_TAIL_SEC = 2.0   — minimum visual tail; matches gen_render_plan.py
 #                            VO_TAIL_MS = 2000.
 #
-# Why max(pause_after_ms, SCENE_TAIL_SEC)?
-#   • pause_after_ms ≤ SCENE_TAIL_SEC (e.g. 300 ms default): tail wins → 2.0 s
-#   • pause_after_ms > SCENE_TAIL_SEC (e.g. 3000 ms user break): pause wins → 3.0 s
-#   This way a user-added 3 s inter-scene break extends the shot duration to
-#   (VO span) + 3.0 s, which is exactly what the Music tab should show.
+# Why separate pause and tail rather than max(pause, SCENE_TAIL_SEC)?
+#   voApproveTTS sets next_shot.start_sec = last.end_sec + pause + tail.
+#   The VO Timeline display (_voRecalcSceneTimes) shows scene boundaries with
+#   the pause included, so its "sc02 starts at 26.1 s" means sc01 lasts 26.1 s.
+#   The old max() formula swallowed the 300 ms pause whenever the approved tail
+#   was small (e.g. gap = 0.3 + 1.0 = 1.3 → max(1.3, 2.0) = 2.0, losing 0.3 s).
+#   The new formula always preserves the pause: 23.806 + 0.300 + 2.000 = 26.106.
 #
 # Shots with empty vo_item_ids are skipped (their duration_sec is unchanged).
 # This handles no-VO shots (action beats, pure music, etc.).
@@ -85,16 +98,21 @@ def patch(
                         start_sec/end_sec are episode-wide cumulative and include
                         scene tails (computed by voApproveTTS on the client).
         manifest_pause: {item_id: pause_after_ms} from AssetManifest_draft.
-                        Used only for the very last shot (no next-shot look-ahead).
+                        Used for ALL shots — pause_sec is always added to shot_vo_span
+                        on top of tail_sec.  For the last shot it also determines
+                        tail_sec (= SCENE_TAIL_SEC, pause stacks on top).
 
     Returns:
         (patched_count, skipped_count, warnings)
 
     Duration formula:
         shot_vo_span = last_item.end_sec − first_item.start_sec
-        tail_sec     = gap to next shot's first item start_sec  (scene tail included)
-                       OR SCENE_TAIL_SEC minimum (for the last shot)
-        duration_sec = shot_vo_span + tail_sec
+        pause_sec    = last_item.pause_after_ms / 1000  (from manifest, default 300 ms)
+        tail_sec     = max(gap − pause_sec, SCENE_TAIL_SEC)
+                       where gap = next_first.start_sec − last_item.end_sec
+                                 = pause_sec + approved_tail (set by voApproveTTS)
+                       OR just SCENE_TAIL_SEC for the last shot (no look-ahead)
+        duration_sec = shot_vo_span + pause_sec + tail_sec
     """
     patched  = 0
     skipped  = 0
@@ -132,27 +150,36 @@ def patch(
             warnings.append(msg)
             print(f"  [WARN] {msg} — using available items")
 
-        shot_vo_span = last_item["end_sec"] - first_item["start_sec"]
+        shot_vo_span  = last_item["end_sec"] - first_item["start_sec"]
+
+        # Pause after the last VO item in this shot (inter-sentence silence).
+        # voApproveTTS writes end_sec = start + dur (no pause), then advances
+        # its cursor by dur + pauseMs — so the pause lives in the gap between
+        # last_item.end_sec and next_shot.first_item.start_sec, not in end_sec.
+        # We must add it explicitly so ShotList matches the VO Timeline display.
+        last_pause_ms = manifest_pause.get(last_item["item_id"], DEFAULT_PAUSE_MS)
+        pause_sec     = last_pause_ms / 1000.0
 
         # Tail: gap from this shot's last item end to the next VO shot's first item start.
-        # Because start_sec in vo_preview_approved includes scene tails (written by
-        # voApproveTTS on the client), this gap naturally captures user-set breaks.
+        # gap = pause_sec + approved_tail_sec  (both set by voApproveTTS).
+        # Strip the pause to isolate the raw approved tail, then enforce SCENE_TAIL_SEC.
         tail_sec     = SCENE_TAIL_SEC
         tail_source  = "default"
         for j in range(idx + 1, len(shot_bounds)):
             next_first = shot_bounds[j][1]
             if next_first is not None:
                 gap      = next_first["start_sec"] - last_item["end_sec"]
-                tail_sec = max(gap, SCENE_TAIL_SEC)
+                raw_tail = gap - pause_sec          # gap minus the trailing pause
+                tail_sec = max(raw_tail, SCENE_TAIL_SEC)
                 tail_source = f"gap-to-{shot_bounds[j][0].get('shot_id','?')}"
                 break
         else:
-            # Last VO shot — fall back to manifest pause_after_ms
-            last_pause_ms = manifest_pause.get(last_item["item_id"], DEFAULT_PAUSE_MS)
-            tail_sec      = max(last_pause_ms / 1000.0, SCENE_TAIL_SEC)
-            tail_source   = "manifest-pause"
+            # Last VO shot — no next-shot look-ahead; always use SCENE_TAIL_SEC.
+            # pause_sec is still stacked on top (already computed above).
+            tail_sec    = SCENE_TAIL_SEC
+            tail_source = "manifest-pause"
 
-        new_dur = round(shot_vo_span + tail_sec, 3)
+        new_dur = round(shot_vo_span + pause_sec + tail_sec, 3)
         old_dur = shot.get("duration_sec", 0)
         shot["duration_sec"] = new_dur
         # Carry episode-cumulative timestamps so downstream tools (gen_render_plan,
@@ -165,7 +192,7 @@ def patch(
         change = "PATCH" if abs(new_dur - old_dur) > 0.01 else "OK   "
         print(f"  [{change}] {shot_id:20s}  "
               f"old={old_dur:7.3f}s → new={new_dur:7.3f}s  "
-              f"(span={shot_vo_span:.3f}s + tail={tail_sec:.3f}s  [{tail_source}])")
+              f"(span={shot_vo_span:.3f}s + pause={pause_sec:.3f}s + tail={tail_sec:.3f}s  [{tail_source}])")
 
     return patched, skipped, warnings
 

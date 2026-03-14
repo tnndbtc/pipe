@@ -714,10 +714,8 @@ def main():
     episode_dir = PIPE_DIR / "projects" / project_id / "episodes" / episode_id
     loop_info = load_loop_candidates(episode_dir)
 
-    # ── Override ShotList durations with RenderPlan (VO-ceiling) durations ──
-    # VO approval is the hard truth. gen_render_plan applies the continuous_narration
-    # ceiling (last_VO_out + 2s) which is the authoritative shot duration.
-    # The music preview must use these same durations so it matches the final render.
+    # ── Load RenderPlan VO lines for accurate shot-relative duck intervals. ──
+    # Duration override removed — ShotList.json already has correct values.
     _rp_path = episode_dir / f"RenderPlan.{locale}.json"
     _rp_shot_dur: dict[str, float] = {}
     _rp_vo_by_shot: dict = {}   # shot_id → list of RenderPlan vo_line dicts
@@ -741,12 +739,6 @@ def main():
             print(f"  [WARN] Could not load RenderPlan.{locale}.json: {_e} — using ShotList durations")
     else:
         print(f"  [WARN] RenderPlan.{locale}.json not found — using ShotList durations (run step 10 first for accurate music preview)")
-
-    if _rp_shot_dur:
-        for _shot in shots:
-            _sid = _shot.get("shot_id", "")
-            if _sid in _rp_shot_dur:
-                _shot["duration_sec"] = _rp_shot_dur[_sid]
 
     print("=" * 60)
     print("  music_review_pack")

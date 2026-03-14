@@ -10399,36 +10399,33 @@ placeholder="Enter your story here"></textarea>
         _musicTimeline = await tr.json();
       }
     } catch (_) {}
-    // Patch stale offset_sec values in _musicTimeline using VOTimeline (which is
-    // derived from the current RenderPlan and represents the true episode-absolute
-    // start times).  MusicReviewPack/timeline.json is generated at music-review
-    // time and may be stale after subsequent VO approvals that change duration_ms.
-    if (_musicTimeline && _musicTimeline.shots) {
-      try {
-        const vtResp = await fetch('/api/vo_timeline?slug=' + encodeURIComponent(_musicSlug)
-          + '&ep_id=' + encodeURIComponent(_musicEpId));
-        if (vtResp.ok) {
-          const vtData = await vtResp.json();
-          const voShotMap = {};
-          (vtData.shots || []).forEach(s => { voShotMap[s.shot_id] = s; });
-          let patched = 0;
-          _musicTimeline.shots.forEach(s => {
-            const vt = voShotMap[s.shot_id];
-            if (vt) {
-              s.offset_sec    = vt.start_sec;
-              s.duration_sec  = vt.duration_sec;
-              patched++;
-            }
-          });
-          // Also update total_duration_sec from VOTimeline
-          if (vtData.total_sec != null) {
-            _musicTimeline.total_duration_sec = vtData.total_sec;
+    // Fetch ShotList.json for authoritative shot timing (same source as SFX and Media tabs)
+    try {
+      const slResp = await fetch(`/api/episode_file?slug=${encodeURIComponent(_musicSlug)}&ep_id=${encodeURIComponent(_musicEpId)}&file=ShotList.json`);
+      if (slResp.ok) {
+        const shotListData = await slResp.json();
+        let cum = 0;
+        const slMap = {};
+        for (const s of (shotListData.shots || [])) {
+          if (s.duration_sec == null) {
+            console.warn('[Music] ShotList shot missing duration_sec:', s.shot_id);
           }
-          if (patched) console.log('[Music] Patched', patched, 'shot offset(s) from VOTimeline');
+          slMap[s.shot_id] = { offset_sec: cum, duration_sec: s.duration_sec || 0 };
+          cum += s.duration_sec || 0;
         }
-      } catch (_vtErr) {
-        console.warn('[Music] Could not load VOTimeline for offset patch:', _vtErr);
+        (_musicTimeline.shots || []).forEach(s => {
+          const sl = slMap[s.shot_id];
+          if (sl) {
+            s.offset_sec   = sl.offset_sec;
+            s.duration_sec = sl.duration_sec;
+          }
+        });
+        _musicTimeline.total_duration_sec = cum;
+      } else {
+        console.warn('[Music] ShotList fetch failed, using MusicReviewPack timing as fallback');
       }
+    } catch (e) {
+      console.warn('[Music] ShotList fetch error, using MusicReviewPack timing as fallback', e);
     }
     // Load gen_music_clip_results.json — all available music clips for this episode
     try {
@@ -10614,6 +10611,35 @@ placeholder="Enter your story here"></textarea>
       const d2 = await r2.json();
       if (!r2.ok || d2.error) throw new Error(d2.error || 'review pack failed');
       _musicTimeline = d2.timeline || null;
+
+      // Fetch ShotList.json for authoritative shot timing (same source as SFX and Media tabs)
+      try {
+        const slResp = await fetch(`/api/episode_file?slug=${encodeURIComponent(_musicSlug)}&ep_id=${encodeURIComponent(_musicEpId)}&file=ShotList.json`);
+        if (slResp.ok) {
+          const shotListData = await slResp.json();
+          let cum = 0;
+          const slMap = {};
+          for (const s of (shotListData.shots || [])) {
+            if (s.duration_sec == null) {
+              console.warn('[Music] ShotList shot missing duration_sec:', s.shot_id);
+            }
+            slMap[s.shot_id] = { offset_sec: cum, duration_sec: s.duration_sec || 0 };
+            cum += s.duration_sec || 0;
+          }
+          (_musicTimeline.shots || []).forEach(s => {
+            const sl = slMap[s.shot_id];
+            if (sl) {
+              s.offset_sec   = sl.offset_sec;
+              s.duration_sec = sl.duration_sec;
+            }
+          });
+          _musicTimeline.total_duration_sec = cum;
+        } else {
+          console.warn('[Music] ShotList fetch failed, using MusicReviewPack timing as fallback');
+        }
+      } catch (e) {
+        console.warn('[Music] ShotList fetch error, using MusicReviewPack timing as fallback', e);
+      }
 
       const nTracks = Object.keys(_musicCandidates.tracks || {}).length;
       _musicSetStatus('Review ready — ' + nTracks + ' tracks analysed. Listen to preview and adjust below.', false);
