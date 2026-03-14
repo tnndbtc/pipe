@@ -2554,7 +2554,7 @@ placeholder="Enter your story here"></textarea>
             value="{{MEDIA_SERVER_URL}}" />
     <button id="media-btn-search" onclick="mediaStartSearch()" disabled>🔍 Search Media</button>
     <button id="media-btn-preview" onclick="mediaGeneratePreview()" style="margin-left:8px;margin-right:4px">🎬 Preview (VO)</button>
-    <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-music" onchange="mediaUpdatePreviewLabel()"> Include Music</label>
+    <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-music" checked onchange="mediaUpdatePreviewLabel()"> Include Music</label>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-sfx" onchange="mediaUpdatePreviewLabel()"> Include SFX</label>
   </div>
 
@@ -5858,6 +5858,7 @@ placeholder="Enter your story here"></textarea>
   // selections: { item_id: { type:'image'|'video', url, path, score } }
   //   Per-shot:  { item_id: { per_shot: { shot_id: { media_type, url, path, score } } } }
   let _mediaSelections = {};
+  let _mediaDragSrc   = null;  // { cardId, bgId, shotId, idx } — active drag source
   let _mediaShotMap   = null; // { bg_id: [shot_id, ...] } or null if ShotList unavailable
   let _mediaShotDur   = null; // { shot_id: duration_sec } — flat lookup for shot durations
   let _mediaShotStart = null; // { shot_id: start_sec }    — absolute start time within episode
@@ -7739,17 +7740,21 @@ placeholder="Enter your story here"></textarea>
       if (seg.media_type === 'video') {
         var d = _resolveVideoDur(seg);
         fixedTotal += d;
-        // Keep duration_sec in sync (for render pipeline)
         seg.duration_sec = d;
+      } else if (seg.hold_sec_locked && seg.hold_sec > 0) {
+        // User-pinned image duration — treat as fixed
+        fixedTotal += seg.hold_sec;
+        seg.duration_sec = seg.hold_sec;
       } else {
         flexIdxs.push(i);
       }
     });
     var gap = shotDur > 0 ? Math.max(0, shotDur - fixedTotal) : 0;
     if (flexIdxs.length === 0) return;
-    var per = flexIdxs.length > 0 ? gap / flexIdxs.length : 0;
+    var per = Math.max(0, gap / flexIdxs.length);
     flexIdxs.forEach(function(i) {
       segs[i].hold_sec = per;
+      segs[i].duration_sec = per;
     });
   }
 
@@ -8044,10 +8049,34 @@ placeholder="Enter your story here"></textarea>
           imgNameSpan.className = 'seg-name';
           imgNameSpan.textContent = fname;
           se.appendChild(imgNameSpan);
-          const imgDurSpan = document.createElement('span');
-          imgDurSpan.className = 'seg-dur';
-          imgDurSpan.textContent = dur.toFixed(1) + 's';
-          se.appendChild(imgDurSpan);
+          // Editable duration input (1 decimal, replaces read-only span)
+          const imgDurInp = document.createElement('input');
+          imgDurInp.type = 'number';
+          imgDurInp.min = '0.1';
+          imgDurInp.step = '0.1';
+          imgDurInp.value = dur > 0 ? dur.toFixed(1) : '';
+          imgDurInp.placeholder = dur > 0 ? dur.toFixed(1) : 'auto';
+          imgDurInp.title = 'Display duration (s). Blank = auto-distribute.';
+          imgDurInp.style.cssText = 'width:48px;font-size:11px;background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:3px;padding:1px 3px;';
+          (function(cid, bid, sid, i, s) {
+            imgDurInp.addEventListener('change', function() {
+              var v = parseFloat(this.value);
+              if (isNaN(v) || v <= 0) {
+                s.hold_sec_locked = false;
+                s.hold_sec = null;
+                s.end_sec = null;  // clear stale end_sec so hold_sec is used on next save/preview
+                this.value = '';
+              } else {
+                s.hold_sec = Math.round(v * 10) / 10;
+                s.hold_sec_locked = true;
+                s.end_sec = null;  // clear stale end_sec so updated hold_sec is used on next save/preview
+              }
+              _mediaRebalanceImages(sid, (_mediaSelections[bid].per_shot[sid] || {segments:[]}).segments);
+              _mediaRenderShotRow(cid, sid);
+              mediaRenderShotOverrides();
+            });
+          })(cardId, bgId, shotId, idx, seg);
+          se.appendChild(imgDurInp);
           // Animation badge — click to change
           const animBadge = document.createElement('span');
           animBadge.className = 'seg-anim-badge';
@@ -8072,6 +8101,48 @@ placeholder="Enter your story here"></textarea>
           return function() { mediaRemoveSegment(iid, sid, i); };
         })(cardId, shotId, idx);
         se.appendChild(rmBtn);
+
+        // ── Drag handle + drag-to-reorder ──
+        const dragHandle = document.createElement('span');
+        dragHandle.textContent = '\u2630';
+        dragHandle.title = 'Drag to reorder';
+        dragHandle.style.cssText = 'cursor:grab;color:var(--dim);font-size:12px;flex-shrink:0;padding:0 2px;user-select:none';
+        se.insertBefore(dragHandle, se.firstChild);
+
+        se.draggable = true;
+        (function(cid, bid, sid, i) {
+          se.addEventListener('dragstart', function(e) {
+            _mediaDragSrc = { cardId: cid, bgId: bid, shotId: sid, idx: i };
+            e.dataTransfer.effectAllowed = 'move';
+            se.style.opacity = '0.4';
+          });
+          se.addEventListener('dragend', function() {
+            se.style.opacity = '';
+          });
+          se.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            se.style.outline = '2px solid var(--accent)';
+          });
+          se.addEventListener('dragleave', function() {
+            se.style.outline = '';
+          });
+          se.addEventListener('drop', function(e) {
+            e.preventDefault();
+            se.style.outline = '';
+            if (!_mediaDragSrc || _mediaDragSrc.shotId !== sid || _mediaDragSrc.idx === i) return;
+            var ps = _mediaSelections[_mediaDragSrc.bgId] && _mediaSelections[_mediaDragSrc.bgId].per_shot;
+            if (!ps || !ps[sid]) return;
+            var segs = ps[sid].segments;
+            var moved = segs.splice(_mediaDragSrc.idx, 1)[0];
+            var targetIdx = i > _mediaDragSrc.idx ? i - 1 : i;
+            segs.splice(targetIdx, 0, moved);
+            _mediaRebalanceImages(sid, segs);
+            _mediaRenderShotRow(cid, sid);
+            mediaRenderShotOverrides();
+          });
+        })(cardId, bgId, shotId, idx);
+
         segContainer.appendChild(se);
       });
     }
@@ -8190,19 +8261,31 @@ placeholder="Enter your story here"></textarea>
       block.segments.forEach((seg, segIdx) => {
         const label   = seg.url ? seg.url.split('/').pop() : '(unknown)';
         const isVideo = seg.media_type === 'video';
-        const badge   = isVideo ? '🎬' : '🖼';
         const natDur  = seg.natural_duration_sec || seg.duration_sec || dur || 0;
         const curStart = seg.start_sec ?? 0;
         const curEnd   = seg.end_sec   ?? (isVideo ? natDur : dur);
         const safeId  = sid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         const fillId  = 'mof-' + sid.replace(/[^a-z0-9]/gi, '_') + '_' + segIdx;
 
-        // ── filename row ──
-        html += '<div class="music-shot-clip" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
-          + '<span style="font-size:0.78em;color:var(--dim)">' + badge + '</span>'
-          + '<span style="font-size:0.82em;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)" title="' + (seg.url || '') + '">' + label + '</span>';
+        // ── thumbnail ──
+        const thumbUrl = _mediaSegThumbUrl(seg.url || '');
+        const safeThumb = thumbUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+        const thumbHtml = isVideo
+          ? '<video class="seg-thumb" src="' + safeThumb + '#t=0.5" muted preload="metadata" playsinline title="' + escHtml(label) + '"></video>'
+          : '<img class="seg-thumb" src="' + safeThumb + '" loading="lazy" alt="' + escHtml(label) + '" title="' + escHtml(label) + '">';
 
-        // ── in/out inputs + range bar inline (video only) ──
+        // ── filename span: duration embedded next to name for both image and video ──
+        const holdSec    = !isVideo ? (seg.hold_sec || 0) : 0;
+        const durLblId   = 'mofd-' + sid.replace(/[^a-z0-9]/gi, '_') + '_' + segIdx;
+        const clipDurSec = isVideo ? Math.max(0, curEnd - curStart) : 0;
+        const durInline  = isVideo
+          ? '<span id="' + durLblId + '" style="color:var(--dim);margin-left:4px;font-size:0.95em">' + clipDurSec.toFixed(1) + 's</span>'
+          : (holdSec > 0 ? '<span style="color:var(--dim);margin-left:4px;font-size:0.95em">' + holdSec.toFixed(1) + 's</span>' : '');
+        html += '<div class="music-shot-clip" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+          + thumbHtml
+          + '<span style="font-size:0.82em;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)" title="' + (seg.url || '') + '">' + label + durInline + '</span>';
+
+        // ── in/out inputs + range bar (video only) ──
         if (isVideo) {
           const leftPct  = natDur > 0 ? (curStart / natDur * 100).toFixed(1) : '0';
           const widthPct = natDur > 0 ? (Math.max(0, curEnd - curStart) / natDur * 100).toFixed(1) : '100';
@@ -8210,7 +8293,7 @@ placeholder="Enter your story here"></textarea>
             + '<span class="trim-label">in:</span>'
             + '<input type="number" min="0" step="0.1" placeholder="0"'
             + ' value="' + (curStart > 0 ? curStart.toFixed(1) : '') + '"'
-            + ' onchange="_mediaOvrTrim(\'' + safeId + '\',' + segIdx + ',\'start_sec\',this.value,' + natDur + ',\'' + fillId + '\')">'
+            + ' onchange="_mediaOvrTrim(\'' + safeId + '\',' + segIdx + ',\'start_sec\',this.value,' + natDur + ',\'' + fillId + '\',\'' + durLblId + '\')">'
             + '<div class="trim-range-bar" style="min-width:60px">'
             + '<div class="trim-range-fill" id="' + fillId + '" style="left:' + leftPct + '%;width:' + widthPct + '%"></div>'
             + '</div>'
@@ -8218,8 +8301,16 @@ placeholder="Enter your story here"></textarea>
             + '<input type="number" min="0" step="0.1"'
             + ' placeholder="' + (natDur > 0 ? natDur.toFixed(1) : '') + '"'
             + ' value="' + (seg.end_sec != null ? curEnd.toFixed(1) : '') + '"'
-            + ' onchange="_mediaOvrTrim(\'' + safeId + '\',' + segIdx + ',\'end_sec\',this.value,' + natDur + ',\'' + fillId + '\')">'
+            + ' onchange="_mediaOvrTrim(\'' + safeId + '\',' + segIdx + ',\'end_sec\',this.value,' + natDur + ',\'' + fillId + '\',\'' + durLblId + '\')">'
             + '</div>';
+        } else {
+          // ── image: editable hold_sec input (duration already shown in filename span above) ──
+          html += '<input type="number" min="0.1" step="0.1"'
+            + ' style="width:48px;font-size:11px;background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:3px;padding:1px 3px;flex-shrink:0"'
+            + ' value="' + (holdSec > 0 ? holdSec.toFixed(1) : '') + '"'
+            + ' placeholder="' + (holdSec > 0 ? holdSec.toFixed(1) : 'auto') + '"'
+            + ' title="Display duration (s). Blank = auto-distribute."'
+            + ' onchange="_mediaOvrHoldSec(\'' + safeId + '\',' + segIdx + ',this.value)">';
         }
 
         html += '<button onclick="mediaClearSegment(\'' + safeId + '\',' + segIdx + ')" style="font-size:11px;flex-shrink:0">✕</button>'
@@ -8243,7 +8334,7 @@ placeholder="Enter your story here"></textarea>
   }
 
   // ── Shot Overrides in/out handler — mirrors applyTrim from the card view ──
-  function _mediaOvrTrim(shotId, segIdx, field, value, natDur, fillId) {
+  function _mediaOvrTrim(shotId, segIdx, field, value, natDur, fillId, durLblId) {
     const bgId = _mediaShotToBg && _mediaShotToBg[shotId];
     if (!bgId) return;
     const segs = _mediaSelections[bgId] && _mediaSelections[bgId].per_shot &&
@@ -8266,7 +8357,7 @@ placeholder="Enter your story here"></textarea>
     var clipDur  = Math.max(0.1, effEnd - effStart);
     seg.duration_override_sec = clipDur;
     seg.duration_sec = clipDur;
-    // Update range fill live
+    // Update range fill and duration label live
     if (natDur > 0) {
       var fill = document.getElementById(fillId);
       if (fill) {
@@ -8274,6 +8365,35 @@ placeholder="Enter your story here"></textarea>
         fill.style.width = (clipDur  / natDur * 100).toFixed(1) + '%';
       }
     }
+    if (durLblId) {
+      var durLbl = document.getElementById(durLblId);
+      if (durLbl) durLbl.textContent = clipDur.toFixed(1) + 's';
+    }
+  }
+
+  // ── Shot Overrides image hold_sec handler ──
+  function _mediaOvrHoldSec(shotId, segIdx, value) {
+    const bgId = _mediaShotToBg && _mediaShotToBg[shotId];
+    if (!bgId) return;
+    const segs = _mediaSelections[bgId] && _mediaSelections[bgId].per_shot &&
+                 _mediaSelections[bgId].per_shot[shotId] &&
+                 _mediaSelections[bgId].per_shot[shotId].segments;
+    if (!segs || !segs[segIdx]) return;
+    const seg = segs[segIdx];
+    const v = parseFloat(value);
+    if (isNaN(v) || v <= 0) {
+      seg.hold_sec_locked = false;
+      seg.hold_sec = null;
+      seg.end_sec = null;  // clear stale end_sec so hold_sec is used on next save/preview
+    } else {
+      seg.hold_sec = Math.round(v * 10) / 10;
+      seg.hold_sec_locked = true;
+      seg.end_sec = null;  // clear stale end_sec so updated hold_sec is used on next save/preview
+    }
+    _mediaRebalanceImages(shotId, (_mediaSelections[bgId].per_shot[shotId] || {segments:[]}).segments);
+    const cardId = (_mediaBgToScene && _mediaBgToScene[bgId]) || bgId;
+    _mediaRenderShotRow(cardId, shotId);
+    mediaRenderShotOverrides();
   }
 
   function mediaClearSegment(shotId, segIdx) {
@@ -8303,6 +8423,9 @@ placeholder="Enter your story here"></textarea>
     const btn = document.getElementById('media-btn-preview');
     btn.disabled = true;
     btn.textContent = '⏳ Generating…';
+
+    // Free all video HTTP connections before the POST to guarantee a free slot
+    _mediaReleaseAllConnections();
 
     // Invert _mediaSelections to flat perShot dict with null-coalescing
     const perShot = {};
@@ -8341,8 +8464,13 @@ placeholder="Enter your story here"></textarea>
       const videoEl = document.getElementById('media-preview-video');
       videoEl.src = '/serve_media?path=' + encodeURIComponent(relPath) + '&t=' + Date.now();
       document.getElementById('media-preview-wrap').style.display = '';
+      if (d.warnings && d.warnings.length) {
+        _mediaSetStatus('⚠️ Preview ready with warnings: ' + d.warnings.join(' | '));
+      } else {
+        _mediaSetStatus('✅ Preview ready.');
+      }
     } catch (err) {
-      document.getElementById('media-confirm-msg').textContent = '❌ Preview failed: ' + err.message;
+      _mediaSetStatus('❌ Preview failed: ' + err.message);
     } finally {
       btn.disabled = false;
       mediaUpdatePreviewLabel();
@@ -8355,6 +8483,9 @@ placeholder="Enter your story here"></textarea>
     const origText = btnEl.textContent;
     btnEl.disabled = true;
     btnEl.textContent = '⏳…';
+
+    // Free all video HTTP connections before the POST to guarantee a free slot
+    _mediaReleaseAllConnections();
 
     // Collect selections for only these shots (flat perShot format)
     const perShot = {};
@@ -8401,9 +8532,13 @@ placeholder="Enter your story here"></textarea>
         wrap.style.display = '';
         wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       }
+      if (d.warnings && d.warnings.length) {
+        _mediaSetStatus('⚠️ Scene preview ready with warnings: ' + d.warnings.join(' | '));
+      } else {
+        _mediaSetStatus('✅ Scene preview ready — ' + cardId + '.');
+      }
     } catch (err) {
-      document.getElementById('media-confirm-msg').textContent =
-        '❌ Scene preview failed (' + cardId + '): ' + err.message;
+      _mediaSetStatus('❌ Scene preview failed (' + cardId + '): ' + err.message);
     } finally {
       btnEl.disabled = false;
       btnEl.textContent = origText;
@@ -8938,7 +9073,8 @@ placeholder="Enter your story here"></textarea>
           }
           const type = seg.media_type || 'image';
           const name = rawUrl.split('/').pop() || '(unknown)';
-          const durS = seg.duration_sec ? ' ' + seg.duration_sec.toFixed(1) + 's' : '';
+          const _durVal = type === 'image' ? (seg.hold_sec || seg.duration_sec) : seg.duration_sec;
+          const durS = _durVal ? ' ' + parseFloat(_durVal).toFixed(1) + 's' : '';
           const icon = type === 'video' ? '🎬' : '🖼';
 
           segsHtml += '<div style="display:flex;align-items:center;gap:8px;margin:2px 0">';
@@ -17409,7 +17545,11 @@ class Handler(BaseHTTPRequestHandler):
                     _json_resp(self, {"error": "media_preview_pack failed",
                                       "detail": result.stderr}, 500)
                 else:
-                    _json_resp(self, {"ok": True, "debug_log": result.stdout + result.stderr})
+                    _warnings = [ln.strip() for ln in (result.stdout + result.stderr).splitlines()
+                                 if "[warn]" in ln]
+                    _json_resp(self, {"ok": True,
+                                      "warnings": _warnings,
+                                      "debug_log": result.stdout + result.stderr})
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 500)
 
