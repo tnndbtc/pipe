@@ -129,19 +129,32 @@ def _anim_vf(anim_type: str, clip_dur: float) -> str:
     return ""  # static / none
 
 
-def _seg_display_dur(seg: dict, shot_dur_fallback: float, n_segs: int) -> float:
-    """Return how long this segment should play in the output video."""
-    start = float(seg.get("start_sec") or 0)
-    end   = float(seg.get("end_sec")   or 0)
-    if end > start:
-        return end - start
+def _seg_display_dur(seg: dict) -> float:
+    """
+    Return how long this segment should play, exactly as the user set it.
+    Returns 0.0 if no duration is specified — caller must skip or warn.
+
+    - images: start_sec/end_sec are shot-timeline markers, NOT trim bounds.
+              Use hold_sec (user-set display duration) first.
+    - videos: start_sec/end_sec ARE trim bounds; use end-start first.
+    """
+    media_type = seg.get("media_type", "image")
+
+    if media_type != "image":
+        # Video: in/out trim range takes priority
+        start = float(seg.get("start_sec") or 0)
+        end   = float(seg.get("end_sec")   or 0)
+        if end > start:
+            return end - start
+
+    # Image (or video without valid trim): use explicit hold/duration
     hold = seg.get("hold_sec")
     if hold:
         return float(hold)
     dur = seg.get("duration_override_sec") or seg.get("duration_sec")
     if dur:
         return float(dur)
-    return shot_dur_fallback / max(n_segs, 1)
+    return 0.0  # unknown — caller should warn and skip
 
 
 def main():
@@ -268,30 +281,37 @@ def main():
                 clip_files.append(clip_path)
                 print(f"  [clip] {shot_id}: {dur_sec:.3f}s ok (black)")
             else:
-                # Build one sub-clip per segment, then concat into the shot clip
-
-                # ── Compute all segment durations first, then normalize ──
-                # If natural_duration_sec was 0 (video metadata not yet loaded in browser),
-                # _seg_display_dur may assign the full shot duration to an image, pushing
-                # the total well past dur_sec and causing the video to be cut off by -shortest.
-                raw_durs = [_seg_display_dur(s, dur_sec, len(segs)) for s in segs]
-                total_raw = sum(raw_durs)
-                if total_raw > dur_sec * 1.01 and dur_sec > 0:
-                    # Scale all durations proportionally so they fit within the shot
-                    scale = dur_sec / total_raw
-                    seg_durs = [max(0.1, d * scale) for d in raw_durs]
-                    print(f"  [warn] {shot_id}: segment total {total_raw:.2f}s > shot {dur_sec:.2f}s "
-                          f"(video duration likely undetected) — scaled down proportionally")
-                else:
-                    seg_durs = raw_durs
+                # Build one sub-clip per segment, then concat into the shot clip.
+                # Each segment plays EXACTLY its designated duration.
+                # After all segments, remaining shot time is filled with black.
+                # The pipeline never adjusts or re-scales user-set durations.
 
                 sub_clip_paths = []
+                remaining = dur_sec  # tracks how much shot time is left
+
                 for seg_idx, seg in enumerate(segs):
                     media_path = url_to_path(seg.get("url", ""))
                     media_type = seg.get("media_type", "image")
                     seg_start  = float(seg.get("start_sec") or 0)
                     anim_type  = (seg.get("animation_type") or "none").lower()
-                    seg_dur    = seg_durs[seg_idx]
+                    seg_dur    = _seg_display_dur(seg)
+                    print(f"  [seg] {shot_id} seg{seg_idx} type={media_type} "
+                          f"hold_sec={seg.get('hold_sec')} start_sec={seg.get('start_sec')} "
+                          f"end_sec={seg.get('end_sec')} duration_sec={seg.get('duration_sec')} "
+                          f"→ seg_dur={seg_dur:.3f}s")
+
+                    if seg_dur <= 0:
+                        print(f"  [warn] {shot_id} seg {seg_idx} ({media_type}): duration is 0 — skipped")
+                        continue
+
+                    if remaining <= 0:
+                        print(f"  [warn] {shot_id} seg {seg_idx} ({media_type}): no remaining shot time — skipped")
+                        break
+
+                    # Cap to remaining shot time (don't exceed total shot duration)
+                    if seg_dur > remaining + 0.001:
+                        print(f"  [warn] {shot_id} seg {seg_idx}: seg_dur {seg_dur:.3f}s exceeds remaining {remaining:.3f}s — capped")
+                        seg_dur = remaining
 
                     sub_clip = tmp / f"clip_{i:04d}_{shot_id}_s{seg_idx}.mp4"
 
@@ -339,7 +359,26 @@ def main():
                             print(f"  [warn] {shot_id} seg {seg_idx}: black fallback also failed — segment skipped")
                             continue
                         print(f"  [warn] {shot_id} seg {seg_idx}: used black fallback (source failed)")
+
                     sub_clip_paths.append(sub_clip)
+                    remaining -= seg_dur
+
+                # Fill remaining shot time with black
+                if remaining > 0.05:
+                    fill_clip = tmp / f"clip_{i:04d}_{shot_id}_fill.mp4"
+                    cmd_fill = [
+                        "ffmpeg", "-y", "-f", "lavfi",
+                        "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={remaining:.3f}",
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-t", f"{remaining:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-shortest", str(fill_clip)
+                    ]
+                    r_fill = subprocess.run(cmd_fill, capture_output=True, text=True)
+                    if r_fill.returncode == 0:
+                        sub_clip_paths.append(fill_clip)
+                        print(f"  [fill] {shot_id}: black fill {remaining:.3f}s (segments used {dur_sec - remaining:.3f}s of {dur_sec:.3f}s)")
+                    else:
+                        print(f"  [warn] {shot_id}: black fill failed: {r_fill.stderr[-200:]}")
 
                 if not sub_clip_paths:
                     print(f"  [skip] {shot_id}: all segments failed")
@@ -378,7 +417,8 @@ def main():
                         print(f"  [warn] {shot_id}: sub-concat fallback — showing black for full shot")
 
                 clip_files.append(clip_path)
-                print(f"  [clip] {shot_id}: {len(sub_clip_paths)} seg(s), {dur_sec:.3f}s ok")
+                segs_used = dur_sec - remaining
+                print(f"  [clip] {shot_id}: {len(segs)} seg(s) {segs_used:.3f}s, fill {remaining:.3f}s, total {dur_sec:.3f}s ok")
 
         if not clip_files:
             print("ERROR: No clips generated.")

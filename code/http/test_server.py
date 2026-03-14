@@ -7177,6 +7177,43 @@ placeholder="Enter your story here"></textarea>
     // Show "Apply Recommended Sequence" button only if server computed one
     const applyBtn = document.getElementById('media-btn-apply-seq');
     applyBtn.style.display = _mediaRecommendedSeq ? 'inline-block' : 'none';
+
+    // Restore any preview videos that were generated in a previous session
+    _mediaRestorePreviewIfExists();
+  }
+
+  // ── Restore preview players that exist on disk after page reload ──
+  async function _mediaRestorePreviewIfExists() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    let data;
+    try {
+      const r = await fetch('/api/media_preview_exists?slug=' + encodeURIComponent(_mediaSlug)
+                            + '&ep_id=' + encodeURIComponent(_mediaEpId));
+      if (!r.ok) return;
+      data = await r.json();
+    } catch (_) { return; }
+
+    const base = 'projects/' + _mediaSlug + '/episodes/' + _mediaEpId
+                 + '/assets/media/MediaPreviewPack/';
+
+    // Full-episode preview
+    if (data.full) {
+      const videoEl = document.getElementById('media-preview-video');
+      if (videoEl && !videoEl.src) {
+        videoEl.src = '/serve_media?path=' + encodeURIComponent(base + 'preview_video.mp4');
+        document.getElementById('media-preview-wrap').style.display = '';
+      }
+    }
+
+    // Per-scene previews
+    (data.scenes || []).forEach(function(cardId) {
+      const wrap = document.getElementById('media-scene-preview-' + cardId);
+      if (!wrap) return;
+      const videoEl = wrap.querySelector('video');
+      if (!videoEl || videoEl.src) return;
+      videoEl.src = '/serve_media?path=' + encodeURIComponent(base + 'scene_' + cardId + '_preview.mp4');
+      wrap.style.display = '';
+    });
   }
 
   // ── Animation picker: option definitions ──
@@ -8422,7 +8459,7 @@ placeholder="Enter your story here"></textarea>
     if (!_mediaSlug || !_mediaEpId) return;
     const btn = document.getElementById('media-btn-preview');
     btn.disabled = true;
-    btn.textContent = '⏳ Generating…';
+    btn.innerHTML = '<span style="display:inline-block;animation:spin 1s linear infinite">⏳</span> Generating…';
 
     // Free all video HTTP connections before the POST to guarantee a free slot
     _mediaReleaseAllConnections();
@@ -8482,7 +8519,7 @@ placeholder="Enter your story here"></textarea>
     if (!_mediaSlug || !_mediaEpId || !shotIds || shotIds.length === 0) return;
     const origText = btnEl.textContent;
     btnEl.disabled = true;
-    btnEl.textContent = '⏳…';
+    btnEl.innerHTML = '<span style="display:inline-block;animation:spin 1s linear infinite">⏳</span>…';
 
     // Free all video HTTP connections before the POST to guarantee a free slot
     _mediaReleaseAllConnections();
@@ -14954,6 +14991,34 @@ class Handler(BaseHTTPRequestHandler):
             # This is a GET-based proxy, but sfx_search is POST-based — redirect handled in do_POST
             body = json.dumps({"error": "Use POST /api/sfx_search"}).encode()
             self.send_response(405)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── Media: check which preview files exist on disk (GET /api/media_preview_exists) ──
+        elif parsed.path == "/api/media_preview_exists":
+            params = parse_qs(parsed.query)
+            slug   = params.get("slug",  [""])[0].strip()
+            ep_id  = params.get("ep_id", [""])[0].strip()
+            if not slug or not ep_id:
+                body = json.dumps({"error": "slug and ep_id required"}).encode()
+                self.send_response(400)
+            else:
+                pack_dir = os.path.join(PIPE_DIR, "projects", slug,
+                                        "episodes", ep_id,
+                                        "assets", "media", "MediaPreviewPack")
+                full_exists = os.path.isfile(os.path.join(pack_dir, "preview_video.mp4"))
+                scenes = []
+                if os.path.isdir(pack_dir):
+                    for fname in os.listdir(pack_dir):
+                        if fname.startswith("scene_") and fname.endswith("_preview.mp4"):
+                            # scene_{cardId}_preview.mp4 → extract cardId
+                            card_id = fname[len("scene_"):-len("_preview.mp4")]
+                            if card_id:
+                                scenes.append(card_id)
+                body = json.dumps({"full": full_exists, "scenes": scenes}).encode()
+                self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
