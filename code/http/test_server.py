@@ -1719,7 +1719,11 @@ HTML = r"""<!DOCTYPE html>
   .media-seg-entry .seg-dur { color: #7eb8f7; flex-shrink: 0; }
   .seg-thumb {
     width: 56px; height: 32px; object-fit: cover; border-radius: 3px; flex-shrink: 0;
-    background: #111; border: 1px solid var(--border); cursor: default;
+    background: #111; border: 1px solid var(--border); cursor: pointer;
+    transition: width .2s ease, height .2s ease;
+  }
+  video.seg-thumb-playing {
+    width: 712px; height: 400px;
   }
   .media-seg-remove {
     background: none; border: none; color: var(--dim);
@@ -7919,9 +7923,54 @@ placeholder="Enter your story here"></textarea>
   // Convert a segment URL (file:// or absolute path) to a browser-loadable URL.
   function _mediaSegThumbUrl(url) {
     if (!url) return '';
-    if (url.startsWith('file://')) return '/api/serve_media_file?url=' + encodeURIComponent(url);
+    if (url.startsWith('file://')) {
+      // Strip file:// prefix and decode percent-encoding to get the raw filesystem path,
+      // then re-encode for the query string.  Route through /serve_media (range-capable)
+      // so <video> elements can seek and play in/out segments correctly.
+      var absPath = decodeURIComponent(url.replace(/^file:\/\//, ''));
+      return '/serve_media?path=' + encodeURIComponent(absPath);
+    }
     if (url.startsWith('/') && !url.startsWith('/serve_media')) return '/serve_media?path=' + encodeURIComponent(url);
     return url;
+  }
+
+  // ── Click to play/pause the in→out range; expands thumbnail while playing ──
+  function _mediaSegThumbClick(vid) {
+    if (!vid.paused) {
+      vid.pause();
+      vid.classList.remove('seg-thumb-playing');
+      return;
+    }
+    const start = parseFloat(vid.dataset.start) || 0;
+    vid.classList.add('seg-thumb-playing');
+
+    function doPlay() {
+      vid.play().catch(function(e) { console.warn('[media] play failed:', e); });
+    }
+
+    // Must wait for seek to complete before calling play(),
+    // otherwise the browser shows a black frame at the old position.
+    function seekAndPlay() {
+      vid.addEventListener('seeked', doPlay, { once: true });
+      vid.currentTime = start;
+    }
+
+    if (vid.readyState >= 2) {   // HAVE_CURRENT_DATA — can seek immediately
+      seekAndPlay();
+    } else {
+      // Video not yet loaded — load it first, then seek
+      vid.addEventListener('canplay', seekAndPlay, { once: true });
+      vid.load();
+    }
+  }
+
+  function _mediaSegThumbTimeUpdate(vid) {
+    const end = parseFloat(vid.dataset.end) || 0;
+    if (end > 0 && vid.currentTime >= end) {
+      vid.pause();
+      vid.currentTime = parseFloat(vid.dataset.start) || 0;
+      vid.classList.remove('seg-thumb-playing');
+    }
   }
 
   // ── Render a per-shot row with segment list and fill bar ──
@@ -7991,11 +8040,17 @@ placeholder="Enter your story here"></textarea>
           })(cardId, bgId, shotId, idx, seg);
           const vidThumb = document.createElement('video');
           vidThumb.className = 'seg-thumb';
-          vidThumb.src = _mediaSegThumbUrl(seg.url || '') + '#t=0.5';
+          var _vts = seg.start_sec || 0;
+          var _vte = seg.end_sec   || natDur;
+          vidThumb.src = _mediaSegThumbUrl(seg.url || '') + '#t=' + _vts.toFixed(3);
           vidThumb.preload = 'metadata';
           vidThumb.muted = true;
           vidThumb.setAttribute('playsinline', '');
-          vidThumb.title = fname;
+          vidThumb.title = fname + ' — click to play in/out';
+          vidThumb.dataset.start = _vts.toFixed(3);
+          vidThumb.dataset.end   = _vte.toFixed(3);
+          vidThumb.onclick       = function() { _mediaSegThumbClick(this); };
+          vidThumb.ontimeupdate  = function() { _mediaSegThumbTimeUpdate(this); };
           se.appendChild(vidThumb);
           const nameSpan = document.createElement('span');
           nameSpan.className = 'seg-name';
@@ -8040,7 +8095,7 @@ placeholder="Enter your story here"></textarea>
           endInp.value = (seg.end_sec != null) ? curEnd.toFixed(1) : '';
           endInp.placeholder = natDur > 0 ? natDur.toFixed(1) : '';
           // Change handlers
-          (function(cid, bid, sid, i, s, sInp, eInp, rFill, nDur) {
+          (function(cid, bid, sid, i, s, sInp, eInp, rFill, nDur, vThumb) {
             function applyTrim() {
               var sv = parseFloat(sInp.value);
               var ev = parseFloat(eInp.value);
@@ -8059,18 +8114,39 @@ placeholder="Enter your story here"></textarea>
                 rFill.style.left  = ((effStart / nDur) * 100).toFixed(1) + '%';
                 rFill.style.width = (((effEnd - effStart) / nDur) * 100).toFixed(1) + '%';
               }
+              // Keep video thumbnail in/out in sync so clicking plays the updated range
+              if (vThumb) {
+                vThumb.dataset.start = effStart.toFixed(3);
+                vThumb.dataset.end   = effEnd.toFixed(3);
+                vThumb.currentTime   = effStart;
+              }
               _mediaRebalanceImages(sid, (_mediaSelections[bid].per_shot[sid] || {segments:[]}).segments);
               _mediaRenderShotRow(cid, sid);
               mediaRenderShotOverrides();
             }
             sInp.addEventListener('change', applyTrim);
             eInp.addEventListener('change', applyTrim);
-          })(cardId, bgId, shotId, idx, seg, startInp, endInp, rangeFill, natDur);
+          })(cardId, bgId, shotId, idx, seg, startInp, endInp, rangeFill, natDur, vidThumb);
+          var playBtn = document.createElement('button');
+          playBtn.textContent = '▶';
+          playBtn.title = 'Play in/out range';
+          playBtn.style.cssText = 'font-size:11px;padding:1px 6px;cursor:pointer;'
+            + 'background:var(--input-bg);border:1px solid var(--input-border);'
+            + 'border-radius:3px;color:var(--text);flex-shrink:0;';
+          (function(vt, btn) {
+            btn.onclick = function(ev) {
+              ev.stopPropagation();
+              _mediaSegThumbClick(vt);
+            };
+            vt.addEventListener('play',  function() { btn.textContent = '⏸'; });
+            vt.addEventListener('pause', function() { btn.textContent = '▶'; });
+          })(vidThumb, playBtn);
           trimRow.appendChild(startLbl);
           trimRow.appendChild(startInp);
           trimRow.appendChild(rangeBar);
           trimRow.appendChild(endLbl);
           trimRow.appendChild(endInp);
+          trimRow.appendChild(playBtn);
           se.appendChild(trimRow);
         } else {
           // Image segment
@@ -8308,7 +8384,11 @@ placeholder="Enter your story here"></textarea>
         const thumbUrl = _mediaSegThumbUrl(seg.url || '');
         const safeThumb = thumbUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
         const thumbHtml = isVideo
-          ? '<video class="seg-thumb" src="' + safeThumb + '#t=0.5" muted preload="metadata" playsinline title="' + escHtml(label) + '"></video>'
+          ? '<video class="seg-thumb" src="' + safeThumb + '#t=' + curStart.toFixed(3) + '"'
+            + ' muted preload="metadata" playsinline title="' + escHtml(label) + '"'
+            + ' data-start="' + curStart.toFixed(3) + '" data-end="' + curEnd.toFixed(3) + '"'
+            + ' onclick="_mediaSegThumbClick(this)" ontimeupdate="_mediaSegThumbTimeUpdate(this)">'
+            + '</video>'
           : '<img class="seg-thumb" src="' + safeThumb + '" loading="lazy" alt="' + escHtml(label) + '" title="' + escHtml(label) + '">';
 
         // ── filename span: duration embedded next to name for both image and video ──

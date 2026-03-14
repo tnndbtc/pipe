@@ -288,6 +288,7 @@ def main():
 
                 sub_clip_paths = []
                 remaining = dur_sec  # tracks how much shot time is left
+                segs_rendered = 0   # counts segments that actually produced a clip
 
                 for seg_idx, seg in enumerate(segs):
                     media_path = url_to_path(seg.get("url", ""))
@@ -362,6 +363,7 @@ def main():
 
                     sub_clip_paths.append(sub_clip)
                     remaining -= seg_dur
+                    segs_rendered += 1
 
                 # Fill remaining shot time with black
                 if remaining > 0.05:
@@ -418,7 +420,9 @@ def main():
 
                 clip_files.append(clip_path)
                 segs_used = dur_sec - remaining
-                print(f"  [clip] {shot_id}: {len(segs)} seg(s) {segs_used:.3f}s, fill {remaining:.3f}s, total {dur_sec:.3f}s ok")
+                skipped = len(segs) - segs_rendered
+                skip_note = f" ({skipped} skipped)" if skipped else ""
+                print(f"  [clip] {shot_id}: {segs_rendered} seg(s){skip_note} {segs_used:.3f}s, fill {remaining:.3f}s, total {dur_sec:.3f}s ok")
 
         if not clip_files:
             print("ERROR: No clips generated.")
