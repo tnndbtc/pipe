@@ -24,6 +24,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1716,6 +1717,10 @@ HTML = r"""<!DOCTYPE html>
   }
   .media-seg-entry .seg-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .media-seg-entry .seg-dur { color: #7eb8f7; flex-shrink: 0; }
+  .seg-thumb {
+    width: 56px; height: 32px; object-fit: cover; border-radius: 3px; flex-shrink: 0;
+    background: #111; border: 1px solid var(--border); cursor: default;
+  }
   .media-seg-remove {
     background: none; border: none; color: var(--dim);
     cursor: pointer; font-size: 0.9em; padding: 0 2px; transition: color .15s;
@@ -1936,59 +1941,6 @@ HTML = r"""<!DOCTYPE html>
     background: var(--active-bg) !important; color: var(--dim) !important;
     border: 1px solid var(--border) !important;
   }
-
-  /* ── Browse panel ── */
-  #panel-browse {
-    flex: 1; overflow: hidden;
-    padding: 16px 24px 20px;
-    display: none; flex-direction: column; gap: 10px;
-  }
-  .browse-toolbar {
-    flex-shrink: 0; display: flex; align-items: center; gap: 10px;
-  }
-  #btn-refresh {
-    background: var(--active-bg); color: var(--dim);
-    border: 1px solid var(--border); border-radius: 6px;
-    font-size: 0.76em; padding: 5px 12px; cursor: pointer;
-    transition: background .15s, color .15s;
-  }
-  #btn-refresh:hover { background: rgba(0,0,0,0.10); color: var(--text); }
-  .browse-empty { color: var(--dim); font-style: italic; font-size: 0.83em; padding: 8px 0; }
-  #browse-tree {
-    flex: 1; overflow-y: auto;
-    font-family: var(--mono); font-size: 0.83em;
-  }
-  .proj-group  { margin-bottom: 18px; }
-  .proj-heading {
-    color: var(--gold); font-weight: 700; font-size: 0.9em;
-    padding: 5px 0 6px; display: flex; align-items: center; gap: 6px;
-    border-bottom: 1px solid var(--border);
-  }
-  .ep-toggle-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 0 6px 10px; cursor: pointer;
-    color: var(--blue); font-weight: 600;
-    border-radius: 5px; transition: background .12s;
-  }
-  .ep-toggle-row:hover { background: #5b9cf610; }
-  .ep-caret  { font-size: 0.68em; width: 10px; text-align: center; color: var(--dim); }
-  .ep-meta   { color: var(--dim); font-size: 0.80em; font-weight: 400; }
-  .ep-files  {
-    margin-left: 22px; padding-left: 14px;
-    border-left: 1px solid var(--border);
-    display: none;
-  }
-  .ep-files.open { display: block; }
-  .ep-file-row {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 4px 2px; border-bottom: 1px solid #1a1a26;
-  }
-  .ep-file-row:last-child { border-bottom: none; }
-  .ep-file-name { color: var(--text); }
-  .ep-file-sz   { color: var(--dim); font-size: 0.80em; margin-left: 8px; }
-  #browse-tree::-webkit-scrollbar { width: 6px; }
-  #browse-tree::-webkit-scrollbar-track { background: transparent; }
-  #browse-tree::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
   /* ── Pipeline panel ── */
   #panel-pipeline {
@@ -2363,11 +2315,10 @@ HTML = r"""<!DOCTYPE html>
   <nav class="tab-bar">
     <button class="tab active" data-tab="run"      onclick="switchTab('run')"     >▶ Run</button>
     <button class="tab"        data-tab="pipeline" onclick="switchTab('pipeline')">🎬 Pipeline</button>
-    <button class="tab"        data-tab="browse"   onclick="switchTab('browse')"  >📁 Browse</button>
-    <button class="tab"        data-tab="media"    onclick="switchTab('media')"   >🖼 Media</button>
-    <button class="tab"        data-tab="sfx"      onclick="switchTab('sfx')"     >🔊 SFX</button>
-    <button class="tab"        data-tab="music"    onclick="switchTab('music')"   >🎵 Music</button>
     <button class="tab"        data-tab="vo"       onclick="switchTab('vo')"      >🎙 VO</button>
+    <button class="tab"        data-tab="music"    onclick="switchTab('music')"   >🎵 Music</button>
+    <button class="tab"        data-tab="sfx"      onclick="switchTab('sfx')"     >🔊 SFX</button>
+    <button class="tab"        data-tab="media"    onclick="switchTab('media')"   >🖼 Media</button>
     <button class="tab"        data-tab="youtube"  onclick="switchTab('youtube')" >▶ YouTube</button>
   </nav>
 
@@ -2590,15 +2541,6 @@ placeholder="Enter your story here"></textarea>
 
 </main>
 
-<!-- ── Browse panel ── -->
-<div id="panel-browse">
-  <div class="browse-toolbar">
-    <div class="section-label">Projects &amp; Episodes</div>
-    <button id="btn-refresh" onclick="loadProjects()">↺ Refresh</button>
-  </div>
-  <div id="browse-tree"><span class="browse-empty">Switch to this tab to load projects.</span></div>
-</div>
-
 <!-- ── Media panel ── -->
 <div id="panel-media">
   <!-- toolbar row -->
@@ -2611,6 +2553,9 @@ placeholder="Enter your story here"></textarea>
             placeholder="Media server URL  e.g. http://localhost:8200"
             value="{{MEDIA_SERVER_URL}}" />
     <button id="media-btn-search" onclick="mediaStartSearch()" disabled>🔍 Search Media</button>
+    <button id="media-btn-preview" onclick="mediaGeneratePreview()" style="margin-left:8px;margin-right:4px">🎬 Preview (VO)</button>
+    <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-music" onchange="mediaUpdatePreviewLabel()"> Include Music</label>
+    <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-sfx" onchange="mediaUpdatePreviewLabel()"> Include SFX</label>
   </div>
 
   <!-- per-source settings table (always visible once project selected) -->
@@ -2634,8 +2579,17 @@ placeholder="Enter your story here"></textarea>
     <span class="media-spinner" id="media-spinner"></span>
   </div>
 
-  <!-- results body — item cards rendered here by JS -->
-  <div class="media-body" id="media-body"></div>
+  <!-- results body — item cards rendered here by JS; overrides + full preview live here too so they scroll -->
+  <div class="media-body" id="media-body">
+    <!-- shot overrides section — populated by mediaRenderShotOverrides() -->
+    <div id="media-shot-overrides"></div>
+
+    <!-- full-episode preview video player -->
+    <div id="media-preview-wrap" style="display:none;padding:8px 12px;border-top:1px solid var(--border);flex-shrink:0">
+      <div style="font-weight:600;margin-bottom:4px" id="media-preview-label">Preview (VO)</div>
+      <video id="media-preview-video" controls style="width:100%;max-height:400px"></video>
+    </div>
+  </div>
 
   <!-- footer actions -->
   <div class="media-footer" id="media-footer" style="display:none">
@@ -4878,7 +4832,6 @@ placeholder="Enter your story here"></textarea>
     document.querySelectorAll('.tab').forEach(t =>
       t.classList.toggle('active', t.dataset.tab === name));
     document.getElementById('panel-run').style.display      = name === 'run'      ? 'flex' : 'none';
-    document.getElementById('panel-browse').style.display   = name === 'browse'   ? 'flex' : 'none';
     document.getElementById('panel-pipeline').style.display = name === 'pipeline' ? 'flex' : 'none';
     document.getElementById('panel-media').style.display    = name === 'media'    ? 'flex' : 'none';
     document.getElementById('panel-sfx').style.display      = name === 'sfx'      ? 'flex' : 'none';
@@ -4910,7 +4863,6 @@ placeholder="Enter your story here"></textarea>
       _vcPlayingAudio = null;
     }
 
-    if (name === 'browse')   loadProjects();
     if (name === 'media')    initMediaTab();
     if (name === 'music')    initMusicTab();
     if (name === 'pipeline') {
@@ -5906,8 +5858,9 @@ placeholder="Enter your story here"></textarea>
   // selections: { item_id: { type:'image'|'video', url, path, score } }
   //   Per-shot:  { item_id: { per_shot: { shot_id: { media_type, url, path, score } } } }
   let _mediaSelections = {};
-  let _mediaShotMap = null;  // { bg_id: [shot_id, ...] } or null if ShotList unavailable
-  let _mediaShotDur = null;  // { shot_id: duration_sec } — flat lookup for shot durations
+  let _mediaShotMap   = null; // { bg_id: [shot_id, ...] } or null if ShotList unavailable
+  let _mediaShotDur   = null; // { shot_id: duration_sec } — flat lookup for shot durations
+  let _mediaShotStart = null; // { shot_id: start_sec }    — absolute start time within episode
   let _mediaActiveShot = {}; // { cardId: shot_id } — which shot row is active (target) per card
   // Scene-based grouping (built alongside _mediaShotMap):
   let _mediaSceneMap  = null; // { scene_id: [shot_id, ...] } ordered by appearance
@@ -5915,6 +5868,7 @@ placeholder="Enter your story here"></textarea>
   let _mediaSceneBgs  = null; // { scene_id: [bg_id, ...] } unique bg_ids per scene, ordered
   let _mediaBgToScene = null; // { bg_id: scene_id } reverse lookup
   let _mediaSceneOrder = null; // [scene_id, ...] ordered by first shot appearance
+  let _mediaBgRemap   = null; // { old_bg_id: new_bg_id } — loaded from bg_id_remap.json if present
   var _mediaPlayingVid = null; // currently playing video element (limit 1 active stream)
   let _bgManifestData = {};    // { itemId: { ai_prompt, search_prompt, include_keywords, media_type, motion_level } }
 
@@ -6107,17 +6061,33 @@ placeholder="Enter your story here"></textarea>
         if (!sceneBgs[sc]) sceneBgs[sc] = [];
         if (sceneBgs[sc].indexOf(bg) === -1) sceneBgs[sc].push(bg);
       });
-      _mediaShotMap = map;
-      _mediaShotDur = durMap;
-      _mediaSceneMap = sceneMap;
-      _mediaShotToBg = shotToBg;
-      _mediaSceneBgs = sceneBgs;
+      // Compute absolute start time for each shot (cumulative, ShotList order)
+      const startMap = {};
+      let _cum = 0;
+      shots.forEach(s => {
+        if (s.shot_id) { startMap[s.shot_id] = _cum; _cum += s.duration_sec || 0; }
+      });
+      _mediaShotMap   = map;
+      _mediaShotDur   = durMap;
+      _mediaShotStart = startMap;
+      _mediaSceneMap  = sceneMap;
+      _mediaShotToBg  = shotToBg;
+      _mediaSceneBgs  = sceneBgs;
       _mediaBgToScene = bgToScene;
       _mediaSceneOrder = sceneOrder;
+      // Load optional bg_id remap (written when selections.json keys are patched to
+      // match a new ShotList without re-running the full media search).
+      _mediaBgRemap = null;
+      try {
+        const rr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
+            + '&ep_id=' + encodeURIComponent(_mediaEpId)
+            + '&file=assets/media/bg_id_remap.json');
+        if (rr.ok) { _mediaBgRemap = await rr.json(); }
+      } catch (_2) {}
     } catch (_) {
-      _mediaShotMap = null; _mediaShotDur = null;
+      _mediaShotMap = null; _mediaShotDur = null; _mediaShotStart = null;
       _mediaSceneMap = null; _mediaShotToBg = null; _mediaSceneBgs = null;
-      _mediaBgToScene = null; _mediaSceneOrder = null;
+      _mediaBgToScene = null; _mediaSceneOrder = null; _mediaBgRemap = null;
     }
   }
 
@@ -6597,7 +6567,7 @@ placeholder="Enter your story here"></textarea>
     _mediaSetStatus('Submitting batch …', true);
     document.getElementById('media-btn-search').disabled = true;
     document.getElementById('media-footer').style.display = 'none';
-    document.getElementById('media-body').innerHTML = '';
+    document.getElementById('media-body').innerHTML = '<div id="media-shot-overrides"></div>';
     _mediaSelections   = {};
     _mediaBatchId      = null;
     _mediaResults      = null;
@@ -6810,6 +6780,7 @@ placeholder="Enter your story here"></textarea>
         _mediaResults._topN  = d.top_n || 5;
         _mediaRecommendedSeq = d.recommended_sequence || null;
         await _mediaLoadShotMap();
+        _mediaApplyBgRemap();
         _mediaRenderResults(_mediaResults);
         await _aiLoadSavedImages();
       } else if (d.status === 'failed' || d.status === 'interrupted') {
@@ -7011,10 +6982,42 @@ placeholder="Enter your story here"></textarea>
     card.appendChild(bgContent);
   }
 
+  // Format seconds as M:SS.d (e.g. 83.4 → "1:23.4")
+  function _mediaFmtTime(sec) {
+    const m = Math.floor(sec / 60);
+    const rem = (sec % 60).toFixed(1);
+    return m + ':' + (parseFloat(rem) < 10 ? '0' : '') + rem;
+  }
+
   // ── Render results grid (scene-grouped) ──
+  // Remap _mediaResults keys from old bg_ids to current ShotList bg_ids using
+  // bg_id_remap.json.  Called after _mediaLoadShotMap() so _mediaBgRemap is populated.
+  function _mediaApplyBgRemap() {
+    if (!_mediaBgRemap || !_mediaResults) return;
+    const remap = _mediaBgRemap;
+    const remapped = {};
+    const topN = _mediaResults._topN;
+    Object.entries(_mediaResults).forEach(([oldKey, val]) => {
+      if (oldKey === '_topN') return;
+      const newKey = remap[oldKey] || oldKey;
+      if (newKey !== oldKey && remapped[newKey]) {
+        // Merge: both old keys map to the same new bg_id (e.g. sc03+sc04 → same bg)
+        // Keep the entry with more results
+        const existing = remapped[newKey];
+        const existingCount = (existing.images || []).length + (existing.videos || []).length;
+        const newCount = (val.images || []).length + (val.videos || []).length;
+        if (newCount > existingCount) remapped[newKey] = val;
+      } else {
+        remapped[newKey] = val;
+      }
+    });
+    if (topN !== undefined) remapped._topN = topN;
+    _mediaResults = remapped;
+  }
+
   function _mediaRenderResults(items) {
     const body = document.getElementById('media-body');
-    body.innerHTML = '';
+    body.innerHTML = '<div id="media-shot-overrides"></div>';
     const d_topN = _mediaResults?._topN || 5;
     _mediaItemIds = Object.keys(items);
     _mediaSelections = {};
@@ -7026,20 +7029,37 @@ placeholder="Enter your story here"></textarea>
 
     if (_mediaSceneOrder && _mediaSceneBgs) {
       _mediaSceneOrder.forEach(sceneId => {
+        // Only include bg_ids that have search results in the thumbnail section,
+        // but ALWAYS create a card for every scene (so all sc01–scN are shown,
+        // matching Music tab behaviour — scenes without results just have no thumbs).
         const bgIds = (_mediaSceneBgs[sceneId] || []).filter(bg => items[bg]);
-        if (bgIds.length === 0) return;
         bgIds.forEach(bg => assignedBgs.add(bg));
         const shotIds = _mediaSceneMap[sceneId] || [];
         cardOrder.push({ cardId: sceneId, sceneShotIds: shotIds, bgIds: bgIds });
       });
     }
-    // Orphan bg_ids (in results but not in any scene) — standalone cards
+    // Orphan bg_ids (in results but not assigned to any scene card above)
     _mediaItemIds.forEach(bgId => {
       if (bgId === '_topN') return;
       if (assignedBgs.has(bgId)) return;
       const shotIds = _mediaShotMap ? (_mediaShotMap[bgId] || []) : [];
       cardOrder.push({ cardId: bgId, sceneShotIds: shotIds, bgIds: [bgId] });
     });
+
+    // Sort the full cardOrder by scene position so both scene-based cards and
+    // orphan bg_id cards appear in ShotList order (sc01 → sc02 → …).
+    // This also corrects ordering when all cards end up as orphans because
+    // the media server returned keys in alphabetical/arbitrary order.
+    if (_mediaSceneOrder && _mediaSceneOrder.length > 0) {
+      const sceneIdx = {};
+      _mediaSceneOrder.forEach((sc, i) => { sceneIdx[sc] = i; });
+      const posOf = cid => {
+        if (sceneIdx[cid] !== undefined) return sceneIdx[cid];          // scene card
+        const sc = _mediaBgToScene && _mediaBgToScene[cid];             // orphan → look up scene
+        return (sc !== undefined && sceneIdx[sc] !== undefined) ? sceneIdx[sc] : 9999;
+      };
+      cardOrder.sort((a, b) => posOf(a.cardId) - posOf(b.cardId));
+    }
 
     cardOrder.forEach(entry => {
       const { cardId, sceneShotIds, bgIds } = entry;
@@ -7061,14 +7081,47 @@ placeholder="Enter your story here"></textarea>
         hdrLabel.textContent = cardId;
       }
       hdr.appendChild(hdrLabel);
+      // Scene time range (start of first shot → end of last shot)
+      if (sceneShotIds.length > 0 && _mediaShotStart) {
+        const firstSid = sceneShotIds[0];
+        const lastSid  = sceneShotIds[sceneShotIds.length - 1];
+        const t0 = _mediaShotStart[firstSid] || 0;
+        const t1 = (_mediaShotStart[lastSid] || 0) + ((_mediaShotDur && _mediaShotDur[lastSid]) || 0);
+        const timeSpan = document.createElement('span');
+        timeSpan.style.cssText = 'margin-left:10px;font-size:0.78em;color:var(--dim);font-family:var(--mono);font-weight:400';
+        timeSpan.textContent = _mediaFmtTime(t0) + '\u2013' + _mediaFmtTime(t1);
+        hdr.appendChild(timeSpan);
+      }
+
+      // Per-scene preview button (right-aligned in the header)
+      const _scenePreviewBtn = document.createElement('button');
+      _scenePreviewBtn.textContent = '🎬 Preview';
+      _scenePreviewBtn.style.cssText = 'margin-left:auto;font-size:0.75em;padding:3px 10px;'
+        + 'border-radius:5px;border:1px solid var(--border);background:var(--surface);'
+        + 'color:var(--text);cursor:pointer;flex-shrink:0';
+      (function(cid, sids, btn) {
+        btn.onclick = function(e) {
+          e.stopPropagation();
+          const resolvedSids = sids.length > 0 ? sids
+            : ((_mediaShotMap && _mediaShotMap[cid]) || [cid]);
+          mediaGenerateScenePreview(cid, resolvedSids, btn);
+        };
+      })(cardId, sceneShotIds, _scenePreviewBtn);
+      hdr.appendChild(_scenePreviewBtn);
+
       card.appendChild(hdr);
 
-      // Render each bg_id's search results as a sub-section
-      bgIds.forEach(bgId => {
-        _mediaRenderBgSection(card, bgId, cardId, items, d_topN);
-      });
+      // Per-scene inline video player (hidden until preview generated) — sits at top of card
+      const _sceneVideoWrap = document.createElement('div');
+      _sceneVideoWrap.id = 'media-scene-preview-' + cardId;
+      _sceneVideoWrap.style.cssText = 'display:none;padding:6px 0 8px;border-bottom:1px solid var(--active-bg)';
+      const _sceneVideo = document.createElement('video');
+      _sceneVideo.controls = true;
+      _sceneVideo.style.cssText = 'width:100%;max-height:360px;border-radius:4px';
+      _sceneVideoWrap.appendChild(_sceneVideo);
+      card.appendChild(_sceneVideoWrap);
 
-      // Per-shot assignment rows (all shots in this scene card)
+      // Per-shot assignment rows (selected media) — shown at top of card, above search results
       if (_mediaShotMap && sceneShotIds.length > 0) {
         const shotSection = document.createElement('div');
         shotSection.className = 'media-shot-section';
@@ -7087,9 +7140,13 @@ placeholder="Enter your story here"></textarea>
           const row = document.createElement('div');
           row.className = 'media-shot-row' + (idx === 0 ? ' media-shot-active' : '');
           row.id = 'media-shot-row-' + cardId + '-' + sid;
-          const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
-          const durLabel = shotDur > 0 ? ' (' + shotDur.toFixed(1) + 's)' : '';
-          row.innerHTML = '<span class="media-shot-label">' + sid + durLabel + ':</span>'
+          const shotDur   = (_mediaShotDur   && _mediaShotDur[sid])   || 0;
+          const shotStart = (_mediaShotStart && _mediaShotStart[sid]) || 0;
+          const timeLabel = _mediaShotStart
+            ? ' <span style="font-family:var(--mono);font-size:0.82em;color:var(--dim)">'
+              + _mediaFmtTime(shotStart) + '\u2013' + _mediaFmtTime(shotStart + shotDur) + '</span>'
+            : (shotDur > 0 ? ' (' + shotDur.toFixed(1) + 's)' : '');
+          row.innerHTML = '<span class="media-shot-label">' + sid + timeLabel + ':</span>'
               + '<div class="media-shot-bar"><div class="media-shot-bar-fill" style="width:0%"></div></div>'
               + '<div class="media-shot-segments"></div>'
               + '<span class="media-shot-gap">\u2014 not assigned \u2014</span>';
@@ -7105,6 +7162,11 @@ placeholder="Enter your story here"></textarea>
         _mediaActiveShot[cardId] = sceneShotIds[0];
         card.appendChild(shotSection);
       }
+
+      // Render each bg_id's search results as a sub-section
+      bgIds.forEach(bgId => {
+        _mediaRenderBgSection(card, bgId, cardId, items, d_topN);
+      });
 
       body.appendChild(card);
     });
@@ -7738,12 +7800,17 @@ placeholder="Enter your story here"></textarea>
       }
       if (removed) {
         wrapEl.classList.remove('selected');
+        mediaRenderShotOverrides();
         return;
       }
 
       // ── Target: the user-selected active shot row ──
       var targetShot = _mediaActiveShot[cardId] || shotIds[0];
       var targetBgId = (_mediaShotToBg && _mediaShotToBg[targetShot]) || cardId;
+
+      // Keep _mediaShotToBg in sync so mediaSetTiming / mediaClearSegment can find this shot
+      if (!_mediaShotToBg) _mediaShotToBg = {};
+      if (!_mediaShotToBg[targetShot]) _mediaShotToBg[targetShot] = targetBgId;
 
       // Initialize selections for the target bg_id
       if (!_mediaSelections[targetBgId]) _mediaSelections[targetBgId] = { per_shot: {} };
@@ -7780,6 +7847,7 @@ placeholder="Enter your story here"></textarea>
       wrapEl.classList.add('selected');
       _mediaRenderShotRow(cardId, targetShot);
       _mediaMarkCrossCardUsed();
+      mediaRenderShotOverrides();
     } else {
       // ── Single-selection mode (no ShotList) ──
       const card = document.getElementById('media-card-' + cardId);
@@ -7802,7 +7870,16 @@ placeholder="Enter your story here"></textarea>
       selBadge.textContent = '\u2714 ' + type;
       wrapEl.appendChild(selBadge);
       _mediaMarkCrossCardUsed();
+      mediaRenderShotOverrides();
     }
+  }
+
+  // Convert a segment URL (file:// or absolute path) to a browser-loadable URL.
+  function _mediaSegThumbUrl(url) {
+    if (!url) return '';
+    if (url.startsWith('file://')) return '/api/serve_media_file?url=' + encodeURIComponent(url);
+    if (url.startsWith('/') && !url.startsWith('/serve_media')) return '/serve_media?path=' + encodeURIComponent(url);
+    return url;
   }
 
   // ── Render a per-shot row with segment list and fill bar ──
@@ -7870,7 +7947,14 @@ placeholder="Enter your story here"></textarea>
               _mediaRenderShotRow(cid, sid);
             });
           })(cardId, bgId, shotId, idx, seg);
-          se.appendChild(document.createTextNode('\uD83C\uDFA5 '));
+          const vidThumb = document.createElement('video');
+          vidThumb.className = 'seg-thumb';
+          vidThumb.src = _mediaSegThumbUrl(seg.url || '') + '#t=0.5';
+          vidThumb.preload = 'metadata';
+          vidThumb.muted = true;
+          vidThumb.setAttribute('playsinline', '');
+          vidThumb.title = fname;
+          se.appendChild(vidThumb);
           const nameSpan = document.createElement('span');
           nameSpan.className = 'seg-name';
           nameSpan.textContent = fname;
@@ -7935,6 +8019,7 @@ placeholder="Enter your story here"></textarea>
               }
               _mediaRebalanceImages(sid, (_mediaSelections[bid].per_shot[sid] || {segments:[]}).segments);
               _mediaRenderShotRow(cid, sid);
+              mediaRenderShotOverrides();
             }
             sInp.addEventListener('change', applyTrim);
             eInp.addEventListener('change', applyTrim);
@@ -7948,8 +8033,21 @@ placeholder="Enter your story here"></textarea>
         } else {
           // Image segment
           const dur = seg.hold_sec || 0;
-          se.innerHTML = '<span class="seg-name">\uD83D\uDDBC\uFE0F ' + fname + '</span>'
-              + '<span class="seg-dur">' + dur.toFixed(1) + 's</span>';
+          const imgThumb = document.createElement('img');
+          imgThumb.className = 'seg-thumb';
+          imgThumb.src = _mediaSegThumbUrl(seg.url || '');
+          imgThumb.loading = 'lazy';
+          imgThumb.alt = fname;
+          imgThumb.title = fname;
+          se.appendChild(imgThumb);
+          const imgNameSpan = document.createElement('span');
+          imgNameSpan.className = 'seg-name';
+          imgNameSpan.textContent = fname;
+          se.appendChild(imgNameSpan);
+          const imgDurSpan = document.createElement('span');
+          imgDurSpan.className = 'seg-dur';
+          imgDurSpan.textContent = dur.toFixed(1) + 's';
+          se.appendChild(imgDurSpan);
           // Animation badge — click to change
           const animBadge = document.createElement('span');
           animBadge.className = 'seg-anim-badge';
@@ -8018,6 +8116,298 @@ placeholder="Enter your story here"></textarea>
     if (!_mediaSelections[bgId] || !_mediaSelections[bgId].per_shot) return;
     delete _mediaSelections[bgId].per_shot[shotId];
     _mediaRenderShotRow(cardId, shotId);
+  }
+
+  // ── Shot Overrides section — Music-tab style (music-card / music-vtl-bar / music-shot-block) ──
+  function mediaRenderShotOverrides() {
+    const container = document.getElementById('media-shot-overrides');
+    if (!container) return;
+
+    // Collect all shots with selections across all bg_ids
+    const shotBlocks = {};  // { shotId: { segments, duration_sec } }
+    for (const [bgId, bgData] of Object.entries(_mediaSelections || {})) {
+      if (!bgData.per_shot) continue;
+      for (const [shotId, shotData] of Object.entries(bgData.per_shot)) {
+        const dur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
+        const segs = (shotData.segments || []).map(seg => {
+          if (seg.start_sec === null || seg.start_sec === undefined) seg.start_sec = 0;
+          if (seg.end_sec === null || seg.end_sec === undefined) seg.end_sec = dur;
+          return seg;
+        });
+        shotBlocks[shotId] = { segments: segs, duration_sec: dur };
+      }
+    }
+
+    // Ordered shot list from _mediaShotDur, plus any extras from selections
+    let orderedShots = _mediaShotDur ? Object.keys(_mediaShotDur) : [];
+    for (const sid of Object.keys(shotBlocks)) {
+      if (!orderedShots.includes(sid)) orderedShots.push(sid);
+    }
+
+    if (orderedShots.length === 0 && Object.keys(shotBlocks).length === 0) {
+      container.innerHTML = '';
+      return;
+    }
+
+    const shotColors = ['#3b6ea5','#8b5e3c','#5e8c5a','#8b3e6e','#6e6e3e','#3e6e8b','#8b6e3e'];
+    const totalDur = orderedShots.reduce((a, sid) => a + ((_mediaShotDur && _mediaShotDur[sid]) || 0), 0) || 1;
+    const fmtT = t => t.toFixed(1) + 's';
+
+    let html = '<div class="music-card-hdr">Shot Overrides</div>'
+      + '<div class="music-card-sub">Selected media and start/end trim per shot.</div>';
+
+    // ── Visual timeline bar ──
+    html += '<div class="music-vtl-bar">';
+    orderedShots.forEach((sid, i) => {
+      const dur    = (_mediaShotDur && _mediaShotDur[sid]) || 0;
+      const pct    = (dur / totalDur * 100).toFixed(2);
+      const col    = shotColors[i % shotColors.length];
+      const epStart = (_mediaShotStart && _mediaShotStart[sid]) || 0;
+      const hasMedia = shotBlocks[sid] && shotBlocks[sid].segments.length > 0;
+      html += '<div class="music-vtl-shot" style="width:' + pct + '%;background:' + col
+        + (hasMedia ? '' : ';opacity:0.35') + '"'
+        + ' title="' + sid + '  ' + fmtT(epStart) + '–' + fmtT(epStart + dur) + '  (' + dur.toFixed(1) + 's)">'
+        + sid.replace(/^s\d+e\d+_/, '') + '</div>';
+    });
+    html += '</div>';
+
+    // ── Per-shot stacked blocks (only shots with media assigned) ──
+    orderedShots.forEach((sid, i) => {
+      const block = shotBlocks[sid];
+      if (!block || !block.segments.length) return;
+      const col     = shotColors[i % shotColors.length];
+      const dur     = block.duration_sec;
+      const epStart = (_mediaShotStart && _mediaShotStart[sid]) || 0;
+      const epEnd   = epStart + dur;
+
+      html += '<div class="music-shot-block">'
+        + '<div class="music-shot-hdr" style="border-left:4px solid ' + col + '">'
+        + '<span class="music-shot-hdr-id">' + sid.replace(/^s\d+e\d+_/, '') + '</span>'
+        + '<span class="music-shot-hdr-ep">episode&nbsp;' + fmtT(epStart) + ' – ' + fmtT(epEnd)
+        + '&nbsp;(' + dur.toFixed(1) + 's)</span>'
+        + '</div>';
+
+      block.segments.forEach((seg, segIdx) => {
+        const label   = seg.url ? seg.url.split('/').pop() : '(unknown)';
+        const isVideo = seg.media_type === 'video';
+        const badge   = isVideo ? '🎬' : '🖼';
+        const natDur  = seg.natural_duration_sec || seg.duration_sec || dur || 0;
+        const curStart = seg.start_sec ?? 0;
+        const curEnd   = seg.end_sec   ?? (isVideo ? natDur : dur);
+        const safeId  = sid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const fillId  = 'mof-' + sid.replace(/[^a-z0-9]/gi, '_') + '_' + segIdx;
+
+        // ── filename row ──
+        html += '<div class="music-shot-clip" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+          + '<span style="font-size:0.78em;color:var(--dim)">' + badge + '</span>'
+          + '<span style="font-size:0.82em;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)" title="' + (seg.url || '') + '">' + label + '</span>';
+
+        // ── in/out inputs + range bar inline (video only) ──
+        if (isVideo) {
+          const leftPct  = natDur > 0 ? (curStart / natDur * 100).toFixed(1) : '0';
+          const widthPct = natDur > 0 ? (Math.max(0, curEnd - curStart) / natDur * 100).toFixed(1) : '100';
+          html += '<div class="seg-trim-row" style="flex-shrink:0;margin:0">'
+            + '<span class="trim-label">in:</span>'
+            + '<input type="number" min="0" step="0.1" placeholder="0"'
+            + ' value="' + (curStart > 0 ? curStart.toFixed(1) : '') + '"'
+            + ' onchange="_mediaOvrTrim(\'' + safeId + '\',' + segIdx + ',\'start_sec\',this.value,' + natDur + ',\'' + fillId + '\')">'
+            + '<div class="trim-range-bar" style="min-width:60px">'
+            + '<div class="trim-range-fill" id="' + fillId + '" style="left:' + leftPct + '%;width:' + widthPct + '%"></div>'
+            + '</div>'
+            + '<span class="trim-label">out:</span>'
+            + '<input type="number" min="0" step="0.1"'
+            + ' placeholder="' + (natDur > 0 ? natDur.toFixed(1) : '') + '"'
+            + ' value="' + (seg.end_sec != null ? curEnd.toFixed(1) : '') + '"'
+            + ' onchange="_mediaOvrTrim(\'' + safeId + '\',' + segIdx + ',\'end_sec\',this.value,' + natDur + ',\'' + fillId + '\')">'
+            + '</div>';
+        }
+
+        html += '<button onclick="mediaClearSegment(\'' + safeId + '\',' + segIdx + ')" style="font-size:11px;flex-shrink:0">✕</button>'
+          + '</div>';
+      });
+
+      html += '</div>';  // music-shot-block
+    });
+
+    container.innerHTML = '<div class="music-card">' + html + '</div>';
+  }
+
+  function mediaSetTiming(shotId, segIdx, field, value) {
+    const bgId = _mediaShotToBg && _mediaShotToBg[shotId];
+    if (!bgId) { console.warn('[media] no bgId for shot', shotId); return; }
+    const segs = _mediaSelections[bgId] && _mediaSelections[bgId].per_shot &&
+                 _mediaSelections[bgId].per_shot[shotId] &&
+                 _mediaSelections[bgId].per_shot[shotId].segments;
+    if (!segs || !segs[segIdx]) return;
+    segs[segIdx][field] = parseFloat(value);
+  }
+
+  // ── Shot Overrides in/out handler — mirrors applyTrim from the card view ──
+  function _mediaOvrTrim(shotId, segIdx, field, value, natDur, fillId) {
+    const bgId = _mediaShotToBg && _mediaShotToBg[shotId];
+    if (!bgId) return;
+    const segs = _mediaSelections[bgId] && _mediaSelections[bgId].per_shot &&
+                 _mediaSelections[bgId].per_shot[shotId] &&
+                 _mediaSelections[bgId].per_shot[shotId].segments;
+    if (!segs || !segs[segIdx]) return;
+    const seg = segs[segIdx];
+    var v = parseFloat(value);
+    if (field === 'start_sec') {
+      if (isNaN(v) || v < 0) v = 0;
+      if (natDur > 0 && v >= natDur) v = 0;
+      seg.start_sec = v;
+    } else {
+      if (isNaN(v) || v <= 0) v = natDur;
+      if (natDur > 0 && v > natDur) v = natDur;
+      seg.end_sec = v;
+    }
+    var effStart = seg.start_sec || 0;
+    var effEnd   = seg.end_sec   || natDur;
+    var clipDur  = Math.max(0.1, effEnd - effStart);
+    seg.duration_override_sec = clipDur;
+    seg.duration_sec = clipDur;
+    // Update range fill live
+    if (natDur > 0) {
+      var fill = document.getElementById(fillId);
+      if (fill) {
+        fill.style.left  = (effStart / natDur * 100).toFixed(1) + '%';
+        fill.style.width = (clipDur  / natDur * 100).toFixed(1) + '%';
+      }
+    }
+  }
+
+  function mediaClearSegment(shotId, segIdx) {
+    const bgId = _mediaShotToBg && _mediaShotToBg[shotId];
+    if (!bgId) return;
+    const ps = _mediaSelections[bgId] && _mediaSelections[bgId].per_shot;
+    if (!ps || !ps[shotId] || !ps[shotId].segments) return;
+    ps[shotId].segments.splice(segIdx, 1);
+    if (ps[shotId].segments.length === 0) delete ps[shotId];
+    mediaRenderShotOverrides();
+  }
+
+  function mediaUpdatePreviewLabel() {
+    const music = document.getElementById('media-include-music').checked;
+    const sfx   = document.getElementById('media-include-sfx').checked;
+    const btn   = document.getElementById('media-btn-preview');
+    let label = '🎬 Preview (VO';
+    if (music && sfx) label += ' + Music + SFX';
+    else if (music)   label += ' + Music';
+    else if (sfx)     label += ' + SFX';
+    label += ')';
+    btn.textContent = label;
+  }
+
+  async function mediaGeneratePreview() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    const btn = document.getElementById('media-btn-preview');
+    btn.disabled = true;
+    btn.textContent = '⏳ Generating…';
+
+    // Invert _mediaSelections to flat perShot dict with null-coalescing
+    const perShot = {};
+    for (const [bgId, bgData] of Object.entries(_mediaSelections || {})) {
+      if (!bgData.per_shot) continue;
+      for (const [shotId, shotData] of Object.entries(bgData.per_shot || {})) {
+        perShot[shotId] = (shotData.segments || []).map(seg => ({
+          ...seg,
+          start_sec: seg.start_sec ?? 0,
+          end_sec:   seg.end_sec   ?? seg.hold_sec ?? 0,
+        }));
+      }
+    }
+
+    const includeMusic = document.getElementById('media-include-music').checked;
+    const includeSfx   = document.getElementById('media-include-sfx').checked;
+
+    try {
+      const r = await fetch('/api/media_preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          slug:          _mediaSlug,
+          ep_id:         _mediaEpId,
+          selections:    perShot,
+          include_music: includeMusic,
+          include_sfx:   includeSfx,
+        }),
+      });
+      const d = await r.json();
+      if (d.debug_log) console.log('[media preview]\n' + d.debug_log);
+      if (!r.ok || d.error) throw new Error(d.error || 'preview failed');
+
+      const relPath = 'projects/' + _mediaSlug + '/episodes/' + _mediaEpId
+                      + '/assets/media/MediaPreviewPack/preview_video.mp4';
+      const videoEl = document.getElementById('media-preview-video');
+      videoEl.src = '/serve_media?path=' + encodeURIComponent(relPath) + '&t=' + Date.now();
+      document.getElementById('media-preview-wrap').style.display = '';
+    } catch (err) {
+      document.getElementById('media-confirm-msg').textContent = '❌ Preview failed: ' + err.message;
+    } finally {
+      btn.disabled = false;
+      mediaUpdatePreviewLabel();
+    }
+  }
+
+  // ── Per-scene preview: render only the shots belonging to one card ──
+  async function mediaGenerateScenePreview(cardId, shotIds, btnEl) {
+    if (!_mediaSlug || !_mediaEpId || !shotIds || shotIds.length === 0) return;
+    const origText = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = '⏳…';
+
+    // Collect selections for only these shots (flat perShot format)
+    const perShot = {};
+    for (const [bgId, bgData] of Object.entries(_mediaSelections || {})) {
+      if (!bgData.per_shot) continue;
+      for (const [shotId, shotData] of Object.entries(bgData.per_shot || {})) {
+        if (!shotIds.includes(shotId)) continue;
+        perShot[shotId] = (shotData.segments || []).map(seg => ({
+          ...seg,
+          start_sec: seg.start_sec ?? 0,
+          end_sec:   seg.end_sec   ?? seg.hold_sec ?? 0,
+        }));
+      }
+    }
+
+    const includeMusic = document.getElementById('media-include-music').checked;
+    const includeSfx   = document.getElementById('media-include-sfx').checked;
+    const outName      = 'scene_' + cardId + '_preview.mp4';
+
+    try {
+      const r = await fetch('/api/media_preview', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          slug:          _mediaSlug,
+          ep_id:         _mediaEpId,
+          selections:    perShot,
+          shot_ids:      shotIds,
+          out_name:      outName,
+          include_music: includeMusic,
+          include_sfx:   includeSfx,
+        }),
+      });
+      const d = await r.json();
+      if (d.debug_log) console.log('[scene preview ' + cardId + ']\n' + d.debug_log);
+      if (!r.ok || d.error) throw new Error(d.error || 'preview failed');
+
+      const relPath = 'projects/' + _mediaSlug + '/episodes/' + _mediaEpId
+                      + '/assets/media/MediaPreviewPack/' + outName;
+      const wrap = document.getElementById('media-scene-preview-' + cardId);
+      if (wrap) {
+        const videoEl = wrap.querySelector('video');
+        if (videoEl) videoEl.src = '/serve_media?path=' + encodeURIComponent(relPath) + '&t=' + Date.now();
+        wrap.style.display = '';
+        wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    } catch (err) {
+      document.getElementById('media-confirm-msg').textContent =
+        '❌ Scene preview failed (' + cardId + '): ' + err.message;
+    } finally {
+      btnEl.disabled = false;
+      btnEl.textContent = origText;
+    }
   }
 
   // ── Auto-assign: stack segments to fill each shot's duration ──
@@ -8205,6 +8595,8 @@ placeholder="Enter your story here"></textarea>
         shotIds.forEach(function(sid) {
           const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
           ps[sid] = { segments: [] };
+          if (!_mediaShotToBg) _mediaShotToBg = {};
+          _mediaShotToBg[sid] = bgId;
           let filled = 0;
           while (filled < shotDur && ci < candidates.length * 2) {
             const pick = candidates[ci % candidates.length];
@@ -8242,13 +8634,18 @@ placeholder="Enter your story here"></textarea>
         applied++;
       } else {
         const ext = (cand.path || cand.url || '').split('.').pop().toLowerCase();
-        const type = ['mp4', 'mov', 'webm', 'mkv'].includes(ext) ? 'video' : 'image';
-        _mediaSelections[bgId] = {
-          media_type: type,
-          url:   cand.url  || '',
-          path:  cand.path || '',
-          score: cand.score || 0,
+        const mType = ['mp4','mov','webm','mkv'].includes(ext) ? 'video' : 'image';
+        if (!_mediaSelections[bgId]) _mediaSelections[bgId] = { per_shot: {} };
+        if (!_mediaSelections[bgId].per_shot) _mediaSelections[bgId].per_shot = {};
+        _mediaSelections[bgId].per_shot[bgId] = {
+          segments: [{
+            media_type: mType, url: cand.url || '', path: cand.path || '',
+            score: cand.score || 0, hold_sec: null, duration_sec: null,
+            start_sec: null, end_sec: null,
+          }]
         };
+        if (!_mediaShotToBg) _mediaShotToBg = {};
+        _mediaShotToBg[bgId] = bgId;
         const card = document.getElementById('media-card-' + sceneId);
         if (card) {
           card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
@@ -8278,6 +8675,7 @@ placeholder="Enter your story here"></textarea>
         applied++;
       }
     }
+    mediaRenderShotOverrides();
     document.getElementById('media-confirm-msg').textContent =
       '\u26A1 Applied recommended sequence for ' + applied + ' item(s).';
   }
@@ -8334,9 +8732,8 @@ placeholder="Enter your story here"></textarea>
         }
       }
       if (missing.length > 0) {
-        document.getElementById('media-confirm-msg').textContent =
-          '❌ Cannot save selections — missing media for: ' + missing.join(', ');
-        return;
+        console.warn('[media] ' + missing.length + ' shot(s) unassigned — will render black bg: ' + missing.join(', '));
+        // do NOT return — fall through to save
       }
     }
 
@@ -8352,13 +8749,47 @@ placeholder="Enter your story here"></textarea>
         return sel.per_shot && Object.values(sel.per_shot).some(function(ps) { return ps.segments; });
       });
       const selVersion = !_mediaShotMap ? 1 : hasSegments ? 3 : 2;
+      // Build selections payload with start_sec/end_sec per segment
+      const selectionsPayload = {};
+      for (const [bgId, bgData] of Object.entries(_mediaSelections || {})) {
+        if (!bgData.per_shot) {
+          // Flat/legacy single-selection — wrap in per_shot segments format
+          if (!bgData.url && !bgData.path) continue;
+          selectionsPayload[bgId] = {
+            per_shot: {
+              [bgId]: {
+                segments: [{
+                  media_type: bgData.media_type || 'image',
+                  url:        bgData.url  || '',
+                  path:       bgData.path || '',
+                  score:      bgData.score || 0,
+                  start_sec:  0,
+                  end_sec:    0,
+                  hold_sec:   null,
+                }]
+              }
+            }
+          };
+          continue;
+        }
+        selectionsPayload[bgId] = { per_shot: {} };
+        for (const [shotId, shotData] of Object.entries(bgData.per_shot || {})) {
+          selectionsPayload[bgId].per_shot[shotId] = {
+            segments: (shotData.segments || []).map(seg => ({
+              ...seg,
+              start_sec: seg.start_sec ?? 0,
+              end_sec:   seg.end_sec   ?? seg.hold_sec ?? 0,
+            }))
+          };
+        }
+      }
       const r = await fetch('/api/media_confirm', {
         method:  'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ slug: _mediaSlug, ep_id: _mediaEpId,
                                batch_id: _mediaBatchId,
                                version: selVersion,
-                               selections: _mediaSelections }),
+                               selections: selectionsPayload }),
       });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || 'save failed');
@@ -8405,6 +8836,7 @@ placeholder="Enter your story here"></textarea>
             _mediaResults._topN  = d2.top_n || 5;
             _mediaRecommendedSeq = d2.recommended_sequence || null;
             await _mediaLoadShotMap();
+            _mediaApplyBgRemap();
             let totalImg2 = 0, totalVid2 = 0;
             Object.values(d2.items || {}).forEach(it => {
               totalImg2 += it.total_images || 0;
@@ -8452,11 +8884,13 @@ placeholder="Enter your story here"></textarea>
       if (!_mediaResults || Object.keys(_mediaResults).length === 0) {
         await _mediaLoadShotMap();
         _mediaRenderSavedSummary(sels);
+        mediaRenderShotOverrides();
         _mediaSetStatus('Loaded ' + nSels + ' saved selection(s) from disk'
           + ' (media server not available — showing saved selections only).', false);
       } else {
         // Batch results available — apply saved selections to the grid
         _mediaApplySavedToGrid(sels);
+        mediaRenderShotOverrides();
       }
     } catch (_) {}
   }
@@ -8464,7 +8898,7 @@ placeholder="Enter your story here"></textarea>
   function _mediaRenderSavedSummary(selections) {
     // Render a read-only summary of saved selections when media server is unavailable
     const body = document.getElementById('media-body');
-    body.innerHTML = '';
+    body.innerHTML = '<div id="media-shot-overrides"></div>';
 
     const shotDur = _mediaShotDur || {};
     const shotMap = _mediaShotMap || {};
@@ -10393,102 +10827,6 @@ placeholder="Enter your story here"></textarea>
     } finally {
       document.getElementById('music-btn-confirm').disabled = false;
     }
-  }
-
-  // ── Browse panel ─────────────────────────────────────────────────────────────
-  function fmtSize(bytes) {
-    if (bytes < 1024)      return bytes + ' B';
-    if (bytes < 1048576)   return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / 1048576).toFixed(2) + ' MB';
-  }
-
-  async function loadProjects() {
-    const tree = document.getElementById('browse-tree');
-    tree.innerHTML = '<span class="browse-empty">Loading…</span>';
-    try {
-      const res = await fetch('/list_projects');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { projects } = await res.json();
-      renderTree(projects, tree);
-    } catch(e) {
-      tree.innerHTML =
-        `<span style="color:var(--red);font-family:var(--mono);font-size:0.82em">` +
-        `Error: ${escHtml(String(e))}</span>`;
-    }
-  }
-
-  function renderTree(projects, container) {
-    if (!projects.length) {
-      container.innerHTML =
-        '<span class="browse-empty">No projects found in projects/ folder.</span>';
-      return;
-    }
-    container.innerHTML = '';
-
-    projects.forEach(proj => {
-      const group = document.createElement('div');
-      group.className = 'proj-group';
-
-      const heading = document.createElement('div');
-      heading.className = 'proj-heading';
-      heading.textContent = '📁 ' + proj.slug;
-      group.appendChild(heading);
-
-      if (!proj.episodes.length) {
-        const empty = document.createElement('div');
-        empty.className = 'browse-empty';
-        empty.style.paddingLeft = '16px';
-        empty.textContent = 'No episodes yet.';
-        group.appendChild(empty);
-      }
-
-      proj.episodes.forEach(ep => {
-        // Episode toggle row
-        const epRow = document.createElement('div');
-        epRow.className = 'ep-toggle-row';
-        const caret = document.createElement('span');
-        caret.className = 'ep-caret';
-        caret.textContent = '▶';
-        const epName = document.createElement('span');
-        epName.textContent = ep.id;
-        const epMeta = document.createElement('span');
-        epMeta.className = 'ep-meta';
-        epMeta.textContent = ` — ${ep.files.length} file${ep.files.length !== 1 ? 's' : ''}`;
-        epRow.appendChild(caret);
-        epRow.appendChild(epName);
-        epRow.appendChild(epMeta);
-        group.appendChild(epRow);
-
-        // File list (collapsed by default)
-        const fileDiv = document.createElement('div');
-        fileDiv.className = 'ep-files';
-        ep.files.forEach(f => {
-          const row = document.createElement('div');
-          row.className = 'ep-file-row';
-          const left = document.createElement('span');
-          left.innerHTML =
-            `<span class="ep-file-name">${escHtml(f.name)}</span>` +
-            `<span class="ep-file-sz">${fmtSize(f.size)}</span>`;
-          const btn = document.createElement('button');
-          btn.className = 'btn-review';
-          btn.textContent = '📄 View';
-          btn.onclick = () => window.open(
-            '/view_artifact?path=' + encodeURIComponent(f.path), '_blank');
-          row.appendChild(left);
-          row.appendChild(btn);
-          fileDiv.appendChild(row);
-        });
-        group.appendChild(fileDiv);
-
-        // Toggle expand/collapse
-        epRow.addEventListener('click', () => {
-          const open = fileDiv.classList.toggle('open');
-          caret.textContent = open ? '▼' : '▶';
-        });
-      });
-
-      container.appendChild(group);
-    });
   }
 
   // ── Stage artifact map ───────────────────────────────────────────────────────
@@ -14701,6 +15039,7 @@ class Handler(BaseHTTPRequestHandler):
             _EPISODE_FILE_WHITELIST = {"ShotList.json", "selections.json",
                                        "meta.json",
                                        "assets/media/selections.json",
+                                       "assets/media/bg_id_remap.json",
                                        "assets/music/MusicPlan.json",
                                        "assets/music/user_cut_clips.json",
                                        "assets/meta/gen_music_clip_results.json",
@@ -17024,6 +17363,56 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── Media: generate preview video (POST /api/media_preview) ──────────
+        elif self.path == "/api/media_preview":
+            try:
+                payload      = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                slug         = payload["slug"]
+                ep_id        = payload["ep_id"]
+                ep_dir       = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                # Detect primary locale from pipeline_vars.sh
+                import re as _re_mp
+                _primary_locale_mp = "en"
+                _vars_mp = os.path.join(ep_dir, "pipeline_vars.sh")
+                if os.path.isfile(_vars_mp):
+                    with open(_vars_mp, encoding="utf-8") as _vf_mp:
+                        _m_mp = _re_mp.search(
+                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                            _vf_mp.read())
+                        if _m_mp:
+                            _primary_locale_mp = _m_mp.group(1).strip()
+                import tempfile
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".json",
+                                                     delete=False, encoding="utf-8") as tf:
+                        json.dump({
+                            "ep_dir":        ep_dir,
+                            "locale":        _primary_locale_mp,
+                            "selections":    payload.get("selections", {}),
+                            "include_music": payload.get("include_music", False),
+                            "include_sfx":   payload.get("include_sfx",  False),
+                            "shot_ids":      payload.get("shot_ids",  None),
+                            "out_name":      payload.get("out_name",  None),
+                        }, tf)
+                        tmp_path = tf.name
+                    result = subprocess.run(
+                        [sys.executable,
+                         os.path.join(PIPE_DIR, "code", "http", "media_preview_pack.py"),
+                         "--input", tmp_path],
+                        capture_output=True, text=True
+                    )
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                if result.returncode != 0:
+                    _json_resp(self, {"error": "media_preview_pack failed",
+                                      "detail": result.stderr}, 500)
+                else:
+                    _json_resp(self, {"ok": True, "debug_log": result.stdout + result.stderr})
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 500)
+
         # ── Media: write selections.json (POST /api/media_confirm) ───────────
         elif self.path == "/api/media_confirm":
             try:
@@ -17045,13 +17434,26 @@ class Handler(BaseHTTPRequestHandler):
                 media_dir = os.path.join(ep_dir, "assets", "media")
                 os.makedirs(media_dir, exist_ok=True)
 
+                # Detect primary locale from pipeline_vars.sh
+                import re as _re_mc
+                _confirmed_locale = "en"
+                _vars_mc = os.path.join(ep_dir, "pipeline_vars.sh")
+                if os.path.isfile(_vars_mc):
+                    with open(_vars_mc, encoding="utf-8") as _vf_mc:
+                        _m_mc = _re_mc.search(
+                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                            _vf_mc.read())
+                        if _m_mc:
+                            _confirmed_locale = _m_mc.group(1).strip()
+
                 sel_path = os.path.join(media_dir, "selections.json")
                 out = {
-                    "batch_id":   batch_id,
-                    "slug":       slug,
-                    "episode_id": ep_id,
-                    "version":    payload.get("version", 1),
-                    "selections": selections,
+                    "batch_id":         batch_id,
+                    "slug":             slug,
+                    "episode_id":       ep_id,
+                    "version":          payload.get("version", 1),
+                    "confirmed_locale": _confirmed_locale,
+                    "selections":       selections,
                 }
                 with open(sel_path, "w", encoding="utf-8") as _sf:
                     json.dump(out, _sf, indent=2, ensure_ascii=False)
@@ -18047,6 +18449,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/diagnose_pipeline",
                   "/api/media_batches", "/api/media_batch_status",
                   "/api/media_batch", "/api/media_batch_resume", "/api/media_confirm",
+                  "/api/media_preview",
                   "/api/sfx_search", "/api/sfx_save", "/api/sfx_results_save",
                   "/api/sfx_save_all", "/api/sfx_preview",
                   "/api/ai_sfx_generate", "/api/ai_sfx_save",

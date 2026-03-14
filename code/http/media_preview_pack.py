@@ -1,0 +1,469 @@
+#!/usr/bin/env python3
+"""
+media_preview_pack.py — Generate a preview video for the Media tab.
+
+Reads:
+  --input <json>  temp JSON with keys: ep_dir, locale, selections, include_music, include_sfx
+
+selections format: { shot_id: [ { media_type, url, start_sec, end_sec }, ... ] }
+  - shot_id keys are real shot_ids (already inverted by JS)
+  - start_sec and end_sec are guaranteed non-null (JS null-coalescing applied)
+
+Outputs:
+  {ep_dir}/assets/media/MediaPreviewPack/preview_video.mp4
+"""
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+import subprocess
+from pathlib import Path
+from urllib.parse import urlparse, unquote
+
+PIPE_DIR = Path(__file__).resolve().parent.parent.parent
+W, H, FPS = 1280, 720, 25
+SAMPLE_RATE = 44100
+CHANNELS = 2
+
+
+def url_to_path(url: str) -> str:
+    """Convert file:// URI to filesystem path for ffmpeg."""
+    if url.startswith("file://"):
+        return unquote(urlparse(url).path)
+    return url
+
+
+def load_json(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def detect_shot_durations(ep_dir: Path, locale: str) -> tuple:
+    """
+    Returns (shot_id -> duration_ms dict, source_description).
+    Priority: RenderPlan > MusicApprovalSnapshot > AssetManifest_merged fallback.
+    """
+    # Priority 1: RenderPlan
+    rp_path = ep_dir / f"RenderPlan.{locale}.json"
+    if rp_path.exists():
+        rp = load_json(rp_path)
+        durations = {s["shot_id"]: s["duration_ms"]
+                     for s in rp.get("shots", [])
+                     if "shot_id" in s and "duration_ms" in s}
+        if durations:
+            print(f"  [dur] Using RenderPlan.{locale}.json ({len(durations)} shots)")
+            return durations, f"RenderPlan.{locale}.json"
+
+    # Priority 2: MusicApprovalSnapshot
+    snap_path = ep_dir / "assets" / "music" / "MusicApprovalSnapshot.json"
+    if snap_path.exists():
+        snap = load_json(snap_path)
+        durations = {s["shot_id"]: s["duration_ms"]
+                     for s in snap.get("shots", [])
+                     if "shot_id" in s and "duration_ms" in s}
+        if durations:
+            print(f"  [dur] Using MusicApprovalSnapshot.json ({len(durations)} shots)")
+            return durations, "MusicApprovalSnapshot.json"
+
+    # Priority 3: AssetManifest_merged / ShotList fallback
+    merged_path = ep_dir / f"AssetManifest_merged.{locale}.json"
+    shot_path = ep_dir / "ShotList.json"
+
+    if shot_path.exists():
+        sl = load_json(shot_path)
+        durations = {}
+        for shot in sl.get("shots", []):
+            sid = shot.get("shot_id", "")
+            dur_sec = shot.get("duration_sec", 0) or 0
+            if sid and dur_sec:
+                durations[sid] = round(dur_sec * 1000)
+        if durations:
+            print(f"  [dur] WARNING: Using ShotList fallback — preview timing is approximate")
+            return durations, "ShotList.json (approximate)"
+
+    print(f"ERROR: No shot duration source found for locale '{locale}'.")
+    print(f"  Checked: {rp_path}")
+    print(f"  Checked: {snap_path}")
+    print(f"  Checked: {shot_path}")
+    sys.exit(1)
+
+
+def build_silent_audio(duration_sec: float, out_path: Path) -> None:
+    """Generate silent audio file of given duration."""
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi",
+        "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+        "-t", str(duration_sec),
+        str(out_path)
+    ], capture_output=True, check=True)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input", required=True, help="Path to temp JSON config file")
+    args = ap.parse_args()
+
+    cfg = load_json(Path(args.input))
+    ep_dir        = Path(cfg["ep_dir"])
+    locale        = cfg.get("locale", "en")
+    selections    = cfg.get("selections", {})   # { shot_id: [segments] }
+    include_music = cfg.get("include_music", False)
+    include_sfx   = cfg.get("include_sfx", False)
+    shot_ids_filter = cfg.get("shot_ids", None)   # None = all shots; list = restrict to these
+    out_name      = cfg.get("out_name", None) or "preview_video.mp4"
+
+    print(f"  [media_preview] ep_dir={ep_dir} locale={locale}")
+    print(f"  [media_preview] shots with selections: {len(selections)}")
+    print(f"  [media_preview] include_music={include_music} include_sfx={include_sfx}")
+    if shot_ids_filter is not None:
+        print(f"  [media_preview] shot_ids filter: {shot_ids_filter}")
+
+    # Output directory
+    out_dir = ep_dir / "assets" / "media" / "MediaPreviewPack"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / out_name
+
+    # Shot durations
+    shot_dur_ms, dur_source = detect_shot_durations(ep_dir, locale)
+    print(f"  [dur] source: {dur_source}")
+
+    # Load RenderPlan for VO line timing (if available)
+    rp_path = ep_dir / f"RenderPlan.{locale}.json"
+    rp_shots = {}  # { shot_id: shot_dict }
+    rp_data = None
+    if rp_path.exists():
+        rp_data = load_json(rp_path)
+        for s in rp_data.get("shots", []):
+            rp_shots[s["shot_id"]] = s
+
+    # Build ordered shot list from RenderPlan or shot_dur_ms
+    if rp_data:
+        ordered_shots = [s["shot_id"] for s in rp_data.get("shots", [])]
+    else:
+        ordered_shots = list(shot_dur_ms.keys())
+
+    # Apply shot_ids filter (per-scene preview)
+    if shot_ids_filter is not None:
+        _filter_set = set(shot_ids_filter)
+        ordered_shots = [s for s in ordered_shots if s in _filter_set]
+        print(f"  [filter] Rendering {len(ordered_shots)} shot(s): {ordered_shots}")
+
+    # VO items by shot from RenderPlan vo_lines
+    vo_items_by_shot = {}  # { shot_id: [ {item_id, timeline_in_ms} ] }
+    for shot_id, shot in rp_shots.items():
+        for line in shot.get("vo_lines", []):
+            iid = line.get("line_id", "")
+            t_ms = line.get("timeline_in_ms", 0)
+            if iid:
+                vo_items_by_shot.setdefault(shot_id, []).append({
+                    "item_id": iid,
+                    "timeline_in_ms": t_ms,
+                })
+
+    vo_dir = ep_dir / "assets" / locale / "audio" / "vo"
+
+    # Load MusicApprovalSnapshot or MusicPlan for music
+    music_data = None
+    snap_path = ep_dir / "assets" / "music" / "MusicApprovalSnapshot.json"
+    music_plan_path = ep_dir / "assets" / "music" / "MusicPlan.json"
+    if include_music:
+        if snap_path.exists():
+            music_data = {"type": "snapshot", "data": load_json(snap_path)}
+            print("  [music] Using MusicApprovalSnapshot.json")
+        elif music_plan_path.exists():
+            music_data = {"type": "plan", "data": load_json(music_plan_path)}
+            print("  [music] Using MusicPlan.json (fallback)")
+        else:
+            print("  [music] WARNING: No music source found — music track skipped")
+
+    # Load SfxPlan for SFX
+    sfx_index = {}  # { shot_id: [entry] }
+    if include_sfx:
+        sfx_path = ep_dir / "assets" / "sfx" / "SfxPlan.json"
+        if sfx_path.exists():
+            sfx_plan = load_json(sfx_path)
+            for entry in sfx_plan.get("sfx_entries", sfx_plan.get("entries", [])):
+                sfx_index.setdefault(entry.get("shot_id", ""), []).append(entry)
+            n_sfx = sum(len(v) for v in sfx_index.values())
+            print(f"  [sfx] Loaded SfxPlan with {n_sfx} entries")
+        else:
+            print("  [sfx] WARNING: SfxPlan.json not found — SFX track skipped")
+
+    # Generate per-shot video clips in a temp dir, then concatenate
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        clip_files = []
+
+        for i, shot_id in enumerate(ordered_shots):
+            dur_ms = shot_dur_ms.get(shot_id, 0)
+            if dur_ms <= 0:
+                print(f"  [skip] {shot_id}: duration 0ms")
+                continue
+            dur_sec = dur_ms / 1000.0
+            clip_path = tmp / f"clip_{i:04d}_{shot_id}.mp4"
+
+            segs = selections.get(shot_id, [])
+
+            if not segs:
+                # Black background
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi",
+                    "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={dur_sec:.3f}",
+                    "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                    "-t", f"{dur_sec:.3f}",
+                    "-c:v", "libx264", "-c:a", "aac",
+                    "-shortest", str(clip_path)
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"  [warn] black clip failed for {shot_id}: {result.stderr[-200:]}")
+                    continue
+            else:
+                # Build video from segments (use first segment for simplicity)
+                seg = segs[0]
+                media_path = url_to_path(seg.get("url", ""))
+                media_type = seg.get("media_type", "image")
+                seg_start = float(seg.get("start_sec") or 0)
+                seg_end   = float(seg.get("end_sec") or dur_sec)
+
+                if media_type == "image":
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-loop", "1", "-t", f"{dur_sec:.3f}",
+                        "-i", media_path,
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1",
+                        "-t", f"{dur_sec:.3f}",
+                        "-c:v", "libx264", "-c:a", "aac",
+                        "-shortest", str(clip_path)
+                    ]
+                else:
+                    # video clip: trim from start_sec for dur_sec
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", f"{seg_start:.3f}",
+                        "-t", f"{dur_sec:.3f}",
+                        "-i", media_path,
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1",
+                        "-t", f"{dur_sec:.3f}",
+                        "-c:v", "libx264", "-c:a", "aac",
+                        "-shortest", str(clip_path)
+                    ]
+
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print(f"  [warn] clip failed for {shot_id} ({media_path}): {result.stderr[-300:]}")
+                    # Fallback to black
+                    cmd2 = [
+                        "ffmpeg", "-y",
+                        "-f", "lavfi",
+                        "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={dur_sec:.3f}",
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-t", f"{dur_sec:.3f}",
+                        "-c:v", "libx264", "-c:a", "aac",
+                        "-shortest", str(clip_path)
+                    ]
+                    result2 = subprocess.run(cmd2, capture_output=True, text=True)
+                    if result2.returncode != 0:
+                        print(f"  [skip] {shot_id}: black fallback also failed")
+                        continue
+
+            clip_files.append(clip_path)
+            print(f"  [clip] {shot_id}: {dur_sec:.3f}s ok")
+
+        if not clip_files:
+            print("ERROR: No clips generated.")
+            sys.exit(1)
+
+        # Concatenate clips
+        concat_list = tmp / "concat.txt"
+        with open(concat_list, "w") as f:
+            for cp in clip_files:
+                f.write(f"file '{cp}'\n")
+
+        concat_video = tmp / "concat.mp4"
+        result = subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
+            "-c", "copy", str(concat_video)
+        ], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"ERROR: concat failed: {result.stderr[-500:]}")
+            sys.exit(1)
+
+        # Build VO audio track
+        total_dur = sum(shot_dur_ms.get(s, 0) for s in ordered_shots) / 1000.0
+        vo_audio = tmp / "vo_mix.wav"
+
+        vo_inputs = []
+        vo_delays = []
+        cumulative_ms = 0
+        for shot_id in ordered_shots:
+            dur_ms = shot_dur_ms.get(shot_id, 0)
+            vo_lines = vo_items_by_shot.get(shot_id, [])
+            for line in vo_lines:
+                wav_path = vo_dir / f"{line['item_id']}.wav"
+                if wav_path.exists():
+                    vo_inputs.append(str(wav_path))
+                    delay_ms = cumulative_ms + line["timeline_in_ms"]
+                    vo_delays.append(delay_ms)
+            cumulative_ms += dur_ms
+
+        if vo_inputs:
+            # Build adelay filter for VO mixing
+            filter_parts = []
+            for idx, delay in enumerate(vo_delays):
+                filter_parts.append(f"[{idx}]adelay={delay}|{delay}[d{idx}]")
+            mix_inputs = "".join(f"[d{i}]" for i in range(len(vo_inputs)))
+            filter_str = (";".join(filter_parts)
+                          + f";{mix_inputs}amix=inputs={len(vo_inputs)}:normalize=0[out]")
+
+            cmd = ["ffmpeg", "-y"]
+            for inp in vo_inputs:
+                cmd += ["-i", inp]
+            cmd += [
+                "-filter_complex", filter_str,
+                "-map", "[out]",
+                "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+                "-t", str(total_dur),
+                str(vo_audio)
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"  [warn] VO mix failed: {result.stderr[-300:]}")
+                build_silent_audio(total_dur, vo_audio)
+        else:
+            print("  [vo] No VO WAV files found — silent VO track")
+            build_silent_audio(total_dur, vo_audio)
+
+        # ── Build music audio track ───────────────────────────────────────────
+        music_audio = None
+        if music_data:
+            snap_shots = music_data["data"].get("shots", [])
+            music_by_shot = {s["shot_id"]: s for s in snap_shots if "shot_id" in s}
+
+            m_inputs, m_delays, m_volumes = [], [], []
+            cum_ms = 0
+            for shot_id in ordered_shots:
+                dur_ms = shot_dur_ms.get(shot_id, 0)
+                entry = music_by_shot.get(shot_id)
+                if entry:
+                    wav = entry.get("loop_wav_path", "")
+                    if wav and Path(wav).exists():
+                        delay_ms = cum_ms + float(entry.get("music_delay_sec", 0.0)) * 1000
+                        base_db  = float(entry.get("base_db", -6.0))
+                        m_inputs.append(wav)
+                        m_delays.append(delay_ms)
+                        m_volumes.append(10 ** (base_db / 20.0))
+                cum_ms += dur_ms
+
+            if m_inputs:
+                music_audio = tmp / "music_mix.wav"
+                f_parts = [
+                    f"[{i}]adelay={d:.0f}|{d:.0f},volume={v:.4f}[m{i}]"
+                    for i, (d, v) in enumerate(zip(m_delays, m_volumes))
+                ]
+                mix_ins = "".join(f"[m{i}]" for i in range(len(m_inputs)))
+                f_str = ";".join(f_parts) + f";{mix_ins}amix=inputs={len(m_inputs)}:normalize=0[out]"
+                cmd = ["ffmpeg", "-y"]
+                for inp in m_inputs:
+                    cmd += ["-i", inp]
+                cmd += ["-filter_complex", f_str, "-map", "[out]",
+                        "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+                        "-t", str(total_dur), str(music_audio)]
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                if res.returncode != 0:
+                    print(f"  [warn] Music mix failed: {res.stderr[-300:]}")
+                    music_audio = None
+                else:
+                    print(f"  [music] Mixed {len(m_inputs)} music clip(s)")
+            else:
+                print("  [music] No music WAV files found for these shots — music skipped")
+
+        # ── Build SFX audio track ─────────────────────────────────────────────
+        sfx_audio = None
+        if sfx_index:
+            s_inputs, s_delays = [], []
+            cum_ms = 0
+            for shot_id in ordered_shots:
+                dur_ms = shot_dur_ms.get(shot_id, 0)
+                for entry in sfx_index.get(shot_id, []):
+                    src = entry.get("source_file") or entry.get("local_path") or ""
+                    if src and Path(src).exists():
+                        delay_ms = cum_ms + float(entry.get("offset_sec", 0)) * 1000
+                        s_inputs.append(src)
+                        s_delays.append(delay_ms)
+                cum_ms += dur_ms
+
+            if s_inputs:
+                sfx_audio = tmp / "sfx_mix.wav"
+                f_parts = [f"[{i}]adelay={d:.0f}|{d:.0f}[s{i}]" for i, d in enumerate(s_delays)]
+                mix_ins = "".join(f"[s{i}]" for i in range(len(s_inputs)))
+                f_str = ";".join(f_parts) + f";{mix_ins}amix=inputs={len(s_inputs)}:normalize=0[out]"
+                cmd = ["ffmpeg", "-y"]
+                for inp in s_inputs:
+                    cmd += ["-i", inp]
+                cmd += ["-filter_complex", f_str, "-map", "[out]",
+                        "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+                        "-t", str(total_dur), str(sfx_audio)]
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                if res.returncode != 0:
+                    print(f"  [warn] SFX mix failed: {res.stderr[-300:]}")
+                    sfx_audio = None
+                else:
+                    print(f"  [sfx] Mixed {len(s_inputs)} SFX clip(s)")
+            else:
+                print("  [sfx] No SFX WAV files found for these shots — SFX skipped")
+
+        # ── Combine VO + music + SFX into final audio ─────────────────────────
+        extra_tracks = [a for a in [music_audio, sfx_audio] if a and a.exists()]
+        if extra_tracks:
+            final_audio = tmp / "final_audio.wav"
+            all_tracks = [str(vo_audio)] + [str(a) for a in extra_tracks]
+            n = len(all_tracks)
+            mix_ins = "".join(f"[{i}]" for i in range(n))
+            f_str = f"{mix_ins}amix=inputs={n}:normalize=0[out]"
+            cmd = ["ffmpeg", "-y"]
+            for t in all_tracks:
+                cmd += ["-i", t]
+            cmd += ["-filter_complex", f_str, "-map", "[out]",
+                    "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+                    "-t", str(total_dur), str(final_audio)]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                print(f"  [warn] Final audio combine failed: {res.stderr[-300:]}")
+                final_audio = vo_audio  # fall back to VO-only
+            else:
+                print(f"  [audio] Combined {n} track(s): VO"
+                      + (" + Music" if music_audio else "")
+                      + (" + SFX"   if sfx_audio   else ""))
+        else:
+            final_audio = vo_audio
+
+        # ── Mux video + final audio ───────────────────────────────────────────
+        result = subprocess.run([
+            "ffmpeg", "-y",
+            "-i", str(concat_video),
+            "-i", str(final_audio),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(out_path)
+        ], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"ERROR: final mux failed: {result.stderr[-500:]}")
+            sys.exit(1)
+
+    print(f"  [done] Preview written: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

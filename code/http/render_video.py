@@ -1038,6 +1038,43 @@ def main() -> None:
     # If SfxPlan.json is absent, _sfx_plan_by_shot stays {} and render falls
     # back to sfx_plan_entries already baked into RenderPlan.
 
+    # ── Load confirmed media selections (CHANGE 5) ───────────────────────────
+    def _url_to_path(url: str) -> str:
+        if url.startswith("file://"):
+            return unquote(urlparse(url).path)
+        return url
+
+    _sel_path = episode_dir / "assets" / "media" / "selections.json"
+    _shot_to_segments = None   # None = no selections file; {} = file present but empty
+
+    if _sel_path.exists():
+        try:
+            _sel_data = json.loads(_sel_path.read_text(encoding="utf-8"))
+            _shot_to_segments = {}
+            for _bg_id, _bg_data in _sel_data.get("selections", {}).items():
+                if not isinstance(_bg_data, dict):
+                    continue
+                for _shot_id, _shot_data in _bg_data.get("per_shot", {}).items():
+                    _shot_to_segments[_shot_id] = _shot_data.get("segments", [])
+            # Locale mismatch warning
+            _confirmed_locale = _sel_data.get("confirmed_locale")
+            if _confirmed_locale and _confirmed_locale != locale:
+                print(
+                    f"INFO: Media selections confirmed in locale '{_confirmed_locale}' "
+                    f"but rendering locale '{locale}'. "
+                    "Re-confirm selections in this locale if timing is incorrect."
+                )
+            print(f"  [media] Loaded confirmed selections: {len(_shot_to_segments)} shots")
+        except Exception as _exc:
+            print(f"  [media] WARNING: Failed to load selections.json: {_exc}")
+            _shot_to_segments = None
+    else:
+        print(
+            "WARNING: No confirmed media selections found — using RenderPlan.background_segments.\n"
+            "         Video trim offsets (start_sec/end_sec from Confirm Selections) are NOT applied.\n"
+            "         To apply confirmed trims, run 'Confirm Selections' in the Media tab first."
+        )
+
     print("=" * 60)
     print("  render_video")
     print(f"  Plan    : {plan_path.name}")
@@ -1076,6 +1113,32 @@ def main() -> None:
     placeholder_count = 0
 
     for i, shot in enumerate(shots):
+        # CHANGE 5: override bg_segments from confirmed selections if present
+        _shot_id_cur = shot.get("shot_id", "")
+        if _shot_to_segments is not None:
+            if _shot_id_cur in _shot_to_segments:
+                _confirmed_segs = _shot_to_segments[_shot_id_cur]
+                shot = dict(shot)  # shallow copy — do not mutate RenderPlan list
+                shot["background_segments"] = [
+                    {
+                        "uri":                   _url_to_path(seg.get("url", "")),
+                        "media_type":            seg.get("media_type", "image"),
+                        "start_sec":             float(seg.get("start_sec") or 0.0),
+                        "duration_override_sec": max(0.0,
+                                                     float(seg.get("end_sec") or seg.get("hold_sec") or 0)
+                                                     - float(seg.get("start_sec") or 0.0)),
+                        "hold_sec":              float(seg.get("hold_sec") or 0.0),
+                    }
+                    for seg in _confirmed_segs
+                ]
+                print(f"  [{_shot_id_cur}] Using confirmed media selections — overriding RenderPlan bg.")
+            else:
+                # selections.json present but shot not confirmed → black background
+                shot = dict(shot)
+                shot["background_segments"] = []
+                print(f"  [{_shot_id_cur}] No confirmed selection — rendering black background.")
+        # else: _shot_to_segments is None → use existing RenderPlan bg_segments (no change)
+
         m_start, m_fadeout = shot_music_params[i]
         mkv = render_shot(
             shot=shot,
