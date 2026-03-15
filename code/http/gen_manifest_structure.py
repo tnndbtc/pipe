@@ -346,6 +346,7 @@ def build_manifest(
         "backgrounds":    backgrounds,
         "sfx_items":      sfx_items,
         "music_items":    music_items,
+        "element_images":  "__FILL__: array of per-shot element image objects — Stage 5-C creates from scratch",
     }
 
     return manifest
@@ -466,15 +467,17 @@ def main() -> int:
     out_path = ep_dir / "AssetManifest_draft.shared.json"
     save_json(manifest, out_path)
 
-    n_bg    = len(manifest["backgrounds"])
-    n_sfx   = len(manifest["sfx_items"])
-    n_music = len(manifest["music_items"])
-    n_packs = len(manifest["character_packs"])
+    n_bg       = len(manifest["backgrounds"])
+    n_sfx      = len(manifest["sfx_items"])
+    n_music    = len(manifest["music_items"])
+    n_packs    = len(manifest["character_packs"])
+    n_elements = len(manifest.get("element_images", [])) if isinstance(manifest.get("element_images"), list) else "FILL"
 
     print(f"  backgrounds     : {n_bg}")
     print(f"  sfx_items       : {n_sfx}")
     print(f"  music_items     : {n_music}")
     print(f"  character_packs : {n_packs}")
+    print(f"  element_images  : {n_elements}")
     print(f"✓ AssetManifest_draft.shared.json scaffold written "
           f"({n_bg} backgrounds, {n_sfx} sfx, {n_music} music)")
 

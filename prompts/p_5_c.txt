@@ -160,13 +160,73 @@ Print: `▶ [5/9] Stage 5-C — Shared manifest creative fill  …`
   Array of 2–3 search phrases for finding this SFX in a stock audio library.
   Example: `["gentle desert wind ambient", "soft breeze outdoor nature sound"]`
 
+#### element_images[] entries
+
+You must CREATE the entire `element_images` array from scratch (the scaffold value is
+the string `"__FILL__: array of per-shot element image objects — Stage 5-C creates from scratch"`).
+Replace this string with a proper JSON array.
+
+For EACH shot in ShotList.shots[]:
+  1. Read the shot's narration from Script.json (the segment matching `shot_id`).
+  2. Identify **3–5 key physical visual elements** that:
+       - Are named or clearly implied in the narration text
+       - Are concrete, identifiable objects (NOT abstract concepts, emotions, or settings)
+       - Could be depicted as a standalone subject in an image
+       - Are visually distinct from each other and from the background scene
+     Examples: reactor core, turbine blades, cooling pump, pressure gauge, fuel rod,
+     control panel, instrument cluster, exhaust valve, water tower, transformer bank.
+     Do NOT use: "atmosphere", "tension", "darkness", "the scene" — these are not elements.
+  3. For each identified element, generate one entry:
+
+**`item_id`**
+  Format: `"el-{shot_id}-{element-slug}"`
+  `{element-slug}`: lowercase kebab-case, max 3 words.
+  Example: `"el-sc01-sh01-reactor-core"`, `"el-sc02-sh02-coolant-pump"`, `"el-sc03-sh03-control-panel"`
+  Must be unique across the ENTIRE manifest (not just within a shot).
+
+**`shot_id`**
+  Copy exactly from ShotList — e.g. `"sc01-sh01"` (note the "sc" scene prefix).
+
+**`label`**
+  Short human-readable name, title-cased, with a clarifying suffix if needed.
+  Example: `"Reactor Core — Interior View"`, `"Coolant Pump Assembly"`, `"Instrument Panel — Close-up"`
+
+**`ai_prompt`**
+  ~2 sentence cinematic description of the element as the PRIMARY subject.
+  Include: the physical object's materials and textures, its condition (worn, pristine,
+  damaged, industrial), the lighting on the object, and its immediate surroundings.
+  Do NOT describe the background scene — focus on the element itself.
+  Example: `"Close-up of a Soviet-era reactor control panel, rows of analogue gauges and
+  toggle switches lit by pale fluorescent light. The metal casing is scratched and dented,
+  indicator needles frozen at abnormal readings, wires exposed at the edges."`
+
+**`ai_prompt_variations`**
+  Array of **1** string (elements use fewer variations than backgrounds — change this
+  number independently of the backgrounds count in p_5_c.txt).
+  Each is an independent ~2 sentence cinematic description of the SAME element, varying
+  exactly one primary visual dimension from `ai_prompt`:
+    * Composition: e.g. straight-on → extreme close-up of a detail → side profile
+    * Lighting: e.g. fluorescent → fire-light → near-darkness with one lamp
+    * Atmosphere: e.g. clean → dusty / steam-covered / rain-streaked
+    * Condition/tonal: e.g. functional → damaged / corroded / overgrown
+  Rules:
+    - Same element, same approximate time period — do NOT change the object.
+    - Each variation is self-contained (no references to "the original" or each other).
+    - Same technical depth and ~2 sentence format as `ai_prompt`.
+
+**Elements per shot: target 3–5. Do not generate fewer than 3 or more than 5.**
+**Skip shots that have no identifiable physical elements (purely atmospheric, no objects).**
+**Shots with `characters: []` and purely environmental narration may yield fewer — minimum 2.**
+
 ### Fields you MUST NOT change
 
 Do NOT modify any pre-filled field. The following are locked:
   `asset_id`, `type`, `license_type`, `motion_level`, `cinematic_role`,
   `search_filters`, `source_filters`, `motion`, `description`,
   all `music_items[]` fields, all `character_packs[]` fields,
-  all `vo_items[]` fields, all top-level manifest metadata fields.
+  all `vo_items[]` fields, all top-level manifest metadata fields,
+  all `element_images[]` fields (once Stage 5-C has filled them — no field should be
+  left as `__FILL__` in the final output).
 
 ### Style guidance
 
@@ -197,6 +257,14 @@ Validate `ai_prompt_variations` for every backgrounds entry:
   - Every element must be a non-empty string
 If any entry fails, fix it inline and re-validate before writing the file.
 
+Validate `element_images` for the whole manifest:
+  - Must be a JSON array (not a string, not null, not `__FILL__`)
+  - Each entry must have `item_id`, `shot_id`, `label`, `ai_prompt`
+  - Each `item_id` must be unique across all entries
+  - Each `ai_prompt_variations` must be a non-empty array of non-empty strings
+  - No entry may contain any `__FILL__` value
+If any check fails, fix inline and re-validate before writing.
+
 Print validation result:
 ```
 ── Stage 5-C validation ─────────────────────────────────────
@@ -205,6 +273,7 @@ AssetManifest_draft.shared.json  →  VALID ✓
   sfx_items       : <count>
   music_items     : <count>
   character_packs : <count>
+  element_images  : <count>
 ────────────────────────────────────────────────────────────
 ```
 

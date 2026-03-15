@@ -3173,6 +3173,34 @@ def run_ssml_narration(
     """
     t_start = time.time()
 
+    # ── Approved-cache fast path ──────────────────────────────────────────────
+    # Must run BEFORE load_azure_synthesizer() so that a re-run after "VO Approve"
+    # never touches Azure — not even credential loading — when all WAVs are locked.
+    _fp_locale = items[0]["locale"] if items else "en"
+    _fp_cache_dir = out_dir.parent.parent.parent / "meta" / "vo_approved_cache" / _fp_locale
+    if _fp_cache_dir.exists() and items:
+        import shutil as _shutil_fp
+        if all((_fp_cache_dir / f"{it['item_id']}.wav").exists() for it in items):
+            print(f"\n[approved-cache] All {len(items)} item(s) have approved WAVs — "
+                  f"skipping Azure TTS entirely")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for it in items:
+                _shutil_fp.copy2(
+                    _fp_cache_dir / f"{it['item_id']}.wav",
+                    out_dir / f"{it['item_id']}.wav",
+                )
+            _fp_results = [{"item_id": it["item_id"], "status": "success"} for it in items]
+            _fp_stats = {
+                "mode": "ssml_narration", "items_total": len(items),
+                "items_synthesized": 0, "items_skipped": len(items),
+                "items_cache_hit": len(items), "raw_chars": 0, "ssml_chars": 0,
+                "ssml_ratio": 0, "api_calls": 0, "cache_hits": len(items),
+                "chunks": 0, "align_ok": 0, "align_fallback": 0,
+                "wall_time_sec": round(time.time() - t_start, 1),
+            }
+            return _fp_results, _fp_stats
+    # ─────────────────────────────────────────────────────────────────────────
+
     synthesizer = load_azure_synthesizer()
     ssml_inner  = Path(ssml_inner_path).read_text(encoding="utf-8")
     voice_cast  = json.loads(Path(voice_cast_path).read_text(encoding="utf-8"))

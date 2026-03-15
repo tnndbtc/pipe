@@ -194,21 +194,32 @@ run_stage_10() {
     python3 "${code_dir}/validate_tts_prompts.py" \
       "${EP_DIR}" --locale "${locale}" --warn-only || true
 
-    echo "  [6] Generating voice-over audio…"
-    if [[ "${STORY_FORMAT:-}" == "ssml_narration" && "$locale" == "$_primary" ]]; then
-      # PRIMARY_LOCALE uses ssml_narration: wrapper-rebuild + inner passthrough
-      python3 "${code_dir}/gen_tts_cloud.py" \
-        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
-        --ssml-narration \
-        --ssml-inner "${EP_DIR}/ssml_inner.xml" \
-        --voice-cast "projects/${PROJECT_SLUG}/VoiceCast.json"
+    # ── [6] TTS synthesis — skip if VO already approved ─────────────────
+    # If vo_preview_approved.{locale}.json exists the audio is final.
+    # Deleting that file is the explicit gate to force re-synthesis.
+    _vo_approved_sentinel="${EP_DIR}/vo_preview_approved.${locale}.json"
+    if [[ -f "$_vo_approved_sentinel" ]]; then
+      echo "  [6] VO already approved — skipping TTS synthesis."
+      echo "      (Delete vo_preview_approved.${locale}.json to force re-run)"
     else
-      # Other locales (or non-ssml_narration): regular per-item TTS
-      python3 "${code_dir}/gen_tts_cloud.py" \
-        --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+      echo "  [6] Generating voice-over audio…"
+      if [[ "${STORY_FORMAT:-}" == "ssml_narration" && "$locale" == "$_primary" ]]; then
+        # PRIMARY_LOCALE uses ssml_narration: wrapper-rebuild + inner passthrough
+        python3 "${code_dir}/gen_tts_cloud.py" \
+          --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+          --ssml-narration \
+          --ssml-inner "${EP_DIR}/ssml_inner.xml" \
+          --voice-cast "projects/${PROJECT_SLUG}/VoiceCast.json"
+      else
+        # Other locales (or non-ssml_narration): regular per-item TTS
+        python3 "${code_dir}/gen_tts_cloud.py" \
+          --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+      fi
     fi
 
     # ── [6b] Phase 1 — convergence loop (non-primary locales only) ───────
+    # Skip if VO already approved (same guard as [6] — no point re-aligning
+    # if TTS was not re-synthesised).
     # Read alignment thresholds from their single source of truth.
     local vo_thresh vo_thresh_high
     vo_thresh=$(python3 -c "import sys; sys.path.insert(0,'${code_dir}'); from polish_locale_vo import THRESHOLD; print(f'{THRESHOLD:.2f}')" 2>/dev/null || echo "0.90")
@@ -218,12 +229,16 @@ run_stage_10() {
     # repeats up to 3 times.
     # Writes calibration data to prompts/tts_calibration.{locale}.json.
     if [[ "$locale" != "$_primary" ]]; then
-      echo "  [6b] Polishing locale VO duration alignment…"
-      python3 "${code_dir}/polish_locale_vo.py" \
-        --manifest        "${EP_DIR}/AssetManifest_merged.${locale}.json" \
-        --locale          "${locale}" \
-        --ep-dir          "${EP_DIR}" \
-        --primary-locale  "${_primary}" || true
+      if [[ -f "$_vo_approved_sentinel" ]]; then
+        echo "  [6b] VO already approved — skipping alignment loop."
+      else
+        echo "  [6b] Polishing locale VO duration alignment…"
+        python3 "${code_dir}/polish_locale_vo.py" \
+          --manifest        "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+          --locale          "${locale}" \
+          --ep-dir          "${EP_DIR}" \
+          --primary-locale  "${_primary}" || true
+      fi
     fi
 
     echo "  [7] Analysing voice timing…"

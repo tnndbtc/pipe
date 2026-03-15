@@ -410,8 +410,17 @@ def render_shot(
                         f"crop={W}:{H},setsar=1[seg{si}]"
                     )
             else:
-                # Placeholder segment
-                seg_dur = seg.get("hold_sec") or seg.get("duration_sec") or 2.0
+                # Placeholder segment (seg_path is None or file missing)
+                # Use explicit None checks so hold_sec=0.0 is not treated as absent.
+                _h = seg.get("hold_sec")
+                _d = seg.get("duration_sec")
+                seg_dur = (_h if _h is not None else (_d if _d is not None else 2.0))
+                if seg_dur <= 0:
+                    seg_dur = seg.get("duration_override_sec") or 2.0
+                print(
+                    f"  [render] WARNING: segment {si} path not found "
+                    f"({seg.get('uri', '?')!r}); using {seg_dur:.3f}s grey placeholder."
+                )
                 seg_idx = add_input(
                     ["-f", "lavfi"],
                     f"color=c=606060:size={W}x{H}:rate={fps}:duration={seg_dur:.3f}",
@@ -1040,8 +1049,20 @@ def main() -> None:
 
     # ── Load confirmed media selections (CHANGE 5) ───────────────────────────
     def _url_to_path(url: str) -> str:
+        """Return a URI that uri_to_path() can resolve.
+
+        selections.json stores file:// URIs.  The previous implementation stripped
+        the 'file://' prefix, producing a bare absolute path which uri_to_path()
+        cannot handle (it requires the file:// scheme).  Now we preserve the scheme.
+        Plain absolute paths are wrapped so they also work downstream.
+        """
         if url.startswith("file://"):
-            return unquote(urlparse(url).path)
+            return url          # keep intact — uri_to_path() requires the file:// prefix
+        if url and Path(url).is_absolute():
+            return Path(url).as_uri()   # /abs/path → file:///abs/path
+        # Relative path (should not appear in practice but handle gracefully)
+        if url:
+            return (_sel_path.parent / url).resolve().as_uri()
         return url
 
     _sel_path = episode_dir / "assets" / "media" / "selections.json"
@@ -1125,8 +1146,8 @@ def main() -> None:
                         "media_type":            seg.get("media_type", "image"),
                         "start_sec":             float(seg.get("start_sec") or 0.0),
                         "duration_override_sec": max(0.0,
-                                                     float(seg.get("end_sec") or seg.get("hold_sec") or 0)
-                                                     - float(seg.get("start_sec") or 0.0)),
+                                                     float(seg["end_sec"] if seg.get("end_sec") is not None else (seg.get("hold_sec") or 0))
+                                                     - float(seg["start_sec"] if seg.get("start_sec") is not None else 0.0)),
                         "hold_sec":              float(seg.get("hold_sec") or 0.0),
                     }
                     for seg in _confirmed_segs

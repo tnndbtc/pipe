@@ -339,6 +339,38 @@
         }
       }
     },
+    "element_images": {
+      "type": "array",
+      "description": "Per-shot scene element image entries. Each entry describes one physical visual element identified by Stage 5-C from the shot's narration (e.g. reactor core, turbine, control panel). The LLM creates all entries from scratch — no pre-scaffolded count. item_id format: 'el-{shot_id}-{element-slug}' (e.g. 'el-sc01-sh01-reactor-core'). The count per shot (3–5) and variation count are both controlled solely by p_5_c.txt.",
+      "items": {
+        "type": "object",
+        "required": ["item_id", "shot_id", "label", "ai_prompt"],
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "description": "Unique identifier. Format: 'el-{shot_id}-{element-slug}' — e.g. 'el-sc01-sh01-reactor-core'. Must be unique across the manifest."
+          },
+          "shot_id": {
+            "type": "string",
+            "description": "shot_id from ShotList.shots[] that this element belongs to."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-readable element name. E.g. 'Reactor core — exterior view', 'Coolant pump assembly', 'Control room instrument panel'."
+          },
+          "ai_prompt": {
+            "type": "string",
+            "description": "~2 sentence cinematic description of the element as the primary subject. Focus on the physical object, its materials, textures, lighting, and context. For AI image generation."
+          },
+          "ai_prompt_variations": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "description": "Additional variation prompts for the same element, each varying one primary visual dimension (composition, lighting, atmosphere, tonal emphasis). Count controlled solely by p_5_c.txt — same N as backgrounds."
+          }
+        }
+      }
+    },
     "locale_scope": {
       "type": "string",
       "enum": ["monolithic", "shared", "locale", "merged"],

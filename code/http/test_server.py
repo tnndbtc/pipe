@@ -2564,6 +2564,14 @@ placeholder="Enter your story here"></textarea>
             placeholder="Media server URL  e.g. http://localhost:8200"
             value="{{MEDIA_SERVER_URL}}" />
     <button id="media-btn-search" onclick="mediaStartSearch()" disabled>🔍 Search Media</button>
+    <select id="media-gen-all-type"
+            style="font-size:0.82em;border-radius:6px;padding:4px 8px;
+                   border:1px solid var(--border,#555);background:var(--bg2,#2a2a2a);
+                   color:var(--fg,#ccc);cursor:pointer;flex-shrink:0"
+            onchange="_mediaUpdateGenAllBtn()">
+      <option value="backgrounds">Backgrounds</option>
+      <option value="elements">Elements</option>
+    </select>
     <button id="media-btn-gen-all" onclick="mediaGenAll()" disabled
             style="background:var(--purple,#7c3aed);color:#fff;border:none;
                    border-radius:6px;font-size:0.82em;font-weight:700;
@@ -5897,6 +5905,7 @@ placeholder="Enter your story here"></textarea>
   let _mediaBgRemap   = null; // { old_bg_id: new_bg_id } — loaded from bg_id_remap.json if present
   var _mediaPlayingVid = null; // currently playing video element (limit 1 active stream)
   let _bgManifestData = {};    // { itemId: { ai_prompt, ai_prompt_variations, search_prompt, include_keywords, media_type, motion_level } }
+  let _elManifestData = {};    // { item_id: { ai_prompt, ai_prompt_variations, label, shot_id } }
 
   // Stop a video and release its HTTP connection (pause alone doesn't close it).
   function _mediaStopVid(vid) {
@@ -7823,9 +7832,11 @@ placeholder="Enter your story here"></textarea>
         fixedTotal += d;
         seg.duration_sec = d;
       } else if (seg.hold_sec_locked && seg.hold_sec > 0) {
-        // User-pinned image duration — treat as fixed
-        fixedTotal += seg.hold_sec;
-        seg.duration_sec = seg.hold_sec;
+        // User-pinned image duration — treat as fixed, but cap at shot duration.
+        var capped = shotDur > 0 ? Math.min(seg.hold_sec, shotDur) : seg.hold_sec;
+        seg.hold_sec = capped;
+        fixedTotal += capped;
+        seg.duration_sec = capped;
       } else {
         flexIdxs.push(i);
       }
@@ -8490,10 +8501,11 @@ placeholder="Enter your story here"></textarea>
         } else {
           // ── image: editable hold_sec input (duration already shown in filename span above) ──
           html += '<input type="number" min="0.1" step="0.1"'
+            + (dur > 0 ? ' max="' + dur.toFixed(1) + '"' : '')
             + ' style="width:48px;font-size:11px;background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:3px;padding:1px 3px;flex-shrink:0"'
             + ' value="' + (holdSec > 0 ? holdSec.toFixed(1) : '') + '"'
             + ' placeholder="' + (holdSec > 0 ? holdSec.toFixed(1) : 'auto') + '"'
-            + ' title="Display duration (s). Blank = auto-distribute."'
+            + ' title="Display duration (s). Max: ' + (dur > 0 ? dur.toFixed(1) + 's (shot duration)' : 'shot duration') + '. Blank = auto-distribute."'
             + ' onchange="_mediaOvrHoldSec(\'' + safeId + '\',' + segIdx + ',this.value)">';
         }
 
@@ -8565,12 +8577,15 @@ placeholder="Enter your story here"></textarea>
     if (!segs || !segs[segIdx]) return;
     const seg = segs[segIdx];
     const v = parseFloat(value);
+    const shotDur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
     if (isNaN(v) || v <= 0) {
       seg.hold_sec_locked = false;
       seg.hold_sec = null;
       seg.end_sec = null;  // clear stale end_sec so hold_sec is used on next save/preview
     } else {
-      seg.hold_sec = Math.round(v * 10) / 10;
+      // Cap at shot duration so an image cannot push the shot longer than its allotted time.
+      const capped = shotDur > 0 ? Math.min(Math.round(v * 10) / 10, shotDur) : Math.round(v * 10) / 10;
+      seg.hold_sec = capped;
       seg.hold_sec_locked = true;
       seg.end_sec = null;  // clear stale end_sec so updated hold_sec is used on next save/preview
     }
@@ -8610,11 +8625,24 @@ placeholder="Enter your story here"></textarea>
       btn.textContent = '⏹ Stop';
       return;
     }
-    const hasBgs = _mediaItemIds.some(
-      id => _bgManifestData[id] && _bgManifestData[id].ai_prompt
-    );
-    btn.disabled = !hasBgs;
-    btn.textContent = '✨ Gen All BGs';
+    const sel  = document.getElementById('media-gen-all-type');
+    const type = sel ? sel.value : 'backgrounds';
+    if (type === 'elements') {
+      // Enable whenever an episode is selected — mediaGenAll() handles the
+      // "no element prompts yet" case with a clear message. Checking
+      // _elManifestData.length would permanently disable the button for users
+      // who haven't run a background generation pass first, since _elManifestData
+      // is only populated lazily (during manifest backfill or the element path itself).
+      const hasEls = !!((_mediaSlug) && (_mediaEpId));
+      btn.disabled    = !hasEls;
+      btn.textContent = '✨ Gen All Elements';
+    } else {
+      const hasBgs = _mediaItemIds.some(
+        id => _bgManifestData[id] && _bgManifestData[id].ai_prompt
+      );
+      btn.disabled    = !hasBgs;
+      btn.textContent = '✨ Gen All BGs';
+    }
   }
 
   async function mediaGenAll() {
@@ -8626,6 +8654,86 @@ placeholder="Enter your story here"></textarea>
     }
 
     const statusEl = document.getElementById('media-gen-all-status');
+    const genType = (document.getElementById('media-gen-all-type') || {}).value || 'backgrounds';
+
+    if (genType === 'elements') {
+      // Populate _elManifestData from manifest on disk (same manifest backfill fetch)
+      try {
+        const mfr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
+                              + '&ep_id=' + encodeURIComponent(_mediaEpId)
+                              + '&file=AssetManifest_draft.shared.json');
+        if (mfr.ok) {
+          const mf = await mfr.json();
+          _elManifestData = {};
+          if (Array.isArray(mf.element_images)) {
+            mf.element_images.forEach(function(el) {
+              if (!el.item_id) return;
+              _elManifestData[el.item_id] = {
+                ai_prompt:            el.ai_prompt || '',
+                ai_prompt_variations: Array.isArray(el.ai_prompt_variations) ? el.ai_prompt_variations : [],
+                label:                el.label || el.item_id,
+                shot_id:              el.shot_id || '',
+              };
+            });
+          }
+        }
+      } catch (_) {
+        console.warn('manifest fetch failed — element_images may be empty');
+      }
+
+      if (Object.keys(_elManifestData).length === 0) {
+        statusEl.textContent = 'No element prompts found. Re-run Stage 5 first.';
+        return;
+      }
+
+      // Check existing element images (ai_images now scans assets/elements/ too)
+      statusEl.textContent = 'Checking existing element images…';
+      let existingImages = {};
+      try {
+        const r = await fetch(
+          `/api/ai_images?slug=${encodeURIComponent(_mediaSlug)}&ep_id=${encodeURIComponent(_mediaEpId)}`
+        );
+        if (r.ok) existingImages = await r.json();
+        else console.warn('[mediaGenAll elements] /api/ai_images returned non-OK — resume check skipped, all elements will be queued');
+      } catch (_) {
+        console.warn('[mediaGenAll elements] /api/ai_images fetch failed — resume check skipped, all elements will be queued');
+      }
+
+      // Build element queue
+      const _newQueue = [];
+      for (const [elId, edata] of Object.entries(_elManifestData)) {
+        if (!edata.ai_prompt) continue;
+        const prompts = [edata.ai_prompt].concat(edata.ai_prompt_variations || [])
+                          .filter(function(p) { return typeof p === 'string' && p.trim(); });
+        if (prompts.length === 0) continue;
+        const totalForId  = prompts.length;
+        const existingCount = existingImages[elId] ? existingImages[elId].length : 0;
+        if (existingCount >= totalForId) continue;
+        prompts.forEach(function(p, i) {
+          _newQueue.push({
+            bgId:        elId,
+            prompt:      p,
+            label:       edata.label + ' [' + (i + 1) + '/' + totalForId + ']',
+            assetFolder: 'elements',
+          });
+        });
+      }
+
+      if (_newQueue.length === 0) {
+        statusEl.textContent = `All ${Object.keys(_elManifestData).length} element(s) fully generated. ✓`;
+        return;
+      }
+
+      _aiBatchQueue  = _newQueue;
+      _aiBatchDone   = [];
+      _aiBatchFailed = {};
+      _aiBatchTotal  = _aiBatchQueue.length;
+      _aiBatchRunning = true;
+      _mediaUpdateGenAllBtn();
+      statusEl.textContent = `Starting — ${_aiBatchTotal} job(s) across ${Object.keys(_elManifestData).length} element(s)…`;
+      _aiBatchProcessNext();
+      return;  // ← early return: element path complete, skip background path below
+    }
 
     // ── Build ordered candidate list ─────────────────────────────────────────
     const seen = new Set();
@@ -8672,6 +8780,19 @@ placeholder="Enter your story here"></textarea>
             _bgManifestData[bg.asset_id].ai_prompt_variations = bg.ai_prompt_variations;
           }
         });
+        // Populate element manifest data from disk (no other source for element entries)
+        _elManifestData = {};
+        if (Array.isArray(mf.element_images)) {
+          mf.element_images.forEach(function(el) {
+            if (!el.item_id) return;
+            _elManifestData[el.item_id] = {
+              ai_prompt:            el.ai_prompt || '',
+              ai_prompt_variations: Array.isArray(el.ai_prompt_variations) ? el.ai_prompt_variations : [],
+              label:                el.label || el.item_id,
+              shot_id:              el.shot_id || '',
+            };
+          });
+        }
       }
     } catch (_) {
       console.warn('manifest fetch failed — ai_prompt_variations may be empty for old batches');
@@ -8806,7 +8927,8 @@ placeholder="Enter your story here"></textarea>
               slug:         _mediaSlug,
               ep_id:        _mediaEpId,
               bg_id:        bgId,
-              timestamp_ms: tMs
+              timestamp_ms: tMs,
+              asset_folder: item.assetFolder || 'backgrounds',
             })
           })
           .then(r => r.ok ? r.json() : Promise.reject(new Error(`save HTTP ${r.status}`)))
@@ -15519,23 +15641,25 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.dumps({"error": "slug and ep_id required"}).encode()
                 self.send_response(400)
             else:
-                bg_root = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
-                                       "assets", "backgrounds")
                 result = {}
-                if os.path.isdir(bg_root):
-                    for bg_id in sorted(os.listdir(bg_root)):
-                        bg_dir = os.path.join(bg_root, bg_id)
-                        if not os.path.isdir(bg_dir):
+                for folder in ("backgrounds", "elements"):
+                    root = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                        "assets", folder)
+                    if not os.path.isdir(root):
+                        continue
+                    for asset_id in sorted(os.listdir(root)):
+                        asset_dir = os.path.join(root, asset_id)
+                        if not os.path.isdir(asset_dir):
                             continue
                         ai_files = sorted(
-                            f for f in os.listdir(bg_dir)
+                            f for f in os.listdir(asset_dir)
                             if f.startswith("ai_") and f.endswith(".png")
                         )
                         if ai_files:
-                            result[bg_id] = [
+                            result[asset_id] = [
                                 {"filename": f,
-                                 "path":     os.path.join(bg_dir, f),
-                                 "url":      "file://" + os.path.join(bg_dir, f)}
+                                 "path":     os.path.join(asset_dir, f),
+                                 "url":      "file://" + os.path.join(asset_dir, f)}
                                 for f in ai_files
                             ]
                 body = json.dumps(result).encode()
@@ -16872,6 +16996,38 @@ class Handler(BaseHTTPRequestHandler):
                         json.dump(_durations, _df, indent=2)
                     os.replace(_dur_tmp, _dur_path)
 
+                    # ── Cache approved WAVs ───────────────────────────────────────────
+                    # Copy every approved WAV into assets/meta/vo_approved_cache/{locale}/
+                    # so that a subsequent step-6 re-run restores these exact files
+                    # instead of overwriting them with a new Azure synthesis.
+                    import shutil as _shutil_vc
+                    _approved_cache_dir = (
+                        _P(full_ep) / "assets" / "meta" / "vo_approved_cache" / locale
+                    )
+                    _log.debug("[vo_approve] cache: full_ep=%s locale=%s approval_items=%d",
+                               full_ep, locale, len(_approval_items))
+                    _approved_cache_dir.mkdir(parents=True, exist_ok=True)
+                    _vo_wav_dir = _P(full_ep) / "assets" / locale / "audio" / "vo"
+                    _log.debug("[vo_approve] cache: vo_wav_dir=%s exists=%s",
+                               _vo_wav_dir, _vo_wav_dir.exists())
+                    _cached_count = 0
+                    _missing_wavs = []
+                    for _item in _approval_items:
+                        _iid = _item["item_id"]
+                        _src_wav = _vo_wav_dir / f"{_iid}.wav"
+                        if _src_wav.exists():
+                            _shutil_vc.copy(_src_wav, _approved_cache_dir / f"{_iid}.wav")
+                            _cached_count += 1
+                        else:
+                            _missing_wavs.append(_iid)
+                    if _missing_wavs:
+                        _log.debug("[vo_approve] cache: ⚠ %d WAV(s) not found: %s",
+                                   len(_missing_wavs), _missing_wavs)
+                    _log.debug("[vo_approve] cache: ✓ %d/%d approved WAV(s) cached → "
+                               "assets/meta/vo_approved_cache/%s/",
+                               _cached_count, len(_approval_items), locale)
+                    # ─────────────────────────────────────────────────────────────────
+
                 _json_resp(self, {
                     "approved":        True,
                     "items_measured":  _items_measured,
@@ -18177,8 +18333,12 @@ class Handler(BaseHTTPRequestHandler):
                 filename = payload.get("filename", "").strip()
                 slug     = payload.get("slug", "").strip()
                 ep_id    = payload.get("ep_id", "").strip()
-                bg_id    = payload.get("bg_id", "").strip()
-                ts_ms    = payload.get("timestamp_ms", "")
+                bg_id        = payload.get("bg_id", "").strip()
+                ts_ms        = payload.get("timestamp_ms", "")
+                asset_folder = payload.get("asset_folder", "backgrounds").strip() or "backgrounds"
+                # Whitelist to prevent path traversal — only allow known asset folder names
+                if asset_folder not in ("backgrounds", "elements"):
+                    asset_folder = "backgrounds"
                 if not all([job_id, filename, slug, ep_id, bg_id, ts_ms]):
                     raise ValueError("job_id, filename, slug, ep_id, bg_id, timestamp_ms required")
                 # Fetch image bytes from AI server
@@ -18190,7 +18350,7 @@ class Handler(BaseHTTPRequestHandler):
                     img_bytes = resp.read()
                 # Write to stable NFS path
                 dest_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
-                                        "assets", "backgrounds", bg_id)
+                                        "assets", asset_folder, bg_id)
                 os.makedirs(dest_dir, exist_ok=True)
                 dest_file = f"ai_{ts_ms}.png"
                 dest_path = os.path.join(dest_dir, dest_file)
