@@ -8352,9 +8352,10 @@ placeholder="Enter your story here"></textarea>
       for (const [shotId, shotData] of Object.entries(bgData.per_shot)) {
         const dur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
         const segs = (shotData.segments || []).map(seg => {
-          if (seg.start_sec === null || seg.start_sec === undefined) seg.start_sec = 0;
-          if (seg.end_sec === null || seg.end_sec === undefined) seg.end_sec = dur;
-          return seg;
+          const s = { ...seg };  // shallow copy — do NOT mutate live _mediaSelections objects
+          if (s.start_sec === null || s.start_sec === undefined) s.start_sec = 0;
+          if (s.end_sec === null || s.end_sec === undefined) s.end_sec = dur;
+          return s;
         });
         shotBlocks[shotId] = { segments: segs, duration_sec: dur };
       }
