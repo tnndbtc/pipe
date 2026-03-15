@@ -172,3 +172,11 @@ basicsr>=1.4.2
 # ---------------------------------------------------------------------------
 einops>=0.7.0
 omegaconf>=2.3.0
+
+
+# ---------------------------------------------------------------------------
+# ControlNet auxiliary preprocessors  (gen_img2img.py pose mode)
+#
+# Provides DwposeDetector for extracting OpenPose conditioning maps.
+# ---------------------------------------------------------------------------
+controlnet_aux>=0.0.7
