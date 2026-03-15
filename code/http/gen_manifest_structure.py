@@ -188,7 +188,8 @@ def build_backgrounds(shots: list[dict]) -> list[dict]:
                 "min_height":  1080,
             },
             # Creative __FILL__ fields — LLM completes these
-            "ai_prompt":         "__FILL__: cinematic visual description for AI image generation",
+            "ai_prompt":            "__FILL__: cinematic visual description for AI image generation",
+            "ai_prompt_variations": "__FILL__: list of exactly 2 variation prompt strings",
             "search_prompt":     "__FILL__: brief keyword summary for stock photo search",
             "search_queries":    "__FILL__: list of 2-4 diverse search phrase strings",
             "scoring_hints":     "__FILL__: dict with subjects, environment, style, motion keys",

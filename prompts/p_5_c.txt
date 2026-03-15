@@ -57,6 +57,31 @@ Print: `▶ [5/9] Stage 5-C — Shared manifest creative fill  …`
   washing over rolling sand dunes. The horizon glows with fading red, shadows
   long and dramatic, completely uninhabited — vast, timeless, solitary."`
 
+**`ai_prompt_variations`**
+  Array of **5** strings (current setting — increase this number here to generate more).
+  Each is an independent ~2 sentence cinematic description for the same background scene,
+  varying exactly one primary visual dimension from `ai_prompt`:
+    * Composition: e.g. wide establishing shot → tight textural close-up
+    * Lighting: e.g. golden hour → harsh midday or night moonlight
+    * Atmosphere: e.g. clear → hazy / misty / rain-slicked / dusty
+    * Tonal emphasis: e.g. warm natural → cold industrial / high contrast dramatic
+  Rules:
+    - Same location, time period, and subject as `ai_prompt` — do NOT change the scene.
+    - Each variation is self-contained (no references to "the original" or to each other).
+    - Same technical depth and ~2 sentence format as `ai_prompt`.
+    - All variations must differ from each other in their changed dimension.
+  Example:
+  ```json
+  [
+    "Ground-level perspective of the Chernobyl reactor building at night, cold blue moonlight casting long shadows across cracked concrete. No people, absolute stillness, oppressive industrial silence — the scale of the structure dwarfs the foreground debris.",
+    "Tight aerial close-up of the reactor rooftop at dusk, overcast sky diffusing the last grey light evenly. Rusted ventilation pipes and shattered roof panels fill the frame, textures sharp, colour almost entirely desaturated."
+  ]
+  ```
+
+  ▶ **To increase to N variations: change only the number "2" above in p_5_c.txt.**
+    No other file needs editing — the schema has no upper limit, and all downstream
+    consumers (queue builder, resume logic) work with any array length.
+
 **`search_prompt`**
   Single string of 4–8 keywords for stock photo fallback search.
   Example: `"ancient Egypt desert dusk twilight sand dunes cinematic"`
@@ -165,6 +190,12 @@ Overwrite the scaffold file in-place with the COMPLETE filled version
 
 Validate against contracts/schemas/AssetManifest.v1.json using Python + jsonschema.
 If validation fails, fix and retry.
+
+Validate `ai_prompt_variations` for every backgrounds entry:
+  - Must be a JSON array (not a string, not null, not `__FILL__`)
+  - Must have at least 1 element
+  - Every element must be a non-empty string
+If any entry fails, fix it inline and re-validate before writing the file.
 
 Print validation result:
 ```

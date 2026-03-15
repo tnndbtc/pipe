@@ -1350,6 +1350,9 @@ HTML = r"""<!DOCTYPE html>
   }
   #media-btn-search:hover  { opacity: 0.85; }
   #media-btn-search:disabled { opacity: 0.4; cursor: not-allowed; }
+  #media-btn-gen-all { transition: opacity .15s; }
+  #media-btn-gen-all:hover    { opacity: 0.85; }
+  #media-btn-gen-all:disabled { opacity: 0.4; cursor: not-allowed; }
   .media-status-bar {
     flex-shrink: 0; background: var(--surface); border: 1px solid var(--border);
     border-radius: 6px; padding: 8px 14px;
@@ -2561,6 +2564,14 @@ placeholder="Enter your story here"></textarea>
             placeholder="Media server URL  e.g. http://localhost:8200"
             value="{{MEDIA_SERVER_URL}}" />
     <button id="media-btn-search" onclick="mediaStartSearch()" disabled>🔍 Search Media</button>
+    <button id="media-btn-gen-all" onclick="mediaGenAll()" disabled
+            style="background:var(--purple,#7c3aed);color:#fff;border:none;
+                   border-radius:6px;font-size:0.82em;font-weight:700;
+                   padding:6px 14px;cursor:pointer;transition:opacity .15s;flex-shrink:0">
+      ✨ Gen All BGs
+    </button>
+    <span id="media-gen-all-status"
+          style="font-size:0.78em;color:var(--dim);flex-shrink:0"></span>
     <button id="media-btn-preview" onclick="mediaGeneratePreview()" style="margin-left:8px;margin-right:4px">🎬 Preview (VO)</button>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-music" checked onchange="mediaUpdatePreviewLabel()"> Include Music</label>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-sfx" onchange="mediaUpdatePreviewLabel()"> Include SFX</label>
@@ -5862,6 +5873,12 @@ placeholder="Enter your story here"></textarea>
   let _mediaLastProgress   = null;        // last batch-status data received while running
   let _mediaResults        = null;   // full items dict from last completed batch
   let _mediaItemIds        = [];     // ordered item IDs for confirm iteration
+  // ── Batch AI generation state ──────────────────────────────────────────────
+  let _aiBatchRunning = false;   // true while the queue is being processed
+  let _aiBatchQueue   = [];      // [{bgId, prompt, label}, ...] remaining in current run
+  let _aiBatchDone    = [];      // [label, ...] labels of completed items this run
+  let _aiBatchFailed  = {};      // { bg_id: error_message } this run
+  let _aiBatchTotal   = 0;       // total items queued at run start (for progress display)
   let _mediaRecommendedSeq = null;   // recommended_sequence from batch response
   // selections: { item_id: { type:'image'|'video', url, path, score } }
   //   Per-shot:  { item_id: { per_shot: { shot_id: { media_type, url, path, score } } } }
@@ -5879,7 +5896,7 @@ placeholder="Enter your story here"></textarea>
   let _mediaSceneOrder = null; // [scene_id, ...] ordered by first shot appearance
   let _mediaBgRemap   = null; // { old_bg_id: new_bg_id } — loaded from bg_id_remap.json if present
   var _mediaPlayingVid = null; // currently playing video element (limit 1 active stream)
-  let _bgManifestData = {};    // { itemId: { ai_prompt, search_prompt, include_keywords, media_type, motion_level } }
+  let _bgManifestData = {};    // { itemId: { ai_prompt, ai_prompt_variations, search_prompt, include_keywords, media_type, motion_level } }
 
   // Stop a video and release its HTTP connection (pause alone doesn't close it).
   function _mediaStopVid(vid) {
@@ -6865,11 +6882,12 @@ placeholder="Enter your story here"></textarea>
 
     // Store manifest fields for info panel
     _bgManifestData[bgId] = {
-      ai_prompt:        item.ai_prompt || '',
-      search_prompt:    item.search_prompt || '',
-      include_keywords: (item.include_keywords || []).join(', '),
-      media_type:       (item.search_filters || {}).media_type || 'mixed',
-      motion_level:     item.motion_level || '',
+      ai_prompt:            item.ai_prompt || '',
+      ai_prompt_variations: Array.isArray(item.ai_prompt_variations) ? item.ai_prompt_variations : [],
+      search_prompt:        item.search_prompt || '',
+      include_keywords:     (item.include_keywords || []).join(', '),
+      media_type:           (item.search_filters || {}).media_type || 'mixed',
+      motion_level:         item.motion_level || '',
     };
     const mdata = _bgManifestData[bgId];
 
@@ -7206,6 +7224,7 @@ placeholder="Enter your story here"></textarea>
 
     // Restore any preview videos that were generated in a previous session
     _mediaRestorePreviewIfExists();
+    _mediaUpdateGenAllBtn();
   }
 
   // ── Restore preview players that exist on disk after page reload ──
@@ -8581,6 +8600,253 @@ placeholder="Enter your story here"></textarea>
     else if (sfx)     label += ' + SFX';
     label += ')';
     btn.textContent = label;
+  }
+
+  function _mediaUpdateGenAllBtn() {
+    const btn = document.getElementById('media-btn-gen-all');
+    if (!btn) return;
+    if (_aiBatchRunning) {
+      btn.disabled = false;
+      btn.textContent = '⏹ Stop';
+      return;
+    }
+    const hasBgs = _mediaItemIds.some(
+      id => _bgManifestData[id] && _bgManifestData[id].ai_prompt
+    );
+    btn.disabled = !hasBgs;
+    btn.textContent = '✨ Gen All BGs';
+  }
+
+  async function mediaGenAll() {
+    // ── Toggle: Stop if already running ─────────────────────────────────────
+    if (_aiBatchRunning) {
+      _aiBatchRunning = false;
+      document.getElementById('media-gen-all-status').textContent = 'Stopping…';
+      return;
+    }
+
+    const statusEl = document.getElementById('media-gen-all-status');
+
+    // ── Build ordered candidate list ─────────────────────────────────────────
+    const seen = new Set();
+    const candidates = [];
+    for (const id of _mediaItemIds) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (_bgManifestData[id] && _bgManifestData[id].ai_prompt) candidates.push(id);
+    }
+    if (candidates.length === 0) {
+      statusEl.textContent = 'No AI prompts found. Run a media search first.';
+      return;
+    }
+
+    // ── Check which bg_ids already have a saved AI image (resume logic) ──────
+    statusEl.textContent = 'Checking existing images…';
+    let existingImages = {};
+    try {
+      const r = await fetch(
+        `/api/ai_images?slug=${encodeURIComponent(_mediaSlug)}&ep_id=${encodeURIComponent(_mediaEpId)}`
+      );
+      if (r.ok) {
+        existingImages = await r.json();
+      } else {
+        console.warn('ai_images check failed:', r.status, '— proceeding without skip filter');
+      }
+    } catch (_) {
+      console.warn('ai_images check network error — proceeding without skip filter');
+    }
+
+    // Backfill ai_prompt_variations from the manifest file on disk.
+    // Old batch results (loaded from the media server cache) were created before
+    // Stage 5-C added ai_prompt_variations, so item.ai_prompt_variations is absent
+    // in those responses. Reading the manifest directly ensures we always have the
+    // latest variations regardless of when the batch was originally run.
+    try {
+      const mfr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
+                            + '&ep_id=' + encodeURIComponent(_mediaEpId)
+                            + '&file=AssetManifest_draft.shared.json');
+      if (mfr.ok) {
+        const mf = await mfr.json();
+        (mf.backgrounds || []).forEach(function(bg) {
+          if (bg.asset_id && _bgManifestData[bg.asset_id] && Array.isArray(bg.ai_prompt_variations)) {
+            _bgManifestData[bg.asset_id].ai_prompt_variations = bg.ai_prompt_variations;
+          }
+        });
+      }
+    } catch (_) {
+      console.warn('manifest fetch failed — ai_prompt_variations may be empty for old batches');
+    }
+
+    // Build queue: one item per (bg_id, prompt) — base + variations
+    const _newQueue = [];
+    for (const id of candidates) {
+      const mdata = _bgManifestData[id] || {};
+      const prompts = [mdata.ai_prompt].concat(mdata.ai_prompt_variations || [])
+                        .filter(function(p) { return typeof p === 'string' && p.trim(); });
+      if (prompts.length === 0) continue;
+      const totalForId = prompts.length;
+      const existingCount = existingImages[id] ? existingImages[id].length : 0;
+      if (existingCount >= totalForId) continue;  // all done — skip
+      prompts.forEach(function(p, i) {
+        _newQueue.push({ bgId: id, prompt: p, label: id + ' [' + (i + 1) + '/' + totalForId + ']' });
+      });
+    }
+    _aiBatchQueue  = _newQueue;
+    _aiBatchDone   = [];
+    _aiBatchFailed = {};
+    _aiBatchTotal  = _aiBatchQueue.length;
+
+    if (_aiBatchQueue.length === 0) {
+      statusEl.textContent = `All ${candidates.length} background(s) fully generated. ✓`;
+      return;
+    }
+
+    const skipped = candidates.filter(function(id) {
+      const total = 1 + ((_bgManifestData[id] || {}).ai_prompt_variations || []).length;
+      return (existingImages[id] || []).length >= total;
+    }).length;
+    statusEl.textContent = skipped > 0
+      ? `Resuming — ${skipped} bg(s) done, generating ${_aiBatchQueue.length} job(s)…`
+      : `Starting — ${_aiBatchQueue.length} job(s) across ${candidates.length} background(s)…`;
+
+    _aiBatchRunning = true;
+    _mediaUpdateGenAllBtn();
+    _aiBatchProcessNext();
+  }
+
+  async function _aiBatchProcessNext() {
+    const statusEl = document.getElementById('media-gen-all-status');
+
+    // ── Terminal conditions ──────────────────────────────────────────────────
+    if (!_aiBatchRunning || _aiBatchQueue.length === 0) {
+      _aiBatchRunning = false;
+      _mediaUpdateGenAllBtn();
+      const doneCount = _aiBatchDone.length;
+      const failCount = Object.keys(_aiBatchFailed).length;
+      if (failCount === 0) {
+        statusEl.textContent = `Done — ${doneCount} image(s) generated. ✓`;
+      } else {
+        statusEl.textContent =
+          `Done — ${doneCount} generated, ${failCount} failed: ` +
+          Object.keys(_aiBatchFailed).join(', ');
+      }
+      return;
+    }
+
+    const item   = _aiBatchQueue[0];
+    const bgId   = item.bgId;
+    const prompt = item.prompt;
+    const pos    = _aiBatchDone.length + Object.keys(_aiBatchFailed).length + 1;
+
+    statusEl.textContent = `Generating ${pos} of ${_aiBatchTotal}: ${item.label}…`;
+
+    // ── Submit generation job ────────────────────────────────────────────────
+    let jobId, assetId, tMs;
+    try {
+      const r = await fetch('/api/ai_generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slug:   _mediaSlug,
+          ep_id:  _mediaEpId,
+          bg_id:  bgId,
+          prompt: prompt
+        })
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json();
+      jobId   = d.job_id;
+      assetId = d.asset_id;   // used as filename: `${assetId}.png` in _aiBatchPollJob
+      tMs     = d.timestamp_ms;
+    } catch (e) {
+      _aiBatchFailed[item.label] = `Submit error: ${e.message}`;
+      _aiBatchQueue.shift();
+      _aiBatchProcessNext();
+      return;
+    }
+
+    if (!jobId || !assetId) {
+      _aiBatchFailed[item.label] = 'Submit error: ai_generate returned no job_id or asset_id';
+      console.warn('[mediaGenAll] ai_generate response missing job_id/asset_id for', bgId);
+      _aiBatchQueue.shift();
+      _aiBatchProcessNext();
+      return;
+    }
+
+    _aiBatchPollJob(item, jobId, assetId, tMs, 0);
+  }
+
+  function _aiBatchPollJob(item, jobId, assetId, tMs, elapsedMs) {
+    const bgId = item.bgId;
+    // User clicked Stop — exit without modifying queue
+    if (!_aiBatchRunning) {
+      _mediaUpdateGenAllBtn();
+      document.getElementById('media-gen-all-status').textContent = 'Stopped.';
+      return;
+    }
+
+    const MAX_WAIT_MS = 600000; // 10 minutes per image
+    if (elapsedMs >= MAX_WAIT_MS) {
+      _aiBatchFailed[item.label] = 'Timeout (10 min)';
+      _aiBatchQueue.shift();
+      _aiBatchProcessNext();
+      return;
+    }
+
+    fetch(`/api/ai_job_status?job_id=${encodeURIComponent(jobId)}`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`status HTTP ${r.status}`)))
+      .then(d => {
+        if (d.status === 'done') {
+          return fetch('/api/ai_save_image', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+              job_id:       jobId,
+              filename:     `${assetId}.png`,
+              slug:         _mediaSlug,
+              ep_id:        _mediaEpId,
+              bg_id:        bgId,
+              timestamp_ms: tMs
+            })
+          })
+          .then(r => r.ok ? r.json() : Promise.reject(new Error(`save HTTP ${r.status}`)))
+          .then(saved => {
+            if (typeof _aiGenInjectResult === 'function') {
+              _aiGenInjectResult(bgId, {
+                url:      saved.url,
+                path:     saved.path,
+                filename: saved.filename,
+                type:     'image',
+                source:   'ai',
+                score:    null
+              });
+            }
+            _aiBatchDone.push(item.label);
+            _aiBatchQueue.shift();
+            _aiBatchProcessNext();
+          });
+
+        } else if (d.status === 'failed') {
+          const msg = (d.errors || []).join('; ') || 'AI server reported failure';
+          _aiBatchFailed[item.label] = msg;
+          _aiBatchQueue.shift();
+          _aiBatchProcessNext();
+
+        } else {
+          // Still running — poll again in 2 seconds
+          setTimeout(
+            () => _aiBatchPollJob(item, jobId, assetId, tMs, elapsedMs + 2000),
+            2000
+          );
+        }
+      })
+      .catch(err => {
+        // Network error or server down — retry after 5s, do NOT advance queue
+        setTimeout(
+          () => _aiBatchPollJob(item, jobId, assetId, tMs, elapsedMs + 5000),
+          5000
+        );
+      });
   }
 
   async function mediaGeneratePreview() {
