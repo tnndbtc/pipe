@@ -1532,6 +1532,10 @@ HTML = r"""<!DOCTYPE html>
   .media-lazy-sentinel {
     width: 40px; height: 90px; flex-shrink: 0;
   }
+  /* ── Compact header when user scrolls into results ── */
+  #panel-media.media-scrolled #media-sources-table { display: none !important; }
+  #panel-media.media-scrolled #media-server-url    { display: none !important; }
+  #panel-media.media-scrolled .media-toolbar label { display: none !important; }
   /* ── Duration badge (top-left on video thumbnails) ── */
   .media-dur-badge {
     position: absolute; top: 4px; left: 4px;
@@ -5953,6 +5957,15 @@ placeholder="Enter your story here"></textarea>
   }
 
   function initMediaTab() {
+    // One-time: collapse toolbar/sources-table when user scrolls into results
+    var _mb = document.getElementById('media-body');
+    if (!_mb._scrollCollapseAttached) {
+      _mb._scrollCollapseAttached = true;
+      var _mp = document.getElementById('panel-media');
+      _mb.addEventListener('scroll', function() {
+        _mp.classList.toggle('media-scrolled', _mb.scrollTop > 40);
+      }, { passive: true });
+    }
     // Populate episode selector from list_projects (same as Pipeline tab)
     var needsSync = document.getElementById('media-ep-select').options.length <= 1;
     if (!needsSync) {
@@ -7799,14 +7812,21 @@ placeholder="Enter your story here"></textarea>
   }
 
   // ── Active shot: which shot row is the current target for thumbnail clicks ──
+  // Clicking the already-active shot deselects it (sets to null).
   function mediaSetActiveShot(itemId, shotId) {
-    _mediaActiveShot[itemId] = shotId;
-    // Update visual highlight: remove from siblings, add to target
+    const alreadyActive = (_mediaActiveShot[itemId] === shotId);
+    // Update visual highlight: always clear all rows first
     const section = document.getElementById('media-shots-' + itemId);
     if (section) {
       section.querySelectorAll('.media-shot-row').forEach(function(r) {
         r.classList.remove('media-shot-active');
       });
+    }
+    if (alreadyActive) {
+      // Deselect — no shot targeted
+      _mediaActiveShot[itemId] = null;
+    } else {
+      _mediaActiveShot[itemId] = shotId;
       var row = document.getElementById('media-shot-row-' + itemId + '-' + shotId);
       if (row) row.classList.add('media-shot-active');
     }
@@ -7850,7 +7870,26 @@ placeholder="Enter your story here"></textarea>
       }
 
       // ── Target: the user-selected active shot row ──
-      var targetShot = _mediaActiveShot[cardId] || shotIds[0];
+      // If no shot is active (user deselected or never selected) and there are
+      // multiple shots, warn instead of silently falling back to the first shot.
+      if (_mediaActiveShot[cardId] == null && shotIds.length > 1) {
+        // Show a brief inline warning on the shot section
+        const _warnSec = document.getElementById('media-shots-' + cardId);
+        if (_warnSec) {
+          var _warnEl = _warnSec.querySelector('.media-shot-warn');
+          if (!_warnEl) {
+            _warnEl = document.createElement('div');
+            _warnEl.className = 'media-shot-warn';
+            _warnEl.style.cssText = 'font-size:11px;color:#c0392b;padding:2px 6px;margin:2px 0;';
+            _warnSec.insertBefore(_warnEl, _warnSec.firstChild);
+          }
+          _warnEl.textContent = 'Select a shot row first';
+          clearTimeout(_warnEl._hideTimer);
+          _warnEl._hideTimer = setTimeout(function() { _warnEl.textContent = ''; }, 2500);
+        }
+        return;
+      }
+      var targetShot = _mediaActiveShot[cardId] != null ? _mediaActiveShot[cardId] : shotIds[0];
       var targetBgId = (_mediaShotToBg && _mediaShotToBg[targetShot]) || cardId;
 
       // Keep _mediaShotToBg in sync so mediaSetTiming / mediaClearSegment can find this shot
@@ -9219,11 +9258,16 @@ placeholder="Enter your story here"></textarea>
   }
 
   function _mediaApplySavedToGrid(selections) {
-    // When batch results are available, restore selection highlights
+    // When batch results are available, restore selection highlights.
+    // cardId is derived per-shot from shotId (e.g. "sc03-sh03" → "sc03")
+    // rather than from _mediaBgToScene[bgId], which is ambiguous when two
+    // shots share the same background_id — the map only retains the last
+    // scene processed, causing _mediaRenderShotRow to look up the wrong
+    // DOM element and silently skip rendering the earlier shot's selections.
     for (const [bgId, data] of Object.entries(selections)) {
-      const cardId = (_mediaBgToScene && _mediaBgToScene[bgId]) || bgId;
       const perShot = data.per_shot || {};
       for (const [shotId, shotData] of Object.entries(perShot)) {
+        const cardId = shotId.split('-')[0];  // "sc03-sh03" → "sc03"
         try { _mediaRenderShotRow(cardId, shotId); } catch (_) {}
       }
     }
