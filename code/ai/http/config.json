@@ -7,13 +7,15 @@
     "characters":  "flux-schnell",
     "backgrounds": "flux-schnell",
     "sfx":         "audiogen",
-    "bg_video":    "cogvideox-2b"
+    "bg_video":    "cogvideox-2b",
+    "composite":   "composite"
   },
   "sfx_model": "medium",
   "bg_hints": {
     "characters":  "plain white studio background, solid backdrop, no scenery, isolated figure",
     "backgrounds": null,
     "bg_video":    null,
-    "sfx":         null
+    "sfx":         null,
+    "composite":   null
   }
 }

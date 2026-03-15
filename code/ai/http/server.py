@@ -37,6 +37,7 @@ DISPATCH: dict[str, tuple[str, str]] = {
     "backgrounds": ("gen_background_images.py", "--model"),
     "bg_video":    ("gen_background_video.py",  "--model"),
     "sfx":         ("gen_sfx.py",               "--backend"),
+    "composite":   ("gen_img2img.py",           "--mode"),   # value = "composite" from config
 }
 
 # asset_type → manifest section key (for counting total assets)
@@ -45,6 +46,7 @@ MANIFEST_SECTION: dict[str, str] = {
     "backgrounds": "backgrounds",
     "bg_video":    "backgrounds",   # subset; all backgrounds counted
     "sfx":         "sfx_items",
+    "composite":   "character_packs",   # one composite job per character pack
 }
 
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\r')

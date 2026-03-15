@@ -3,12 +3,23 @@
 Replace gen_composite_image.py.
 
 run(pipe, config, args) where:
-  pipe  = {"depth": depth_pipe, "sdxl": sdxl_img2img_pipe | None}
-  args  = Namespace with: bg, characters, blend_strength, depth_scale, output
+  pipe  = {"depth": depth_pipe | None, "sdxl": sdxl_img2img_pipe | None}
+  args  = Namespace with: bg, characters, char_x, char_y, blend_strength,
+          depth_scale, fg_scale, bg_scale, output
 
-Depth-aware scaling logic ported from gen_composite_image.py (unchanged).
-blend_strength=0.0 → pure Pillow composite (same as old script, no GPU beyond depth).
+Depth-aware scaling:
+  Depth map is computed ONCE per background and reused for all characters.
+  Each character is sampled at its own (char_x, char_y) foot position — not
+  a hardcoded value — so multiple characters at different positions scale
+  correctly relative to each other.
+
+blend_strength=0.0 → pure Pillow composite (no GPU beyond depth model).
 blend_strength>0.0 → composite then SDXL img2img refinement at given strength.
+
+Layer ordering:
+  Characters are sorted back-to-front by char_y (smaller y = higher on screen
+  = further away = rendered first). This is automatic; caller does not need to
+  pre-sort the --characters list.
 """
 
 from PIL import Image
@@ -18,106 +29,190 @@ import logging
 log = logging.getLogger(__name__)
 
 
-def _get_depth_scale(depth_map: np.ndarray, foot_y_norm: float,
-                     fg_scale: float = 0.70, bg_scale: float = 0.15) -> float:
-    """Interpolate character scale from depth value at foot position (0–1 normalised)."""
-    depth_at_foot = float(depth_map[int(foot_y_norm * depth_map.shape[0]),
-                                    depth_map.shape[1] // 2])
-    # depth=0 → foreground (large); depth=1 → background (small)
-    return fg_scale + (bg_scale - fg_scale) * depth_at_foot
+# ---------------------------------------------------------------------------
+# Depth helpers
+# ---------------------------------------------------------------------------
+
+def _build_depth_map(depth_pipe, bg_rgb: Image.Image) -> np.ndarray:
+    """
+    Run Depth Anything V2 on the background. Returns a float32 array
+    normalised 0-1 (1 = closest to camera), shaped (h, w), resized to
+    match the background dimensions.
+    """
+    result    = depth_pipe(bg_rgb)
+    depth_raw = np.array(result["depth"], dtype=np.float32)
+
+    d_min, d_max = depth_raw.min(), depth_raw.max()
+    if d_max > d_min:
+        norm = (depth_raw - d_min) / (d_max - d_min)
+    else:
+        norm = np.zeros_like(depth_raw)
+
+    bw, bh = bg_rgb.size
+    if norm.shape != (bh, bw):
+        tmp  = Image.fromarray((norm * 255).astype(np.uint8))
+        tmp  = tmp.resize((bw, bh), Image.BILINEAR)
+        norm = np.array(tmp, dtype=np.float32) / 255.0
+
+    return norm
 
 
-def _detect_overlap(boxes: list[tuple]) -> list[tuple]:
-    """Return list of (i,j) pairs that overlap. box = (x1,y1,x2,y2)."""
-    overlapping = []
-    for i in range(len(boxes)):
-        for j in range(i + 1, len(boxes)):
-            ax1, ay1, ax2, ay2 = boxes[i]
-            bx1, by1, bx2, by2 = boxes[j]
-            if ax1 < bx2 and ax2 > bx1 and ay1 < by2 and ay2 > by1:
-                overlapping.append((i, j))
-    return overlapping
+def _sample_depth_scale(depth_norm: np.ndarray, bg_w: int, bg_h: int,
+                        char_x: float, char_y: float,
+                        fg_scale: float, bg_scale: float) -> float:
+    """
+    Sample depth at (char_x, char_y) foot position and return a char_scale.
+    depth_norm: 1 = foreground (large scale), 0 = background (small scale).
+    Formula matches gen_composite_image.py exactly.
+    """
+    sx = max(0, min(int(bg_w * char_x), bg_w - 1))
+    sy = max(0, min(int(bg_h * char_y), bg_h - 1))
+    d  = float(depth_norm[sy, sx])
+    scale = bg_scale + (fg_scale - bg_scale) * d
+    log.info(f"  depth foot=({sx},{sy}) depth={d:.3f} -> scale={scale:.3f}")
+    return scale
 
+
+# ---------------------------------------------------------------------------
+# Overlap helpers
+# ---------------------------------------------------------------------------
+
+def _boxes_overlap(b1: tuple, b2: tuple) -> bool:
+    return not (b1[2] <= b2[0] or b2[2] <= b1[0] or
+                b1[3] <= b2[1] or b2[3] <= b1[1])
+
+
+def _nudge_no_overlap(paste_x: int, paste_y: int, w: int, h: int,
+                      placed: list, bg_w: int, step: int = 4) -> int:
+    """Shift paste_x horizontally until bbox doesn't overlap any placed box."""
+    bbox = (paste_x, paste_y, paste_x + w, paste_y + h)
+    if not any(_boxes_overlap(bbox, p) for p in placed):
+        return paste_x
+    for delta in range(step, bg_w, step):
+        for direction in (+1, -1):
+            nx    = max(0, min(paste_x + direction * delta, bg_w - w))
+            new_b = (nx, paste_y, nx + w, paste_y + h)
+            if not any(_boxes_overlap(new_b, p) for p in placed):
+                log.info(f"  overlap nudged {direction * delta:+d}px")
+                return nx
+    log.warning(f"  could not resolve overlap — using original x={paste_x}")
+    return paste_x
+
+
+# ---------------------------------------------------------------------------
+# Position / scale helpers
+# ---------------------------------------------------------------------------
+
+def _auto_x_positions(n: int) -> list:
+    if n == 1:
+        return [0.5]
+    return [round((i + 1) / (n + 1), 3) for i in range(n)]
+
+
+def _fill(provided, n: int, default) -> list:
+    provided = list(provided or [])
+    while len(provided) < n:
+        provided.append(default)
+    return provided[:n]
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
 
 def run(pipe: dict, config, args) -> Image.Image:
     if not args.characters:
         raise ValueError(
             "--characters is required for composite mode. "
-            "Pass one or more RGBA PNG paths, e.g. --characters char1.png char2.png"
+            "Pass one or more RGBA PNG paths."
         )
 
-    bg = Image.open(args.bg).convert("RGBA")
+    bg     = Image.open(args.bg).convert("RGBA")
+    bg_rgb = bg.convert("RGB")
     bw, bh = bg.size
 
-    # Characters must be passed in back-to-front order (farther characters first).
-    # The caller controls layer order; no automatic sort is applied.
-    chars = [Image.open(c).convert("RGBA") for c in args.characters]
+    n       = len(args.characters)
+    fg_scale = getattr(args, "fg_scale", 0.70)
+    bg_scale = getattr(args, "bg_scale", 0.15)
 
-    depth_map = None
+    # Resolve per-character positions
+    provided_xs = getattr(args, "char_x", None) or []
+    provided_ys = getattr(args, "char_y", None) or []
+    auto_xs     = _auto_x_positions(n)
+    char_xs     = [(provided_xs[i] if i < len(provided_xs) else auto_xs[i]) for i in range(n)]
+    char_ys     = _fill(provided_ys, n, 0.92)
+
+    # Build depth map once (reused for all characters)
+    depth_norm = None
     if args.depth_scale and pipe.get("depth"):
-        result = pipe["depth"](bg.convert("RGB"))
-        depth_map = np.array(result["depth"]) / 255.0
-        log.info("Depth map obtained for scaling.")
+        log.info("Computing depth map...")
+        depth_norm = _build_depth_map(pipe["depth"], bg_rgb)
 
-    positions = []
-    boxes = []
+    # Build per-character dicts
+    chars = []
+    for i, path in enumerate(args.characters):
+        char_x = char_xs[i]
+        char_y = char_ys[i]
 
-    for idx, char in enumerate(chars):
-        # Determine paste x centre: evenly spaced
-        cx = int(bw * (idx + 1) / (len(chars) + 1))
-        cy = bh  # anchor bottom of character to bottom of frame
-
-        # Scale character
-        if depth_map is not None:
-            scale = _get_depth_scale(depth_map, foot_y_norm=0.85)
-            target_h = int(bh * scale)
+        if depth_norm is not None:
+            scale = _sample_depth_scale(depth_norm, bw, bh,
+                                        char_x, char_y, fg_scale, bg_scale)
         else:
-            target_h = int(bh * 0.50)  # auto-scale fallback
+            scale = getattr(args, "char_scale", None) or 0.50
 
-        ratio = target_h / char.size[1]
-        target_w = int(char.size[0] * ratio)
-        char_resized = char.resize((target_w, target_h), Image.LANCZOS)
+        chars.append({
+            "img":     Image.open(path).convert("RGBA"),
+            "char_x":  char_x,
+            "char_y":  char_y,
+            "scale":   scale,
+        })
 
-        px = cx - target_w // 2
-        py = cy - target_h
-        positions.append([px, py, char_resized])
-        boxes.append((px, py, px + target_w, py + target_h))
+    # Sort back-to-front: smaller char_y = higher on screen = further = render first
+    chars.sort(key=lambda c: c["char_y"])
 
-    # Nudge overlapping characters horizontally (alternating directions)
-    nudge = 20
-    for _ in range(50):
-        pairs = _detect_overlap(boxes)
-        if not pairs:
-            break
-        for i, j in pairs:
-            x1, y1, x2, y2 = boxes[i]
-            dx = nudge if i % 2 == 0 else -nudge
-            positions[i][0] += dx
-            boxes[i] = (boxes[i][0] + dx, y1, boxes[i][2] + dx, y2)
+    # Composite each character
+    canvas       = bg.copy()
+    placed_boxes = []
 
-    # Compose
-    canvas = bg.copy()
-    for px, py, ch in positions:
-        canvas.alpha_composite(ch, dest=(px, py))
+    for c in chars:
+        img    = c["img"]
+        target_h = int(bh * c["scale"])
+        ratio    = target_h / img.size[1]
+        target_w = int(img.size[0] * ratio)
+        img      = img.resize((target_w, target_h), Image.LANCZOS)
 
-    log.info(f"Pillow composite done ({len(chars)} character(s)).")
+        paste_x = int(bw * c["char_x"]) - target_w // 2
+        paste_y = int(bh * c["char_y"]) - target_h
+        paste_x = max(0, min(paste_x, bw - target_w))
+        paste_y = max(0, min(paste_y, bh - target_h))
+
+        paste_x = _nudge_no_overlap(paste_x, paste_y, target_w, target_h,
+                                    placed_boxes, bw)
+
+        log.info(f"  paste ({paste_x},{paste_y}) size {target_w}x{target_h} "
+                 f"scale={c['scale']:.3f} x={c['char_x']} y={c['char_y']}")
+
+        canvas.alpha_composite(img, dest=(paste_x, paste_y))
+        placed_boxes.append((paste_x, paste_y, paste_x + target_w, paste_y + target_h))
+
+    log.info(f"Pillow composite done ({n} character(s)).")
 
     # Optional SDXL blend pass
-    if args.blend_strength and args.blend_strength > 0.0 and pipe.get("sdxl"):
-        sdxl = pipe["sdxl"]
+    blend = getattr(args, "blend_strength", 0.0) or 0.0
+    if blend > 0.0 and pipe.get("sdxl"):
+        log.info(f"SDXL blend pass (strength={blend})...")
         composite_rgb = canvas.convert("RGB")
-        result = sdxl(
+        result = pipe["sdxl"](
             prompt=getattr(args, "prompt", "photorealistic historical scene"),
             negative_prompt=config.NEGATIVE_PROMPT,
             image=composite_rgb,
-            strength=args.blend_strength,
+            strength=blend,
             num_inference_steps=20,
             guidance_scale=5.0,
         ).images[0]
-        # Restore alpha from original composite
         result_rgba = result.convert("RGBA")
         result_rgba.putalpha(canvas.split()[3])
         canvas = result_rgba
-        log.info(f"SDXL blend pass done (strength={args.blend_strength}).")
+        log.info("SDXL blend pass done.")
 
     return canvas

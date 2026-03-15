@@ -16,12 +16,13 @@ from img2img.config import MODEL_IDS, DEVICE
 log = logging.getLogger(__name__)
 
 
-def _fp16_kwargs() -> dict:
-    return {"torch_dtype": torch.float16} if DEVICE == "cuda" else {}
+def _fp16_kwargs(no_fp16: bool = False) -> dict:
+    if no_fp16 or DEVICE != "cuda":
+        return {}
+    return {"torch_dtype": torch.float16}
 
 
 def unload_model(pipe) -> None:
-    """Delete pipeline and free VRAM."""
     if pipe is None:
         return
     del pipe
@@ -31,11 +32,10 @@ def unload_model(pipe) -> None:
     log.info("Model unloaded, VRAM cleared.")
 
 
-def load_sdxl_img2img() -> StableDiffusionXLImg2ImgPipeline:
-    """SDXL img2img — ~5 GB peak with CPU offload. Used by: style, composite blend."""
+def load_sdxl_img2img(no_fp16: bool = False) -> StableDiffusionXLImg2ImgPipeline:
     log.info("Loading SDXL img2img...")
     pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-        MODEL_IDS["sdxl_base"], **_fp16_kwargs()
+        MODEL_IDS["sdxl_base"], **_fp16_kwargs(no_fp16)
     )
     pipe.enable_model_cpu_offload()
     pipe.enable_vae_slicing()
@@ -43,11 +43,10 @@ def load_sdxl_img2img() -> StableDiffusionXLImg2ImgPipeline:
     return pipe
 
 
-def load_sdxl_inpaint() -> StableDiffusionXLInpaintPipeline:
-    """SDXL Inpainting — ~5 GB peak. Used by: inpaint, outpaint."""
+def load_sdxl_inpaint(no_fp16: bool = False) -> StableDiffusionXLInpaintPipeline:
     log.info("Loading SDXL Inpaint...")
     pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
-        MODEL_IDS["sdxl_inpaint"], **_fp16_kwargs()
+        MODEL_IDS["sdxl_inpaint"], **_fp16_kwargs(no_fp16)
     )
     pipe.enable_model_cpu_offload()
     pipe.enable_vae_slicing()
@@ -55,12 +54,12 @@ def load_sdxl_inpaint() -> StableDiffusionXLInpaintPipeline:
     return pipe
 
 
-def load_sdxl_controlnet(controlnet_id: str) -> StableDiffusionXLControlNetImg2ImgPipeline:
-    """SDXL + ControlNet — ~6.5 GB peak. Used by: pose, depth, canny."""
+def load_sdxl_controlnet(controlnet_id: str,
+                         no_fp16: bool = False) -> StableDiffusionXLControlNetImg2ImgPipeline:
     log.info(f"Loading ControlNet: {controlnet_id}")
-    controlnet = ControlNetModel.from_pretrained(controlnet_id, **_fp16_kwargs())
+    controlnet = ControlNetModel.from_pretrained(controlnet_id, **_fp16_kwargs(no_fp16))
     pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
-        MODEL_IDS["sdxl_base"], controlnet=controlnet, **_fp16_kwargs()
+        MODEL_IDS["sdxl_base"], controlnet=controlnet, **_fp16_kwargs(no_fp16)
     )
     pipe.enable_model_cpu_offload()
     pipe.enable_vae_slicing()
@@ -68,11 +67,10 @@ def load_sdxl_controlnet(controlnet_id: str) -> StableDiffusionXLControlNetImg2I
     return pipe
 
 
-def load_sd_upscaler() -> StableDiffusionUpscalePipeline:
-    """SD x4 Upscaler — ~2 GB peak. Used by: upscale_diffusion."""
+def load_sd_upscaler(no_fp16: bool = False) -> StableDiffusionUpscalePipeline:
     log.info("Loading SD x4 Upscaler...")
     pipe = StableDiffusionUpscalePipeline.from_pretrained(
-        MODEL_IDS["sd_x4_upscaler"], **_fp16_kwargs()
+        MODEL_IDS["sd_x4_upscaler"], **_fp16_kwargs(no_fp16)
     )
     if DEVICE == "cuda":
         pipe = pipe.to("cuda")
@@ -82,7 +80,7 @@ def load_sd_upscaler() -> StableDiffusionUpscalePipeline:
 
 
 def load_depth_model():
-    """Depth Anything V2 Small — ~1 GB. Used by: composite, depth_control."""
+    """Depth Anything V2 Small — ~1 GB. No FP16 flag (transformers pipeline manages dtype)."""
     log.info("Loading Depth Anything V2 Small...")
     depth_pipe = hf_pipeline(
         task="depth-estimation",
@@ -94,7 +92,6 @@ def load_depth_model():
 
 
 def load_ip_adapter(sdxl_pipe: StableDiffusionXLImg2ImgPipeline):
-    """Attach IP-Adapter-Plus weights to an existing SDXL pipe (~1 GB extra)."""
     log.info("Loading IP-Adapter-Plus...")
     sdxl_pipe.load_ip_adapter(
         MODEL_IDS["ip_adapter_plus"],
