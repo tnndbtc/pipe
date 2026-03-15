@@ -597,8 +597,46 @@ def synthesize_vo_item(
     }
 
 
+def _mp3_bytes_to_wav_bytes(mp3_data: bytes) -> bytes:
+    """Convert MP3 bytes to 24 kHz 16-bit mono PCM WAV bytes using ffmpeg.
+
+    Azure TTS is configured to output MP3 (smaller, better quality for HD voices).
+    All downstream processing (wave module, vo_preview_concat, trim) requires
+    standard PCM WAV, so we convert here rather than changing the TTS output format.
+    """
+    import subprocess as _sp
+    result = _sp.run(
+        ["ffmpeg", "-y", "-f", "mp3", "-i", "pipe:0",
+         "-ar", "24000", "-ac", "1", "-sample_fmt", "s16", "-f", "wav", "pipe:1"],
+        input=mp3_data, capture_output=True, timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg MP3→WAV conversion failed: "
+            f"{result.stderr.decode('utf-8', 'replace')[:300]}"
+        )
+    return result.stdout
+
+
+def _is_mp3_bytes(data: bytes) -> bool:
+    """Return True if data is MP3 (MPEG sync header or ID3 tag)."""
+    if len(data) < 3:
+        return False
+    if data[:3] == b"ID3":           # ID3 tag header before MP3 frames
+        return True
+    # MPEG sync: 0xFF followed by 0xE0–0xFF (sync bits + layer bits set)
+    return data[0] == 0xFF and (data[1] & 0xE0) == 0xE0
+
+
 def _write_wav_bytes_atomic(path: str, wav_bytes: bytes) -> None:
-    """Write WAV bytes atomically (write to .tmp then rename)."""
+    """Write WAV bytes atomically (write to .tmp then rename).
+
+    Automatically converts MP3 bytes to PCM WAV if the TTS returned MP3.
+    Azure TTS is configured with Audio24Khz96KBitRateMonoMp3; all .wav files
+    stored on disk must be real PCM WAV for downstream wave-module reads.
+    """
+    if _is_mp3_bytes(wav_bytes):
+        wav_bytes = _mp3_bytes_to_wav_bytes(wav_bytes)
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(wav_bytes)
@@ -879,7 +917,7 @@ def _tts_rest_preview(ssml: str) -> bytes:
     headers = {
         "Ocp-Apim-Subscription-Key": key,
         "Content-Type": "application/ssml+xml",
-        "X-Microsoft-OutputFormat": "audio-24khz-96kbitrate-mono-mp3",
+        "X-Microsoft-OutputFormat": "riff-24khz-16bit-mono-pcm",
         "User-Agent": "pipe-preview",
     }
     for attempt in range(4):
@@ -956,7 +994,7 @@ def _get_synth():
             raise RuntimeError("AZURE_SPEECH_KEY not set")
         config = _speechsdk.SpeechConfig(subscription=key, region=region)
         config.set_speech_synthesis_output_format(
-            _speechsdk.SpeechSynthesisOutputFormat.Audio24Khz96KBitRateMonoMp3)
+            _speechsdk.SpeechSynthesisOutputFormat.Riff24Khz16BitMonoPcm)
         _tts_synth = _speechsdk.SpeechSynthesizer(speech_config=config, audio_config=None)
     return _tts_synth
 
@@ -17143,17 +17181,21 @@ class Handler(BaseHTTPRequestHandler):
                         # start_sec/end_sec computed on the client with the same
                         # cursor logic as _voRecalcSceneTimes (scene tails included).
                         # Trust them verbatim — no recomputation on the server.
+                        # pause_after_ms is also sent by the frontend and must be
+                        # written back to the manifest so vo_preview_concat uses it.
                         for _it in _req_items:
-                            _dur   = float(_it.get("duration_sec", 0))
-                            _start = float(_it["start_sec"]) if "start_sec" in _it else 0.0
-                            _end   = float(_it["end_sec"])   if "end_sec"   in _it else _start + _dur
+                            _dur      = float(_it.get("duration_sec", 0))
+                            _start    = float(_it["start_sec"]) if "start_sec" in _it else 0.0
+                            _end      = float(_it["end_sec"])   if "end_sec"   in _it else _start + _dur
+                            _pause_ms = int(_it.get("pause_after_ms", 300))
                             _approval_items.append({
-                                "item_id":      _it["item_id"],
-                                "speaker_id":   _it.get("speaker_id", ""),
-                                "text":         _it.get("text", ""),
-                                "duration_sec": round(_dur, 3),
-                                "start_sec":    round(_start, 6),
-                                "end_sec":      round(_end, 6),
+                                "item_id":        _it["item_id"],
+                                "speaker_id":     _it.get("speaker_id", ""),
+                                "text":           _it.get("text", ""),
+                                "duration_sec":   round(_dur, 3),
+                                "pause_after_ms": _pause_ms,
+                                "start_sec":      round(_start, 6),
+                                "end_sec":        round(_end, 6),
                             })
                         _items_measured = len(_approval_items)
                     else:
@@ -17215,6 +17257,32 @@ class Handler(BaseHTTPRequestHandler):
                         _approval_items,
                         _hashes,
                     )
+
+                    # ── Write pause_after_ms / start_sec / end_sec back to manifest ──
+                    # The frontend sends the full approved timeline including
+                    # pause_after_ms for every item.  Write these back so that
+                    # vo_preview_concat (and any other manifest reader) uses the
+                    # values the user actually approved, not stale or missing defaults.
+                    if _req_items:
+                        _pause_lookup = {
+                            a["item_id"]: a["pause_after_ms"]
+                            for a in _approval_items
+                        }
+                        _mani_path = os.path.join(full_ep,
+                                                  f"AssetManifest_merged.{locale}.json")
+                        with open(_mani_path, encoding="utf-8") as _mf2:
+                            _mani2 = json.load(_mf2)
+                        for _mitem in _mani2.get("vo_items", []):
+                            _miid = _mitem["item_id"]
+                            if _miid in _pause_lookup:
+                                _mitem["pause_after_ms"] = _pause_lookup[_miid]
+                        _mani_tmp = _mani_path + ".tmp"
+                        with open(_mani_tmp, "w", encoding="utf-8") as _mf2:
+                            json.dump(_mani2, _mf2, indent=2, ensure_ascii=False)
+                        os.replace(_mani_tmp, _mani_path)
+                        _log.debug("[vo_approve] wrote pause_after_ms for %d items → manifest",
+                                   len(_pause_lookup))
+                    # ─────────────────────────────────────────────────────────────────
 
                     # Export {locale}_vo_durations.json (used by Stage 8 p_8.txt)
                     _durations = {
