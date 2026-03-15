@@ -2589,14 +2589,14 @@ placeholder="Enter your story here"></textarea>
 
   <!-- results body — item cards rendered here by JS; overrides + full preview live here too so they scroll -->
   <div class="media-body" id="media-body">
-    <!-- shot overrides section — populated by mediaRenderShotOverrides() -->
-    <div id="media-shot-overrides"></div>
-
-    <!-- full-episode preview video player -->
+    <!-- full-episode preview video player — above overrides and batch cards -->
     <div id="media-preview-wrap" style="display:none;padding:8px 12px;border-top:1px solid var(--border);flex-shrink:0">
       <div style="font-weight:600;margin-bottom:4px" id="media-preview-label">Preview (VO)</div>
       <video id="media-preview-video" controls style="width:100%;max-height:400px"></video>
     </div>
+
+    <!-- shot overrides section — populated by mediaRenderShotOverrides() -->
+    <div id="media-shot-overrides"></div>
   </div>
 
   <!-- footer actions -->
@@ -6589,7 +6589,7 @@ placeholder="Enter your story here"></textarea>
     if (_mbPreviewWrap) _mbPreviewWrap.style.display = 'none';
     const _mbBody = document.getElementById('media-body');
     _mbBody.innerHTML = '<div id="media-shot-overrides"></div>';
-    if (_mbPreviewWrap) _mbBody.appendChild(_mbPreviewWrap);
+    if (_mbPreviewWrap) _mbBody.insertBefore(_mbPreviewWrap, _mbBody.firstChild);
     _mediaSelections   = {};
     _mediaBatchId      = null;
     _mediaResults      = null;
@@ -6658,7 +6658,7 @@ placeholder="Enter your story here"></textarea>
     if (!tbl) {
       const _pw = document.getElementById('media-preview-wrap');
       body.innerHTML = '';
-      if (_pw) body.appendChild(_pw);
+      if (_pw) body.insertBefore(_pw, body.firstChild);
       tbl = document.createElement('table');
       tbl.className = 'media-progress-table';
       tbl.innerHTML = `<thead><tr>
@@ -7044,7 +7044,7 @@ placeholder="Enter your story here"></textarea>
     const _pw = document.getElementById('media-preview-wrap');
     if (_pw) _pw.style.display = 'none';
     body.innerHTML = '<div id="media-shot-overrides"></div>';
-    if (_pw) body.appendChild(_pw);
+    if (_pw) body.insertBefore(_pw, body.firstChild);
     const d_topN = _mediaResults?._topN || 5;
     _mediaItemIds = Object.keys(items);
     _mediaSelections = {};
@@ -8629,7 +8629,10 @@ placeholder="Enter your story here"></textarea>
       const videoEl = document.getElementById('media-preview-video');
       if (videoEl) videoEl.src = '/serve_media?path=' + encodeURIComponent(relPath) + '&t=' + Date.now();
       const previewWrap = document.getElementById('media-preview-wrap');
-      if (previewWrap) previewWrap.style.display = '';
+      if (previewWrap) {
+        previewWrap.style.display = '';
+        previewWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
       if (d.warnings && d.warnings.length) {
         _mediaSetStatus('⚠️ Preview ready with warnings: ' + d.warnings.join(' | '));
       } else {
@@ -9201,7 +9204,7 @@ placeholder="Enter your story here"></textarea>
     const body = document.getElementById('media-body');
     const _pw = document.getElementById('media-preview-wrap');
     body.innerHTML = '<div id="media-shot-overrides"></div>';
-    if (_pw) body.appendChild(_pw);
+    if (_pw) body.insertBefore(_pw, body.firstChild);
 
     const shotDur = _mediaShotDur || {};
     const shotMap = _mediaShotMap || {};
@@ -9268,7 +9271,7 @@ placeholder="Enter your story here"></textarea>
       const _pw2 = document.getElementById('media-preview-wrap');
       body.innerHTML = '<div style="color:var(--dim);padding:16px;font-style:italic">'
         + 'No saved media selections found.</div>';
-      if (_pw2) body.appendChild(_pw2);
+      if (_pw2) body.insertBefore(_pw2, body.firstChild);
     }
   }
 
