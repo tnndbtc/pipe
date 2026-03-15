@@ -12681,8 +12681,9 @@ placeholder="Enter your story here"></textarea>
               // Only grey steps that are actually skipped in run.sh when approved.
               // Steps that always run (merge, post_tts, apply_music_plan, resolve,
               // gen_render_plan, render) are never greyed — grey means "will not run".
+              const _voByLocale = _approvals.vo_by_locale || {};
               const _localeApproved =
-                (step === 'gen_tts' && _approvals.vo);
+                (step === 'gen_tts' && !!_voByLocale[locale]);
               const _localeReadyToRender = (step === 'render_video' && _approvals.all && !_rpStale[locale]);
               const _renderPlanStale     = (step === 'gen_render_plan' && !!_rpStale[locale]);
               if (_localeApproved && !_renderPlanStale) {
@@ -13808,13 +13809,24 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
     _vo_primary = meta_locales_str.split(",")[0].strip() if meta_locales_str else "en"
     _vo_approved_new    = os.path.join(ep_dir, f"vo_preview_approved.{_vo_primary}.json")
     _vo_approved_legacy = os.path.join(ep_dir, "tts_review_complete.json")
+    # Per-locale VO approval — used by Stage 9 UI to grey gen_tts only for
+    # locales whose VO has actually been approved (not just the primary).
+    _vo_by_locale: dict[str, bool] = {}
+    for _loc in (locales or ["en"]):
+        _loc_sentinel = os.path.join(ep_dir, f"vo_preview_approved.{_loc}.json")
+        _vo_by_locale[_loc] = os.path.isfile(_loc_sentinel)
+    # Legacy fallback: if tts_review_complete.json exists, count it for primary locale
+    if os.path.isfile(_vo_approved_legacy) and _vo_primary not in _vo_by_locale:
+        _vo_by_locale[_vo_primary] = True
+
     approvals = {
-        "vo":    os.path.isfile(_vo_approved_new) or os.path.isfile(_vo_approved_legacy),
-        "music": os.path.isfile(os.path.join(ep_dir, "assets", "music", "MusicApprovalSnapshot.json")),
-        "sfx":   os.path.isfile(os.path.join(ep_dir, "assets", "sfx", "SfxPlan.json")),
-        "media": os.path.isfile(os.path.join(ep_dir, "assets", "media", "selections.json")),
+        "vo":           os.path.isfile(_vo_approved_new) or os.path.isfile(_vo_approved_legacy),
+        "vo_by_locale": _vo_by_locale,
+        "music":        os.path.isfile(os.path.join(ep_dir, "assets", "music", "MusicApprovalSnapshot.json")),
+        "sfx":          os.path.isfile(os.path.join(ep_dir, "assets", "sfx", "SfxPlan.json")),
+        "media":        os.path.isfile(os.path.join(ep_dir, "assets", "media", "selections.json")),
     }
-    approvals["all"] = all(approvals.values())
+    approvals["all"] = approvals["vo"] and approvals["music"] and approvals["sfx"] and approvals["media"]
 
     # ── Staleness guard: is RenderPlan older than VO approval? ────────────────
     # If vo_preview_approved.{primary}.json is newer than RenderPlan.{locale}.json,
