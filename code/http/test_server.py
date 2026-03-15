@@ -6585,7 +6585,11 @@ placeholder="Enter your story here"></textarea>
     _mediaSetStatus('Submitting batch …', true);
     document.getElementById('media-btn-search').disabled = true;
     document.getElementById('media-footer').style.display = 'none';
-    document.getElementById('media-body').innerHTML = '<div id="media-shot-overrides"></div>';
+    const _mbPreviewWrap = document.getElementById('media-preview-wrap');
+    if (_mbPreviewWrap) _mbPreviewWrap.style.display = 'none';
+    const _mbBody = document.getElementById('media-body');
+    _mbBody.innerHTML = '<div id="media-shot-overrides"></div>';
+    if (_mbPreviewWrap) _mbBody.appendChild(_mbPreviewWrap);
     _mediaSelections   = {};
     _mediaBatchId      = null;
     _mediaResults      = null;
@@ -6652,7 +6656,9 @@ placeholder="Enter your story here"></textarea>
     // Re-use existing table if already rendered; otherwise create it
     let tbl = body.querySelector('.media-progress-table');
     if (!tbl) {
+      const _pw = document.getElementById('media-preview-wrap');
       body.innerHTML = '';
+      if (_pw) body.appendChild(_pw);
       tbl = document.createElement('table');
       tbl.className = 'media-progress-table';
       tbl.innerHTML = `<thead><tr>
@@ -7035,7 +7041,10 @@ placeholder="Enter your story here"></textarea>
 
   function _mediaRenderResults(items) {
     const body = document.getElementById('media-body');
+    const _pw = document.getElementById('media-preview-wrap');
+    if (_pw) _pw.style.display = 'none';
     body.innerHTML = '<div id="media-shot-overrides"></div>';
+    if (_pw) body.appendChild(_pw);
     const d_topN = _mediaResults?._topN || 5;
     _mediaItemIds = Object.keys(items);
     _mediaSelections = {};
@@ -8618,8 +8627,9 @@ placeholder="Enter your story here"></textarea>
       const relPath = 'projects/' + _mediaSlug + '/episodes/' + _mediaEpId
                       + '/assets/media/MediaPreviewPack/preview_video.mp4';
       const videoEl = document.getElementById('media-preview-video');
-      videoEl.src = '/serve_media?path=' + encodeURIComponent(relPath) + '&t=' + Date.now();
-      document.getElementById('media-preview-wrap').style.display = '';
+      if (videoEl) videoEl.src = '/serve_media?path=' + encodeURIComponent(relPath) + '&t=' + Date.now();
+      const previewWrap = document.getElementById('media-preview-wrap');
+      if (previewWrap) previewWrap.style.display = '';
       if (d.warnings && d.warnings.length) {
         _mediaSetStatus('⚠️ Preview ready with warnings: ' + d.warnings.join(' | '));
       } else {
@@ -9189,7 +9199,9 @@ placeholder="Enter your story here"></textarea>
   function _mediaRenderSavedSummary(selections) {
     // Render a read-only summary of saved selections when media server is unavailable
     const body = document.getElementById('media-body');
+    const _pw = document.getElementById('media-preview-wrap');
     body.innerHTML = '<div id="media-shot-overrides"></div>';
+    if (_pw) body.appendChild(_pw);
 
     const shotDur = _mediaShotDur || {};
     const shotMap = _mediaShotMap || {};
@@ -9253,8 +9265,10 @@ placeholder="Enter your story here"></textarea>
     }
 
     if (Object.keys(selections).length === 0) {
+      const _pw2 = document.getElementById('media-preview-wrap');
       body.innerHTML = '<div style="color:var(--dim);padding:16px;font-style:italic">'
         + 'No saved media selections found.</div>';
+      if (_pw2) body.appendChild(_pw2);
     }
   }
 
