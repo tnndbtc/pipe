@@ -100,6 +100,12 @@
             "type": "string",
             "description": "Detailed text-to-image generation prompt"
           },
+          "ai_prompt_variations": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "description": "Additional AI image generation prompts for the same scene. Each varies one primary visual dimension from ai_prompt (composition, lighting, atmosphere, or tonal emphasis). Same ~2 sentence cinematic format as ai_prompt. The count is controlled solely by p_5_c.txt — currently 2, but can be increased to any N by editing only that prompt file."
+          },
           "search_queries": {
             "type": "array",
             "items": { "type": "string" },
