@@ -146,15 +146,25 @@ run_stage_10() {
   local code_dir
   code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
 
-  # ── [1] Music clips — locale-free, runs once, skips if no resources ──
-  echo "  [1] Generating music clips (skips gracefully if no resources)…"
-  python3 "${code_dir}/gen_music_clip.py" \
-    --manifest "${EP_DIR}/AssetManifest_draft.shared.json" || true
+  # ── [1] Music clips — skip if music already approved ─────────────────
+  _music_approved="${EP_DIR}/assets/music/MusicApprovalSnapshot.json"
+  if [[ -f "$_music_approved" ]]; then
+    echo "  [1] Music already approved — skipping gen_music_clip."
+    echo "      (Delete assets/music/MusicApprovalSnapshot.json to force re-run)"
+  else
+    echo "  [1] Generating music clips (skips gracefully if no resources)…"
+    python3 "${code_dir}/gen_music_clip.py" \
+      --manifest "${EP_DIR}/AssetManifest_draft.shared.json" || true
+  fi
 
-  # ── [1b] Music loop candidates — auto, no pause ───────────────────────
-  echo "  [1b] Analysing music loop candidates…"
-  python3 "${code_dir}/music_prepare_loops.py" \
-    --manifest "${EP_DIR}/AssetManifest_draft.shared.json" || true
+  # ── [1b] Music loop candidates — skip if music already approved ───────
+  if [[ -f "$_music_approved" ]]; then
+    echo "  [1b] Music already approved — skipping music_prepare_loops."
+  else
+    echo "  [1b] Analysing music loop candidates…"
+    python3 "${code_dir}/music_prepare_loops.py" \
+      --manifest "${EP_DIR}/AssetManifest_draft.shared.json" || true
+  fi
 
   # ── Per-locale steps ──────────────────────────────────────────────────
   # Parse comma-separated locales (e.g. "en, zh-Hans").

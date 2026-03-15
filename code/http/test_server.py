@@ -12500,25 +12500,29 @@ placeholder="Enter your story here"></textarea>
 
         // ── Steps 1–4: shared (no locale) ───────────────────────────────────
         [
-          { num: 1, step: 'gen_music_clip',  label: '1 — gen_music_clip',
+          { num: 1,  step: 'gen_music_clip',       label: '1 — gen_music_clip',
             cmd: 'gen_music_clip.py --manifest AssetManifest_draft.shared.json' },
-          { num: 2, step: 'gen_characters',  label: '2 — gen_characters',
+          { num: '1b', step: 'music_prepare_loops', label: '1b — music_prepare_loops',
+            cmd: 'music_prepare_loops.py --manifest AssetManifest_draft.shared.json' },
+          { num: 2,  step: 'gen_characters',       label: '2 — gen_characters',
             cmd: 'gen_characters.py --manifest AssetManifest_draft.shared.json' },
-          { num: 3, step: 'gen_backgrounds', label: '3 — gen_backgrounds',
+          { num: 3,  step: 'gen_backgrounds',      label: '3 — gen_backgrounds',
             cmd: 'gen_backgrounds.py --manifest AssetManifest_draft.shared.json' },
-          { num: 4, step: 'gen_sfx',         label: '4 — gen_sfx',
+          { num: 4,  step: 'gen_sfx',              label: '4 — gen_sfx',
             cmd: 'gen_sfx.py --manifest AssetManifest_draft.shared.json' },
         ].forEach(({ num, step, label, cmd }) => {
           const done = (sharedStepsMap[step] || {}).done || false;
           const row = document.createElement('div');
           row.className = 'pipe-substep-row';
-          // ── approval dimming (FIX E) ──────────────────────────────────────
+          // Steps that are skipped in run.sh when the corresponding approval exists.
+          // grey = will NOT run when Stage 9 is executed.
           const _sharedApproved =
-            (step === 'gen_music_clip' && _approvals.music) ||
-            (step === 'gen_sfx'        && _approvals.sfx);
+            (step === 'gen_music_clip'       && _approvals.music) ||
+            (step === 'music_prepare_loops'  && _approvals.music) ||
+            (step === 'gen_sfx'              && _approvals.sfx);
           if (_sharedApproved) {
             row.classList.add('step-approved');
-            row.title = 'Already approved — click to re-run if content changes';
+            row.title = 'Already approved — will be skipped when Stage 9 runs';
           }
           row.appendChild(Object.assign(document.createElement('span'), {
             innerHTML: statusIcon(done), style: 'flex-shrink:0'
@@ -12561,17 +12565,16 @@ placeholder="Enter your story here"></textarea>
               const done = (lsteps[step] || {}).done || false;
               const row  = document.createElement('div');
               row.className = 'pipe-substep-row';
-              // ── approval dimming (FIX E) ────────────────────────────────
+              // Only grey steps that are actually skipped in run.sh when approved.
+              // Steps that always run (merge, post_tts, apply_music_plan, resolve,
+              // gen_render_plan, render) are never greyed — grey means "will not run".
               const _localeApproved =
-                (['manifest_merge', 'gen_tts', 'post_tts'].includes(step) && _approvals.vo) ||
-                (step === 'apply_music_plan' && _approvals.music) ||
-                (step === 'resolve_assets'   && _approvals.media) ||
-                (step === 'gen_render_plan'  && _approvals.all);
+                (step === 'gen_tts' && _approvals.vo);
               const _localeReadyToRender = (step === 'render_video' && _approvals.all && !_rpStale[locale]);
               const _renderPlanStale     = (step === 'gen_render_plan' && !!_rpStale[locale]);
               if (_localeApproved && !_renderPlanStale) {
                 row.classList.add('step-approved');
-                row.title = 'Already approved — click to re-run if content changes';
+                row.title = 'VO already approved — will be skipped when Stage 9 runs';
               }
               if (_renderPlanStale) {
                 // VO was re-approved after this RenderPlan was generated

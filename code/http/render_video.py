@@ -311,10 +311,17 @@ def _build_anim_filter(
     else:
         return None  # unknown type → static
 
+    # trim+setpts after zoompan: zoompan does not signal EOF cleanly when used
+    # inside a concat filter on looped still-image inputs.  Without the explicit
+    # trim the last frame is held indefinitely and the concat never switches to
+    # the next segment.  trim=duration caps the output; setpts=PTS-STARTPTS
+    # resets timestamps to 0 so the concat filter stitches correctly.
+    dur_sec_frag = dur_sec  # captured by the outer call; d/fps gives the same value
     frag = (
         f"{in_label}scale={W*2}:{H*2}:force_original_aspect_ratio=increase,"
         f"crop={W*2}:{H*2},"
         f"zoompan=z='{z}':x='{x}':y='{y}':d={d}:s={s}:fps={fps},"
+        f"trim=duration={dur_sec_frag:.3f},setpts=PTS-STARTPTS,"
         f"setsar=1{out_label}"
     )
     return frag
@@ -1144,6 +1151,7 @@ def main() -> None:
                     {
                         "uri":                   _url_to_path(seg.get("url", "")),
                         "media_type":            seg.get("media_type", "image"),
+                        "animation_type":        seg.get("animation_type"),
                         "start_sec":             float(seg.get("start_sec") or 0.0),
                         "duration_override_sec": max(0.0,
                                                      float(seg["end_sec"] if seg.get("end_sec") is not None else (seg.get("hold_sec") or 0))
