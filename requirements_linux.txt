@@ -70,6 +70,19 @@ google-api-python-client>=2.0  # YouTube Data API client
 
 
 # ---------------------------------------------------------------------------
+# Speech-to-text — VO script verification  (whisper)
+#
+# Transcribes .wav/.mp3 files and compares output against a given script.
+# Uses CPU by default; GPU accelerated if CUDA is available.
+# Model files (~140 MB for 'base', ~1.5 GB for 'large') are downloaded
+# automatically to ~/.cache/whisper/ on first run.
+#
+# Requires ffmpeg (system package): sudo apt install ffmpeg
+# ---------------------------------------------------------------------------
+openai-whisper>=20231117
+
+
+# ---------------------------------------------------------------------------
 # Azure Neural TTS — cloud synthesis, no GPU required  (gen_tts_cloud.py)
 # ---------------------------------------------------------------------------
 azure-cognitiveservices-speech>=1.38.0
