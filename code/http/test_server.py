@@ -2095,8 +2095,9 @@ HTML = r"""<!DOCTYPE html>
     filter: grayscale(60%);
   }
   .step-approved:hover {
-    opacity: 0.75;
-    filter: none;
+    opacity: 0.45;
+    filter: grayscale(60%);
+    cursor: default;
   }
   .step-ready-to-render {
     border: 2px solid #2ecc71 !important;
@@ -2557,6 +2558,7 @@ placeholder="Enter your story here"></textarea>
   <!-- toolbar row -->
   <div class="media-toolbar">
     <div class="section-label" style="margin-bottom:0">Media Search</div>
+    <span id="media-project-label" class="file-badge" style="font-weight:700"></span>
     <select id="media-ep-select" onchange="onMediaEpChange()">
       <option value="">— select episode —</option>
     </select>
@@ -2669,6 +2671,7 @@ placeholder="Enter your story here"></textarea>
   <!-- toolbar -->
   <div class="sfx-toolbar">
     <div class="section-label" style="margin-bottom:0">SFX Search</div>
+    <span id="sfx-project-label" class="file-badge" style="font-weight:700"></span>
     <select id="sfx-ep-select" onchange="onSfxEpChange()">
       <option value="">— select episode —</option>
     </select>
@@ -2732,6 +2735,7 @@ placeholder="Enter your story here"></textarea>
   <!-- toolbar row -->
   <div class="music-toolbar">
     <div class="section-label" style="margin-bottom:0">Music Review</div>
+    <span id="music-project-label" class="file-badge" style="font-weight:700"></span>
     <select id="music-ep-select" onchange="onMusicEpChange()">
       <option value="">— select episode —</option>
     </select>
@@ -2832,6 +2836,7 @@ placeholder="Enter your story here"></textarea>
   </style>
   <div class="vo-toolbar">
     <span class="section-label" style="margin:0">Episode</span>
+    <span id="vo-project-label" class="file-badge" style="font-weight:700"></span>
     <select id="vo-ep-select" onchange="onVoEpChange()" style="min-width:200px">
       <option value="">— select episode —</option>
     </select>
@@ -2912,6 +2917,7 @@ placeholder="Enter your story here"></textarea>
   <!-- Header row -->
   <div style="display:flex;align-items:center;gap:12px">
     <div class="section-label" style="margin:0">▶ YouTube Upload</div>
+    <span id="yt-project-label" class="file-badge" style="font-weight:700"></span>
     <span id="yt-status-badge" style="font-size:0.8em;padding:3px 10px;border-radius:12px;background:var(--active-bg);color:var(--dim)">No episode loaded</span>
   </div>
 
@@ -2990,6 +2996,15 @@ placeholder="Enter your story here"></textarea>
         <option value="true">On — notify subscribers when video goes public</option>
       </select>
       <span style="font-size:0.75em;color:var(--red)">⚠ permanent — cannot change after upload</span>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:8px">
+      <label style="min-width:90px;font-size:0.82em;color:var(--dim)">Playlist</label>
+      <select id="yt-playlist" onchange="ytFieldChange('playlist_id', this.value || null); _ytUpdateStudioLink(this.value)"
+              style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:4px 8px;font-size:0.85em;min-width:200px">
+        <option value="">— None —</option>
+      </select>
+      <span id="yt-playlist-status" style="font-size:0.75em;color:var(--dim)"></span>
     </div>
   </div>
 
@@ -3076,10 +3091,18 @@ placeholder="Enter your story here"></textarea>
             style="background:#16a34a;color:#fff;border:none;border-radius:7px;padding:8px 18px;cursor:pointer;font-size:0.9em">
       🌐 Publish
     </button>
-    <button id="yt-copy-review-btn" onclick="ytCopyReview()"
-            style="background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:7px;padding:8px 14px;cursor:pointer;font-size:0.85em;display:none">
-      📋 Copy Review Packet
+    <button id="yt-btn-cancel" onclick="ytCancel()" style="display:none;background:#7f1d1d;color:#fca5a5;border:1px solid #f87171;border-radius:7px;padding:8px 16px;cursor:pointer;font-size:0.9em">
+      ✕ Cancel
     </button>
+    <a id="yt-studio-btn" href="https://studio.youtube.com" target="_blank" rel="noopener"
+       style="background:#dc2626;color:#fff;border:none;border-radius:7px;padding:8px 14px;cursor:pointer;font-size:0.85em;text-decoration:none;font-weight:600">
+      🎬 Youtube PlayList
+    </a>
+    <a id="yt-watch-btn" href="#" target="_blank" rel="noopener"
+       style="display:none;background:#1d4ed8;color:#fff;border:none;border-radius:7px;padding:8px 14px;cursor:pointer;font-size:0.85em;text-decoration:none;font-weight:600">
+      ▶ Watch on YouTube
+    </a>
+    <span id="yt-action-error" style="display:none;color:#f87171;font-size:0.82em;background:#7f1d1d44;border:1px solid #f8717155;border-radius:6px;padding:8px 14px;max-width:480px;word-break:break-word;white-space:pre-wrap;line-height:1.5"></span>
   </div>
 
   <!-- Upload status / log -->
@@ -3100,6 +3123,7 @@ placeholder="Enter your story here"></textarea>
   <!-- toolbar: episode selector -->
   <div class="pipe-toolbar">
     <div class="section-label" style="margin-bottom:0">Episode</div>
+    <span id="pipe-project-label" class="file-badge" style="font-weight:700"></span>
     <select id="pipe-ep-select" onchange="onPipeEpChange()">
       <option value="">— select episode —</option>
     </select>
@@ -4855,7 +4879,16 @@ placeholder="Enter your story here"></textarea>
   // ── Tab switching ───────────────────────────────────────────────────────────
   let _pipePoller = null;   // setInterval handle for Pipeline tab auto-refresh
 
+  function _updateEpLabels() {
+    const text = (currentSlug && currentEpId) ? currentSlug + ' / ' + currentEpId : '';
+    ['pipe','media','sfx','music','vo','yt'].forEach(id => {
+      const el = document.getElementById(id + '-project-label');
+      if (el) el.textContent = text;
+    });
+  }
+
   function switchTab(name) {
+    _updateEpLabels();
     document.querySelectorAll('.tab').forEach(t =>
       t.classList.toggle('active', t.dataset.tab === name));
     document.getElementById('panel-run').style.display      = name === 'run'      ? 'flex' : 'none';
@@ -11610,7 +11643,6 @@ placeholder="Enter your story here"></textarea>
   let pipeStatus    = null;
   // ── YouTube tab ────────────────────────────────────────────────────────────
 
-  let _ytReviewData = null;  // last upload_review.json data
   let _ytPendingSec = null;  // frame second waiting for [Save as thumbnail] confirmation
 
   async function initYoutubeTab() {
@@ -11658,6 +11690,7 @@ placeholder="Enter your story here"></textarea>
       _ytFillForm(yt);
       // Preserve all fields (including non-form ones) so ytSaveAll() doesn't lose them
       window._ytDraft = Object.assign({}, yt);
+      _ytLoadPlaylists(locale);   // async — populates playlist dropdown
       document.getElementById('yt-meta-form').style.display    = 'flex';
       document.getElementById('yt-thumb-section').style.display = 'block';
       document.getElementById('yt-subs-section').style.display  = 'block';
@@ -11665,20 +11698,21 @@ placeholder="Enter your story here"></textarea>
 
       // Upload state badge
       const st = d.upload_state || {};
+      const watchBtn = document.getElementById('yt-watch-btn');
       if (st.video_id) {
         badge.textContent = `Uploaded: ${st.video_id}`;
         badge.style.background = '#14532d';
+        if (watchBtn) {
+          watchBtn.href = `https://www.youtube.com/watch?v=${encodeURIComponent(st.video_id)}`;
+          watchBtn.style.display = 'inline-block';
+        }
         _ytShowChecklist(st, yt);
       } else {
         badge.textContent = 'Ready to validate';
         badge.style.background = '#1e3a5f';
+        watchBtn.style.display = 'none';
         document.getElementById('yt-checklist').style.display = 'none';
       }
-
-      // Review data
-      _ytReviewData = d.review || null;
-      document.getElementById('yt-copy-review-btn').style.display =
-        _ytReviewData ? 'inline-block' : 'none';
 
       // Subtitles
       const subs = (yt.subtitles || []);
@@ -11721,6 +11755,42 @@ placeholder="Enter your story here"></textarea>
     if (mfk) mfk.value = yt.made_for_kids ? 'true' : 'false';
     const ntf = document.getElementById('yt-notify');
     if (ntf) ntf.value = yt.notify_subscribers ? 'true' : 'false';
+    // playlist set after dropdown is populated by _ytLoadPlaylists
+    window._ytPendingPlaylistId = yt.playlist_id || null;
+  }
+
+  async function _ytLoadPlaylists(locale) {
+    const sel    = document.getElementById('yt-playlist');
+    const status = document.getElementById('yt-playlist-status');
+    if (!sel) return;
+    status.textContent = 'Loading…';
+    try {
+      const r = await fetch(`/api/youtube_playlists?locale=${encodeURIComponent(locale)}`);
+      const d = await r.json();
+      if (!d.ok) { status.textContent = d.error || 'Failed to load'; return; }
+      // Rebuild options
+      sel.innerHTML = '<option value="">— None —</option>';
+      (d.playlists || []).forEach(p => {
+        const opt = document.createElement('option');
+        opt.value       = p.id;
+        opt.textContent = p.title;
+        sel.appendChild(opt);
+      });
+      // Set the saved value and update Studio link
+      sel.value = window._ytPendingPlaylistId || '';
+      _ytUpdateStudioLink(sel.value);
+      status.textContent = d.playlists.length ? '' : 'No playlists found';
+    } catch(e) {
+      status.textContent = 'Error: ' + e.message;
+    }
+  }
+
+  function _ytUpdateStudioLink(playlistId) {
+    const btn = document.getElementById('yt-studio-btn');
+    if (!btn) return;
+    btn.href = playlistId
+      ? `https://studio.youtube.com/playlist/${encodeURIComponent(playlistId)}/videos`
+      : 'https://studio.youtube.com';
   }
 
   function ytUpdateCounter(id, n, max) {
@@ -11804,6 +11874,16 @@ placeholder="Enter your story here"></textarea>
     const btn    = document.getElementById('yt-save-btn');
     const badge  = document.getElementById('yt-save-badge');
 
+    // Playlist is required before saving
+    const _playlistSel = document.getElementById('yt-playlist');
+    const _playlistId  = _playlistSel ? _playlistSel.value.trim() : '';
+    if (!_playlistId) {
+      badge.textContent = '⚠ Select a playlist before saving.';
+      badge.style.color = '#f87171';
+      return;
+    }
+    badge.style.color = '';
+
     // Collect all form fields
     const fields = {
       title:               document.getElementById('yt-title')?.value    || '',
@@ -11817,7 +11897,7 @@ placeholder="Enter your story here"></textarea>
       // auto-populated fields from draft
       upload_profile:      (window._ytDraft || {}).upload_profile || '',
       channel_id:          (window._ytDraft || {}).channel_id     || '',
-      playlist_id:         (window._ytDraft || {}).playlist_id    || null,
+      playlist_id:         _playlistId,  // from dropdown (always current selection)
       video_language:      (window._ytDraft || {}).video_language || locale,
       subtitles:           (window._ytDraft || {}).subtitles      || [],
       thumbnail:           (window._ytDraft || {}).thumbnail      || `projects/${slug}/episodes/${epId}/renders/${locale}/thumbnail.jpg`,
@@ -11969,10 +12049,14 @@ placeholder="Enter your story here"></textarea>
     const epId   = currentEpId; if (!epId) return;
     const locale = document.getElementById('yt-locale-sel').value || 'en';
 
-    const logWrap = document.getElementById('yt-log-wrap');
-    const logEl   = document.getElementById('yt-log');
+    const logWrap   = document.getElementById('yt-log-wrap');
+    const logEl     = document.getElementById('yt-log');
+    const actionErr = document.getElementById('yt-action-error');
 
-    // Disable all action buttons while running
+    // Clear any previous inline error
+    if (actionErr) { actionErr.style.display = 'none'; actionErr.textContent = ''; }
+
+    // Disable all action buttons while running; show Cancel for long ops
     const actionBtns = ['yt-btn-validate','yt-btn-upload','yt-btn-publish'];
     const labels = {'validate':'⏳ Validating…', 'upload':'⏳ Uploading…', 'publish':'⏳ Publishing…'};
     actionBtns.forEach(id => {
@@ -11981,9 +12065,11 @@ placeholder="Enter your story here"></textarea>
     });
     const activeBtn = document.getElementById(`yt-btn-${action}`);
     if (activeBtn) activeBtn.textContent = labels[action] || '⏳ Running…';
+    const cancelBtn = document.getElementById('yt-btn-cancel');
+    if (cancelBtn && (action === 'upload' || action === 'publish')) cancelBtn.style.display = 'inline-block';
 
-    logWrap.style.display = 'block';
-    logEl.textContent = `▶ ${action} started…\n`;
+    // Note: log panel is NOT shown here — we wait until we know it's not a cred error
+    logEl.textContent = '';
     logWrap.scrollTop = 0;
 
     try {
@@ -11993,35 +12079,54 @@ placeholder="Enter your story here"></textarea>
         body: JSON.stringify({slug, ep_id: epId, locale, action}),
       });
       const d = await r.json();
-      logEl.textContent += (d.output || d.error || JSON.stringify(d));
-      if (d.ok !== false) {
-        logEl.textContent += '\n\n✅ Done.';
-        initYoutubeTab();  // refresh status
+
+      // Credential / missing-file errors → show full details inline next to Studio button
+      const _isCredErr = !d.ok && d.error && (
+        d.error.includes('.config/pipe') ||
+        d.error.includes('credentials') ||
+        d.error.includes('No such file') ||
+        d.error.includes('youtube_profiles')
+      );
+      if (_isCredErr && actionErr) {
+        actionErr.textContent = '⚠ ' + d.error;   // full error, not just first line
+        actionErr.style.display = 'inline';
+        // logWrap stays hidden — do NOT show log panel for cred errors
+      } else if (d.cancelled) {
+        logWrap.style.display = 'block';
+        logEl.textContent = '✕ Upload cancelled by user.';
       } else {
-        logEl.textContent += '\n\n❌ Failed (see above).';
+        logWrap.style.display = 'block';
+        logEl.textContent = `▶ ${action} started…\n`;
+        logEl.textContent += (d.output || d.error || JSON.stringify(d));
+        if (d.ok !== false) {
+          logEl.textContent += '\n\n✅ Done.';
+          initYoutubeTab();  // refresh status
+        } else {
+          logEl.textContent += '\n\n❌ Failed (see above).';
+        }
       }
     } catch(e) {
       logEl.textContent += '\n\n❌ Error: ' + e.message;
     }
 
-    // Re-enable buttons and restore labels
+    // Re-enable buttons, hide Cancel, restore labels
     const origLabels = {'yt-btn-validate':'✓ Validate', 'yt-btn-upload':'⬆ Upload (Private)', 'yt-btn-publish':'🌐 Publish'};
     actionBtns.forEach(id => {
       const b = document.getElementById(id);
       if (b) { b.disabled = false; b.style.opacity = ''; b.style.cursor = 'pointer'; b.textContent = origLabels[id]; }
     });
+    if (cancelBtn) cancelBtn.style.display = 'none';
 
     logWrap.scrollTop = logWrap.scrollHeight;
   }
 
-  function ytCopyReview() {
-    if (!_ytReviewData) return;
-    navigator.clipboard.writeText(JSON.stringify(_ytReviewData, null, 2))
-      .then(() => {
-        const btn = document.getElementById('yt-copy-review-btn');
-        btn.textContent = '✓ Copied!';
-        setTimeout(() => { btn.textContent = '📋 Copy Review Packet'; }, 2000);
-      });
+  async function ytCancel() {
+    const cancelBtn = document.getElementById('yt-btn-cancel');
+    if (cancelBtn) { cancelBtn.disabled = true; cancelBtn.textContent = '⏳ Cancelling…'; }
+    try {
+      await fetch('/api/youtube_cancel', { method: 'POST' });
+    } catch(e) { /* ignore */ }
+    // The ongoing ytAction fetch will resolve with cancelled:true once the process is killed
   }
 
   function _ytShowChecklist(st, yt) {
@@ -12536,12 +12641,20 @@ placeholder="Enter your story here"></textarea>
           row.appendChild(nameSpan);
           const btnWrap = document.createElement('span');
           btnWrap.style.cssText = 'margin-left:auto;display:flex;gap:4px;flex-shrink:0';
-          btnWrap.appendChild(makeRunBtn('Run ' + num, () =>
+          const _sb1 = makeRunBtn('Run ' + num, () =>
             startPipeStep({ type: 'post', step,
-                            slug: pipeEpSlug, ep_id: pipeEpId, locale: '' })));
-          btnWrap.appendChild(makeRunBtn('Run ' + num + '→11', () =>
+                            slug: pipeEpSlug, ep_id: pipeEpId, locale: '' }));
+          const _sb2 = makeRunBtn('Run ' + num + '→11', () =>
             startPipeStep({ type: 'shared_chain', from_step: step,
-                            slug: pipeEpSlug, ep_id: pipeEpId })));
+                            slug: pipeEpSlug, ep_id: pipeEpId }));
+          if (_sharedApproved) {
+            _sb1.disabled = true;
+            _sb2.disabled = true;
+            _sb1.title = 'Already approved — step will be skipped';
+            _sb2.title = 'Already approved — step will be skipped';
+          }
+          btnWrap.appendChild(_sb1);
+          btnWrap.appendChild(_sb2);
           row.appendChild(btnWrap);
           detailEl.appendChild(row);
         });
@@ -12597,16 +12710,26 @@ placeholder="Enter your story here"></textarea>
                 '<br><span style="font-family:var(--mono);font-size:0.72em;color:var(--dim)">' +
                 escHtml(cmdDisplay) + '</span>';
               row.appendChild(nameSpan);
-              // Run N  [Run N→7]  — right-aligned
+              // Run N  [Run N→11]  — right-aligned
               const btnWrap = document.createElement('span');
               btnWrap.style.cssText = 'margin-left:auto;display:flex;gap:4px;flex-shrink:0';
-              btnWrap.appendChild(makeRunBtn('Run ' + num, () =>
+              const _lb1 = makeRunBtn('Run ' + num, () =>
                 startPipeStep({ type: 'post', step,
-                                slug: pipeEpSlug, ep_id: pipeEpId, locale })));
+                                slug: pipeEpSlug, ep_id: pipeEpId, locale }));
+              if (_localeApproved && !_renderPlanStale) {
+                _lb1.disabled = true;
+                _lb1.title = 'Already approved — step will be skipped';
+              }
+              btnWrap.appendChild(_lb1);
               if (num < 11) {
-                btnWrap.appendChild(makeRunBtn('Run ' + num + '→11', () =>
+                const _lb2 = makeRunBtn('Run ' + num + '→11', () =>
                   startPipeStep({ type: 'locale', from_step: step,
-                                  slug: pipeEpSlug, ep_id: pipeEpId, locale })));
+                                  slug: pipeEpSlug, ep_id: pipeEpId, locale }));
+                if (_localeApproved && !_renderPlanStale) {
+                  _lb2.disabled = true;
+                  _lb2.title = 'Already approved — step will be skipped';
+                }
+                btnWrap.appendChild(_lb2);
               }
               row.appendChild(btnWrap);
               detailEl.appendChild(row);
@@ -14897,6 +15020,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
+            # ── Server-side approval skip ──────────────────────────────────────
+            # These steps are skipped when their approval sentinel exists.
+            # This enforces the skip even if the UI button is somehow clicked.
+            _step_ep_dir   = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+            _step_music_ok = os.path.isfile(os.path.join(_step_ep_dir, "assets", "music", "MusicApprovalSnapshot.json"))
+            _step_sfx_ok   = os.path.isfile(os.path.join(_step_ep_dir, "assets", "sfx", "SfxPlan.json"))
+            _step_vo_ok    = os.path.isfile(os.path.join(_step_ep_dir, f"vo_preview_approved.{locale or 'en'}.json"))
+            _approved_skip = {
+                "gen_music_clip":      _step_music_ok,
+                "music_prepare_loops": _step_music_ok,
+                "gen_sfx":             _step_sfx_ok,
+                "gen_tts":             _step_vo_ok,
+            }
+            if _approved_skip.get(step):
+                self.wfile.write(sse("line", f"  ✓ {step} — skipped (already approved)"))
+                self.wfile.write(sse("done", "0"))
+                self.wfile.flush()
+                return
+            # ──────────────────────────────────────────────────────────────────
+
             _step_payload = {"asset_ids": asset_ids} if asset_ids else None
             cmd = _build_step_cmd(step, slug, ep_id, locale, profile, no_music,
                                   payload=_step_payload)
@@ -15000,7 +15143,17 @@ class Handler(BaseHTTPRequestHandler):
                     write_log("O", f"   Deleted {len(removed)} file(s)")
                     _force = True
 
+                # Approval sentinels — these steps are unconditionally skipped
+                # when the corresponding approval exists, even in force_run mode.
+                _rl_ep_dir  = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                _rl_vo_ok   = os.path.isfile(os.path.join(_rl_ep_dir, f"vo_preview_approved.{locale}.json"))
+                _rl_locale_approved = {"gen_tts": _rl_vo_ok}
+
                 for step in LOCALE_STEPS[from_idx:]:
+                    # Approval skip — takes priority over force_run
+                    if _rl_locale_approved.get(step):
+                        write_log("O", f"  ✓ {step} — skipped (already approved)")
+                        continue
                     if _force:
                         _delete_step_output(step, slug, ep_id, locale)
                     elif _step_is_done(step, slug, ep_id, locale):
@@ -15122,8 +15275,22 @@ class Handler(BaseHTTPRequestHandler):
                     _total_removed = _purge_episode_assets(slug, ep_id, "")
                     write_log("O", f"   Deleted {len(_total_removed)} file(s)")
 
+                # ── Approval sentinels for shared-step skip ───────────────────
+                _s10_music_ok = os.path.isfile(os.path.join(
+                    _ep_dir_s10, "assets", "music", "MusicApprovalSnapshot.json"))
+                _s10_sfx_ok   = os.path.isfile(os.path.join(
+                    _ep_dir_s10, "assets", "sfx", "SfxPlan.json"))
+                _s10_shared_approved = {
+                    "gen_music_clip":      _s10_music_ok,
+                    "music_prepare_loops": _s10_music_ok,
+                    "gen_sfx":             _s10_sfx_ok,
+                }
+
                 # ── Shared steps (locale-free) ────────────────────────────────
                 for _step in _SHARED_STEPS[from_idx:]:
+                    if _s10_shared_approved.get(_step):
+                        write_log("O", f"  ✓ {_step} — skipped (already approved)")
+                        continue
                     write_log("O", f"\n── {_step} (shared) ────────────────────────────────")
                     _cmd = _build_step_cmd(_step, slug, ep_id, "", profile, no_music)
                     if _cmd is None:
@@ -16012,6 +16179,38 @@ class Handler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
 
+        # ── YouTube: list playlists for a profile (GET /api/youtube_playlists) ──
+        elif parsed.path == "/api/youtube_playlists":
+            params = parse_qs(parsed.query)
+            locale = unquote_plus(params.get("locale", ["en"])[0]).strip() or "en"
+            try:
+                from google.oauth2.credentials import Credentials
+                from google.auth.transport.requests import Request as _GRequest
+                from googleapiclient.discovery import build as _yt_build
+                _profile_path = os.path.join(os.path.expanduser("~"), ".config", "pipe", "youtube_profiles.json")
+                _profiles = json.loads(open(_profile_path, encoding="utf-8").read())
+                # Match by locale or upload_profile key
+                _prof = _profiles.get(locale) or next(
+                    (v for v in _profiles.values() if v.get("locale") == locale), None
+                ) or next(iter(_profiles.values()))
+                _creds = Credentials.from_authorized_user_file(_prof["token_path"])
+                if _creds.expired and _creds.refresh_token:
+                    _creds.refresh(_GRequest())
+                _yt = _yt_build("youtube", "v3", credentials=_creds)
+                _playlists = []
+                _req = _yt.playlists().list(part="snippet", mine=True, maxResults=50)
+                while _req:
+                    _resp = _req.execute()
+                    for _item in _resp.get("items", []):
+                        _playlists.append({
+                            "id":    _item["id"],
+                            "title": _item["snippet"]["title"],
+                        })
+                    _req = _yt.playlists().list_next(_req, _resp)
+                _json_resp(self, {"ok": True, "playlists": _playlists})
+            except Exception as _exc:
+                _json_resp(self, {"ok": False, "error": str(_exc), "playlists": []})
+
         # ── YouTube: status (GET /api/youtube_status) ────────────────────────────
         elif parsed.path == "/api/youtube_status":
             params = parse_qs(parsed.query)
@@ -16226,8 +16425,26 @@ class Handler(BaseHTTPRequestHandler):
     # ── POST ──────────────────────────────────────────────────────────────────
     def do_POST(self):
 
+        # Cancel YouTube upload/publish subprocess
+        if self.path == "/api/youtube_cancel":
+            killed = []
+            with _lock:
+                for k in list(_procs.keys()):
+                    if str(k).startswith("yt_"):
+                        p = _procs.pop(k)
+                        if p.poll() is None:
+                            p.terminate()
+                            killed.append(str(k))
+            _log.info("[youtube_cancel] terminated: %s", killed)
+            resp = json.dumps({"ok": True, "killed": killed}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
         # Kill running process
-        if self.path == "/stop":
+        elif self.path == "/stop":
             with _lock:
                 for proc in _procs.values():
                     if proc.poll() is None:
@@ -17990,8 +18207,8 @@ class Handler(BaseHTTPRequestHandler):
                 _ep_key = f"{slug}/{ep_id}"
                 if _ep_key not in _sfx_preview_locks:
                     _sfx_preview_locks[_ep_key] = threading.Lock()
-                _lock = _sfx_preview_locks[_ep_key]
-                if not _lock.acquire(blocking=False):
+                _sfx_ep_lock = _sfx_preview_locks[_ep_key]
+                if not _sfx_ep_lock.acquire(blocking=False):
                     if os.path.exists(sel_path):
                         os.unlink(sel_path)
                     _json_resp(self, {"error": "Preview already generating for this episode"}, 409)
@@ -18031,7 +18248,7 @@ class Handler(BaseHTTPRequestHandler):
                     for _tp in _temp_dl_paths:
                         if os.path.exists(_tp):
                             os.unlink(_tp)
-                    _lock.release()
+                    _sfx_ep_lock.release()
 
                 # Return subprocess logs in response for browser-side debugging
                 _debug_log = (result.stdout or "")[-3000:]
@@ -18922,11 +19139,38 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(resp)
                     return
 
+                # ── Append CC BY credits from licenses.json ───────────────────
+                licenses_path = os.path.join(render_dir, "licenses.json")
+                credits_block = ""
+                if os.path.isfile(licenses_path):
+                    try:
+                        lic_data = json.loads(
+                            open(licenses_path, encoding="utf-8").read()
+                        )
+                        seen = set()
+                        credit_lines = []
+                        for seg in lic_data.get("segments", []):
+                            if not seg.get("attribution_required"):
+                                continue
+                            text = (seg.get("attribution_text") or "").strip()
+                            if text and text not in seen:
+                                seen.add(text)
+                                credit_lines.append(text)
+                        if credit_lines:
+                            credits_block = (
+                                "\n\n---\nCredits\n"
+                                + "\n".join(credit_lines)
+                            )
+                    except Exception as _lic_exc:
+                        print(f"  [youtube] WARNING: could not read licenses.json: {_lic_exc}")
+
+                final_description = suggested["description"].rstrip() + credits_block
+
                 # ── Assemble full draft ───────────────────────────────────────
                 draft = {
                     "upload_profile":      upload_profile,
                     "title":               suggested["title"],
-                    "description":         suggested["description"],
+                    "description":         final_description,
                     "tags":                suggested.get("tags", []),
                     "category_id":         category_id,
                     "playlist_id":         profile_info.get("playlist_id"),
@@ -19187,7 +19431,57 @@ class Handler(BaseHTTPRequestHandler):
                 if action not in ("validate", "upload", "publish"):
                     raise ValueError(f"unknown action: {action!r}")
 
+                # ── Credential pre-flight check ───────────────────────────────
+                _cred_base   = os.path.join(os.path.expanduser("~"), ".config", "pipe")
+                _profiles_path = os.path.join(_cred_base, "youtube_profiles.json")
+                if not os.path.isfile(_profiles_path):
+                    raise ValueError(
+                        f"YouTube credentials not found.\n\n"
+                        f"Missing:  {_profiles_path}\n\n"
+                        f"Place your youtube_profiles.json in:\n"
+                        f"  {_cred_base}/\n\n"
+                        f"Expected format:\n"
+                        f'  {{"en": {{"locale": "en", "token_path": "{_cred_base}/token_en.json", ...}}}}'
+                    )
+                _profiles = json.loads(open(_profiles_path, encoding="utf-8").read())
+                _prof = _profiles.get(locale) or next(
+                    (v for v in _profiles.values() if v.get("locale") == locale), None
+                )
+                if not _prof:
+                    raise ValueError(
+                        f"No YouTube profile found for locale {locale!r}.\n\n"
+                        f"Add a profile for {locale!r} in:\n"
+                        f"  {_profiles_path}"
+                    )
+                _token_path = _prof.get("token_path", "")
+                if not os.path.isfile(_token_path):
+                    raise ValueError(
+                        f"YouTube token not found for locale {locale!r}.\n\n"
+                        f"Missing:  {_token_path}\n\n"
+                        f"Run the token generator to create it:\n"
+                        f"  python3 code/deploy/youtube/gen_tokens.py"
+                    )
+                # ─────────────────────────────────────────────────────────────
+
                 ep_dir_rel = f"projects/{slug}/episodes/{ep_id}"
+
+                # If re-uploading and video already exists, reset thumbnail_uploaded
+                # so the script re-pushes the (possibly updated) thumbnail.
+                if action == "upload":
+                    _state_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                               "renders", locale, "upload_state.json")
+                    if os.path.isfile(_state_path):
+                        try:
+                            with open(_state_path, encoding="utf-8") as _sf:
+                                _st = json.load(_sf)
+                            if _st.get("video_id") and _st.get("thumbnail_uploaded"):
+                                _st["thumbnail_uploaded"] = False
+                                with open(_state_path, "w", encoding="utf-8") as _sf:
+                                    json.dump(_st, _sf, indent=2)
+                                _log.info("[youtube_action] reset thumbnail_uploaded for re-upload: %s/%s", slug, ep_id)
+                        except Exception as _e:
+                            _log.warning("[youtube_action] could not reset upload_state: %s", _e)
+
                 script_map = {
                     "validate": "code/deploy/youtube/prepare_upload.py",
                     "upload":   "code/deploy/youtube/upload_private.py",
@@ -19204,21 +19498,37 @@ class Handler(BaseHTTPRequestHandler):
                 if action == "validate":
                     cmd.append("--yes")  # non-interactive
 
-                result = subprocess.run(
+                _yt_key = f"yt_{slug}_{ep_id}"
+                proc = subprocess.Popen(
                     cmd,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                     cwd=PIPE_DIR,
-                    timeout=1800,  # 30-min max (upload can be slow)
                 )
-                output = result.stdout + ("\n\n--- stderr ---\n" + result.stderr if result.stderr.strip() else "")
-                resp = json.dumps({
-                    "ok":     result.returncode == 0,
-                    "rc":     result.returncode,
-                    "output": output,
-                }).encode()
+                with _lock:
+                    _procs[_yt_key] = proc
+                try:
+                    stdout, stderr = proc.communicate(timeout=1800)
+                finally:
+                    with _lock:
+                        _procs.pop(_yt_key, None)
+
+                if proc.returncode is None or proc.returncode == -15:
+                    resp = json.dumps({"ok": False, "cancelled": True, "error": "Upload cancelled."}).encode()
+                else:
+                    output = stdout + ("\n\n--- stderr ---\n" + stderr if stderr.strip() else "")
+                    resp = json.dumps({
+                        "ok":     proc.returncode == 0,
+                        "rc":     proc.returncode,
+                        "output": output,
+                    }).encode()
                 self.send_response(200)
             except subprocess.TimeoutExpired:
+                with _lock:
+                    p = _procs.pop(f"yt_{slug}_{ep_id}", None)
+                if p and p.poll() is None:
+                    p.terminate()
                 resp = json.dumps({"ok": False, "error": "timeout"}).encode()
                 self.send_response(200)
             except Exception as exc:

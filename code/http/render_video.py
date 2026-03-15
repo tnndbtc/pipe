@@ -51,6 +51,7 @@
 # =============================================================================
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -1247,6 +1248,18 @@ def main() -> None:
     }
     save_json(render_output, output_dir / "render_output.json")
 
+    # ── License manifest ─────────────────────────────────────────────────────
+    if _shot_to_segments is not None:
+        _license_path = write_license_manifest(
+            shot_mkv_pairs=shot_mkv_pairs,
+            shot_to_segments=_shot_to_segments,
+            fps=fps,
+            output_dir=output_dir,
+            locale=locale,
+        )
+        if _license_path:
+            print(f"  Licenses : {_license_path}")
+
     print(f"\n  [OK] {final_mp4}")
     print(f"  Placeholders : {placeholder_count}")
     print(f"  Duration     : {total_ms / 1000:.1f} s")
@@ -1255,6 +1268,122 @@ def main() -> None:
     if not args.keep_intermediates:
         shutil.rmtree(shots_dir, ignore_errors=True)
         print(f"  Cleaned .shots/ scratch directory")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# License manifest
+# ─────────────────────────────────────────────────────────────────────────────
+
+def write_license_manifest(
+    shot_mkv_pairs: list,
+    shot_to_segments: dict,
+    fps: float,
+    output_dir: "Path",
+    locale: str,
+) -> "Path | None":
+    """Write licenses.json to output_dir.
+
+    One entry per confirmed media segment, each with:
+      - Timing in the final video (video_start_sec / video_end_sec)
+      - Clip offsets within the source file (start_sec / end_sec)
+      - Full license / attribution metadata from selections.json
+    """
+    entries: list[dict] = []
+    total_sec = 0.0
+    frame_sec = 1.0 / fps
+
+    for idx, (shot, _mkv) in enumerate(shot_mkv_pairs):
+        shot_id   = shot.get("shot_id", "")
+        scene_id  = shot.get("scene_id", "")
+        shot_dur  = shot.get("duration_ms", 0) / 1000.0
+        shot_start = total_sec
+
+        raw_segs = shot_to_segments.get(shot_id, [])
+        if raw_segs:
+            seg_cursor = 0.0           # cursor within this shot (seconds)
+            for seg in raw_segs:
+                media_type = seg.get("media_type", "image")
+
+                # Duration of this segment as it appears in the video
+                if media_type == "image":
+                    seg_dur = float(seg.get("hold_sec") or 0.0)
+                else:
+                    # video clip: end_sec - start_sec
+                    s_start = float(seg.get("start_sec") or 0.0)
+                    s_end   = float(seg.get("end_sec") or 0.0)
+                    seg_dur = max(0.0, s_end - s_start)
+
+                video_start = round(shot_start + seg_cursor, 6)
+                video_end   = round(video_start + seg_dur,   6)
+
+                # Pull the full source/license block from the raw segment
+                source: dict = seg.get("source") or {}
+
+                entry: dict = {
+                    # ── Identity ─────────────────────────────────────────
+                    "shot_id":            shot_id,
+                    "scene_id":           scene_id,
+                    "locale":             locale,
+                    # ── Position in final video ───────────────────────────
+                    "video_start_sec":    video_start,
+                    "video_end_sec":      video_end,
+                    "video_duration_sec": round(seg_dur, 6),
+                    # ── Media file info ───────────────────────────────────
+                    "media_type":         media_type,
+                    "url":                seg.get("url", ""),
+                    "clip_start_sec":     float(seg.get("start_sec") or 0.0),
+                    "clip_end_sec":       float(seg.get("end_sec") or 0.0),
+                    "hold_sec":           float(seg.get("hold_sec") or 0.0)
+                                          if media_type == "image" else None,
+                    "animation_type":     seg.get("animation_type"),
+                    # ── License / attribution ─────────────────────────────
+                    "title":              source.get("title"),
+                    "photographer":       source.get("photographer"),
+                    "attribution_text":   source.get("attribution_text"),
+                    "attribution_required": source.get("attribution_required"),
+                    "license_summary":    source.get("license_summary"),
+                    "license_url":        source.get("license_url"),
+                    "asset_page_url":     source.get("asset_page_url"),
+                    "file_url":           source.get("file_url"),
+                    "source_site":        source.get("source_site"),
+                    # ── Media dimensions / tags ───────────────────────────
+                    "width":              source.get("width"),
+                    "height":             source.get("height"),
+                    "tags":               source.get("tags"),
+                }
+                # Strip keys whose value is None to keep the file concise
+                entry = {k: v for k, v in entry.items() if v is not None}
+                entries.append(entry)
+
+                seg_cursor += seg_dur
+
+        # Advance global clock
+        total_sec += shot_dur
+
+        # Black frame between scene boundaries
+        if idx < len(shot_mkv_pairs) - 1:
+            next_shot = shot_mkv_pairs[idx + 1][0]
+            if next_shot.get("scene_id") != scene_id:
+                total_sec += frame_sec
+
+    if not entries:
+        return None
+
+    manifest = {
+        "schema_id":      "license_manifest",
+        "schema_version": "1.0.0",
+        "locale":         locale,
+        "generated_at":   datetime.datetime.utcnow().isoformat() + "Z",
+        "total_segments": len(entries),
+        "segments":       entries,
+    }
+    out_path = Path(output_dir) / "licenses.json"
+    out_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(f"  [license] Wrote {len(entries)} segment(s) → {out_path}")
+    return out_path
 
 
 if __name__ == "__main__":
