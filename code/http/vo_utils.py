@@ -326,8 +326,9 @@ def invalidate_vo_state(ep_dir, primary_locale: str) -> None:
 
     ── Asset Preservation rule (MUST NOT VIOLATE) ──────────────────────────────
     This function and every caller MUST NOT delete or overwrite any files under:
-        assets/music/   — music loop WAVs, MusicPlan.json, MusicApprovalSnapshot.json
-        assets/sfx/     — SFX files and SfxPlan.json
+        assets/music/   — music loop WAVs, MusicApprovalSnapshot.json
+        assets/sfx/     — SFX files
+    MusicPlan.json and SfxPlan.json live at the episode root (not under assets/).
         assets/media/   — media selections and selections.json
     These directories are owned exclusively by the Music, SFX, and Media tabs.
     Music/SFX/Media curation is expensive user effort that survives VO re-runs.

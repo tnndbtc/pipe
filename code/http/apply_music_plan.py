@@ -243,7 +243,7 @@ def generate_loop_wav(
 BASE_MUSIC_DB = -6.0   # music un-ducked level (mirrors render_video.py)
 
 OVERRIDE_FIELDS = {
-    "duck_db", "fade_sec", "start_sec", "duration_sec",
+    "duck_db", "fade_sec", "start_sec", "end_sec",
     "music_asset_id", "crossfade_sec",
     "clip_start_sec", "clip_duration_sec",
     "base_db",          # per-shot base level (future use); track-level handled separately
@@ -355,9 +355,11 @@ def apply_shot_overrides(
                     clip_start = override.get("clip_start_sec",
                                               override.get("start_sec",
                                               item.get("start_sec", 0.0)))
-                    clip_dur = override.get("clip_duration_sec",
-                                            override.get("duration_sec",
-                                            item.get("duration_sec", 30.0)))
+                    _o_end_sec = override.get("end_sec")
+                    clip_dur = override.get("clip_duration_sec") or (
+                        float(_o_end_sec) - float(clip_start)
+                        if _o_end_sec is not None else None
+                    ) or item.get("duration_sec", 30.0)
                     out_wav = assets_music_dir / f"{item_id}.wav"
                     ok = extract_clip_from_source(
                         new_asset_id, resources_dir, out_wav,

@@ -251,7 +251,7 @@ def main():
     # Load MusicApprovalSnapshot or MusicPlan for music
     music_data = None
     snap_path = ep_dir / "assets" / "music" / "MusicApprovalSnapshot.json"
-    music_plan_path = ep_dir / "assets" / "music" / "MusicPlan.json"
+    music_plan_path = ep_dir / "MusicPlan.json"
     if include_music:
         if snap_path.exists():
             music_data = {"type": "snapshot", "data": load_json(snap_path)}
@@ -265,7 +265,7 @@ def main():
     # Load SfxPlan for SFX
     sfx_index = {}  # { shot_id: [entry] }
     if include_sfx:
-        sfx_path = ep_dir / "assets" / "sfx" / "SfxPlan.json"
+        sfx_path = ep_dir / "SfxPlan.json"
         if sfx_path.exists():
             sfx_plan = load_json(sfx_path)
             for entry in sfx_plan.get("sfx_entries", sfx_plan.get("entries", [])):
@@ -570,7 +570,7 @@ def main():
                 for entry in sfx_index.get(shot_id, []):
                     src = entry.get("source_file") or entry.get("local_path") or ""
                     if src and Path(src).exists():
-                        delay_ms = cum_ms + float(entry.get("offset_sec", 0)) * 1000
+                        delay_ms = cum_ms + float(entry.get("start_sec", 0)) * 1000
                         s_inputs.append(src)
                         s_delays.append(delay_ms)
                 cum_ms += dur_ms

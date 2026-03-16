@@ -381,7 +381,7 @@ def main():
     # If the user has already assigned custom clips to shots via the Music tab,
     # skip those shots entirely so gen_music_clip does not overwrite their work.
     _user_assigned_items: set = set()
-    _music_plan_path = out_dir / "music" / "MusicPlan.json"
+    _music_plan_path = out_dir.parent / "MusicPlan.json"
     if _music_plan_path.exists() and not getattr(args, "ignore_music_plan", False):
         try:
             with open(_music_plan_path, encoding="utf-8") as _mpf:

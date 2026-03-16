@@ -1980,9 +1980,9 @@ HTML = r"""<!DOCTYPE html>
     padding-top: 8px; border-top: 1px solid var(--border);
   }
   .music-footer button {
-    background: var(--gold); color: #fff; border: none;
-    border-radius: 6px; font-size: 0.82em; font-weight: 700;
-    padding: 6px 16px; cursor: pointer; transition: opacity .15s;
+    background: var(--green); color: #fff; border: none;
+    border-radius: 6px; font-size: 0.85em; font-weight: 700;
+    padding: 8px 20px; cursor: pointer; transition: opacity .15s;
   }
   .music-footer button:hover { opacity: 0.85; }
   .music-footer button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -2654,6 +2654,20 @@ placeholder="Enter your story here"></textarea>
     <div id="media-preview-wrap" style="display:none;padding:8px 12px;border-top:1px solid var(--border);flex-shrink:0">
       <div style="font-weight:600;margin-bottom:4px" id="media-preview-label">Generate Preview (VO)</div>
       <video id="media-preview-video" controls style="width:100%;max-height:400px"></video>
+      <div id="media-timeline" style="position:relative;height:80px;margin-top:6px;
+           background:var(--bg);border:1px solid var(--border);border-radius:4px;
+           overflow:hidden;cursor:pointer">
+        <div id="media-tl-music" style="position:absolute;bottom:0;left:0;right:0;height:24px"></div>
+        <div id="media-tl-sfx"   style="position:absolute;bottom:24px;left:0;right:0;height:24px"></div>
+        <div id="media-tl-vo"    style="position:absolute;top:0;left:0;right:0;height:24px"></div>
+        <div id="media-tl-shots" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none"></div>
+        <div id="media-tl-cursor" style="position:absolute;top:0;bottom:0;width:2px;background:red;pointer-events:none;z-index:10;left:0"></div>
+      </div>
+      <div style="display:flex;gap:12px;font-size:0.70em;color:var(--dim);margin-top:3px">
+        <span><span style="display:inline-block;width:10px;height:10px;background:#4a9eff;border-radius:2px;vertical-align:middle"></span> VO</span>
+        <span><span style="display:inline-block;width:10px;height:10px;background:#ff9f43;border-radius:2px;vertical-align:middle"></span> SFX</span>
+        <span><span style="display:inline-block;width:10px;height:10px;background:#2ecc71;border-radius:2px;vertical-align:middle"></span> Music</span>
+      </div>
     </div>
 
     <!-- shot overrides section — populated by mediaRenderShotOverrides() -->
@@ -2665,7 +2679,7 @@ placeholder="Enter your story here"></textarea>
     <span id="media-confirm-msg"></span>
     <button id="media-btn-reset"     onclick="mediaReset()">↺ Reset</button>
     <button id="media-btn-apply-seq" onclick="mediaApplyRecommended()" style="display:none">⚡ Apply Recommended Sequence</button>
-    <button id="media-btn-confirm"   onclick="mediaConfirm()">✔ Confirm Selections</button>
+    <button id="media-btn-confirm"   onclick="mediaConfirm()">✔ Confirm</button>
   </div>
 </div>
 
@@ -2708,6 +2722,9 @@ placeholder="Enter your story here"></textarea>
     .sfx-ai-status{font-size:11px;color:#888888}
     .sfx-status-bar{font-size:0.82em;color:var(--dim);padding:4px 0}
     .sfx-footer{display:flex;align-items:center;gap:10px;padding-top:10px;border-top:1px solid var(--border)}
+    #sfx-btn-confirm{background:var(--green);color:#fff;border:none;border-radius:6px;font-size:0.85em;font-weight:700;padding:8px 20px;cursor:pointer;transition:opacity .15s}
+    #sfx-btn-confirm:hover{opacity:0.85}
+    #sfx-btn-confirm:disabled{opacity:0.4;cursor:not-allowed}
     .sfx-empty{color:var(--dim);font-size:0.85em;padding:12px 0}
   </style>
 
@@ -2738,37 +2755,36 @@ placeholder="Enter your story here"></textarea>
   <!-- status bar -->
   <div class="sfx-status-bar" id="sfx-status-bar">Select an episode to begin.</div>
 
-  <!-- sfx preview player + visual timeline -->
-  <div id="sfx-preview-wrap" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border)">
-    <div style="font-size:0.78em;font-weight:600;margin-bottom:4px;color:var(--dim)">
-      Preview Audio (VO + SFX<span id="sfx-preview-music-label"> + Music</span>)
-    </div>
-    <audio id="sfx-preview-audio" controls style="width:100%"></audio>
-    <div id="sfx-timeline" style="position:relative;height:80px;margin-top:6px;
-         background:var(--bg);border:1px solid var(--border);border-radius:4px;
-         overflow:hidden;cursor:pointer">
-      <div id="sfx-tl-music" style="position:absolute;bottom:0;left:0;right:0;height:24px"></div>
-      <div id="sfx-tl-sfx"   style="position:absolute;bottom:24px;left:0;right:0;height:24px"></div>
-      <div id="sfx-tl-vo"    style="position:absolute;top:0;left:0;right:0;height:24px"></div>
-      <div id="sfx-tl-shots" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none"></div>
-      <div id="sfx-tl-cursor" style="position:absolute;top:0;bottom:0;width:2px;background:red;pointer-events:none;z-index:10;left:0"></div>
-    </div>
-    <div style="display:flex;gap:12px;font-size:0.70em;color:var(--dim);margin-top:3px">
-      <span><span style="display:inline-block;width:10px;height:10px;background:#4a9eff;border-radius:2px;vertical-align:middle"></span> VO</span>
-      <span><span style="display:inline-block;width:10px;height:10px;background:#ff9f43;border-radius:2px;vertical-align:middle"></span> SFX</span>
-      <span><span style="display:inline-block;width:10px;height:10px;background:#2ecc71;border-radius:2px;vertical-align:middle"></span> Music</span>
-    </div>
-  </div>
-
-  <!-- results body (scrollable; shot overrides rendered inside as first child) -->
+  <!-- results body (scrollable; preview + shot overrides + cards all scroll together) -->
   <div class="sfx-body" id="sfx-body">
+    <!-- sfx preview player + visual timeline (scrolls with cards) -->
+    <div id="sfx-preview-wrap" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <div style="font-size:0.78em;font-weight:600;margin-bottom:4px;color:var(--dim)">
+        Preview Audio (VO + SFX<span id="sfx-preview-music-label"> + Music</span>)
+      </div>
+      <audio id="sfx-preview-audio" controls style="width:100%"></audio>
+      <div id="sfx-timeline" style="position:relative;height:80px;margin-top:6px;
+           background:var(--bg);border:1px solid var(--border);border-radius:4px;
+           overflow:hidden;cursor:pointer">
+        <div id="sfx-tl-music" style="position:absolute;bottom:0;left:0;right:0;height:24px"></div>
+        <div id="sfx-tl-sfx"   style="position:absolute;bottom:24px;left:0;right:0;height:24px"></div>
+        <div id="sfx-tl-vo"    style="position:absolute;top:0;left:0;right:0;height:24px"></div>
+        <div id="sfx-tl-shots" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none"></div>
+        <div id="sfx-tl-cursor" style="position:absolute;top:0;bottom:0;width:2px;background:red;pointer-events:none;z-index:10;left:0"></div>
+      </div>
+      <div style="display:flex;gap:12px;font-size:0.70em;color:var(--dim);margin-top:3px">
+        <span><span style="display:inline-block;width:10px;height:10px;background:#4a9eff;border-radius:2px;vertical-align:middle"></span> VO</span>
+        <span><span style="display:inline-block;width:10px;height:10px;background:#ff9f43;border-radius:2px;vertical-align:middle"></span> SFX</span>
+        <span><span style="display:inline-block;width:10px;height:10px;background:#2ecc71;border-radius:2px;vertical-align:middle"></span> Music</span>
+      </div>
+    </div>
     <div id="sfx-overrides" style="display:none"></div>
   </div>
 
   <!-- footer -->
   <div class="sfx-footer" id="sfx-footer" style="display:none">
     <span id="sfx-confirm-msg" style="font-size:0.83em;color:var(--dim);flex:1"></span>
-    <button onclick="sfxSaveAll()">💾 Save SFX Selections</button>
+    <button id="sfx-btn-confirm" onclick="sfxSaveAll()">✔ Confirm</button>
     <button onclick="sfxReset()" style="background:transparent;border:1px solid var(--border);color:var(--dim)">↺ Reset</button>
   </div>
 </div>
@@ -2798,7 +2814,7 @@ placeholder="Enter your story here"></textarea>
   <!-- footer actions -->
   <div class="music-footer" id="music-footer" style="display:none">
     <span id="music-confirm-msg"></span>
-    <button id="music-btn-confirm" onclick="musicConfirm()">✔ Confirm MusicPlan</button>
+    <button id="music-btn-confirm" onclick="musicConfirm()">✔ Confirm</button>
   </div>
 </div>
 
@@ -2913,21 +2929,13 @@ placeholder="Enter your story here"></textarea>
              onmousedown="_voTlScrubStart()" onmouseup="_voTlScrubEnd()"
              ontouchstart="_voTlScrubStart()" ontouchend="_voTlScrubEnd()"/>
     </div>
-  </div>
-  <!-- VO approval banner — always visible; locks in current WAVs via sentinel -->
-  <div id="vo-approve-banner" style="display:flex;flex-direction:column;gap:6px;
-       padding:10px 14px;background:#1a3a1a;border:1px solid #2d6a2d;
-       border-radius:6px;font-size:0.85em;color:#a8e6a8;margin-bottom:4px">
-    <div style="display:flex;align-items:center;gap:8px">
-      <span id="vo-approve-icon">🎙</span>
-      <span id="vo-approve-msg">Review each VO item, then approve to lock in your audio and continue.</span>
-      <button id="vo-approve-btn" onclick="voApproveTTS()"
-        style="margin-left:auto;padding:5px 14px;background:#2d7a2d;color:#fff;
-               border:none;border-radius:5px;cursor:pointer;font-size:0.95em;font-weight:600">
-        ✓ VO Approved — Continue
-      </button>
+    <div id="vo-vis-timeline" style="position:relative;height:26px;margin-top:4px;
+         background:var(--bg);border:1px solid #2a4a6a;border-radius:4px;
+         overflow:hidden;cursor:pointer">
+      <div id="vo-vis-tl-vo"    style="position:absolute;top:2px;bottom:2px;left:0;right:0"></div>
+      <div id="vo-vis-tl-shots" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none"></div>
+      <div id="vo-vis-tl-cursor" style="position:absolute;top:0;bottom:0;width:2px;background:red;pointer-events:none;z-index:10;left:0"></div>
     </div>
-    <div id="vo-approve-error" style="display:none;color:#f88;font-size:0.9em;padding:2px 0"></div>
   </div>
   <!-- TTS accuracy check — populated by _voLoadWhisperCompare() after loadVoItems() -->
   <div id="vo-whisper-section" style="display:none;margin-top:12px;
@@ -2938,13 +2946,6 @@ placeholder="Enter your story here"></textarea>
     <div id="vo-whisper-summary" style="font-size:0.82em;margin-bottom:10px"></div>
     <table id="vo-whisper-table" style="width:100%;font-size:0.78em;
            border-collapse:collapse"></table>
-  </div>
-  <!-- sentinel status indicator (shown after approval) -->
-  <div id="vo-sentinel-status" style="display:none;align-items:center;gap:8px;
-       padding:5px 10px;border-radius:5px;font-size:0.8em">
-    <span id="vo-sentinel-icon">✓</span>
-    <span id="vo-sentinel-text">VO Approved</span>
-    <span id="vo-sentinel-time" style="color:var(--dim)"></span>
   </div>
   <!-- column headers -->
   <div class="vo-col-headers" style="margin-top:2px">
@@ -2961,6 +2962,21 @@ placeholder="Enter your story here"></textarea>
   </div>
   <div id="vo-body" class="vo-body">
     <span class="vo-empty">Select an episode and locale to see VO items.</span>
+  </div>
+  <!-- footer actions: status left, Confirm button right -->
+  <div id="vo-footer" style="flex-shrink:0;display:flex;align-items:center;gap:10px;
+       padding-top:8px;border-top:1px solid var(--border)">
+    <span id="vo-approve-icon" style="font-size:0.9em">🎙</span>
+    <span id="vo-approve-msg" style="font-size:0.83em;color:var(--text);flex:1">
+      Review each VO item, then click Confirm to lock in your audio and continue.
+    </span>
+    <span id="vo-approve-error" style="display:none;color:#f88;font-size:0.83em"></span>
+    <button id="vo-approve-btn" onclick="voApproveTTS()"
+      style="background:var(--green);color:#fff;border:none;border-radius:6px;
+             font-size:0.85em;font-weight:700;padding:8px 20px;cursor:pointer;
+             transition:opacity .15s;flex-shrink:0">
+      ✔ Confirm
+    </button>
   </div>
 </div>
 
@@ -3865,6 +3881,8 @@ placeholder="Enter your story here"></textarea>
         // Load approved durations for drift detection (OPEN 3)
         window._voApprovedDurations = {};
         _voLoadApprovedDurations(epDir, locale);
+        // Restore preview player if a previous generate was saved
+        _voTryRestorePreview(slug, epId, locale);
       })
       .catch(e => {
         body.innerHTML = '<span class="vo-empty" style="color:#f88">Failed: ' +
@@ -3876,6 +3894,8 @@ placeholder="Enter your story here"></textarea>
 
   function _renderVoItems(items, slug, epId, locale, voiceCatalog) {
     _voVoiceCatalog = voiceCatalog || {};
+    window._voSlug = slug;   // stored for timeline loading
+    window._voEpId = epId;
     const epDir = `projects/${slug}/episodes/${epId}`;
     const body = document.getElementById('vo-body');
     if (!items.length) {
@@ -4070,6 +4090,7 @@ placeholder="Enter your story here"></textarea>
 
     // Populate scene time labels after DOM is ready
     _voRecalcSceneTimes();
+    _voVisLoadTimeline();
   }
 
   // Called whenever any TTS param field changes after a Preview write.
@@ -4141,6 +4162,22 @@ placeholder="Enter your story here"></textarea>
       const lbl = document.getElementById('vo-scene-time-' + scIdE);
       if (lbl) lbl.textContent = `${fmt(sceneStart)} – ${fmt(sceneEnd)}`;
     });
+  }
+
+  // ── VO visual timeline ───────────────────────────────────────────────────────
+
+  let _voVisTlData = null;
+  async function _voVisLoadTimeline() {
+    const slug = window._voSlug, epId = window._voEpId;
+    if (!slug || !epId) return;
+    const tlPath = 'projects/' + slug + '/episodes/' + epId
+      + '/assets/sfx/SfxPreviewPack/timeline.json';
+    try {
+      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
+      if (!r.ok) return;
+      _voVisTlData = await r.json();
+      _tlRender('vo-vis', _voVisTlData, 'vo-tl-audio');
+    } catch (e) { console.warn('[VO] timeline load failed', e); }
   }
 
   // ── VO preview helpers ──────────────────────────────────────────────────────
@@ -4412,6 +4449,22 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('vo-tl-playbtn').textContent = '▶';
   }
 
+  // Restore preview player from sidecar written on the previous generate.
+  async function _voTryRestorePreview(slug, epId, locale) {
+    if (!slug || !epId || !locale) return;
+    const metaPath = 'projects/' + slug + '/episodes/' + epId
+      + '/assets/meta/vo_preview_' + locale + '.meta.json';
+    try {
+      const r = await fetch('/serve_media?path=' + encodeURIComponent(metaPath));
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.clips && data.clips.length && data.wav_url) {
+        _voTlBuild(data);
+        _voVisLoadTimeline();
+      }
+    } catch (_) { /* no preview yet — that's fine */ }
+  }
+
   // Preview all VO items — concat on server, show timeline.
   async function _voPreviewAll() {
     const epSel  = document.getElementById('vo-ep-select');
@@ -4419,6 +4472,8 @@ placeholder="Enter your story here"></textarea>
     const epDir  = epSel?.value;
     const locale = locSel?.value;
     if (!epDir || !locale) return;
+
+    _voVisLoadTimeline();
 
     // Stop any in-progress per-item playback
     if (window._voAudio) { window._voAudio.pause(); window._voAudio = null; }
@@ -4750,16 +4805,16 @@ placeholder="Enter your story here"></textarea>
       sentinelEl.style.color = '#f0963c';
       sentinelEl.style.border = '1px solid #7a4400';
       document.getElementById('vo-sentinel-icon').textContent = '⚠';
-      document.getElementById('vo-sentinel-text').textContent = 'VO edits made — click Re-approve when ready';
+      document.getElementById('vo-sentinel-text').textContent = 'VO edits made — click Confirm when ready';
     }
     const approveBtn = document.getElementById('vo-approve-btn');
     if (approveBtn) {
-      approveBtn.textContent = '↻ Re-approve';
+      approveBtn.textContent = '✔ Confirm';
       const banner = document.getElementById('vo-approve-banner');
       if (banner) {
         banner.style.display = 'flex';
         document.getElementById('vo-approve-msg').textContent =
-          'VO edits made — re-approve before continuing to Stage 8.';
+          'VO edits made — click Confirm before continuing to Stage 8.';
       }
     }
   }
@@ -4828,7 +4883,7 @@ placeholder="Enter your story here"></textarea>
 
       // Success — clear pending stage and update UI
       _pendingApproveStage = null;
-      if (btn) { btn.textContent = '✓ VO Approved — Continue'; btn.disabled = false; }
+      if (btn) { btn.textContent = '✔ Confirm'; btn.disabled = false; }
       const sentinelEl = document.getElementById('vo-sentinel-status');
       if (sentinelEl) {
         sentinelEl.style.display = 'flex';
@@ -4849,7 +4904,7 @@ placeholder="Enter your story here"></textarea>
         el.classList.remove('vo-timing-stale'));
 
     } catch(e) {
-      if (btn) { btn.textContent = '✓ VO Approved — Continue'; btn.disabled = false; }
+      if (btn) { btn.textContent = '✔ Confirm'; btn.disabled = false; }
       if (errEl) { errEl.textContent = '✗ ' + e.message; errEl.style.display = 'block'; }
     }
   }
@@ -4918,28 +4973,13 @@ placeholder="Enter your story here"></textarea>
     try {
       const r = await fetch(`/api/vo_sentinel?ep_dir=${encodeURIComponent(epDir)}&locale=${encodeURIComponent(locale)}`);
       const data = await r.json();
-      const approveBanner = document.getElementById('vo-approve-banner');
-      const sentinelEl    = document.getElementById('vo-sentinel-status');
       if (data.valid) {
-        if (approveBanner) {
-          approveBanner.style.display = 'flex';
-          document.getElementById('vo-approve-msg').textContent =
-            '✓ VO Approved — pipeline may continue. Edit any item and Re-approve if needed.';
-          document.getElementById('vo-approve-btn').textContent = '↻ Re-approve';
-        }
-        if (sentinelEl) {
-          sentinelEl.style.display = 'flex';
-          sentinelEl.style.background = '#1a3a1a';
-          sentinelEl.style.color = '#6ec96e';
-          sentinelEl.style.border = '1px solid #2d6a2d';
-          document.getElementById('vo-sentinel-icon').textContent = '✓';
-          document.getElementById('vo-sentinel-text').textContent = 'VO Approved';
-          document.getElementById('vo-sentinel-time').textContent = data.completed_at || '';
-        }
+        document.getElementById('vo-approve-msg').textContent =
+          '✓ VO Approved — pipeline may continue.';
+        document.getElementById('vo-approve-btn').textContent = '✔ Confirm';
       } else if (data.exists) {
         // Sentinel exists but hashes don't match (edits since last approval)
         _voMarkSentinelInvalid();
-        if (approveBanner) approveBanner.style.display = 'flex';
       }
     } catch(e) {}
   }
@@ -5284,6 +5324,8 @@ placeholder="Enter your story here"></textarea>
     await _sfxLoadExisting();
     // Show empty cards for any manifest items not yet covered by search results
     _sfxRenderManifestItems();
+    // Restore preview player if a previous generate was saved
+    await _sfxTryRestorePreview();
   }
 
   async function _sfxLoadExisting() {
@@ -5317,7 +5359,7 @@ placeholder="Enter your story here"></textarea>
       try {
         const rp = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
                              + '&ep_id=' + encodeURIComponent(_sfxEpId)
-                             + '&file=assets/sfx/SfxPlan.json');
+                             + '&file=SfxPlan.json');
         if (rp.ok) {
           const plan = await rp.json();
           (plan.sfx_entries || []).forEach(e => {
@@ -5329,7 +5371,8 @@ placeholder="Enter your story here"></textarea>
         }
       } catch(_) {}
 
-      // Render all cards (preserve sfx-overrides inside sfx-body)
+      // Render all cards in item_id order (preserve sfx-overrides inside sfx-body)
+      _sfxItems.sort((a, b) => (a.item_id || a.asset_id || '').localeCompare(b.item_id || b.asset_id || ''));
       _sfxClearCards();
       _sfxItems.forEach(item => {
         const res = _sfxResults[item.item_id || item.asset_id || ''];
@@ -5365,6 +5408,7 @@ placeholder="Enter your story here"></textarea>
       if (_sfxResults[id]) return;  // already has search results — card already rendered
       if (!_sfxItems.find(i => (i.item_id || i.asset_id) === id)) {
         _sfxItems.push(item);
+        _sfxItems.sort((a, b) => (a.item_id || a.asset_id || '').localeCompare(b.item_id || b.asset_id || ''));
         addedAny = true;
       }
       sfxRenderCard(item, []);
@@ -5499,7 +5543,7 @@ placeholder="Enter your story here"></textarea>
     const body = document.getElementById('sfx-body');
     if (!body) return;
     Array.from(body.children).forEach(el => {
-      if (el.id !== 'sfx-overrides') el.remove();
+      if (el.id !== 'sfx-overrides' && el.id !== 'sfx-preview-wrap') el.remove();
     });
   }
 
@@ -5879,6 +5923,24 @@ placeholder="Enter your story here"></textarea>
   }
 
   // Auto-download any selected SFX files that are not yet on disk.
+  // Restore preview player from files written by a previous sfxGeneratePreview().
+  async function _sfxTryRestorePreview() {
+    if (!_sfxSlug || !_sfxEpId) return;
+    const tlPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
+      + '/assets/sfx/SfxPreviewPack/timeline.json';
+    const audioPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
+      + '/assets/sfx/SfxPreviewPack/preview_audio.wav';
+    try {
+      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath));
+      if (!r.ok) return;
+      _sfxTimeline = await r.json();
+      const audio = document.getElementById('sfx-preview-audio');
+      audio.src = '/serve_media?path=' + encodeURIComponent(audioPath);
+      document.getElementById('sfx-preview-wrap').style.display = '';
+      sfxRenderTimeline();
+    } catch (_) { /* no preview yet — that's fine */ }
+  }
+
   async function sfxGeneratePreview() {
     if (!_sfxSlug || !_sfxEpId) return;
     if (_sfxBusy) return;
@@ -5887,7 +5949,8 @@ placeholder="Enter your story here"></textarea>
     btn.disabled = true;
     btn.textContent = '⏳ Generating…';
     const includeMusic = document.getElementById('sfx-include-music').checked;
-    document.getElementById('sfx-preview-music-label').style.display = includeMusic ? '' : 'none';
+    const _musicLabel = document.getElementById('sfx-preview-music-label');
+    if (_musicLabel) _musicLabel.style.display = includeMusic ? '' : 'none';
     try {
       const r = await fetch('/api/sfx_preview', {
         method: 'POST',
@@ -5952,76 +6015,95 @@ placeholder="Enter your story here"></textarea>
     } catch (e) { console.warn('timeline load failed', e); }
   }
 
-  function sfxRenderTimeline() {
-    const tl = _sfxTimeline;
+  // ── Shared visual timeline renderer ─────────────────────────────────────────
+  // Renders colored track bars into DOM elements named {prefix}-timeline,
+  // {prefix}-tl-shots, {prefix}-tl-vo, {prefix}-tl-sfx, {prefix}-tl-music,
+  // {prefix}-tl-cursor.
+  // tl format: {total_dur_sec, shots[], vo_items[], sfx_items[], music_items[]}
+  let _tlCursorRafs = {};   // { prefix: rafId }
+
+  function _tlRender(prefix, tl, audioId) {
     if (!tl || !tl.total_dur_sec) return;
     const totalDur = tl.total_dur_sec;
-    const pct = (sec) => (sec / totalDur * 100).toFixed(3) + '%';
+    const pct = (s) => (s / totalDur * 100).toFixed(3) + '%';
     const w   = (s, e) => (Math.max(0, (e - s) / totalDur * 100)).toFixed(3) + '%';
 
-    const shotsDiv = document.getElementById('sfx-tl-shots');
-    shotsDiv.innerHTML = '';
-    let prevSceneId = null;
-    for (const sh of (tl.shots || [])) {
-      const absStart = sh.offset_sec;
-      const isScene = prevSceneId !== null && sh.scene_id !== prevSceneId;
-      const line = document.createElement('div');
-      line.style.cssText = 'position:absolute;top:0;bottom:0;width:'
-        + (isScene ? '2px' : '1px') + ';background:'
-        + (isScene ? 'var(--dim)' : 'rgba(128,128,128,0.3)')
-        + ';left:' + pct(absStart);
-      line.title = sh.shot_id + (isScene ? ' (scene break)' : '');
-      shotsDiv.appendChild(line);
-      prevSceneId = sh.scene_id;
-    }
-
-    const voDiv = document.getElementById('sfx-tl-vo');
-    voDiv.innerHTML = '';
-    for (const v of (tl.vo_items || [])) {
-      const el = document.createElement('div');
-      el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
-        + 'background:#4a9eff;opacity:0.85;left:' + pct(v.start_sec) + ';width:' + w(v.start_sec, v.end_sec);
-      el.title = v.item_id + ' (' + v.speaker_id + ')';
-      voDiv.appendChild(el);
-    }
-
-    const sfxDiv = document.getElementById('sfx-tl-sfx');
-    sfxDiv.innerHTML = '';
-    for (const s of (tl.sfx_items || [])) {
-      const el = document.createElement('div');
-      el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
-        + 'background:#ff9f43;opacity:0.85;left:' + pct(s.start_sec) + ';width:' + w(s.start_sec, s.end_sec);
-      el.title = s.item_id + ': ' + (s.tag || '');
-      sfxDiv.appendChild(el);
-    }
-
-    const musDiv = document.getElementById('sfx-tl-music');
-    musDiv.innerHTML = '';
-    for (const m of (tl.music_items || [])) {
-      const el = document.createElement('div');
-      el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
-        + 'background:#2ecc71;opacity:0.7;left:' + pct(m.start_sec) + ';width:' + w(m.start_sec, m.end_sec);
-      el.title = m.item_id + ': ' + (m.music_mood || '');
-      musDiv.appendChild(el);
-    }
-
-    const tlDiv = document.getElementById('sfx-timeline');
-    tlDiv.onclick = (e) => {
-      const rect = tlDiv.getBoundingClientRect();
-      const ratio = (e.clientX - rect.left) / rect.width;
-      document.getElementById('sfx-preview-audio').currentTime = ratio * totalDur;
-    };
-
-    if (_sfxCursorRaf) cancelAnimationFrame(_sfxCursorRaf);
-    const audio  = document.getElementById('sfx-preview-audio');
-    const cursor = document.getElementById('sfx-tl-cursor');
-    function tick() {
-      if (audio && cursor) {
-        cursor.style.left = (audio.currentTime / totalDur * 100).toFixed(2) + '%';
+    const shotsDiv = document.getElementById(prefix + '-tl-shots');
+    if (shotsDiv) {
+      shotsDiv.innerHTML = '';
+      let prevSceneId = null;
+      for (const sh of (tl.shots || [])) {
+        const isScene = prevSceneId !== null && sh.scene_id !== prevSceneId;
+        const line = document.createElement('div');
+        line.style.cssText = 'position:absolute;top:0;bottom:0;width:'
+          + (isScene ? '2px' : '1px') + ';background:'
+          + (isScene ? 'var(--dim)' : 'rgba(128,128,128,0.3)')
+          + ';left:' + pct(sh.offset_sec || 0);
+        line.title = sh.shot_id + (isScene ? ' (scene break)' : '');
+        shotsDiv.appendChild(line);
+        prevSceneId = sh.scene_id;
       }
-      _sfxCursorRaf = requestAnimationFrame(tick);
     }
-    tick();
+
+    const voDiv = document.getElementById(prefix + '-tl-vo');
+    if (voDiv) {
+      voDiv.innerHTML = '';
+      for (const v of (tl.vo_items || [])) {
+        const el = document.createElement('div');
+        el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
+          + 'background:#4a9eff;opacity:0.85;left:' + pct(v.start_sec) + ';width:' + w(v.start_sec, v.end_sec);
+        el.title = (v.item_id || '') + (v.speaker_id ? ' (' + v.speaker_id + ')' : '');
+        voDiv.appendChild(el);
+      }
+    }
+
+    const sfxDiv = document.getElementById(prefix + '-tl-sfx');
+    if (sfxDiv) {
+      sfxDiv.innerHTML = '';
+      for (const s of (tl.sfx_items || [])) {
+        const el = document.createElement('div');
+        el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
+          + 'background:#ff9f43;opacity:0.85;left:' + pct(s.start_sec) + ';width:' + w(s.start_sec, s.end_sec);
+        el.title = (s.item_id || '') + ': ' + (s.tag || '');
+        sfxDiv.appendChild(el);
+      }
+    }
+
+    const musDiv = document.getElementById(prefix + '-tl-music');
+    if (musDiv) {
+      musDiv.innerHTML = '';
+      for (const m of (tl.music_items || [])) {
+        const el = document.createElement('div');
+        el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
+          + 'background:#2ecc71;opacity:0.7;left:' + pct(m.start_sec) + ';width:' + w(m.start_sec, m.end_sec);
+        el.title = (m.item_id || '') + ': ' + (m.music_mood || '');
+        musDiv.appendChild(el);
+      }
+    }
+
+    const tlDiv = document.getElementById(prefix + '-timeline');
+    const audioEl = audioId ? document.getElementById(audioId) : null;
+    if (tlDiv && audioEl) {
+      tlDiv.onclick = (e) => {
+        const rect = tlDiv.getBoundingClientRect();
+        audioEl.currentTime = (e.clientX - rect.left) / rect.width * totalDur;
+      };
+    }
+
+    if (_tlCursorRafs[prefix]) cancelAnimationFrame(_tlCursorRafs[prefix]);
+    const cursor = document.getElementById(prefix + '-tl-cursor');
+    if (cursor && audioEl) {
+      function _tlTick() {
+        cursor.style.left = (audioEl.currentTime / totalDur * 100).toFixed(2) + '%';
+        _tlCursorRafs[prefix] = requestAnimationFrame(_tlTick);
+      }
+      _tlTick();
+    }
+  }
+
+  function sfxRenderTimeline() {
+    if (_sfxCursorRaf) { cancelAnimationFrame(_sfxCursorRaf); _sfxCursorRaf = null; }
+    _tlRender('sfx', _sfxTimeline, 'sfx-preview-audio');
   }
 
   function sfxSetTiming(itemId, field, value) {
@@ -7463,6 +7545,7 @@ placeholder="Enter your story here"></textarea>
       if (videoEl && !videoEl.src) {
         videoEl.src = '/serve_media?path=' + encodeURIComponent(base + 'preview_video.mp4');
         document.getElementById('media-preview-wrap').style.display = '';
+        _mediaLoadTimeline();
       }
     }
 
@@ -7475,6 +7558,19 @@ placeholder="Enter your story here"></textarea>
       videoEl.src = '/serve_media?path=' + encodeURIComponent(base + 'scene_' + cardId + '_preview.mp4');
       wrap.style.display = '';
     });
+  }
+
+  let _mediaTlData = null;
+  async function _mediaLoadTimeline() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    const tlPath = 'projects/' + _mediaSlug + '/episodes/' + _mediaEpId
+      + '/assets/sfx/SfxPreviewPack/timeline.json';
+    try {
+      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
+      if (!r.ok) return;
+      _mediaTlData = await r.json();
+      _tlRender('media', _mediaTlData, 'media-preview-video');
+    } catch (e) { console.warn('[Media] timeline load failed', e); }
   }
 
   // ── Animation picker: option definitions ──
@@ -9228,6 +9324,8 @@ placeholder="Enter your story here"></textarea>
         previewWrap.style.display = '';
         previewWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
+      // Load SFX timeline for visual track display
+      _mediaLoadTimeline();
       if (d.warnings && d.warnings.length) {
         _mediaSetStatus('⚠️ Preview ready with warnings: ' + d.warnings.join(' | '));
       } else {
@@ -11115,7 +11213,7 @@ placeholder="Enter your story here"></textarea>
     // Try loading existing MusicPlan.json
     try {
       const pr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_musicSlug)
-        + '&ep_id=' + encodeURIComponent(_musicEpId) + '&file=assets/music/MusicPlan.json');
+        + '&ep_id=' + encodeURIComponent(_musicEpId) + '&file=MusicPlan.json');
       if (pr.ok) {
         const plan = await pr.json();
         _musicLoopSel      = plan.loop_selections || {};
@@ -11312,6 +11410,40 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
+  function _musicRenderTimeline() {
+    if (!_musicTimeline) return;
+    const tl = _musicTimeline;
+    const totalDur = tl.total_duration_sec || 0;
+    if (!totalDur) return;
+
+    // Normalize into _tlRender format
+    const voItems = [];
+    const musicItems = [];
+    for (const sh of (tl.shots || [])) {
+      const shStart = sh.offset_sec || 0;
+      const shEnd   = shStart + (sh.duration_sec || 0);
+      // VO lines from this shot (episode-absolute)
+      for (const v of (sh.vo_lines || [])) {
+        if (v.start_sec != null && v.end_sec != null) {
+          voItems.push({ item_id: v.item_id, start_sec: v.start_sec, end_sec: v.end_sec, speaker_id: v.speaker_id || '' });
+        }
+      }
+      // Music bar: entire shot if it has music
+      if (sh.music_item_id) {
+        musicItems.push({ item_id: sh.music_item_id, start_sec: shStart, end_sec: shEnd, music_mood: sh.music_mood || '' });
+      }
+    }
+
+    // Build shots list with scene_id derived from shot_id (e.g. "s01e01_sc02_sh01" → "sc02")
+    const shots = (tl.shots || []).map(sh => {
+      const parts = (sh.shot_id || '').split('_');
+      const scene_id = parts.length >= 2 ? parts[parts.length - 2] : '';
+      return { shot_id: sh.shot_id, scene_id, offset_sec: sh.offset_sec || 0 };
+    });
+
+    _tlRender('music', { total_dur_sec: totalDur, shots, vo_items: voItems, sfx_items: [], music_items: musicItems }, 'music-preview-audio');
+  }
+
   function _musicRenderBody() {
     const body = document.getElementById('music-body');
     body.innerHTML = '';
@@ -11321,12 +11453,26 @@ placeholder="Enter your story here"></textarea>
       + '/assets/music/MusicReviewPack/preview_audio.wav';
     const previewWrap = document.createElement('div');
     previewWrap.className = 'music-preview-wrap';
+    previewWrap.id = 'music-preview-wrap-el';
     previewWrap.innerHTML = '<div class="music-section-label">Preview Audio (VO + Music)</div>'
-      + '<audio controls src="/serve_media?path=' + encodeURIComponent(previewPath)
+      + '<audio id="music-preview-audio" controls src="/serve_media?path=' + encodeURIComponent(previewPath)
       + '&t=' + Date.now() + '" style="width:100%"></audio>'
+      + '<div id="music-timeline" style="position:relative;height:56px;margin-top:6px;'
+      + 'background:var(--bg);border:1px solid var(--border);border-radius:4px;'
+      + 'overflow:hidden;cursor:pointer">'
+      + '<div id="music-tl-music" style="position:absolute;bottom:0;left:0;right:0;height:24px"></div>'
+      + '<div id="music-tl-vo"    style="position:absolute;top:0;left:0;right:0;height:24px"></div>'
+      + '<div id="music-tl-shots" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none"></div>'
+      + '<div id="music-tl-cursor" style="position:absolute;top:0;bottom:0;width:2px;background:red;pointer-events:none;z-index:10;left:0"></div>'
+      + '</div>'
+      + '<div style="display:flex;gap:12px;font-size:0.70em;color:var(--dim);margin-top:3px">'
+      + '<span><span style="display:inline-block;width:10px;height:10px;background:#4a9eff;border-radius:2px;vertical-align:middle"></span> VO</span>'
+      + '<span><span style="display:inline-block;width:10px;height:10px;background:#2ecc71;border-radius:2px;vertical-align:middle"></span> Music</span>'
+      + '</div>'
       + '<div style="font-size:0.72em;color:var(--dim);margin-top:4px">'
       + 'If no audio loads, click Generate Review Pack first.</div>';
     body.appendChild(previewWrap);
+    _musicRenderTimeline();
 
     // ── Build unified clip list + global lookup (used by Shot Overrides + Generated Clips) ──
     _musicClipLookup = {};
@@ -11403,9 +11549,9 @@ placeholder="Enter your story here"></textarea>
           const epStart  = s.offset_sec || 0;
           const epEnd    = epStart + shotDur;
           // within-shot offsets (stored in overrides / backend)
-          const startWithin = ovr.start_sec    != null ? ovr.start_sec    : (s.start_sec != null ? s.start_sec : 0);
-          const durVal      = ovr.duration_sec != null ? ovr.duration_sec : shotDur;
-          const endWithin   = Math.min(startWithin + durVal, shotDur);
+          const startWithin = ovr.start_sec != null ? ovr.start_sec : (s.start_sec != null ? s.start_sec : 0);
+          const endWithin   = ovr.end_sec   != null ? Math.min(ovr.end_sec, shotDur)
+                                                    : Math.min(startWithin + shotDur, shotDur);
           // episode-absolute values shown in the inputs
           const dispStart = epStart + startWithin;
           const dispEnd   = epStart + endWithin;
@@ -11715,14 +11861,13 @@ placeholder="Enter your story here"></textarea>
     if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
     const ovr = _musicOverrides[itemId];
     // Resolve current values
-    const curStart = startSec  != null ? startSec  : (ovr.start_sec   != null ? ovr.start_sec   : 0);
-    const curDur   = ovr.duration_sec != null ? ovr.duration_sec : shotDur;
-    const curEnd   = endSec    != null ? endSec    : Math.min(curStart + curDur, shotDur);
+    const curStart = startSec != null ? startSec : (ovr.start_sec != null ? ovr.start_sec : 0);
+    const curEnd   = endSec   != null ? endSec   : (ovr.end_sec   != null ? ovr.end_sec   : Math.min(curStart + shotDur, shotDur));
     // Clamp and store
     const newStart = Math.max(0, Math.min(curStart, shotDur));
     const newEnd   = Math.max(newStart, Math.min(curEnd, shotDur));
-    ovr.start_sec    = parseFloat(newStart.toFixed(2));
-    ovr.duration_sec = parseFloat((newEnd - newStart).toFixed(2));
+    ovr.start_sec = parseFloat(newStart.toFixed(2));
+    ovr.end_sec   = parseFloat(newEnd.toFixed(2));
   }
 
   async function musicConfirm() {
@@ -12477,7 +12622,7 @@ placeholder="Enter your story here"></textarea>
         '                            (in-place → AssetManifest.{locale}.json)\n' +
         '[ 6] gen_tts_cloud.py       --manifest AssetManifest.{locale}.json\n' +
         '[ 7] post_tts_analysis.py   --manifest AssetManifest.{locale}.json\n' +
-        '[ 8] apply_music_plan.py    --plan assets/music/MusicPlan.json\n' +
+        '[ 8] apply_music_plan.py    --plan MusicPlan.json\n' +
         '                            --manifest AssetManifest.{locale}.json\n' +
         '     (skipped if Music disabled; ⏸ pauses to wait for Music tab confirm if plan missing)\n' +
         '[ 9] resolve_assets.py      --manifest AssetManifest.{locale}.json\n' +
@@ -12763,7 +12908,7 @@ placeholder="Enter your story here"></textarea>
           { num: 7,  step: 'post_tts',         label: '7 — post_tts',
             cmd: 'post_tts_analysis.py --manifest AssetManifest.{locale}.json' },
           { num: 8,  step: 'apply_music_plan', label: '8 — music plan',
-            cmd: 'apply_music_plan.py --plan assets/music/MusicPlan.json --manifest AssetManifest.{locale}.json  (skipped if Music disabled)' },
+            cmd: 'apply_music_plan.py --plan MusicPlan.json --manifest AssetManifest.{locale}.json  (skipped if Music disabled)' },
           { num: 9,  step: 'resolve_assets',   label: '9 — resolve',
             cmd: 'resolve_assets.py --manifest AssetManifest.{locale}.json  (writes resolved_assets[] into unified manifest)' },
           { num: 10, step: 'gen_render_plan',  label: '10 — plan',
@@ -14012,7 +14157,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
     }
 
     # Music plan checkpoint: [4b/8] in Stage 9 — pipeline pauses here until user confirms
-    _music_plan_path = os.path.join(_assets_dir, "music", "MusicPlan.json")
+    _music_plan_path = os.path.join(ep_dir, "MusicPlan.json")
     music_plan_done = os.path.isfile(_music_plan_path)
 
     # TTS done: at least one locale has WAV files (proxy for Stage 9 having started)
@@ -14087,7 +14232,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "vo":           (_is_vo_approved(ep_dir, _vo_primary) if _VO_UTILS_AVAILABLE else False) or os.path.isfile(_vo_approved_legacy),
         "vo_by_locale": _vo_by_locale,
         "music":        os.path.isfile(os.path.join(ep_dir, "assets", "music", "MusicApprovalSnapshot.json")),
-        "sfx":          os.path.isfile(os.path.join(ep_dir, "assets", "sfx", "SfxPlan.json")),
+        "sfx":          os.path.isfile(os.path.join(ep_dir, "SfxPlan.json")),
         "media":        os.path.isfile(os.path.join(ep_dir, "assets", "media", "selections.json")),
     }
     approvals["all"] = approvals["vo"] and approvals["music"] and approvals["sfx"] and approvals["media"]
@@ -14433,7 +14578,7 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
             "--manifest", ep(f"AssetManifest.{locale}.json"),
         ]
     elif step == "apply_music_plan":
-        music_plan = os.path.join(ep_dir, "assets", "music", "MusicPlan.json")
+        music_plan = os.path.join(ep_dir, "MusicPlan.json")
         if not os.path.isfile(music_plan):
             return []   # [] = intentional skip (no MusicPlan.json); None = unknown step
         return [
@@ -14721,11 +14866,17 @@ class Handler(BaseHTTPRequestHandler):
                     _of.write(all_pcm)
 
                 _rel = os.path.relpath(out_path, PIPE_DIR).replace("\\", "/")
-                _resp = json.dumps({
+                _payload = {
                     "wav_url":   "/serve_media?path=" + _rel,
                     "total_sec": round(current_sec, 3),
                     "clips":     clips_meta,
-                }).encode()
+                }
+                # Persist metadata so the frontend can restore the player on reload
+                _meta_path = os.path.join(full_ep, "assets", "meta",
+                                          f"vo_preview_{locale}.meta.json")
+                with open(_meta_path, "w", encoding="utf-8") as _mf:
+                    json.dump(_payload, _mf, ensure_ascii=False)
+                _resp = json.dumps(_payload).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(_resp)))
@@ -15460,7 +15611,7 @@ class Handler(BaseHTTPRequestHandler):
             # This enforces the skip even if the UI button is somehow clicked.
             _step_ep_dir   = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
             _step_music_ok = os.path.isfile(os.path.join(_step_ep_dir, "assets", "music", "MusicApprovalSnapshot.json"))
-            _step_sfx_ok   = os.path.isfile(os.path.join(_step_ep_dir, "assets", "sfx", "SfxPlan.json"))
+            _step_sfx_ok   = os.path.isfile(os.path.join(_step_ep_dir, "SfxPlan.json"))
             _step_vo_ok    = _is_vo_approved(_step_ep_dir, locale or 'en') if _VO_UTILS_AVAILABLE else False
             _approved_skip = {
                 "gen_music_clip":      _step_music_ok,
@@ -15753,7 +15904,7 @@ class Handler(BaseHTTPRequestHandler):
                 _s10_music_ok = os.path.isfile(os.path.join(
                     _ep_dir_s10, "assets", "music", "MusicApprovalSnapshot.json"))
                 _s10_sfx_ok   = os.path.isfile(os.path.join(
-                    _ep_dir_s10, "assets", "sfx", "SfxPlan.json"))
+                    _ep_dir_s10, "SfxPlan.json"))
                 _s10_shared_approved = {
                     "gen_music_clip":      _s10_music_ok,
                     "music_prepare_loops": _s10_music_ok,
@@ -16462,11 +16613,11 @@ class Handler(BaseHTTPRequestHandler):
                                        "meta.json",
                                        "assets/media/selections.json",
                                        "assets/media/bg_id_remap.json",
-                                       "assets/music/MusicPlan.json",
+                                       "MusicPlan.json",
                                        "assets/music/user_cut_clips.json",
                                        "assets/meta/gen_music_clip_results.json",
                                        "assets/sfx/sfx_search_results.json",
-                                       "assets/sfx/SfxPlan.json",
+                                       "SfxPlan.json",
                                        "AssetManifest.shared.json"}
             params   = parse_qs(parsed.query)
             slug     = params.get("slug", [""])[0].strip()
@@ -18642,7 +18793,7 @@ class Handler(BaseHTTPRequestHandler):
                     "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "sfx_entries": sfx_plan_entries,
                 }
-                plan_path = os.path.join(sfx_dir, "SfxPlan.json")
+                plan_path = os.path.join(ep_dir, "SfxPlan.json")
                 with open(plan_path, "w", encoding="utf-8") as _pf:
                     json.dump(sfx_plan, _pf, indent=2, ensure_ascii=False)
                 print(f"  [SFX] SfxPlan.json written: {len(sfx_plan_entries)} entries")
@@ -18746,9 +18897,16 @@ class Handler(BaseHTTPRequestHandler):
                                         _dl_req.add_header("X-Api-Key", _api_key)
                                 except Exception:
                                     pass
+                                _dl_deadline = time.time() + 30
                                 with _ul_req.urlopen(_dl_req, timeout=30) as _resp:
                                     with open(_tp, "wb") as _tf_out:
-                                        _tf_out.write(_resp.read())
+                                        while True:
+                                            if time.time() > _dl_deadline:
+                                                raise TimeoutError(f"Download of {_iid} exceeded 30s total")
+                                            _chunk = _resp.read(65536)
+                                            if not _chunk:
+                                                break
+                                            _tf_out.write(_chunk)
                                 _file_sz = os.path.getsize(_tp)
                                 _sel_entry["source_file"] = _tp
                                 _temp_dl_paths.append(_tp)
@@ -19535,7 +19693,7 @@ class Handler(BaseHTTPRequestHandler):
                 music_dir = os.path.join(ep_dir, "assets", "music")
                 os.makedirs(music_dir, exist_ok=True)
 
-                plan_path = os.path.join(music_dir, "MusicPlan.json")
+                plan_path = os.path.join(ep_dir, "MusicPlan.json")
                 with open(plan_path, "w", encoding="utf-8") as _pf:
                     json.dump(plan, _pf, indent=2, ensure_ascii=False)
                     _pf.write("\n")

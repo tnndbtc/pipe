@@ -1105,7 +1105,7 @@ def main() -> None:
     # ── Load SfxPlan.json (once) — live user selections from SFX tab ────────
     # Read directly at render time so edits made in the SFX tab are honoured
     # without requiring a gen_render_plan re-run (mirrors MusicApprovalSnapshot).
-    _sfx_plan_path = os.path.join(episode_dir, "assets", "sfx", "SfxPlan.json")
+    _sfx_plan_path = os.path.join(episode_dir, "SfxPlan.json")
     _sfx_plan_by_shot: dict = {}   # shot_id -> list[sfx_entry]
     if os.path.isfile(_sfx_plan_path):
         try:

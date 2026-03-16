@@ -519,7 +519,7 @@ def build_plan(
     # Keyed by shot_id so build_shot() can inject sfx_plan_entries per shot.
     sfx_plan_by_shot: dict[str, list] = {}
     if episode_dir is not None:
-        sfx_plan_path = episode_dir / "assets" / "sfx" / "SfxPlan.json"
+        sfx_plan_path = episode_dir / "SfxPlan.json"
         if sfx_plan_path.exists():
             try:
                 sfx_plan = json.load(sfx_plan_path.open(encoding="utf-8"))

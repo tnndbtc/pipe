@@ -538,8 +538,8 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         snap["fade_sec"] = fade_sec
         snap["music_delay_sec"] = start_sec
         # music_end_sec: shot-relative position where music stops.
-        # = entry["duration_sec"] after _apply_overrides (which converts UI duration_sec
-        #   from window-duration to end-position). When no end override, equals shot duration.
+        # = entry["duration_sec"] after _apply_overrides (which stores end_sec directly).
+        # When no end_sec override, equals shot duration.
         snap["music_end_sec"] = float(entry.get("duration_sec", snap["duration_ms"] / 1000.0))
         snap["loop_wav_path"] = str(music_path)
 
@@ -745,13 +745,11 @@ def main():
                     entry["fade_sec"] = float(ovr["fade_sec"])
                 if "start_sec" in ovr:
                     entry["start_sec"] = float(ovr["start_sec"])
-                if "duration_sec" in ovr:
-                    # UI sends duration_sec = music window duration (end - start).
-                    # We need entry["duration_sec"] = music END POSITION within shot
-                    # because shot_samples = (entry["duration_sec"] - start_sec) * SR.
-                    # "start_sec" was already applied above, so entry["start_sec"] is current.
-                    _ov_start = float(entry.get("start_sec", 0.0))
-                    entry["duration_sec"] = _ov_start + float(ovr["duration_sec"])
+                if "end_sec" in ovr:
+                    # end_sec is the music play end offset within the shot (seconds from shot start).
+                    # entry["duration_sec"] here is used as an end-position sentinel:
+                    # shot_samples = (entry["duration_sec"] - entry["start_sec"]) * SR.
+                    entry["duration_sec"] = float(ovr["end_sec"])
                 if "music_asset_id" in ovr:
                     # Store override separately — keep original music_item_id
                     # for UI (timeline.json). Renderer uses _override for audio.
@@ -770,8 +768,8 @@ def main():
         if applied:
             print(f"  [INFO] Applied {applied} user override(s) from {source_name}")
 
-    # Step 1: auto-load MusicPlan.json from the episode's music dir (always honoured)
-    music_plan_path = episode_dir / "assets" / "music" / "MusicPlan.json"
+    # Step 1: auto-load MusicPlan.json from the episode dir (always honoured)
+    music_plan_path = episode_dir / "MusicPlan.json"
     _loaded_music_plan = None
     if music_plan_path.exists():
         try:

@@ -278,7 +278,7 @@ run_stage_10() {
     # ── end Stage 8.5 gate ───────────────────────────────────────────────
 
     # ── [8] Music review checkpoint (only when Music is enabled) ──────────
-    _music_plan="${EP_DIR}/assets/music/MusicPlan.json"
+    _music_plan="${EP_DIR}/MusicPlan.json"
     if [[ -z "${NO_MUSIC:-}" ]]; then
       if [[ ! -f "$_music_plan" ]]; then
         echo "  [8] Generating music review pack…"

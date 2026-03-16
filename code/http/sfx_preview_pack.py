@@ -330,7 +330,7 @@ def main():
     # Load MusicPlan if --include-music
     music_plan = {}
     if args.include_music:
-        mp_path = ep_dir / "assets" / "music" / "MusicPlan.json"
+        mp_path = ep_dir / "MusicPlan.json"
         if mp_path.exists():
             music_plan = json.loads(mp_path.read_text(encoding="utf-8"))
 
@@ -499,6 +499,7 @@ def main():
             duck_db  = float(ovr.get("duck_db",  manifest_duck_db))
             fade_sec = float(ovr.get("fade_sec", manifest_fade_sec))
             music_start_sec = float(ovr.get("start_sec", 0.0))
+            music_end_sec   = float(ovr.get("end_sec", shot_dur))
 
             # Resolve base_db from track/clip volumes
             stem = clip_id.split(":")[0] if clip_id else ""
@@ -530,9 +531,12 @@ def main():
                     music_data = None
 
                 if music_data is not None:
-                    music_offset_samples = int(music_start_sec * SAMPLE_RATE)
-                    music_data = music_data[music_offset_samples:]
-                    shot_samples = max(0, int((shot_dur - music_start_sec) * SAMPLE_RATE))
+                    # How many samples of music content we need (start→end within shot)
+                    shot_samples = max(0, int((music_end_sec - music_start_sec) * SAMPLE_RATE))
+                    # Loop the WAV if it is shorter than the required content duration
+                    if shot_samples > 0 and len(music_data) > 0 and len(music_data) < shot_samples:
+                        reps = (shot_samples // len(music_data)) + 1
+                        music_data = np.tile(music_data, (reps, 1) if music_data.ndim == 2 else reps)
                     music_data = music_data[:shot_samples]
 
                     # Per-VO-line duck envelope — VO start/end in vo_lines are absolute
@@ -555,7 +559,8 @@ def main():
                         music_data = music_data * env
                     music_data = music_data * base_scale
 
-                    s = int(shot_offset * SAMPLE_RATE)
+                    # Place music at shot_offset + music_start_sec (within-shot delay)
+                    s = int((shot_offset + music_start_sec) * SAMPLE_RATE)
                     e2 = min(s + len(music_data), n_samples)
                     if s < n_samples and e2 > s:
                         buf[s:e2] += music_data[:e2 - s]

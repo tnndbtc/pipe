@@ -84,15 +84,15 @@
             "type": "string",
             "description": "Override the music asset used for this shot. Can be an existing clip item_id (e.g. 'music-s01e01_sh01') OR a source track stem (e.g. 'djokovic_bg_climax') — when a source stem is used, apply_music_plan will extract a new clip from that source track."
           },
-          "duration_sec": {
-            "type": "number",
-            "minimum": 0.1,
-            "description": "Override music clip duration (seconds)"
-          },
           "start_sec": {
             "type": "number",
             "minimum": 0,
-            "description": "Override music start offset within the shot (seconds)"
+            "description": "Music play start offset within the shot (seconds from shot start). 0 = music begins at the shot's first frame."
+          },
+          "end_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Music play end offset within the shot (seconds from shot start). Must be > start_sec. Downstream components compute duration as end_sec - start_sec."
           },
           "duck_db": {
             "type": "number",
