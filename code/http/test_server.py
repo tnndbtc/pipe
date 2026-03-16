@@ -16811,14 +16811,16 @@ class Handler(BaseHTTPRequestHandler):
                             _scene_shift = _sc_map.get(_en["scene_id"], 0.0)
                             _ovr = _mp_overrides.get(_mid)
                             if _ovr and "start_sec" in _ovr:
-                                # MusicPlan start_sec is episode-absolute (pre-scene-shift)
-                                _ms = float(_ovr["start_sec"]) + _scene_shift
+                                # MusicPlan start_sec is episode-absolute — no scene_shift added.
+                                # The audio renderer places music at ovr["start_sec"] directly;
+                                # adding scene_shift here would shift the bar ahead of the audio.
+                                _ms = float(_ovr["start_sec"])
                                 if "end_sec" in _ovr:
-                                    _me = float(_ovr["end_sec"]) + _scene_shift
+                                    _me = float(_ovr["end_sec"])
                                 else:
-                                    _me = float(_ovr["start_sec"]) + float(_ovr.get("duration_sec", _en["duration_sec"])) + _scene_shift
+                                    _me = float(_ovr["start_sec"]) + float(_ovr.get("duration_sec", _en["duration_sec"]))
                             else:
-                                _shot_abs = _en["offset_sec"] + _scene_shift
+                                _shot_abs = _en["offset_sec"]
                                 _ms = _shot_abs + float(_en.get("start_sec", 0.0))
                                 _me = _shot_abs + float(_en["duration_sec"])
                             _music_items_out.append({
