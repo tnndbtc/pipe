@@ -4,11 +4,13 @@
 # =============================================================================
 #
 # Runs AFTER post_tts_analysis.py (Stage 9[4/8]) when both music WAVs and VO
-# timing exist.  Produces three review artifacts:
+# timing exist.  Produces two review artifacts:
 #
-#   1. timeline.txt   — human-readable shot timeline with music, VO, ducking
-#   2. timeline.json  — machine-readable version for Web UI
-#   3. preview_audio.wav — VO + music mix (no SFX, no video) with ducking
+#   1. timeline.txt      — human-readable shot timeline with music, VO, ducking
+#   2. preview_audio.wav — VO + music mix (no SFX, no video) with ducking
+#
+# Timeline data is returned in-memory by build_timeline() and is no longer
+# persisted to timeline.json — test_server.py calls build_timeline() directly.
 #
 # Usage:
 #   python music_review_pack.py \
@@ -298,20 +300,6 @@ def write_timeline_txt(timeline_shots, total_dur, episode_id, out_path):
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"  [OK] {out_path}")
-
-
-def write_timeline_json(timeline_shots, total_dur, episode_id, out_path):
-    """Write machine-readable timeline.json."""
-    doc = {
-        "episode_id": episode_id,
-        "total_duration_sec": total_dur,
-        "shots": timeline_shots,
-    }
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(doc, f, indent=2, ensure_ascii=False)
-        f.write("\n")
     print(f"  [OK] {out_path}")
 
 
@@ -613,6 +601,57 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         print(f"  [WARN] Could not write MusicApprovalSnapshot.json: {exc}", file=sys.stderr)
 
 
+# ── Override application ─────────────────────────────────────────────────────
+
+def apply_music_plan_overrides(timeline_shots, override_list, source_name, vo_shot_map):
+    """Apply a list of MusicPlan shot_override dicts to timeline_shots in-place.
+
+    Parameters
+    ----------
+    timeline_shots : list[dict]  — in-memory timeline built by build_timeline()
+    override_list  : list[dict]  — shot_overrides array from MusicPlan.json or payload
+    source_name    : str         — label used in log messages ("MusicPlan.json", etc.)
+    vo_shot_map    : dict        — {shot_id: [vo_item, …]} for duck-interval recompute
+    """
+    ovr_by_item = {o["item_id"]: o for o in override_list if "item_id" in o}
+    applied = 0
+    for entry in timeline_shots:
+        mid = entry.get("music_item_id", "")
+        if mid in ovr_by_item:
+            ovr = ovr_by_item[mid]
+            if "duck_db" in ovr:
+                entry["duck_db"] = float(ovr["duck_db"])
+            if "fade_sec" in ovr:
+                entry["fade_sec"] = float(ovr["fade_sec"])
+            if "start_sec" in ovr:
+                # MusicPlan stores episode-absolute coords; convert to within-shot
+                _shot_offset = float(entry.get("offset_sec", 0.0))
+                entry["start_sec"] = max(0.0, float(ovr["start_sec"]) - _shot_offset)
+            if "end_sec" in ovr:
+                # MusicPlan stores episode-absolute coords; convert to within-shot.
+                # Store as music_end_sec (separate from shot duration_sec to avoid
+                # corruption).
+                _shot_offset = float(entry.get("offset_sec", 0.0))
+                entry["music_end_sec"] = max(0.0, float(ovr["end_sec"]) - _shot_offset)
+            if "music_asset_id" in ovr:
+                # Store override separately — keep original music_item_id intact.
+                # Renderer uses _override for audio selection.
+                entry["music_item_id_override"] = ovr["music_asset_id"]
+            # Recompute duck intervals only if fade_sec changed (which affects
+            # the margin around each VO line). Use manifest vo_items timing.
+            if "fade_sec" in ovr:
+                _sid = entry["shot_id"]
+                _new_fade = float(entry.get("fade_sec", DEFAULT_FADE_SEC))
+                _vo_items = vo_shot_map.get(_sid, [])
+                if _vo_items:
+                    entry["duck_intervals"] = compute_duck_intervals(
+                        _vo_items, _new_fade,
+                        shot_start_offset_sec=float(entry.get("offset_sec", 0.0)))
+            applied += 1
+    if applied:
+        print(f"  [INFO] Applied {applied} user override(s) from {source_name}")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def parse_args():
@@ -631,7 +670,7 @@ def parse_args():
                         "Each entry: {item_id, duck_db, fade_sec, start_sec, music_asset_id}. "
                         "Applied on top of manifest values before rendering.")
     p.add_argument("--preview-only", action="store_true",
-                   help="Only regenerate preview_audio.wav (skip timeline.txt/json).")
+                   help="Only regenerate preview_audio.wav (skip timeline.txt).")
     return p.parse_args()
 
 
@@ -730,44 +769,6 @@ def main():
     )
 
     # Apply user overrides on top of timeline (duck_db, fade_sec, music_asset_id, etc.)
-    # Helper: apply a list of override dicts to timeline_shots in-place
-    def _apply_overrides(override_list, source_name):
-        ovr_by_item = {o["item_id"]: o for o in override_list if "item_id" in o}
-        applied = 0
-        for entry in timeline_shots:
-            mid = entry.get("music_item_id", "")
-            if mid in ovr_by_item:
-                ovr = ovr_by_item[mid]
-                if "duck_db" in ovr:
-                    entry["duck_db"] = float(ovr["duck_db"])
-                if "fade_sec" in ovr:
-                    entry["fade_sec"] = float(ovr["fade_sec"])
-                if "start_sec" in ovr:
-                    # MusicPlan stores episode-absolute coords; convert to within-shot
-                    _shot_offset = float(entry.get("offset_sec", 0.0))
-                    entry["start_sec"] = max(0.0, float(ovr["start_sec"]) - _shot_offset)
-                if "end_sec" in ovr:
-                    # MusicPlan stores episode-absolute coords; convert to within-shot.
-                    # Store as music_end_sec (separate from shot duration_sec to avoid corruption).
-                    _shot_offset = float(entry.get("offset_sec", 0.0))
-                    entry["music_end_sec"] = max(0.0, float(ovr["end_sec"]) - _shot_offset)
-                if "music_asset_id" in ovr:
-                    # Store override separately — keep original music_item_id
-                    # for UI (timeline.json). Renderer uses _override for audio.
-                    entry["music_item_id_override"] = ovr["music_asset_id"]
-                # Recompute duck intervals only if fade_sec changed (which affects
-                # the margin around each VO line). Use manifest vo_items timing.
-                if "fade_sec" in ovr:
-                    _sid = entry["shot_id"]
-                    _new_fade = float(entry.get("fade_sec", DEFAULT_FADE_SEC))
-                    _vo_items = vo_shot_map.get(_sid, [])
-                    if _vo_items:
-                        entry["duck_intervals"] = compute_duck_intervals(
-                            _vo_items, _new_fade,
-                            shot_start_offset_sec=float(entry.get("offset_sec", 0.0)))
-                applied += 1
-        if applied:
-            print(f"  [INFO] Applied {applied} user override(s) from {source_name}")
 
     # Step 1: auto-load MusicPlan.json from the episode dir (always honoured)
     music_plan_path = episode_dir / "MusicPlan.json"
@@ -778,7 +779,7 @@ def main():
                 _loaded_music_plan = json.load(f)
             plan_overrides = _loaded_music_plan.get("shot_overrides", [])
             if plan_overrides:
-                _apply_overrides(plan_overrides, "MusicPlan.json")
+                apply_music_plan_overrides(timeline_shots, plan_overrides, "MusicPlan.json", vo_shot_map)
         except Exception as exc:
             print(f"  [WARN] Could not read MusicPlan.json: {exc}", file=sys.stderr)
 
@@ -788,7 +789,7 @@ def main():
         if overrides_path.exists():
             with open(overrides_path, encoding="utf-8") as f:
                 user_overrides = json.load(f)
-            _apply_overrides(user_overrides, overrides_path.name)
+            apply_music_plan_overrides(timeline_shots, user_overrides, overrides_path.name, vo_shot_map)
         else:
             print(f"  [WARN] Overrides file not found: {overrides_path}")
 
@@ -830,7 +831,6 @@ def main():
     # Write artifacts
     if not args.preview_only:
         write_timeline_txt(timeline_shots, total_dur, episode_id, out_dir / "timeline.txt")
-        write_timeline_json(timeline_shots, total_dur, episode_id, out_dir / "timeline.json")
     render_preview_audio(timeline_shots, total_dur, manifest, manifest_path,
                          out_dir / "preview_audio.wav")
 
@@ -840,7 +840,7 @@ def main():
     print(f"  Total duration : {total_dur:.2f}s")
     print(f"  Shots          : {len(timeline_shots)}")
     print(f"  Output dir     : {out_dir}")
-    print(f"  Files written  : timeline.txt, timeline.json, preview_audio.wav")
+    print(f"  Files written  : timeline.txt, preview_audio.wav")
 
 
 if __name__ == "__main__":

@@ -281,17 +281,14 @@ run_stage_10() {
     _music_plan="${EP_DIR}/MusicPlan.json"
     if [[ -z "${NO_MUSIC:-}" ]]; then
       if [[ ! -f "$_music_plan" ]]; then
-        echo "  [8] Generating music review pack…"
-        python3 "${code_dir}/music_review_pack.py" \
-          --manifest "${EP_DIR}/AssetManifest.${locale}.json" || true
         echo ""
         echo "══════════════════════════════════════════════════════════════"
         echo "  ⏸  PAUSED — Music review required"
         echo ""
-        echo "  Music review pack is ready. Open the VC editor:"
+        echo "  Open the VC editor to generate and review the music preview:"
         echo "    1. Go to the 🎵 Music tab"
-        echo "    2. Review the timeline and preview audio"
-        echo "    3. Adjust loop selections and shot overrides"
+        echo "    2. Click 'Generate Preview' to build the preview audio"
+        echo "    3. Review the timeline and adjust loop selections / shot overrides"
         echo "    4. Click ✔ Confirm to save MusicPlan.json"
         echo ""
         echo "  Then resume the pipeline:"

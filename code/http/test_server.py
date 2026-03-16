@@ -4170,10 +4170,9 @@ placeholder="Enter your story here"></textarea>
   async function _voVisLoadTimeline() {
     const slug = window._voSlug, epId = window._voEpId;
     if (!slug || !epId) return;
-    const tlPath = 'projects/' + slug + '/episodes/' + epId
-      + '/assets/sfx/SfxPreviewPack/timeline.json';
     try {
-      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
+      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(slug)
+        + '&ep_id=' + encodeURIComponent(epId) + '&t=' + Date.now());
       if (!r.ok) return;
       _voVisTlData = await r.json();
       _tlRender('vo-vis', _voVisTlData, 'vo-tl-audio');
@@ -5926,14 +5925,18 @@ placeholder="Enter your story here"></textarea>
   // Restore preview player from files written by a previous sfxGeneratePreview().
   async function _sfxTryRestorePreview() {
     if (!_sfxSlug || !_sfxEpId) return;
-    const tlPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
-      + '/assets/sfx/SfxPreviewPack/timeline.json';
     const audioPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
       + '/assets/sfx/SfxPreviewPack/preview_audio.wav';
     try {
-      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath));
+      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_sfxSlug)
+        + '&ep_id=' + encodeURIComponent(_sfxEpId));
       if (!r.ok) return;
-      _sfxTimeline = await r.json();
+      const tl = await r.json();
+      // Only restore the preview UI if a WAV was actually generated previously.
+      // /api/sfx_timeline always returns 200 (unlike the old timeline.json file which
+      // only existed after a render), so we rely on the has_wav field instead.
+      if (!tl.has_wav) return;
+      _sfxTimeline = tl;
       const audio = document.getElementById('sfx-preview-audio');
       audio.src = '/serve_media?path=' + encodeURIComponent(audioPath);
       document.getElementById('sfx-preview-wrap').style.display = '';
@@ -6005,10 +6008,9 @@ placeholder="Enter your story here"></textarea>
   let _sfxCursorRaf = null;
 
   async function sfxLoadTimeline() {
-    const tlPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
-      + '/assets/sfx/SfxPreviewPack/timeline.json';
     try {
-      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
+      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_sfxSlug)
+        + '&ep_id=' + encodeURIComponent(_sfxEpId) + '&t=' + Date.now());
       if (!r.ok) return;
       _sfxTimeline = await r.json();
       sfxRenderTimeline();
@@ -7563,10 +7565,9 @@ placeholder="Enter your story here"></textarea>
   let _mediaTlData = null;
   async function _mediaLoadTimeline() {
     if (!_mediaSlug || !_mediaEpId) return;
-    const tlPath = 'projects/' + _mediaSlug + '/episodes/' + _mediaEpId
-      + '/assets/sfx/SfxPreviewPack/timeline.json';
     try {
-      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
+      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_mediaSlug)
+        + '&ep_id=' + encodeURIComponent(_mediaEpId) + '&t=' + Date.now());
       if (!r.ok) return;
       _mediaTlData = await r.json();
       _tlRender('media', _mediaTlData, 'media-preview-video');
@@ -16552,6 +16553,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         # ── Music: return timeline JSON (GET /api/music_timeline) ────────────
+        # Built in-memory from AssetManifest + MusicPlan — no timeline.json on disk
         elif parsed.path == "/api/music_timeline":
             params = parse_qs(parsed.query)
             slug   = params.get("slug", [""])[0].strip()
@@ -16560,16 +16562,281 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.dumps({"error": "slug and ep_id required"}).encode()
                 self.send_response(400)
             else:
-                tl_path = os.path.join(PIPE_DIR, "projects", slug,
-                    "episodes", ep_id, "assets", "music",
-                    "MusicReviewPack", "timeline.json")
-                if not os.path.isfile(tl_path):
-                    body = json.dumps({"error": "not found"}).encode()
-                    self.send_response(404)
-                else:
-                    with open(tl_path, "rb") as _tf:
-                        body = _tf.read()
+                try:
+                    import glob as _glob_mtl
+                    import re as _re_mtl
+                    _ep_dir_mtl = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                    _manifests = [p for p in _glob_mtl.glob(
+                        os.path.join(_ep_dir_mtl, "AssetManifest.*.json"))
+                        if os.path.basename(p) != "AssetManifest.shared.json"]
+                    if not _manifests:
+                        raise FileNotFoundError("No AssetManifest found")
+                    _locale_mtl = "en"
+                    _vars_mtl = os.path.join(_ep_dir_mtl, "pipeline_vars.sh")
+                    if os.path.isfile(_vars_mtl):
+                        _vm = _re_mtl.search(
+                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                            open(_vars_mtl).read())
+                        if _vm:
+                            _locale_mtl = _vm.group(1).strip()
+                    _pm = os.path.join(_ep_dir_mtl, f"AssetManifest.{_locale_mtl}.json")
+                    _mpath = _pm if os.path.isfile(_pm) else sorted(_manifests)[0]
+
+                    from music_review_pack import (
+                        build_timeline as _mrp_build_mtl,
+                        apply_music_plan_overrides as _mrp_apply_mtl,
+                        load_shotlist as _mrp_sl_mtl,
+                        load_loop_candidates as _mrp_loop_mtl,
+                        BASE_MUSIC_DB as _MRP_BASE_DB_MTL,
+                    )
+                    import re as _re_vol_mtl
+                    _mf = json.load(open(_mpath, encoding="utf-8"))
+                    _shots_mtl = _mrp_sl_mtl(_mf, Path(_mpath))
+                    _vo_id_to_shot_mtl = {
+                        vid: s["shot_id"]
+                        for s in _shots_mtl
+                        for vid in s.get("audio_intent", {}).get("vo_item_ids", [])
+                    }
+                    _vsm = {}
+                    for _vo in _mf.get("vo_items", []):
+                        _sid = (_vo_id_to_shot_mtl.get(_vo.get("item_id", ""))
+                                or _vo.get("shot_id", ""))
+                        if _sid:
+                            _vsm.setdefault(_sid, []).append(_vo)
+                    _midx = {
+                        mi["shot_id"]: mi
+                        for mi in _mf.get("music_items", []) if mi.get("shot_id")
+                    }
+                    _tls, _tdur = _mrp_build_mtl(
+                        _shots_mtl, _mf, _vsm, _midx, _mrp_loop_mtl(Path(_ep_dir_mtl)))
+                    # Apply MusicPlan overrides
+                    _mp2 = os.path.join(_ep_dir_mtl, "MusicPlan.json")
+                    _lmp2 = None
+                    if os.path.isfile(_mp2):
+                        try:
+                            _lmp2 = json.load(open(_mp2, encoding="utf-8"))
+                            _po2 = _lmp2.get("shot_overrides", [])
+                            if _po2:
+                                _mrp_apply_mtl(_tls, _po2, "MusicPlan.json", _vsm)
+                        except Exception as _e2:
+                            print(f"  [WARN] music_timeline: MusicPlan.json: {_e2}")
+                    # Apply volume offsets
+                    _tv2 = (_lmp2 or {}).get("track_volumes", {})
+                    _cv2 = (_lmp2 or {}).get("clip_volumes", {})
+                    if _tv2 or _cv2:
+                        for _ent in _tls:
+                            _rid2 = (_ent.get("music_item_id_override")
+                                     or _ent.get("music_item_id") or "")
+                            if not _rid2:
+                                continue
+                            _db2 = 0.0
+                            _s2 = _re_vol_mtl.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _rid2)
+                            _db2 += float(_tv2.get(_s2, 0))
+                            _db2 += float(_cv2.get(_rid2, 0))
+                            if _db2 == 0.0:
+                                _mx2 = _re_vol_mtl.match(
+                                    r'^(.+?)_(\d+)_(\d+)s-(\d+)_(\d+)s$', _rid2)
+                                if _mx2:
+                                    _cid2 = (f"{_mx2.group(1)}:{_mx2.group(2)}."
+                                             f"{_mx2.group(3)}s-{_mx2.group(4)}.{_mx2.group(5)}s")
+                                    _db2 += float(_cv2.get(_cid2, 0))
+                            if _db2 != 0.0:
+                                _ent["base_db"] = (
+                                    _ent.get("base_db", _MRP_BASE_DB_MTL) + _db2)
+                    body = json.dumps({
+                        "episode_id": ep_id,
+                        "total_duration_sec": _tdur,
+                        "shots": _tls,
+                    }).encode()
                     self.send_response(200)
+                except Exception as _etl:
+                    body = json.dumps({"error": str(_etl)}).encode()
+                    self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── SFX: return timeline JSON in-memory (GET /api/sfx_timeline) ─────
+        # Replaces /serve_media?path=.../SfxPreviewPack/timeline.json
+        elif parsed.path == "/api/sfx_timeline":
+            params = parse_qs(parsed.query)
+            slug  = params.get("slug", [""])[0].strip()
+            ep_id = params.get("ep_id", [""])[0].strip()
+            if not slug or not ep_id:
+                body = json.dumps({"error": "slug and ep_id required"}).encode()
+                self.send_response(400)
+            else:
+                try:
+                    import glob as _glob_stl
+                    import re as _re_stl
+                    _ep_dir_stl = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                    _mf_list = [p for p in _glob_stl.glob(
+                        os.path.join(_ep_dir_stl, "AssetManifest.*.json"))
+                        if os.path.basename(p) != "AssetManifest.shared.json"]
+                    if not _mf_list:
+                        raise FileNotFoundError("No AssetManifest found")
+                    _loc_stl = "en"
+                    _vars_stl = os.path.join(_ep_dir_stl, "pipeline_vars.sh")
+                    if os.path.isfile(_vars_stl):
+                        _vm_s = _re_stl.search(
+                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                            open(_vars_stl).read())
+                        if _vm_s:
+                            _loc_stl = _vm_s.group(1).strip()
+                    _pm_stl = os.path.join(_ep_dir_stl, f"AssetManifest.{_loc_stl}.json")
+                    _mpath_stl = _pm_stl if os.path.isfile(_pm_stl) else sorted(_mf_list)[0]
+
+                    from sfx_preview_pack import (
+                        load_shotlist as _sfx_sl_stl,
+                        build_shot_timeline as _sfx_bld_stl,
+                    )
+                    _mf_stl = json.load(open(_mpath_stl, encoding="utf-8"))
+                    _shots_stl = _sfx_sl_stl(_mf_stl, Path(_mpath_stl))
+                    _vid2s_stl = {}
+                    for _sh in _shots_stl:
+                        for _v in _sh.get("audio_intent", {}).get("vo_item_ids", []):
+                            _vid2s_stl[_v] = _sh["shot_id"]
+                    _vsm_stl = {}
+                    for _vo in _mf_stl.get("vo_items", []):
+                        _sid = (_vid2s_stl.get(_vo.get("item_id", ""))
+                                or _vo.get("shot_id", ""))
+                        if _sid:
+                            _vsm_stl.setdefault(_sid, []).append(_vo)
+                    _midx_stl = {
+                        mi["shot_id"]: mi
+                        for mi in _mf_stl.get("music_items", []) if mi.get("shot_id")
+                    }
+                    # Patch shot durations from RenderPlan if available
+                    _rp_stl = os.path.join(_ep_dir_stl, f"RenderPlan.{_loc_stl}.json")
+                    if os.path.isfile(_rp_stl):
+                        try:
+                            _rpd = json.loads(open(_rp_stl, encoding="utf-8").read())
+                            _rpdur = {
+                                _rs["shot_id"]: _rs["duration_ms"] / 1000.0
+                                for _rs in _rpd.get("shots", [])
+                                if _rs.get("shot_id") and _rs.get("duration_ms") is not None
+                            }
+                            for _sh in _shots_stl:
+                                if _sh.get("shot_id") in _rpdur:
+                                    _sh["duration_sec"] = _rpdur[_sh["shot_id"]]
+                        except Exception as _rpe2:
+                            print(f"  [WARN] sfx_timeline: RenderPlan: {_rpe2}")
+                    _tl_stl, _dur_stl = _sfx_bld_stl(
+                        _shots_stl, _mf_stl, _vsm_stl, _midx_stl, {})
+                    # Build tl_doc matching SFX timeline format (no audio rendered)
+                    # Compute scene shifts for accurate offset_sec
+                    _sc_tails = _mf_stl.get("scene_tails", {})
+                    _sc_map: dict = {}
+                    _prev_sc = None
+                    _sh_acc = 0.0
+                    for _en in _tl_stl:
+                        _sc = _en["scene_id"]
+                        if _prev_sc is not None and _sc != _prev_sc:
+                            _tc = int(_sc_tails.get(_sc, _sc_tails.get(_prev_sc, 2000)))
+                            _sh_acc += _tc / 1000.0
+                        _sc_map.setdefault(_sc, _sh_acc)
+                        _prev_sc = _sc
+                    _shots_out = [{
+                        "shot_id": _en["shot_id"],
+                        "scene_id": _en.get("scene_id", ""),
+                        "offset_sec": round(_en["offset_sec"] + _sc_map.get(_en["scene_id"], 0.0), 3),
+                        "duration_sec": round(_en["duration_sec"], 3),
+                        "scene_shift_sec": round(_sc_map.get(_en["scene_id"], 0.0), 3),
+                    } for _en in _tl_stl]
+                    _vo_out = []
+                    for _en in _tl_stl:
+                        _shift = _sc_map.get(_en["scene_id"], 0.0)
+                        for _v in _en.get("vo_lines", []):
+                            _vs = _v.get("start_sec")
+                            _ve = _v.get("end_sec")
+                            if _vs is not None:
+                                _vo_out.append({
+                                    "item_id": _v["item_id"],
+                                    "start_sec": round(_vs + _shift, 3),
+                                    "end_sec": round((_ve or _vs) + _shift, 3),
+                                    "speaker_id": _v.get("speaker_id", ""),
+                                    "shot_id": _en["shot_id"],
+                                })
+                    # Load SfxPlan for sfx_items entries
+                    _sfx_plan_path = os.path.join(_ep_dir_stl, "SfxPlan.json")
+                    _sfx_items_out = []
+                    if os.path.isfile(_sfx_plan_path):
+                        try:
+                            _sfx_plan = json.load(open(_sfx_plan_path, encoding="utf-8"))
+                            for _sfx_en in _sfx_plan.get("sfx_entries", []):
+                                _shot_id_sfx = _sfx_en.get("shot_id", "")
+                                _shift_sfx = _sc_map.get(
+                                    next((e["scene_id"] for e in _tl_stl
+                                          if e["shot_id"] == _shot_id_sfx), ""), 0.0)
+                                _shot_off = next(
+                                    (e["offset_sec"] for e in _tl_stl
+                                     if e["shot_id"] == _shot_id_sfx), 0.0)
+                                _ep_start = _shot_off + _shift_sfx
+                                _sfx_items_out.append({
+                                    "item_id": _sfx_en.get("item_id", ""),
+                                    "start_sec": round(_ep_start + float(_sfx_en.get("start_sec", 0)), 3),
+                                    "end_sec": round(_ep_start + float(_sfx_en.get("end_sec", 0)), 3),
+                                    "shot_id": _shot_id_sfx,
+                                    "tag": _sfx_en.get("tag", ""),
+                                })
+                        except Exception as _spe:
+                            print(f"  [WARN] sfx_timeline: SfxPlan: {_spe}")
+                    # Build music_items from MusicPlan.json so the music bar
+                    # renders in both the SFX tab and Media tab timelines.
+                    _music_items_out = []
+                    try:
+                        _mp_path = os.path.join(_ep_dir_stl, "MusicPlan.json")
+                        if not os.path.isfile(_mp_path):
+                            _mp_path = os.path.join(_ep_dir_stl, "assets", "music", "MusicPlan.json")
+                        _mp_overrides = {}
+                        if os.path.isfile(_mp_path):
+                            _mp = json.loads(open(_mp_path, encoding="utf-8").read())
+                            for _ovr in _mp.get("shot_overrides", []):
+                                if _ovr.get("item_id"):
+                                    _mp_overrides[_ovr["item_id"]] = _ovr
+                        for _en in _tl_stl:
+                            _mid = _en.get("music_item_id", "")
+                            if not _mid:
+                                continue
+                            _scene_shift = _sc_map.get(_en["scene_id"], 0.0)
+                            _ovr = _mp_overrides.get(_mid)
+                            if _ovr and "start_sec" in _ovr:
+                                # MusicPlan start_sec is episode-absolute (pre-scene-shift)
+                                _ms = float(_ovr["start_sec"]) + _scene_shift
+                                if "end_sec" in _ovr:
+                                    _me = float(_ovr["end_sec"]) + _scene_shift
+                                else:
+                                    _me = float(_ovr["start_sec"]) + float(_ovr.get("duration_sec", _en["duration_sec"])) + _scene_shift
+                            else:
+                                _shot_abs = _en["offset_sec"] + _scene_shift
+                                _ms = _shot_abs + float(_en.get("start_sec", 0.0))
+                                _me = _shot_abs + float(_en["duration_sec"])
+                            _music_items_out.append({
+                                "item_id": _mid,
+                                "start_sec": round(_ms, 3),
+                                "end_sec": round(_me, 3),
+                                "shot_id": _en["shot_id"],
+                                "music_mood": _en.get("music_mood", ""),
+                            })
+                    except Exception as _mpe:
+                        print(f"  [WARN] sfx_timeline: music_items: {_mpe}")
+                    _wav_stl = os.path.join(_ep_dir_stl, "assets", "sfx",
+                                            "SfxPreviewPack", "preview_audio.wav")
+                    _tl_doc_stl = {
+                        "total_dur_sec": round(_dur_stl + _sh_acc, 3),
+                        "timing_source": "manifest",
+                        "shots": _shots_out,
+                        "vo_items": _vo_out,
+                        "sfx_items": _sfx_items_out,
+                        "music_items": _music_items_out,
+                        "has_wav": os.path.isfile(_wav_stl),
+                    }
+                    body = json.dumps(_tl_doc_stl).encode()
+                    self.send_response(200)
+                except Exception as _e_stl:
+                    body = json.dumps({"error": str(_e_stl)}).encode()
+                    self.send_response(500)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -18942,62 +19209,79 @@ class Handler(BaseHTTPRequestHandler):
                     _sf_exists = os.path.isfile(_sf) if _sf else False
                     print(f"    {_iid}: source_file={_sf!r} exists={_sf_exists} url={_pu!r}")
 
-                # ── Write sfx_selections temp file ──
-                import tempfile as _tempfile_sfx
-                sel_fd, sel_path = _tempfile_sfx.mkstemp(suffix=".json", prefix="sfx_sel_")
-                with os.fdopen(sel_fd, "w") as f:
-                    json.dump(sfx_sel, f)
-
                 # ── Per-episode lock ──────────────────────────────────────────
                 _ep_key = f"{slug}/{ep_id}"
                 if _ep_key not in _sfx_preview_locks:
                     _sfx_preview_locks[_ep_key] = threading.Lock()
                 _sfx_ep_lock = _sfx_preview_locks[_ep_key]
                 if not _sfx_ep_lock.acquire(blocking=False):
-                    if os.path.exists(sel_path):
-                        os.unlink(sel_path)
                     _json_resp(self, {"error": "Preview already generating for this episode"}, 409)
                     return
 
-                # ── Build command ─────────────────────────────────────────────
-                cmd = ["python3", os.path.join(PIPE_DIR, "code", "http", "sfx_preview_pack.py"),
-                       "--manifest", manifest_path,
-                       "--sfx-selections", sel_path]
-                if include_music:
-                    cmd.append("--include-music")
+                # ── Direct in-process render ─────────────────────────────────
+                from sfx_preview_pack import (
+                    load_shotlist as _sfx_load_sl,
+                    build_shot_timeline as _sfx_build_tl,
+                    render_sfx_preview as _sfx_render,
+                )
 
-                _preview_output = os.path.join(
-                    ep_dir, "assets", "sfx", "SfxPreviewPack", "preview_audio.wav")
+                _sfx_manifest = json.loads(
+                    open(manifest_path, encoding="utf-8").read())
+                _sfx_locale = (_sfx_manifest.get("locale", "")
+                               or os.path.basename(manifest_path).split(".")[-2])
+                _sfx_shots = _sfx_load_sl(_sfx_manifest, Path(manifest_path))
+
+                _sfx_vid2shot = {}
+                for _s in _sfx_shots:
+                    for _vid in _s.get("audio_intent", {}).get("vo_item_ids", []):
+                        _sfx_vid2shot[_vid] = _s["shot_id"]
+                _sfx_vsm = {}
+                for _vo in _sfx_manifest.get("vo_items", []):
+                    _sid = (_sfx_vid2shot.get(_vo.get("item_id", ""))
+                            or _vo.get("shot_id", ""))
+                    if _sid:
+                        _sfx_vsm.setdefault(_sid, []).append(_vo)
+                _sfx_midx = {
+                    mi["shot_id"]: mi
+                    for mi in _sfx_manifest.get("music_items", [])
+                    if mi.get("shot_id")
+                }
+
+                # Patch shot durations from RenderPlan (VO ceiling)
+                _rp_sfx = os.path.join(ep_dir, f"RenderPlan.{_sfx_locale}.json")
+                if os.path.isfile(_rp_sfx):
+                    try:
+                        _rp_d = json.loads(open(_rp_sfx, encoding="utf-8").read())
+                        _rp_dur = {
+                            _rs["shot_id"]: _rs["duration_ms"] / 1000.0
+                            for _rs in _rp_d.get("shots", [])
+                            if _rs.get("shot_id") and _rs.get("duration_ms") is not None
+                        }
+                        for _sh in _sfx_shots:
+                            if _sh.get("shot_id") in _rp_dur:
+                                _sh["duration_sec"] = _rp_dur[_sh["shot_id"]]
+                    except Exception as _rpe:
+                        print(f"  [WARN] sfx_preview: RenderPlan: {_rpe}")
+
+                _sfx_tl, _sfx_dur = _sfx_build_tl(
+                    _sfx_shots, _sfx_manifest, _sfx_vsm, _sfx_midx, {})
+
+                _sfx_out_wav = Path(ep_dir) / "assets" / "sfx" / "SfxPreviewPack" / "preview_audio.wav"
+                _sfx_out_wav.parent.mkdir(parents=True, exist_ok=True)
 
                 try:
-                    result = subprocess.run(cmd, capture_output=True, text=True,
-                                            timeout=180, cwd=PIPE_DIR)
-                    # Always print stdout/stderr for debugging
-                    if result.stdout:
-                        print(f"  [SFX subprocess stdout]\n{result.stdout[-3000:]}")
-                    if result.stderr:
-                        print(f"  [SFX subprocess stderr]\n{result.stderr[-1000:]}")
-                    if result.returncode != 0:
-                        if os.path.exists(_preview_output):
-                            os.unlink(_preview_output)
-                        raise RuntimeError(result.stderr[-2000:] if result.stderr else "process failed")
-                except subprocess.TimeoutExpired:
-                    if os.path.exists(_preview_output):
-                        os.unlink(_preview_output)
-                    raise RuntimeError(
-                        "SFX preview timed out after 180s; episode may be too large "
-                        "or assets may be missing. Check timeline.json for debug info.")
+                    _tl_doc = _sfx_render(
+                        _sfx_tl, _sfx_dur, _sfx_manifest, Path(manifest_path),
+                        Path(ep_dir), _sfx_locale, sfx_sel, _sfx_out_wav,
+                        include_music=include_music,
+                    )
                 finally:
-                    if os.path.exists(sel_path):
-                        os.unlink(sel_path)
                     for _tp in _temp_dl_paths:
                         if os.path.exists(_tp):
                             os.unlink(_tp)
                     _sfx_ep_lock.release()
 
-                # Return subprocess logs in response for browser-side debugging
-                _debug_log = (result.stdout or "")[-3000:]
-                _json_resp(self, {"ok": True, "debug_log": _debug_log})
+                _json_resp(self, {"ok": True, "timeline": _tl_doc})
 
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 400)
@@ -19646,40 +19930,99 @@ class Handler(BaseHTTPRequestHandler):
                         "duck_intervals are populated."
                     )
 
-                code_dir = os.path.join(PIPE_DIR, "code", "http")
-                cmd = ["python3", os.path.join(code_dir, "music_review_pack.py"),
-                       "--manifest", manifest_path]
+                # Direct in-process call — no subprocess, no temp files
+                import re as _re_vol_mrp
+                from music_review_pack import (
+                    build_timeline as _mrp_build,
+                    render_preview_audio as _mrp_render,
+                    apply_music_plan_overrides as _mrp_apply,
+                    load_shotlist as _mrp_load_sl,
+                    load_loop_candidates as _mrp_load_loop,
+                    BASE_MUSIC_DB as _MRP_BASE_DB,
+                )
 
-                # Write overrides to temp file if present
-                import tempfile as _tempfile
-                ovr_path = None
+                _manifest = json.load(open(manifest_path, encoding="utf-8"))
+                _shots = _mrp_load_sl(_manifest, Path(manifest_path))
+                if not _shots:
+                    raise ValueError("ShotList not found — cannot build music timeline.")
+
+                _vo_id_to_shot = {
+                    vid: s["shot_id"]
+                    for s in _shots
+                    for vid in s.get("audio_intent", {}).get("vo_item_ids", [])
+                }
+                _vo_shot_map = {}
+                for _vo in _manifest.get("vo_items", []):
+                    _sid = (_vo_id_to_shot.get(_vo.get("item_id", ""))
+                            or _vo.get("shot_id", ""))
+                    if _sid:
+                        _vo_shot_map.setdefault(_sid, []).append(_vo)
+
+                _music_index = {
+                    mi["shot_id"]: mi
+                    for mi in _manifest.get("music_items", [])
+                    if mi.get("shot_id")
+                }
+                _loop_info = _mrp_load_loop(Path(ep_dir))
+                _tl_shots, _total_dur = _mrp_build(
+                    _shots, _manifest, _vo_shot_map, _music_index, _loop_info)
+
+                # Apply saved MusicPlan overrides
+                _mp_path = os.path.join(ep_dir, "MusicPlan.json")
+                _loaded_mp = None
+                if os.path.isfile(_mp_path):
+                    try:
+                        with open(_mp_path, encoding="utf-8") as _mpf:
+                            _loaded_mp = json.load(_mpf)
+                        _plan_ovrs = _loaded_mp.get("shot_overrides", [])
+                        if _plan_ovrs:
+                            _mrp_apply(_tl_shots, _plan_ovrs, "MusicPlan.json",
+                                       _vo_shot_map)
+                    except Exception as _e:
+                        print(f"  [WARN] music_review_pack: MusicPlan.json: {_e}")
+
+                # Apply payload overrides (from UI — take precedence)
                 if shot_overrides:
-                    ovr_fd, ovr_path = _tempfile.mkstemp(
-                        suffix=".json", prefix="music_ovr_")
-                    with os.fdopen(ovr_fd, "w", encoding="utf-8") as _of:
-                        json.dump(shot_overrides, _of)
-                    cmd.extend(["--overrides", ovr_path])
+                    _mrp_apply(_tl_shots, shot_overrides, "payload", _vo_shot_map)
 
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True, text=True, timeout=120, cwd=PIPE_DIR,
-                    )
-                    if result.returncode != 0:
-                        raise RuntimeError(result.stderr[-2000:] if result.stderr else "process failed")
-                finally:
-                    if ovr_path and os.path.exists(ovr_path):
-                        os.unlink(ovr_path)
+                # Apply track/clip volume offsets (same as music_review_pack main())
+                _track_vols = (_loaded_mp or {}).get("track_volumes", {})
+                _clip_vols  = (_loaded_mp or {}).get("clip_volumes",  {})
+                if _track_vols or _clip_vols:
+                    for _entry in _tl_shots:
+                        _rid = (_entry.get("music_item_id_override")
+                                or _entry.get("music_item_id") or "")
+                        if not _rid:
+                            continue
+                        _db = 0.0
+                        _vstem = _re_vol_mrp.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _rid)
+                        _db += float(_track_vols.get(_vstem, 0))
+                        _db += float(_clip_vols.get(_rid, 0))
+                        if _db == 0.0:
+                            _vmx = _re_vol_mrp.match(
+                                r'^(.+?)_(\d+)_(\d+)s-(\d+)_(\d+)s$', _rid)
+                            if _vmx:
+                                _cid = (f"{_vmx.group(1)}:{_vmx.group(2)}."
+                                        f"{_vmx.group(3)}s-{_vmx.group(4)}.{_vmx.group(5)}s")
+                                _db += float(_clip_vols.get(_cid, 0))
+                        if _db != 0.0:
+                            _entry["base_db"] = (
+                                _entry.get("base_db", _MRP_BASE_DB) + _db)
 
-                # Read and return the timeline
-                tl_path = os.path.join(ep_dir, "assets", "music",
-                                       "MusicReviewPack", "timeline.json")
-                timeline = None
-                if os.path.isfile(tl_path):
-                    with open(tl_path, encoding="utf-8") as _tf:
-                        timeline = json.load(_tf)
+                # Render preview audio WAV
+                _prev_dir = os.path.join(ep_dir, "assets", "music", "MusicReviewPack")
+                os.makedirs(_prev_dir, exist_ok=True)
+                _mrp_render(
+                    _tl_shots, _total_dur, _manifest, Path(manifest_path),
+                    Path(_prev_dir) / "preview_audio.wav")
 
-                body = json.dumps({"ok": True, "timeline": timeline}).encode()
+                body = json.dumps({
+                    "ok": True,
+                    "timeline": {
+                        "shots": _tl_shots,
+                        "total_duration_sec": _total_dur,
+                    },
+                }).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))

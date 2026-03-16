@@ -207,96 +207,36 @@ def build_per_vo_envelope(n_samples, duck_intervals, duck_db, fade_sec, sr):
     return env
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", required=True)
-    parser.add_argument("--sfx-selections", required=True)
-    parser.add_argument("--include-music", action="store_true")
-    parser.add_argument("--output", default=None)
-    args = parser.parse_args()
+def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
+                       ep_dir, locale, sfx_selections, output_path,
+                       include_music=False):
+    """Render SFX preview WAV and return the tl_doc dict (no timeline.json written).
 
-    manifest_path = Path(args.manifest)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    Parameters
+    ----------
+    timeline_shots  : list[dict]  — from build_shot_timeline()
+    total_dur       : float       — total episode duration in seconds
+    manifest        : dict        — parsed AssetManifest
+    manifest_path   : Path        — path to the manifest (for relative-path helpers)
+    ep_dir          : Path        — episode root directory
+    locale          : str         — locale code (e.g. "en")
+    sfx_selections  : dict        — {item_id: {source_file, start, end, preview_url}}
+    output_path     : Path | None — if None, skip WAV write (compute-only mode)
+    include_music   : bool        — mix music stems into preview
 
-    project_id = manifest.get("project_id", "")
-    episode_id = manifest.get("episode_id", "")
-    locale = manifest.get("locale", "") or manifest_path.stem.split(".")[-1]
-
-    ep_dir = PIPE_DIR / "projects" / project_id / "episodes" / episode_id
-
-    # Load sfx_selections
-    sfx_selections = json.loads(Path(args.sfx_selections).read_text(encoding="utf-8"))
-
-    # Path security: validate all source_file paths are under PIPE_DIR
+    Returns
+    -------
+    dict  tl_doc with keys: total_dur_sec, timing_source, shots, vo_items,
+          sfx_items, music_items
+    """
     pipe_root = str(PIPE_DIR.resolve())
 
-    # Output dir
-    if args.output:
-        output_dir = Path(args.output)
-    else:
-        output_dir = ep_dir / "assets" / "sfx" / "SfxPreviewPack"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "preview_audio.wav"
-
-    # Load ShotList
-    shots = load_shotlist(manifest, manifest_path)
-
-    # Build vo_item_id → shot_id mapping via ShotList audio_intent (vo_items have no shot_id field)
-    vo_id_to_shot = {}
-    for shot in shots:
-        sid = shot.get("shot_id", "")
-        for vid in shot.get("audio_intent", {}).get("vo_item_ids", []):
-            vo_id_to_shot[vid] = sid
-
-    # Group vo_items by shot_id
-    vo_shot_map = {}
-    for vo in manifest.get("vo_items", []):
-        sid = vo_id_to_shot.get(vo.get("item_id", "")) or vo.get("shot_id", "")
-        if sid:
-            vo_shot_map.setdefault(sid, []).append(vo)
-
-    # Build music_index: { shot_id: music_item }
+    # Build music_index: { shot_id: music_item } — needed for music mixing
     music_index = {}
     for mi in manifest.get("music_items", []):
         sid = mi.get("shot_id", "")
         if sid:
             music_index[sid] = mi
-
-    # Load RenderPlan for shot duration patching (VO ceiling)
-    render_plan = None
-    render_plan_path = ep_dir / f"RenderPlan.{locale}.json"
-    if render_plan_path.exists():
-        try:
-            render_plan = json.loads(render_plan_path.read_text(encoding="utf-8"))
-            print(f"  [INFO] Loaded RenderPlan for shot durations: {render_plan_path.name}")
-        except Exception as e:
-            print(f"  [WARN] Failed to load RenderPlan: {e}")
-    else:
-        print(f"  [INFO] No RenderPlan found, using ShotList durations")
-
-    # Patch ShotList durations with VO-ceiling values from RenderPlan.
-    # gen_render_plan applies a VO ceiling (last_vo_out_ms + tail) that makes
-    # many shots shorter than the ShotList estimate.  Without this patch, the
-    # SFX tab accumulates wrong offsets from shot 1 onward — exactly the same
-    # bug that music_review_pack.py fixes with its _rp_shot_dur block.
-    if render_plan:
-        _rp_shot_dur: dict[str, float] = {}
-        for _rs in render_plan.get("shots", []):
-            _sid = _rs.get("shot_id", "")
-            _dur_ms = _rs.get("duration_ms")
-            if _sid and _dur_ms is not None:
-                _rp_shot_dur[_sid] = _dur_ms / 1000.0
-        if _rp_shot_dur:
-            _patched = 0
-            for _shot in shots:
-                _sid = _shot.get("shot_id", "")
-                if _sid in _rp_shot_dur:
-                    _shot["duration_sec"] = _rp_shot_dur[_sid]
-                    _patched += 1
-            print(f"  [INFO] Patched {_patched} shot duration(s) from RenderPlan (VO ceiling applied)")
-
-    # Build shot timeline
-    timeline_shots, total_dur = build_shot_timeline(shots, manifest, vo_shot_map, music_index, {})
 
     # Scene-tail shift — keyed by scene_id from ShotList (Issue 18 fix)
     _scene_tails_cfg = manifest.get("scene_tails", {})
@@ -327,9 +267,9 @@ def main():
     vo_dir = ep_dir / "assets" / locale / "audio" / "vo"
     music_dir = ep_dir / "assets" / "music"
 
-    # Load MusicPlan if --include-music
+    # Load MusicPlan if include_music
     music_plan = {}
-    if args.include_music:
+    if include_music:
         mp_path = ep_dir / "MusicPlan.json"
         if mp_path.exists():
             music_plan = json.loads(mp_path.read_text(encoding="utf-8"))
@@ -370,7 +310,7 @@ def main():
             "duration_sec": float(sfx_meta.get("duration_sec", 0)),
         })
 
-    # Timeline data for timeline.json
+    # Timeline data collections
     tl_shots_out = []
     tl_vo_out = []
     tl_sfx_out = []
@@ -485,7 +425,7 @@ def main():
             })
 
         # ── Place Music ──
-        if args.include_music and entry.get("music_item_id"):
+        if include_music and entry.get("music_item_id"):
             mid = entry["music_item_id"]
             ovr = shot_overrides.get(mid, {})
             clip_id = ovr.get("music_clip_id", "")
@@ -597,8 +537,6 @@ def main():
         if _peak > 0.891:
             buf = buf * (0.891 / _peak)
 
-    # Write timeline.json FIRST (survives crash)
-    tl_path = output_dir / "timeline.json"
     tl_doc = {
         "total_dur_sec": round(total_dur + _shift_acc, 3),
         "timing_source": "manifest",
@@ -607,16 +545,115 @@ def main():
         "sfx_items": tl_sfx_out,
         "music_items": tl_music_out,
     }
-    with open(tl_path, "w", encoding="utf-8") as f:
-        json.dump(tl_doc, f, indent=2, ensure_ascii=False)
-    print(f"  [OK] {tl_path}")
 
-    # Atomic write
-    buf_out = buf.astype(np.float32)
-    tmp_path = output_path.with_suffix(".tmp.wav")
-    sf.write(str(tmp_path), buf_out, SAMPLE_RATE, subtype="PCM_16")
-    tmp_path.rename(output_path)
-    print(f"  [OK] {output_path}  ({len(buf)/SAMPLE_RATE:.2f}s)")
+    # Write WAV (atomic)
+    if output_path is not None:
+        buf_out = buf.astype(np.float32)
+        tmp_path = output_path.with_suffix(".tmp.wav")
+        sf.write(str(tmp_path), buf_out, SAMPLE_RATE, subtype="PCM_16")
+        tmp_path.rename(output_path)
+        print(f"  [OK] {output_path}  ({len(buf)/SAMPLE_RATE:.2f}s)")
+
+    return tl_doc
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--sfx-selections", required=True)
+    parser.add_argument("--include-music", action="store_true")
+    parser.add_argument("--output", default=None)
+    args = parser.parse_args()
+
+    manifest_path = Path(args.manifest)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    project_id = manifest.get("project_id", "")
+    episode_id = manifest.get("episode_id", "")
+    locale = manifest.get("locale", "") or manifest_path.stem.split(".")[-1]
+
+    ep_dir = PIPE_DIR / "projects" / project_id / "episodes" / episode_id
+
+    # Load sfx_selections
+    sfx_selections = json.loads(Path(args.sfx_selections).read_text(encoding="utf-8"))
+
+    # Path security: validate all source_file paths are under PIPE_DIR
+    pipe_root = str(PIPE_DIR.resolve())
+
+    # Output dir
+    if args.output:
+        output_dir = Path(args.output)
+    else:
+        output_dir = ep_dir / "assets" / "sfx" / "SfxPreviewPack"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "preview_audio.wav"
+
+    # Load ShotList
+    shots = load_shotlist(manifest, manifest_path)
+
+    # Build vo_item_id → shot_id mapping via ShotList audio_intent (vo_items have no shot_id field)
+    vo_id_to_shot = {}
+    for shot in shots:
+        sid = shot.get("shot_id", "")
+        for vid in shot.get("audio_intent", {}).get("vo_item_ids", []):
+            vo_id_to_shot[vid] = sid
+
+    # Group vo_items by shot_id
+    vo_shot_map = {}
+    for vo in manifest.get("vo_items", []):
+        sid = vo_id_to_shot.get(vo.get("item_id", "")) or vo.get("shot_id", "")
+        if sid:
+            vo_shot_map.setdefault(sid, []).append(vo)
+
+    # Build music_index: { shot_id: music_item }
+    music_index = {}
+    for mi in manifest.get("music_items", []):
+        sid = mi.get("shot_id", "")
+        if sid:
+            music_index[sid] = mi
+
+    # Load RenderPlan for shot duration patching (VO ceiling)
+    render_plan = None
+    render_plan_path = ep_dir / f"RenderPlan.{locale}.json"
+    if render_plan_path.exists():
+        try:
+            render_plan = json.loads(render_plan_path.read_text(encoding="utf-8"))
+            print(f"  [INFO] Loaded RenderPlan for shot durations: {render_plan_path.name}")
+        except Exception as e:
+            print(f"  [WARN] Failed to load RenderPlan: {e}")
+    else:
+        print(f"  [INFO] No RenderPlan found, using ShotList durations")
+
+    # Patch ShotList durations with VO-ceiling values from RenderPlan.
+    # gen_render_plan applies a VO ceiling (last_vo_out_ms + tail) that makes
+    # many shots shorter than the ShotList estimate.  Without this patch, the
+    # SFX tab accumulates wrong offsets from shot 1 onward — exactly the same
+    # bug that music_review_pack.py fixes with its _rp_shot_dur block.
+    if render_plan:
+        _rp_shot_dur: dict[str, float] = {}
+        for _rs in render_plan.get("shots", []):
+            _sid = _rs.get("shot_id", "")
+            _dur_ms = _rs.get("duration_ms")
+            if _sid and _dur_ms is not None:
+                _rp_shot_dur[_sid] = _dur_ms / 1000.0
+        if _rp_shot_dur:
+            _patched = 0
+            for _shot in shots:
+                _sid = _shot.get("shot_id", "")
+                if _sid in _rp_shot_dur:
+                    _shot["duration_sec"] = _rp_shot_dur[_sid]
+                    _patched += 1
+            print(f"  [INFO] Patched {_patched} shot duration(s) from RenderPlan (VO ceiling applied)")
+
+    # Build shot timeline
+    timeline_shots, total_dur = build_shot_timeline(shots, manifest, vo_shot_map, music_index, {})
+
+    # Render preview (returns tl_doc; writes WAV to output_path)
+    render_sfx_preview(
+        timeline_shots, total_dur, manifest, manifest_path,
+        ep_dir, locale, sfx_selections, output_path,
+        include_music=args.include_music,
+    )
 
 
 if __name__ == "__main__":
