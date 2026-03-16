@@ -9,9 +9,9 @@
 #   1. RenderPlan.{locale}.json           — per-shot render instructions
 #
 # Key design decisions vs old p_9.txt:
-#   • VO timeline_in_ms / timeline_out_ms come from start_sec / end_sec
-#     in AssetManifest (measured by post_tts_analysis), NOT evenly
-#     distributed approximations.
+#   • VO timing (start_sec / end_sec) is read directly from AssetManifest.{locale}.json
+#     vo_items[] (written authoritatively at VO Approve). No vo_lines are written
+#     to RenderPlan — consumers read AssetManifest directly.
 #   • duration_ms respects background_overrides for overflow shots.
 #   • timing_lock_hash comes from AssetManifest (locale-adjusted).
 #   • duck_intervals / duck_db / fade_sec are passed into each shot's music
@@ -191,22 +191,26 @@ def build_override_map(merged: dict) -> dict[str, float]:
 
 
 def compute_duck_intervals_from_vo(
-    vo_lines: list[dict],
-    fade_ms:  int,
+    vo_items: list[dict],
+    fade_ms: int,
+    shot_start_sec: float = 0.0,
 ) -> list[list[float]]:
-    """
-    Recompute music duck intervals from shot-relative VO lines.
+    """Compute music duck intervals from AssetManifest vo_items timing.
 
-    For each VO line, the music is ducked from
-        max(0, timeline_in_ms  - fade_ms)  to
-              timeline_out_ms + fade_ms
-    Overlapping intervals are merged.  Units: seconds (for compatibility with
-    the AssetManifest duck_intervals convention).
+    vo_items: VO items with start_sec / end_sec (episode-cumulative).
+    fade_ms:  fade padding in milliseconds.
+    shot_start_sec: episode-cumulative start of the shot (from ShotList).
     """
     raw: list[tuple[float, float]] = []
-    for vl in vo_lines:
-        t0 = max(0.0, (vl["timeline_in_ms"]  - fade_ms) / 1000.0)
-        t1 =          (vl["timeline_out_ms"] + fade_ms) / 1000.0
+    for vi in vo_items:
+        start_sec = vi.get("start_sec")
+        end_sec   = vi.get("end_sec")
+        if start_sec is None or end_sec is None:
+            continue
+        rel_in_ms  = round((start_sec - shot_start_sec) * 1000)
+        rel_out_ms = round((end_sec   - shot_start_sec) * 1000)
+        t0 = max(0.0, (rel_in_ms  - fade_ms) / 1000.0)
+        t1 =          (rel_out_ms + fade_ms) / 1000.0
         raw.append((t0, t1))
     if not raw:
         return []
@@ -319,43 +323,31 @@ def build_shot(
         if cid and cid in media_map:
             character_asset_ids.append(media_map[cid]["asset_id"])
 
-    # vo_lines — only non-placeholder VO with real timing
-    #
-    # post_tts_analysis.py may have processed all VO items as a single
-    # episode-wide sequence (because locale manifest vo_items lack shot_id).
-    # In that case start_sec/end_sec are episode-cumulative, not shot-relative.
-    #
-    # We compute shot-relative timing by using WAV duration (end_sec - start_sec)
-    # and re-stacking items from cursor=0 within the shot, using the same
-    # DEFAULT_PAUSE_SEC=0.3 inter-line pause that post_tts_analysis uses.
-    # This gives correct timeline_in_ms / timeline_out_ms relative to shot start.
-    #
-    # If total VO exceeds duration_ms (overflow), we extend duration_ms so the
-    # renderer knows the shot is longer than originally planned.
+    # VO timing: read start_sec / end_sec directly from AssetManifest.{locale}.json
+    # vo_items[] (written authoritatively at VO Approve). Compute shot-relative
+    # last_vo_out_ms needed for duration ceiling/floor and duck interval computation.
+    # vo_lines are NOT written to RenderPlan — consumers read AssetManifest directly.
 
     audio_intent = shot.get("audio_intent", {})
-    vo_lines: list[dict] = []
-    cursor_ms = 0
     _seen_vo: set[tuple] = set()   # deduplicate by (speaker_id, text) within shot
+    _vo_items_for_shot: list[dict] = []  # timing-valid, deduplicated items for this shot
+    last_vo_out_ms = 0
+    shot_start_sec = shot.get("start_sec", 0.0)
 
     for vid in audio_intent.get("vo_item_ids", []):
-        media_item = media_map.get(vid)
-        if not media_item or media_item.get("is_placeholder", True):
-            continue
+        # VO WAV files are NOT in resolved_assets — do not gate on media_map.
+        # The only valid skip condition is missing start_sec/end_sec (checked below).
         vo_item = vo_map.get(vid, {})
         start_sec = vo_item.get("start_sec")
         end_sec   = vo_item.get("end_sec")
         if start_sec is None or end_sec is None:
             continue
 
-        # WAV duration of this clip
         wav_dur_ms = round((end_sec - start_sec) * 1000)
         if wav_dur_ms <= 0:
             continue
 
         # Skip duplicate VO lines (same speaker + same text) within the same shot.
-        # The LLM sometimes assigns two IDs for the same line (e.g. -001 and -002
-        # with identical text), causing the sentence to play twice in the render.
         speaker = vo_item.get("speaker_id", "")
         text    = vo_item.get("text", "").strip()
         dedup_key = (speaker, text)
@@ -365,27 +357,10 @@ def build_shot(
             continue
         _seen_vo.add(dedup_key)
 
-        timeline_in_ms  = cursor_ms
-        timeline_out_ms = cursor_ms + wav_dur_ms
-        item_pause_ms = vo_item.get("pause_after_ms", INTER_LINE_PAUSE_MS)
-        cursor_ms = timeline_out_ms + item_pause_ms
-
-        vo_line: dict = {
-            "line_id":         vid,
-            "speaker_id":      speaker,
-            "text":            text,
-            "timeline_in_ms":  timeline_in_ms,
-            "timeline_out_ms": timeline_out_ms,
-        }
-        # Phase 3, Step 10: chunk-WAV deferred slicing fields (optional)
-        chunk_info = (tts_chunk_info or {}).get(vid)
-        if chunk_info:
-            from pathlib import Path as _Path
-            chunk_wav = chunk_info["chunk_wav"]
-            vo_line["audio_chunk_uri"]  = _Path(chunk_wav).as_uri()
-            vo_line["audio_start_sec"]  = chunk_info["start_sec"]
-            vo_line["audio_end_sec"]    = chunk_info["end_sec"]
-        vo_lines.append(vo_line)
+        # Shot-relative end time (episode-cumulative end_sec minus shot start)
+        rel_out_ms = round((end_sec - shot_start_sec) * 1000)
+        last_vo_out_ms = max(last_vo_out_ms, rel_out_ms)
+        _vo_items_for_shot.append(vo_item)
 
     # Derive per-shot tail from ShotList duration_sec (set by patch_shotlist_durations.py
     # from AssetManifest vo_items).  This correctly reflects the actual inter-scene gap
@@ -397,17 +372,16 @@ def build_shot(
     # (shot.duration_sec already = vo_span + approved_tail from the patcher)
     # Falls back to VO_TAIL_MS (2 s) when shot.duration_sec is absent or stale.
     tail_ms = VO_TAIL_MS  # safety fallback
-    if vo_lines and shot.get("duration_sec"):
+    if _vo_items_for_shot and shot.get("duration_sec"):
         shot_dur_ms  = round(shot["duration_sec"] * 1000)
-        derived_tail = shot_dur_ms - vo_lines[-1]["timeline_out_ms"]
+        derived_tail = shot_dur_ms - last_vo_out_ms
         if derived_tail > 0:
             tail_ms = derived_tail
     # Explicit scene_tails override from merged manifest (highest priority)
     if scene_tails:
         tail_ms = int(scene_tails.get(scene_id, scene_tails.get(shot_id, tail_ms)))
-    if vo_lines:
-        vo_end_ms = vo_lines[-1]["timeline_out_ms"]
-        duration_ms = max(duration_ms, vo_end_ms + tail_ms)
+    if _vo_items_for_shot:
+        duration_ms = max(duration_ms, last_vo_out_ms + tail_ms)
 
     # sfx_asset_ids — skip placeholder SFX
     sfx_asset_ids: list[str] = []
@@ -418,9 +392,9 @@ def build_shot(
 
     # music_asset_id + ducking fields
     #
-    # duck_intervals are recomputed from the shot-relative vo_lines above.
-    # The merged manifest's duck_intervals use episode-cumulative VO offsets
-    # (because post_tts_analysis doesn't have per-shot timing context);
+    # duck_intervals are computed from AssetManifest vo_items timing (start_sec / end_sec),
+    # converted to shot-relative offsets using shot_start_sec.
+    # The merged manifest's duck_intervals use episode-cumulative VO offsets;
     # recomputing here gives correct shot-relative values.
     music_asset_id: str | None = None
     music_extra: dict = {}
@@ -435,8 +409,8 @@ def build_shot(
             fade_sec = music_item.get("fade_sec",  0.15)
             base_db  = music_item.get("base_db",  BASE_MUSIC_DB)  # per-track vol offset
             fade_ms  = round(fade_sec * 1000)
-            # Recompute shot-relative duck_intervals from the vo_lines we just built
-            duck_ivs = compute_duck_intervals_from_vo(vo_lines, fade_ms)
+            # Compute shot-relative duck_intervals from AssetManifest vo_items timing
+            duck_ivs = compute_duck_intervals_from_vo(_vo_items_for_shot, fade_ms, shot_start_sec)
             music_extra["duck_intervals"] = duck_ivs
             music_extra["duck_db"]        = duck_db
             music_extra["music_fade_sec"] = fade_sec
@@ -461,8 +435,7 @@ def build_shot(
     # effectively pinning duration to exactly that value.
     #
     # For episodic / monologue we keep creative timing — only the floor applies.
-    if story_format in NARRATIVE_FORMATS and vo_lines:
-        last_vo_out_ms = vo_lines[-1]["timeline_out_ms"]
+    if story_format in NARRATIVE_FORMATS and _vo_items_for_shot:
         ceiling_ms = last_vo_out_ms + tail_ms
         if duration_ms > ceiling_ms:
             print(f"  [CEILING] {shot_id}: {duration_ms} ms → {ceiling_ms} ms "
@@ -505,7 +478,6 @@ def build_shot(
         "background_media_type":  background_media_type,   # "image" | "video" | None
         "background_segments":    bg_segments,              # list or None (v3 multi-segment)
         "character_asset_ids":    character_asset_ids,
-        "vo_lines":               vo_lines,
         "sfx_asset_ids":          sfx_asset_ids,
         "sfx_plan_entries":       sfx_plan_entries,        # from SfxPlan.json
         "music_asset_id":         music_asset_id,
@@ -536,8 +508,7 @@ def build_plan(
     music_map    = build_music_map(merged)
     override_map = build_override_map(merged)
 
-    # Phase 3, Step 10: load TTS chunk info for deferred WAV slicing
-    # Determines which vo_lines can reference chunk WAVs instead of sentence WAVs.
+    # Phase 3, Step 10: load TTS chunk info (retained for future use / logging).
     tts_chunk_info: dict = {}
     if episode_dir is not None:
         tts_chunk_info = load_tts_chunk_info(episode_dir)
@@ -812,7 +783,6 @@ def main() -> None:
     save_json(plan, out_plan)
 
     n_shots   = len(plan["shots"])
-    n_vo_lines = sum(len(s["vo_lines"]) for s in plan["shots"])
     n_overflow = sum(
         1 for s in plan["shots"]
         if s["shot_id"] in {o["shot_id"] for o in merged.get("background_overrides", [])}
@@ -840,7 +810,6 @@ def main() -> None:
 
     print(f"  RenderPlan shots     : {n_shots}")
     print(f"  BG type — video      : {n_bg_video}  image: {n_bg_image}  multi-segment: {n_bg_multi}")
-    print(f"  VO lines             : {n_vo_lines}")
     print(f"  Overflow shots       : {n_overflow}")
     print(f"  Ceiling applied      : {n_ceiling} shots  "
           f"({'narrative ceiling active' if args.story_format in NARRATIVE_FORMATS else 'n/a — episodic/monologue'})")

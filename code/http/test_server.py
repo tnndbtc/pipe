@@ -2621,7 +2621,8 @@ placeholder="Enter your story here"></textarea>
     </button>
     <span id="media-gen-all-status"
           style="font-size:0.78em;color:var(--dim);flex-shrink:0"></span>
-    <button id="media-btn-preview" onclick="mediaGeneratePreview()" style="margin-left:8px;margin-right:4px">🎬 Generate Preview (VO)</button>
+    <button id="media-btn-preview" onclick="mediaGeneratePreview()"
+            style="margin-left:8px;margin-right:4px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.80em;padding:5px 14px;cursor:pointer">🎬 Generate Preview (VO)</button>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-music" checked onchange="mediaUpdatePreviewLabel()"> Include Music</label>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-sfx" onchange="mediaUpdatePreviewLabel()"> Include SFX</label>
   </div>
@@ -2694,6 +2695,9 @@ placeholder="Enter your story here"></textarea>
     .sfx-link-btn:hover{color:var(--text)}
     .sfx-ai-toggle-btn{background:#f3e8f3;border:1px solid #c8a0c8;border-radius:4px;color:#7a3a7a;cursor:pointer;font-size:0.78em;padding:2px 8px;margin-left:6px;flex-shrink:0}
     .sfx-ai-toggle-btn:hover{background:#2a1a2a}
+    .sfx-upload-btn{background:#e8f3f0;border:1px solid #a0c8b8;border-radius:4px;color:#2a6a4a;cursor:pointer;font-size:0.78em;padding:2px 8px;margin-left:4px;flex-shrink:0}
+    .sfx-upload-btn:hover{background:#c8e8d8}
+    .sfx-upload-status{font-size:11px;color:#888;margin-left:6px}
     .sfx-ai-panel{display:none;background:#f3e8f3;border:1px solid #c8a0c8;border-radius:4px;padding:8px 10px;margin:4px 0 6px}
     .sfx-ai-panel textarea{width:100%;box-sizing:border-box;background:var(--panel-bg);color:var(--text);border:1px solid #5a3a5a;border-radius:3px;font-size:11px;font-family:monospace;resize:vertical;padding:4px}
     .sfx-ai-panel .sfx-ai-hint{font-size:10px;color:#666;margin:3px 0 5px}
@@ -2884,8 +2888,8 @@ placeholder="Enter your story here"></textarea>
       <option value="">— select locale —</option>
     </select>
     <button class="vo-scene-btn" onclick="loadVoItems()" style="margin-left:4px">↺ Refresh</button>
-    <button class="vo-scene-btn" id="vo-preview-all-btn" onclick="_voPreviewAll()"
-            style="margin-left:8px;color:#4fc3f7;border-color:#4fc3f7aa" title="Play all VO items sequentially">
+    <button id="vo-preview-all-btn" onclick="_voPreviewAll()"
+            style="margin-left:8px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.80em;padding:5px 14px;cursor:pointer" title="Play all VO items sequentially">
       ▶ Generate Preview</button>
     <button class="vo-scene-btn" id="vo-stop-preview-btn" onclick="_voStopPreview()"
             style="display:none;margin-left:4px;color:#f88;border-color:#f88aa" title="Stop playback">
@@ -2924,6 +2928,16 @@ placeholder="Enter your story here"></textarea>
       </button>
     </div>
     <div id="vo-approve-error" style="display:none;color:#f88;font-size:0.9em;padding:2px 0"></div>
+  </div>
+  <!-- TTS accuracy check — populated by _voLoadWhisperCompare() after loadVoItems() -->
+  <div id="vo-whisper-section" style="display:none;margin-top:12px;
+       background:var(--surface);border:1px solid var(--border);
+       border-radius:8px;padding:14px">
+    <div style="font-size:0.85em;font-weight:600;color:var(--dim);
+                margin-bottom:10px">🎙 TTS ACCURACY CHECK</div>
+    <div id="vo-whisper-summary" style="font-size:0.82em;margin-bottom:10px"></div>
+    <table id="vo-whisper-table" style="width:100%;font-size:0.78em;
+           border-collapse:collapse"></table>
   </div>
   <!-- sentinel status indicator (shown after approval) -->
   <div id="vo-sentinel-status" style="display:none;align-items:center;gap:8px;
@@ -3847,6 +3861,7 @@ placeholder="Enter your story here"></textarea>
         items._scene_tails = data.scene_tails || {};
         _renderVoItems(items, slug, epId, locale, data.voice_catalog || {});
         _voLoadSentinel(epDir, locale);
+        _voLoadWhisperCompare(epDir, locale);  // TTS accuracy check (fire-and-forget)
         // Load approved durations for drift detection (OPEN 3)
         window._voApprovedDurations = {};
         _voLoadApprovedDurations(epDir, locale);
@@ -4839,7 +4854,65 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  // Load sentinel status when VO tab loads
+  // ── TTS Accuracy Check (Whisper compare) ─────────────────────────────────
+  async function _voLoadWhisperCompare(epDir, locale) {
+    const section = document.getElementById('vo-whisper-section');
+    if (!epDir || !locale || !section) return;
+    try {
+      const r = await fetch('/api/vo_whisper_compare?ep_dir=' + encodeURIComponent(epDir)
+                          + '&locale=' + encodeURIComponent(locale));
+      const d = await r.json();
+      if (!d.ok || !d.data) {
+        section.style.display = 'none';
+        return;
+      }
+      const data = d.data;
+      const s    = data.summary || {};
+      section.style.display = '';
+
+      // Summary bar
+      const anyFail = s.fail > 0;
+      const anyWarn = s.warn > 0;
+      const bgColor = anyFail ? '#450a0a' : anyWarn ? '#422006' : '#052e16';
+      const txColor = anyFail ? '#fca5a5' : anyWarn ? '#fcd34d' : '#86efac';
+      const summaryEl = document.getElementById('vo-whisper-summary');
+      summaryEl.style.cssText = 'padding:6px 10px;border-radius:5px;background:' + bgColor
+        + ';color:' + txColor + ';font-size:0.82em';
+      summaryEl.textContent = s.total + ' items:  ✅ ' + s.ok + ' ok  '
+        + '⚠ ' + s.warn + ' warn  ✗ ' + s.fail + ' fail  ○ ' + s.missing + ' missing';
+
+      // Table
+      const tbl = document.getElementById('vo-whisper-table');
+      const rowBg = { ok: '', warn: '#78350f', fail: '#7f1d1d', missing: '#1c1917' };
+      const icon  = { ok: '✅', warn: '⚠', fail: '✗', missing: '○' };
+      let html = '<thead><tr style="color:var(--dim);font-size:0.75em;text-transform:uppercase">'
+        + '<th style="text-align:left;padding:4px 8px">Item</th>'
+        + '<th style="text-align:left;padding:4px 8px">Intended</th>'
+        + '<th style="text-align:left;padding:4px 8px">Whisper</th>'
+        + '<th style="text-align:right;padding:4px 8px">WER</th>'
+        + '<th style="text-align:center;padding:4px 8px"></th>'
+        + '</tr></thead><tbody>';
+      (data.items || []).forEach(it => {
+        const bg  = rowBg[it.status] || '';
+        const wer = it.wer != null ? (it.wer * 100).toFixed(1) + '%' : '—';
+        html += '<tr style="background:' + bg + ';border-top:1px solid var(--border)">'
+          + '<td style="padding:4px 8px;color:var(--dim);white-space:nowrap">' + escHtml(it.item_id) + '</td>'
+          + '<td style="padding:4px 8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+          +   escHtml(it.intended) + '</td>'
+          + '<td style="padding:4px 8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+          +   escHtml(it.transcript || '') + '</td>'
+          + '<td style="padding:4px 8px;text-align:right">' + wer + '</td>'
+          + '<td style="padding:4px 8px;text-align:center">' + (icon[it.status] || '') + '</td>'
+          + '</tr>';
+      });
+      html += '</tbody>';
+      tbl.innerHTML = html;
+    } catch (_) {
+      // Silently hide — Whisper may not have run yet
+      document.getElementById('vo-whisper-section').style.display = 'none';
+    }
+  }
+
   async function _voLoadSentinel(epDir, locale) {
     if (!epDir || !locale) return;
     try {
@@ -5209,6 +5282,8 @@ placeholder="Enter your story here"></textarea>
     sfxRenderShotOverrides();
     // Try to load previously saved search results from disk
     await _sfxLoadExisting();
+    // Show empty cards for any manifest items not yet covered by search results
+    _sfxRenderManifestItems();
   }
 
   async function _sfxLoadExisting() {
@@ -5275,6 +5350,28 @@ placeholder="Enter your story here"></textarea>
     } catch(e) {
       statusBar.textContent = 'No previous results found. Run a search to get started.';
       document.getElementById('sfx-btn-search').disabled = false;
+    }
+  }
+
+  function _sfxRenderManifestItems() {
+    // Render empty cards for sfx_items from the manifest that have no search results yet.
+    // This lets users AI-generate or upload audio without running a search first.
+    const items = (_sfxManifest && (_sfxManifest.sfx_items || _sfxManifest.sfx)) || [];
+    if (!items.length) return;
+    let addedAny = false;
+    items.forEach(item => {
+      const id = item.item_id || item.asset_id || '';
+      if (!id) return;
+      if (_sfxResults[id]) return;  // already has search results — card already rendered
+      if (!_sfxItems.find(i => (i.item_id || i.asset_id) === id)) {
+        _sfxItems.push(item);
+        addedAny = true;
+      }
+      sfxRenderCard(item, []);
+    });
+    if (addedAny) {
+      document.getElementById('sfx-footer').style.display = 'flex';
+      sfxUpdateCountLabel();
     }
   }
 
@@ -5422,7 +5519,7 @@ placeholder="Enter your story here"></textarea>
 
     let rows = '';
     if (!candidates.length) {
-      rows = '<div class="sfx-empty">No results found.</div>';
+      rows = '<div class="sfx-empty">No candidates yet \u2014 use \u2728\u00a0AI or \ud83d\udcc1\u00a0Upload to add audio, or click \ud83d\udd0d\u00a0Search All SFX.</div>';
     } else {
       candidates.forEach((c, idx) => {
         const isSel = selIdx === idx;
@@ -5470,6 +5567,10 @@ placeholder="Enter your story here"></textarea>
         <span class="sfx-card-tag">${tag}</span>
         <span class="sfx-card-dur">Target: ${dur}s</span>
         <button class="sfx-ai-toggle-btn" onclick="event.stopPropagation();_sfxAiToggle('${itemId}')" title="Generate SFX with AI">\u2728 AI</button>
+        <button class="sfx-upload-btn" onclick="event.stopPropagation();_sfxUpload('${itemId}')" title="Upload your own SFX file">\ud83d\udcc1 Upload</button>
+        <span class="sfx-upload-status" id="sfx-upload-status-${itemId}"></span>
+        <input type="file" id="sfx-upload-input-${itemId}" accept="audio/*" style="display:none"
+               onchange="_sfxUploadFile('${itemId}',this)">
       </div>
       <div class="sfx-ai-panel" id="sfx-ai-panel-${itemId}">
         <textarea id="sfx-ai-prompt-${itemId}" rows="3" placeholder="Describe the sound to generate\u2026"
@@ -5650,11 +5751,62 @@ placeholder="Enter your story here"></textarea>
   }
 
   function _sfxAiInjectResult(itemId, candidate) {
+    // If the item came from the manifest (no search done yet), _sfxResults won't
+    // have an entry for it. Initialise from _sfxItems so the card can render.
+    if (!_sfxResults[itemId]) {
+      const item = _sfxItems.find(i => (i.item_id || i.asset_id) === itemId);
+      if (!item) return;   // unknown item — nothing we can do
+      _sfxResults[itemId] = { item, candidates: [] };
+    }
     const res = _sfxResults[itemId];
-    if (!res) return;
-    res.candidates.unshift(candidate);  // prepend — AI result appears first
+    res.candidates.unshift(candidate);  // prepend — AI/upload result appears first
     sfxRenderCard(res.item, res.candidates);
-    _sfxSaveResults();  // persist AI-generated result to disk
+    sfxRenderShotOverrides();  // keep dropdown in sync with new candidate
+    _sfxSaveResults();  // persist to disk
+  }
+
+  // ── SFX Upload ─────────────────────────────────────────────────────────────
+
+  function _sfxUpload(itemId) {
+    const input = document.getElementById('sfx-upload-input-' + itemId);
+    if (input) { input.value = ''; input.click(); }
+  }
+
+  async function _sfxUploadFile(itemId, input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const status = document.getElementById('sfx-upload-status-' + itemId);
+    const setStatus = (msg, color) => {
+      if (status) { status.textContent = msg; status.style.color = color || '#888'; }
+    };
+    setStatus('\u23f3 Uploading\u2026');
+    try {
+      const fd = new FormData();
+      fd.append('slug',    _sfxSlug);
+      fd.append('ep_id',   _sfxEpId);
+      fd.append('item_id', itemId);
+      fd.append('file',    file, file.name);
+      const r = await fetch('/api/sfx_upload', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || 'upload failed');
+      setStatus('\u2713 Uploaded', '#6a9a6a');
+      // Inject as first candidate so user can immediately preview & select
+      _sfxAiInjectResult(itemId, {
+        preview_url:      d.url,
+        title:            '\ud83d\udcc1 Upload: ' + file.name.slice(0, 50),
+        source_site:      'upload',
+        license_summary:  'User Upload',
+        duration_sec:     d.duration_sec || 0,
+        attribution_text: 'User upload',
+        asset_page_url:   '',
+        waveform_img:     '',
+        author:           'User',
+        rating:           0,
+        downloads:        0,
+      });
+    } catch(err) {
+      setStatus('\u274c ' + err.message, '#e06c75');
+    }
   }
 
   function _sfxResetBtn(b) {
@@ -10846,6 +10998,9 @@ placeholder="Enter your story here"></textarea>
 
   function initMusicTab() {
     const sel = document.getElementById('music-ep-select');
+    // If episode already selected, reload data automatically (user may have
+    // run step 5 or copied songs since last visit).
+    if (_musicSlug && _musicEpId) { _musicLoadExisting(); return; }
     if (sel.options.length > 1) { _musicSyncFromRunTab(); return; }
     fetch('/list_projects').then(r => r.json()).then(data => {
       (data.projects || []).forEach(proj => {
@@ -12715,12 +12870,15 @@ placeholder="Enter your story here"></textarea>
               const row  = document.createElement('div');
               row.className = 'pipe-substep-row';
               // Only grey steps that are actually skipped in run.sh when approved.
-              // gen_tts + post_tts: skipped when VO is approved.
+              // gen_tts + post_tts:
+              //   Primary locale  → always greyed (VO is authored in VO tab, never re-run from Stage 9).
+              //   Non-primary     → greyed only when VO is approved for that locale.
               // apply_music_plan: skipped when music is approved (render_video reads
               //   MusicApprovalSnapshot directly — manifest update is redundant).
-              const _voByLocale = _approvals.vo_by_locale || {};
+              const _voByLocale    = _approvals.vo_by_locale || {};
+              const _isPrimary     = locale === (locales[0] || 'en');
               const _localeApproved =
-                ((step === 'gen_tts' || step === 'post_tts') && !!_voByLocale[locale]) ||
+                ((step === 'gen_tts' || step === 'post_tts') && (_isPrimary || !!_voByLocale[locale])) ||
                 (step === 'apply_music_plan' && !!_approvals.music);
               const _localeReadyToRender = (step === 'render_video' && _approvals.all && !_rpStale[locale]);
               const _renderPlanStale     = (step === 'gen_render_plan' && !!_rpStale[locale]);
@@ -14803,6 +14961,47 @@ class Handler(BaseHTTPRequestHandler):
                         pass
             body = json.dumps({"approved": approved}).encode()
             self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── GET /api/vo_whisper_compare — serve cached whisper_compare.json ──
+        elif parsed.path == "/api/vo_whisper_compare":
+            params = parse_qs(parsed.query)
+            ep_dir = unquote_plus(params.get("ep_dir", [""])[0]).strip()
+            locale = unquote_plus(params.get("locale", [""])[0]).strip()
+            if not ep_dir or not locale:
+                body = json.dumps({"ok": False, "error": "ep_dir and locale required"}).encode()
+                self.send_response(400)
+            else:
+                # Resolve relative ep_dir to absolute path (same pattern as other VO endpoints)
+                _full_ep = os.path.join(PIPE_DIR, ep_dir) \
+                           if not os.path.isabs(ep_dir) else ep_dir
+                _wc_path = os.path.join(_full_ep, "assets", locale, "whisper_compare.json")
+                # Path traversal guard
+                try:
+                    _wc_resolved = str(Path(_wc_path).resolve())
+                    assert _wc_resolved.startswith(str(PIPE_DIR))
+                except (AssertionError, Exception):
+                    body = json.dumps({"ok": False, "error": "invalid path"}).encode()
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if not os.path.isfile(_wc_path):
+                    body = json.dumps({"ok": False, "error": "not found"}).encode()
+                else:
+                    try:
+                        with open(_wc_path, encoding="utf-8") as _wf:
+                            _wc_data = json.load(_wf)
+                        body = json.dumps({"ok": True, "data": _wc_data}).encode()
+                    except Exception as _wc_exc:
+                        body = json.dumps({"ok": False, "error": str(_wc_exc)}).encode()
+                self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -17555,6 +17754,8 @@ class Handler(BaseHTTPRequestHandler):
                             a["item_id"]: {
                                 "duration_sec":   a["duration_sec"],
                                 "pause_after_ms": a["pause_after_ms"],
+                                "start_sec":      a["start_sec"],
+                                "end_sec":        a["end_sec"],
                             }
                             for a in _approval_items
                         }
@@ -17567,12 +17768,14 @@ class Handler(BaseHTTPRequestHandler):
                             if _miid in _approved_lookup:
                                 _mitem["duration_sec"]   = _approved_lookup[_miid]["duration_sec"]
                                 _mitem["pause_after_ms"] = _approved_lookup[_miid]["pause_after_ms"]
+                                _mitem["start_sec"]      = _approved_lookup[_miid]["start_sec"]
+                                _mitem["end_sec"]        = _approved_lookup[_miid]["end_sec"]
                         _mani_tmp = _mani_path + ".tmp"
                         with open(_mani_tmp, "w", encoding="utf-8") as _mf2:
                             json.dump(_mani2, _mf2, indent=2, ensure_ascii=False)
                         os.replace(_mani_tmp, _mani_path)
-                        _log.debug("[vo_approve] wrote duration_sec + pause_after_ms "
-                                   "for %d items → manifest", len(_approved_lookup))
+                        _log.debug("[vo_approve] wrote duration_sec + pause_after_ms + "
+                                   "start_sec + end_sec for %d items → manifest", len(_approved_lookup))
                     # ─────────────────────────────────────────────────────────────────
 
                     # ── Cache approved WAVs ───────────────────────────────────────────
@@ -18382,8 +18585,8 @@ class Handler(BaseHTTPRequestHandler):
                     preview_url = cand.get("preview_url", "")
                     source_site = cand.get("source_site", "")
 
-                    # AI-generated: already on disk, just find path
-                    if source_site == "ai_gen":
+                    # AI-generated or user-uploaded: already on disk, just find path
+                    if source_site in ("ai_gen", "upload"):
                         _local = _resolve_sfx_local_path(ep_dir, item_id, cand)
                         if _local:
                             t = timing.get(item_id, {})
@@ -18396,6 +18599,9 @@ class Handler(BaseHTTPRequestHandler):
                                 "end_sec":      t.get("end"),
                             })
                             saved += 1
+                        else:
+                            print(f"  [SFX] Upload/AI file not found on disk for {item_id}")
+                            failed += 1
                         continue
 
                     if not preview_url:
@@ -18729,6 +18935,107 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 body = json.dumps({"error": str(exc)}).encode()
                 self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── SFX: upload user-provided audio file ─────────────────────────────
+        elif self.path == "/api/sfx_upload":
+            try:
+                ctype = self.headers.get("Content-Type", "")
+                if "multipart/form-data" not in ctype:
+                    raise ValueError("Expected multipart/form-data")
+                length = int(self.headers.get("Content-Length", 0))
+                raw    = self.rfile.read(length)
+
+                boundary = re.search(r"boundary=(.+)", ctype)
+                if not boundary:
+                    raise ValueError("No boundary in Content-Type")
+                bnd = boundary.group(1).strip().encode()
+
+                parts = raw.split(b"--" + bnd)
+                fields    = {}
+                file_data = None
+                file_name = "upload.wav"
+                for part in parts:
+                    if b"Content-Disposition" not in part:
+                        continue
+                    header, _, body = part.partition(b"\r\n\r\n")
+                    body = body.rstrip(b"\r\n")
+                    name_m  = re.search(rb'name="([^"]+)"', header)
+                    fname_m = re.search(rb'filename="([^"]+)"', header)
+                    if name_m:
+                        name = name_m.group(1).decode()
+                        if fname_m:
+                            file_data = body
+                            file_name = fname_m.group(1).decode(errors="replace")
+                        else:
+                            fields[name] = body.decode(errors="replace")
+
+                slug    = fields.get("slug",    "").strip()
+                ep_id   = fields.get("ep_id",   "").strip()
+                item_id = fields.get("item_id", "").strip()
+
+                if not slug or not ep_id or not item_id or file_data is None:
+                    raise ValueError("slug, ep_id, item_id, and file are required")
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug):
+                    raise ValueError("invalid slug")
+                if not re.match(r'^s\d+e\d+$', ep_id):
+                    raise ValueError("invalid ep_id")
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', item_id):
+                    raise ValueError("invalid item_id")
+
+                # Determine extension from uploaded filename
+                ext = os.path.splitext(file_name)[1].lower() or ".wav"
+                if ext not in (".wav", ".mp3", ".ogg", ".flac", ".aiff", ".aif"):
+                    ext = ".wav"
+
+                import time as _time_sfx_up
+                ts_ms = int(_time_sfx_up.time() * 1000)
+                dest_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                        "assets", "sfx", item_id)
+                os.makedirs(dest_dir, exist_ok=True)
+                dest_file = f"uploaded_{ts_ms}{ext}"
+                dest_path = os.path.join(dest_dir, dest_file)
+                with open(dest_path, "wb") as fh:
+                    fh.write(file_data)
+
+                # Extract duration
+                import wave as _wave_sfx, contextlib as _cl_sfx
+                duration_sec = 0.0
+                try:
+                    with _cl_sfx.closing(_wave_sfx.open(dest_path, "r")) as wf:
+                        duration_sec = wf.getnframes() / wf.getframerate()
+                except Exception:
+                    # For non-WAV formats, try subprocess ffprobe
+                    try:
+                        import subprocess as _sp_sfx
+                        _r = _sp_sfx.run(
+                            ["ffprobe", "-v", "quiet", "-print_format", "json",
+                             "-show_streams", dest_path],
+                            capture_output=True, timeout=10)
+                        _info = json.loads(_r.stdout)
+                        for _s in _info.get("streams", []):
+                            if _s.get("codec_type") == "audio":
+                                duration_sec = float(_s.get("duration", 0))
+                                break
+                    except Exception:
+                        pass
+
+                rel_path  = os.path.relpath(dest_path, PIPE_DIR)
+                serve_url = "/serve_media?path=" + _url_quote(rel_path)
+                body = json.dumps({"ok": True, "url": serve_url,
+                                   "filename": dest_file,
+                                   "duration_sec": duration_sec}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -19946,7 +20253,8 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/azure_voices", "/api/voice_presets", "/api/voice_index",
                   "/api/preview_voice", "/api/save_voice_cast", "/api/delete_preset",
                   "/api/status_report", "/api/append_status_report",
-                  "/api/vo_alignment",
+                  "/api/vo_alignment", "/api/vo_whisper_compare",
+                  "/api/vo_approved_timing",
                   "/api/check_slug", "/api/next_episode_id",
                   "/api/create_episode", "/api/save_episode_meta",
                   "/api/diagnose_pipeline",

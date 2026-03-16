@@ -518,22 +518,26 @@ def main() -> None:
     # If the user deleted the video from YouTube Studio, reset state so it
     # re-uploads from scratch rather than crashing on caption/thumbnail steps.
     if state.get("video_id") and state.get("video_uploaded"):
-        _check = _api_with_retry(
-            youtube.videos().list(part="id", id=state["video_id"]),
-            label="verify video exists"
-        )
-        if not _check.get("items"):
-            print(f"  ⚠  Video {state['video_id']} no longer exists on YouTube — resetting upload state.")
-            state.update({
-                "video_id":             None,
-                "resumable_upload_uri": None,
-                "video_uploaded":       False,
-                "processing_confirmed": False,
-                "captions_uploaded":    {},
-                "thumbnail_uploaded":   False,
-                "playlist_added":       False,
-            })
-            _save_state(state_path, state)
+        try:
+            _check = _api_with_retry(
+                youtube.videos().list(part="id", id=state["video_id"]),
+                label="verify video exists"
+            )
+            if not _check.get("items"):
+                print(f"  ⚠  Video {state['video_id']} no longer exists on YouTube — resetting upload state.")
+                state.update({
+                    "video_id":             None,
+                    "resumable_upload_uri": None,
+                    "video_uploaded":       False,
+                    "processing_confirmed": False,
+                    "captions_uploaded":    {},
+                    "thumbnail_uploaded":   False,
+                    "playlist_added":       False,
+                })
+                _save_state(state_path, state)
+        except HttpError as _ve:
+            print(f"  ⚠  Could not verify video {state['video_id']} exists "
+                  f"({_ve.resp.status}) — skipping check, proceeding with saved state.")
 
     # ── Step 1: Upload video ──────────────────────────────────────────────────
     video_id = upload_video(youtube, meta, mp4_path, state, state_path)

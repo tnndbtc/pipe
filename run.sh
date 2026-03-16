@@ -778,6 +778,10 @@ for N in 1 2 3 4 5 6 7 8 9; do
           exit "$_s35_pta_exit"
         fi
 
+        echo "  [3.5c] Checking TTS accuracy with Whisper…"
+        python3 "${code_dir}/whisper_compare.py" "${EP_DIR}" "${_s35_primary}" 2>&1 | tee -a "$_s35_log" || true
+        # || true — Whisper failure must never block the pipeline
+
         echo ""
         echo "══════════════════════════════════════════════════════════════"
         echo "  ⏸  PAUSED — Stage 3.5: VO review required"

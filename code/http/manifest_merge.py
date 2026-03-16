@@ -208,6 +208,12 @@ def merge_manifests(
         "render_plan":     None,
     }
 
+    # Preserve vo_approval block if it exists in the locale manifest.
+    # This block is written by write_sentinel() when the user approves VO in the
+    # VO tab and must survive manifest_merge in-place re-runs intact.
+    if locale.get("vo_approval"):
+        merged["vo_approval"] = locale["vo_approval"]
+
     # Deep-copy music_items from shared so we can add duck_intervals
     music_items = json.loads(json.dumps(shared.get("music_items", [])))
 

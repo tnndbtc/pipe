@@ -124,6 +124,67 @@ def build_asset_map(render_plan: dict) -> dict[str, dict]:
     return {item["asset_id"]: item for item in render_plan.get("resolved_assets", [])}
 
 
+def load_vo_timing(manifest_path: Path, shotlist_path: Path) -> dict:
+    """Load VO timing from AssetManifest.{locale}.json + ShotList.json.
+
+    Returns {shot_id: [{item_id, speaker_id, text,
+                         shot_rel_in_ms, shot_rel_out_ms,
+                         audio_chunk_uri, audio_start_sec, audio_end_sec}]}
+
+    shot_rel_in_ms / shot_rel_out_ms are milliseconds relative to shot start.
+    audio_chunk_uri / audio_start_sec / audio_end_sec are optional chunk-WAV fields.
+    """
+    result: dict = {}
+
+    if not manifest_path.exists():
+        print(f"  [render] WARNING: AssetManifest not found: {manifest_path}")
+        return result
+    if not shotlist_path.exists():
+        print(f"  [render] WARNING: ShotList not found: {shotlist_path}")
+        return result
+
+    manifest  = load_json(manifest_path)
+    shotlist  = load_json(shotlist_path)
+    vo_lookup = {v["item_id"]: v for v in manifest.get("vo_items", [])}
+
+    for shot in shotlist.get("shots", []):
+        sid        = shot.get("shot_id", "")
+        shot_start = shot.get("start_sec", 0.0)
+        lines = []
+        seen: set = set()
+        for iid in shot.get("audio_intent", {}).get("vo_item_ids", []):
+            v = vo_lookup.get(iid)
+            if not v:
+                continue
+            start_sec = v.get("start_sec")
+            end_sec   = v.get("end_sec")
+            if start_sec is None or end_sec is None:
+                continue
+            # Deduplicate by (speaker_id, text) within shot
+            dedup = (v.get("speaker_id", ""), v.get("text", "").strip())
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+            entry = {
+                "item_id":          iid,
+                "speaker_id":       v.get("speaker_id", ""),
+                "text":             v.get("text", ""),
+                "shot_rel_in_ms":   round((start_sec - shot_start) * 1000),
+                "shot_rel_out_ms":  round((end_sec   - shot_start) * 1000),
+            }
+            # Optional chunk-WAV fields (Phase 3 deferred slicing)
+            if v.get("audio_chunk_uri"):
+                entry["audio_chunk_uri"]  = v["audio_chunk_uri"]
+                entry["audio_start_sec"]  = v.get("audio_start_sec", 0.0)
+                entry["audio_end_sec"]    = v.get("audio_end_sec",   0.0)
+            lines.append(entry)
+        result[sid] = lines
+
+    total = sum(len(v) for v in result.values())
+    print(f"  [render] VO timing loaded: {total} lines across {len(result)} shots")
+    return result
+
+
 def run_ffmpeg(cmd: list[str], verbose: bool = False) -> None:
     """Run an FFmpeg command; print stderr and exit on failure."""
     if verbose:
@@ -177,13 +238,16 @@ def build_enable_expr(vo_lines: list[dict], speaker_id: str) -> str:
     Build an FFmpeg ``enable=`` expression that evaluates to non-zero
     whenever ``speaker_id`` is the active VO speaker.
 
+    vo_lines entries use shot_rel_in_ms / shot_rel_out_ms (milliseconds,
+    shot-relative) as written by load_vo_timing().
+
     Returns '0' if the speaker never appears.
     """
     windows = [vl for vl in vo_lines if vl.get("speaker_id") == speaker_id]
     if not windows:
         return "0"
     parts = [
-        f"between(t,{vl['timeline_in_ms'] / 1000:.3f},{vl['timeline_out_ms'] / 1000:.3f})"
+        f"between(t,{vl['shot_rel_in_ms'] / 1000:.3f},{vl['shot_rel_out_ms'] / 1000:.3f})"
         for vl in windows
     ]
     return "+".join(parts)
@@ -332,6 +396,7 @@ def _build_anim_filter(
 
 def render_shot(
     shot:               dict,
+    vo_lines:           list,
     asset_map:          dict[str, dict],
     shot_index:         int,
     shots_dir:          Path,
@@ -352,7 +417,6 @@ def render_shot(
     shot_id = shot["shot_id"]
     dur_ms  = shot["duration_ms"]   # authoritative: set by gen_render_plan (VO ceiling)
     dur_sec = dur_ms / 1000.0
-    vo_lines = shot.get("vo_lines", [])
 
     out_path = shots_dir / f"{shot_index:04d}_{shot_id}.mkv"
     if out_path.exists():
@@ -578,13 +642,11 @@ def render_shot(
 
     # ── 4. VO audio streams ────────────────────────────────────────────────
     for vo_i, vl in enumerate(vo_lines):
-        line_id  = vl.get("line_id", "")
-        delay_ms = vl["timeline_in_ms"]
+        line_id  = vl.get("item_id", vl.get("line_id", ""))
+        delay_ms = vl["shot_rel_in_ms"]
         lbl      = f"vo{vo_i}"
 
         # Phase 3, Step 10: chunk-WAV deferred slicing path
-        # When the RenderPlan vo_line carries audio_chunk_uri, seek into the
-        # full chunk WAV with -ss/-t instead of opening the per-sentence WAV.
         chunk_uri = vl.get("audio_chunk_uri", "")
         if chunk_uri:
             chunk_path = uri_to_path(chunk_uri)
@@ -887,11 +949,15 @@ def ms_to_srt_ts(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int) -> None:
+def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int,
+              vo_timing_by_shot: dict | None = None) -> None:
     """
     Write output.{locale}.srt with cumulative absolute timestamps and a parallel
     output.subs.json sidecar keyed by line_id for cross-language SRT generation.
     Accounts for 1-frame black frames inserted at scene boundaries.
+
+    vo_timing_by_shot: {shot_id: [{item_id, text, shot_rel_in_ms, shot_rel_out_ms}]}
+    as returned by load_vo_timing(). When None, SRT is written empty.
     """
     lines: list[str] = []
     subs:  list[dict] = []
@@ -900,16 +966,17 @@ def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int) -> N
     frame_ms   = round(1000 / fps)
 
     for i, shot in enumerate(shots):
-        for vl in shot.get("vo_lines", []):
+        shot_id = shot.get("shot_id", "")
+        for vl in (vo_timing_by_shot or {}).get(shot_id, []):
             text = vl.get("text", "").strip()
             if not text:
                 continue
-            abs_in  = offset_ms + vl["timeline_in_ms"]
-            abs_out = offset_ms + vl["timeline_out_ms"]
+            abs_in  = offset_ms + vl["shot_rel_in_ms"]
+            abs_out = offset_ms + vl["shot_rel_out_ms"]
             timecode = f"{ms_to_srt_ts(abs_in)} --> {ms_to_srt_ts(abs_out)}"
             lines += [str(seq), timecode, text, ""]
             subs.append({
-                "line_id":  vl.get("line_id", ""),
+                "line_id":  vl.get("item_id", vl.get("line_id", "")),
                 "timecode": timecode,
                 "text":     text,
             })
@@ -1055,6 +1122,11 @@ def main() -> None:
     # If SfxPlan.json is absent, _sfx_plan_by_shot stays {} and render falls
     # back to sfx_plan_entries already baked into RenderPlan.
 
+    # ── Load VO timing from AssetManifest + ShotList ─────────────────────────
+    _manifest_path = episode_dir / f"AssetManifest.{locale}.json"
+    _shotlist_path = episode_dir / "ShotList.json"
+    _vo_timing_by_shot = load_vo_timing(_manifest_path, _shotlist_path)
+
     # ── Load confirmed media selections (CHANGE 5) ───────────────────────────
     def _url_to_path(url: str) -> str:
         """Return a URI that uri_to_path() can resolve.
@@ -1172,6 +1244,7 @@ def main() -> None:
         m_start, m_fadeout = shot_music_params[i]
         mkv = render_shot(
             shot=shot,
+            vo_lines=_vo_timing_by_shot.get(shot.get("shot_id", ""), []),
             asset_map=asset_map,
             shot_index=i,
             shots_dir=shots_dir,
@@ -1227,7 +1300,7 @@ def main() -> None:
     # ── SRT + subtitle sidecar ───────────────────────────────────────────────
     srt_path  = output_dir / f"output.{locale}.srt"
     subs_path = output_dir / "output.subs.json"
-    write_srt(shots, srt_path, subs_path, fps)
+    write_srt(shots, srt_path, subs_path, fps, vo_timing_by_shot=_vo_timing_by_shot)
     print(f"  SRT:  {srt_path}")
     print(f"  Subs: {subs_path}")
 

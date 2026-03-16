@@ -170,16 +170,9 @@ def build_shot_envelope(n_samples, base_db, fade_sec, fade_in=True, fade_out=Tru
 
 # ── Timeline builders ────────────────────────────────────────────────────────
 
-def build_timeline(shots, manifest, vo_shot_map, music_index, loop_info,
-                   rp_vo_by_shot=None):
+def build_timeline(shots, manifest, vo_shot_map, music_index, loop_info):
     """
     Build the timeline data structure used for both text and JSON output.
-
-    rp_vo_by_shot: dict[shot_id → list of RenderPlan vo_line dicts], each with
-      timeline_in_ms / timeline_out_ms already shot-relative. When provided,
-      duck intervals are computed from these authoritative values instead of
-      the manifest start_sec/end_sec (which are VO-audio-track positions, not
-      video episode timeline positions).
 
     Returns a list of shot dicts with enriched timeline info, plus total_duration_sec.
     """
@@ -213,24 +206,11 @@ def build_timeline(shots, manifest, vo_shot_map, music_index, loop_info,
             start_sec = float(music_item.get("start_sec", 0.0))
 
         # Compute duck intervals from VO timing.
-        # Prefer RenderPlan vo_lines (timeline_in_ms/timeline_out_ms, already
-        # shot-relative and authoritative) over manifest start_sec/end_sec
-        # (which are VO-audio-track positions, not video timeline positions).
         vo_items_for_shot = vo_shot_map.get(shot_id, [])
-        if not duck_intervals:
-            rp_vos = (rp_vo_by_shot or {}).get(shot_id, [])
-            if rp_vos:
-                # Convert ms → sec; already shot-relative — offset = 0
-                rp_items = [{"start_sec": vl["timeline_in_ms"] / 1000.0,
-                              "end_sec":   vl["timeline_out_ms"] / 1000.0}
-                             for vl in rp_vos
-                             if "timeline_in_ms" in vl and "timeline_out_ms" in vl]
-                duck_intervals = compute_duck_intervals(rp_items, fade_sec,
-                                                        shot_start_offset_sec=0.0)
-            elif vo_items_for_shot:
-                # Fallback: manifest times (episode-relative) minus cumulative offset
-                duck_intervals = compute_duck_intervals(
-                    vo_items_for_shot, fade_sec, shot_start_offset_sec=cumulative_sec)
+        if not duck_intervals and vo_items_for_shot:
+            # Use manifest vo_items timing (episode-relative) minus cumulative offset
+            duck_intervals = compute_duck_intervals(
+                vo_items_for_shot, fade_sec, shot_start_offset_sec=cumulative_sec)
 
         # VO lines
         vo_lines = []
@@ -720,7 +700,6 @@ def main():
     # Duration override removed — ShotList.json already has correct values.
     _rp_path = episode_dir / f"RenderPlan.{locale}.json"
     _rp_shot_dur: dict[str, float] = {}
-    _rp_vo_by_shot: dict = {}   # shot_id → list of RenderPlan vo_line dicts
     if _rp_path.exists():
         try:
             import json as _json
@@ -731,12 +710,6 @@ def main():
                 if _sid and _dur_ms is not None:
                     _rp_shot_dur[_sid] = _dur_ms / 1000.0
             print(f"  [RenderPlan] Loaded {len(_rp_shot_dur)} shot durations from RenderPlan.{locale}.json (VO ceiling applied)")
-            # Also build VO-lines-by-shot from RenderPlan for accurate duck intervals
-            _rp_vo_by_shot: dict = {}
-            for _rs in _rp.get("shots", []):
-                _sid = _rs.get("shot_id") or _rs.get("id", "")
-                if _sid and _rs.get("vo_lines"):
-                    _rp_vo_by_shot[_sid] = _rs["vo_lines"]
         except Exception as _e:
             print(f"  [WARN] Could not load RenderPlan.{locale}.json: {_e} — using ShotList durations")
     else:
@@ -755,7 +728,6 @@ def main():
     # Build timeline
     timeline_shots, total_dur = build_timeline(
         shots, manifest, vo_shot_map, music_index, loop_info,
-        rp_vo_by_shot=_rp_vo_by_shot
     )
 
     # Apply user overrides on top of timeline (duck_db, fade_sec, music_asset_id, etc.)
@@ -785,25 +757,15 @@ def main():
                     # for UI (timeline.json). Renderer uses _override for audio.
                     entry["music_item_id_override"] = ovr["music_asset_id"]
                 # Recompute duck intervals only if fade_sec changed (which affects
-                # the margin around each VO line). Use RenderPlan VO lines (already
-                # shot-relative) when available — fall back to manifest VO items.
+                # the margin around each VO line). Use manifest vo_items timing.
                 if "fade_sec" in ovr:
                     _sid = entry["shot_id"]
-                    _rp_vos = _rp_vo_by_shot.get(_sid, [])
                     _new_fade = float(entry.get("fade_sec", DEFAULT_FADE_SEC))
-                    if _rp_vos:
-                        _rp_items = [{"start_sec": vl["timeline_in_ms"] / 1000.0,
-                                      "end_sec":   vl["timeline_out_ms"] / 1000.0}
-                                     for vl in _rp_vos
-                                     if "timeline_in_ms" in vl and "timeline_out_ms" in vl]
+                    _vo_items = vo_shot_map.get(_sid, [])
+                    if _vo_items:
                         entry["duck_intervals"] = compute_duck_intervals(
-                            _rp_items, _new_fade, shot_start_offset_sec=0.0)
-                    else:
-                        _vo_items = vo_shot_map.get(_sid, [])
-                        if _vo_items:
-                            entry["duck_intervals"] = compute_duck_intervals(
-                                _vo_items, _new_fade,
-                                shot_start_offset_sec=float(entry.get("offset_sec", 0.0)))
+                            _vo_items, _new_fade,
+                            shot_start_offset_sec=float(entry.get("offset_sec", 0.0)))
                 applied += 1
         if applied:
             print(f"  [INFO] Applied {applied} user override(s) from {source_name}")

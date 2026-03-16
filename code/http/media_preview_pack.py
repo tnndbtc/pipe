@@ -217,19 +217,36 @@ def main():
         ordered_shots = [s for s in ordered_shots if s in _filter_set]
         print(f"  [filter] Rendering {len(ordered_shots)} shot(s): {ordered_shots}")
 
-    # VO items by shot from RenderPlan vo_lines
+    # VO items by shot — derive from ShotList vo_item_ids and place lines
+    # sequentially using WAV durations. This matches the music_review_pack.py
+    # fallback so VO is always audible even before Stage 10 (RenderPlan) has run.
     vo_items_by_shot = {}  # { shot_id: [ {item_id, timeline_in_ms} ] }
-    for shot_id, shot in rp_shots.items():
-        for line in shot.get("vo_lines", []):
-            iid = line.get("line_id", "")
-            t_ms = line.get("timeline_in_ms", 0)
-            if iid:
-                vo_items_by_shot.setdefault(shot_id, []).append({
-                    "item_id": iid,
-                    "timeline_in_ms": t_ms,
-                })
 
     vo_dir = ep_dir / "assets" / locale / "audio" / "vo"
+
+    _DEFAULT_VO_PAUSE_MS = 300  # 0.3 s between lines when no timing
+    shot_path = ep_dir / "ShotList.json"
+    if shot_path.exists():
+        sl = load_json(shot_path)
+        for shot in sl.get("shots", []):
+            sid = shot.get("shot_id", "")
+            cursor_ms = 0
+            for iid in shot.get("audio_intent", {}).get("vo_item_ids", []):
+                wav = vo_dir / f"{iid}.wav"
+                dur_ms = 0
+                if wav.exists():
+                    try:
+                        import wave
+                        with wave.open(str(wav)) as wf:
+                            dur_ms = int(wf.getnframes() / wf.getframerate() * 1000)
+                    except Exception:
+                        dur_ms = 2000  # safe fallback if unreadable
+                vo_items_by_shot.setdefault(sid, []).append({
+                    "item_id": iid,
+                    "timeline_in_ms": cursor_ms,
+                })
+                cursor_ms += dur_ms + _DEFAULT_VO_PAUSE_MS
+        print(f"  [vo] Placed {sum(len(v) for v in vo_items_by_shot.values())} VO lines sequentially from ShotList")
 
     # Load MusicApprovalSnapshot or MusicPlan for music
     music_data = None

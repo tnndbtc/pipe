@@ -99,28 +99,23 @@ def compute_vo_intervals(
     scene_tails: dict | None = None,
 ) -> list[tuple[float, float]]:
     """
-    Compute shot-relative (t0, t1) second intervals where VO is active.
-
-    This is a pure reimplementation of gen_render_plan.compute_duck_intervals_from_vo()
-    combined with the vo_lines cursor logic in gen_render_plan.build_shot().
-    It must produce identical duck interval endpoints to the render pipeline.
+    Compute shot-relative duck interval endpoints from AssetManifest vo_items[].
 
     How it works
     ------------
-    1. Walk ``vo_items`` in order (same as build_shot does with vo_item_ids).
-    2. Assign each item a shot-relative start/end time using a cursor:
-           timeline_in_ms  = cursor_ms
-           timeline_out_ms = cursor_ms + wav_dur_ms
-           cursor_ms       += wav_dur_ms + item_pause_ms
-       where ``wav_dur_ms = (end_sec - start_sec) * 1000`` from the item and
-       ``item_pause_ms = item.get("pause_after_ms", pause_after_ms)``.
+    1. Walk ``vo_items`` in order (matching ShotList audio_intent.vo_item_ids order).
+    2. Use start_sec / end_sec from each item (episode-cumulative, written at VO
+       Approve) to derive shot-relative placement via a cursor:
+           wav_dur_ms = (end_sec - start_sec) * 1000
+           cursor_ms  += wav_dur_ms + item_pause_ms
+       where ``item_pause_ms = item.get("pause_after_ms", pause_after_ms)``.
     3. For each placed line, produce a duck interval:
-           t0 = max(0, timeline_in_ms  - fade_ms) / 1000
-           t1 =       (timeline_out_ms + fade_ms) / 1000
+           t0 = max(0, line_in_ms  - fade_ms) / 1000
+           t1 =       (line_out_ms + fade_ms) / 1000
        using ``fade_ms = round(fade_sec * 1000)`` extracted from the shot's
        music entry (caller should pass it via ``shot["music_fade_sec"]`` or
-       this function uses 150 ms as the same default as gen_render_plan).
-    4. Merge overlapping intervals (same algorithm as gen_render_plan).
+       this function uses 150 ms as the default).
+    4. Merge overlapping intervals.
 
     Parameters
     ----------
@@ -175,15 +170,15 @@ def compute_vo_intervals(
         if wav_dur_ms <= 0:
             continue
 
-        # Shot-relative placement using cursor (identical to build_shot)
-        timeline_in_ms  = cursor_ms
-        timeline_out_ms = cursor_ms + wav_dur_ms
-        item_pause_ms   = float(vo_item.get("pause_after_ms", pause_after_ms))
-        cursor_ms       = timeline_out_ms + item_pause_ms
+        # Shot-relative placement using cursor
+        line_in_ms    = cursor_ms
+        line_out_ms   = cursor_ms + wav_dur_ms
+        item_pause_ms = float(vo_item.get("pause_after_ms", pause_after_ms))
+        cursor_ms     = line_out_ms + item_pause_ms
 
-        # Duck interval for this line (same formula as compute_duck_intervals_from_vo)
-        t0 = max(0.0, (timeline_in_ms  - fade_ms) / 1000.0)
-        t1 =          (timeline_out_ms + fade_ms) / 1000.0
+        # Duck interval for this line
+        t0 = max(0.0, (line_in_ms  - fade_ms) / 1000.0)
+        t1 =          (line_out_ms + fade_ms) / 1000.0
         raw.append((t0, t1))
 
     if not raw:

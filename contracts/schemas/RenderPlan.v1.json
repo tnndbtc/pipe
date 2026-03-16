@@ -44,7 +44,7 @@
   "$defs": {
     "RenderedShot": {
       "type": "object",
-      "required": ["shot_id", "scene_id", "duration_ms", "background_asset_id", "character_asset_ids", "vo_lines"],
+      "required": ["shot_id", "scene_id", "duration_ms", "background_asset_id", "character_asset_ids"],
       "additionalProperties": true,
       "properties": {
         "shot_id": {
@@ -68,13 +68,6 @@
           "type": "array",
           "description": "Ordered list of resolved asset_ids for characters appearing in this shot. Each value must match an asset_id present in resolved_assets[].",
           "items": {"type": "string"}
-        },
-        "vo_lines": {
-          "type": "array",
-          "description": "Ordered VO lines assigned to this shot with timeline offsets relative to shot start. Empty array if the shot has no VO. Plan builders must ensure every timeline_out_ms ≤ duration_ms before emitting; the renderer clips at duration_ms at runtime as a safety net.",
-          "items": {
-            "$ref": "#/$defs/VOLine"
-          }
         },
         "sfx_asset_ids": {
           "type": "array",
@@ -135,33 +128,6 @@
           "type": ["number", "null"],
           "minimum": 0,
           "description": "Clip trim end point in seconds from beginning of source video. Null/absent means play to natural end. Must be > start_sec when set."
-        }
-      }
-    },
-    "VOLine": {
-      "type": "object",
-      "required": ["line_id", "speaker_id", "text", "timeline_in_ms", "timeline_out_ms"],
-      "additionalProperties": false,
-      "properties": {
-        "line_id": {
-          "type": "string",
-          "description": "Matches AssetManifest.{locale}.vo_items[].item_id (and AssetManifest.{locale}.json resolved_assets[].asset_id for resolved VO assets)"
-        },
-        "speaker_id": {
-          "type": "string"
-        },
-        "text": {
-          "type": "string"
-        },
-        "timeline_in_ms": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Start offset in ms relative to shot start (0 = shot begins). Phase 0: evenly distributed approximation across shot duration. Phase 1: derived from real TTS audio file duration."
-        },
-        "timeline_out_ms": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "End offset in ms relative to shot start. Plan builder validation rule: must be ≤ duration_ms. Renderer clips to duration_ms at runtime if violated."
         }
       }
     }

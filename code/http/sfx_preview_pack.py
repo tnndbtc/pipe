@@ -13,6 +13,7 @@ SFX_DB = -3.0
 BASE_MUSIC_DB = -6.0
 DEFAULT_DUCK_DB = -12.0   # matches render_video.py default
 DEFAULT_FADE_SEC = 0.8
+DEFAULT_VO_PAUSE_SEC = 0.3   # gap between sequential VO lines when no timing
 
 
 # ── I/O helpers ──────────────────────────────────────────────────────────────
@@ -261,27 +262,17 @@ def main():
         if sid:
             music_index[sid] = mi
 
-    # Feature C: auto-detect RenderPlan for VO timing parity
+    # Load RenderPlan for shot duration patching (VO ceiling)
     render_plan = None
     render_plan_path = ep_dir / f"RenderPlan.{locale}.json"
     if render_plan_path.exists():
         try:
             render_plan = json.loads(render_plan_path.read_text(encoding="utf-8"))
-            print(f"  [INFO] Using RenderPlan for VO timing: {render_plan_path.name}")
+            print(f"  [INFO] Loaded RenderPlan for shot durations: {render_plan_path.name}")
         except Exception as e:
             print(f"  [WARN] Failed to load RenderPlan: {e}")
     else:
-        print(f"  [INFO] No RenderPlan found, using manifest start_sec")
-
-    # Build render_plan vo timing lookup if available
-    rp_vo_timing = {}  # { item_id: timeline_in_sec }
-    if render_plan:
-        for rp_shot in render_plan.get("shots", []):
-            for vo_line in rp_shot.get("vo_lines", []):
-                iid = vo_line.get("item_id", "")
-                t_ms = vo_line.get("timeline_in_ms")
-                if iid and t_ms is not None:
-                    rp_vo_timing[iid] = t_ms / 1000.0
+        print(f"  [INFO] No RenderPlan found, using ShotList durations")
 
     # Patch ShotList durations with VO-ceiling values from RenderPlan.
     # gen_render_plan applies a VO ceiling (last_vo_out_ms + tail) that makes
@@ -401,30 +392,49 @@ def main():
         })
 
         # ── Place VO ──
+        # vo_cursor: shot-relative cursor used when no timing is available
+        vo_cursor = 0.0
+        has_timing = any(
+            v.get("start_sec") is not None for v in entry.get("vo_lines", [])
+        )
         for vo in entry.get("vo_lines", []):
             iid = vo.get("item_id", "")
             vo_shift = _vo_scene_shift.get(iid, scene_shift)
 
-            if render_plan and iid in rp_vo_timing:
-                # Feature C: use RenderPlan timing
-                vo_start = shot_offset + rp_vo_timing[iid]
-            else:
+            if has_timing:
                 raw_start = vo.get("start_sec")
                 if raw_start is None:
                     continue
                 vo_start = raw_start + vo_shift
-
-            raw_end = vo.get("end_sec")
-            vo_end = (raw_end + vo_shift) if raw_end is not None else vo_start
+            else:
+                # No timing in manifest or RenderPlan — place sequentially
+                # within the shot using WAV durations (same fallback as
+                # music_review_pack.py).
+                vo_start = shot_offset + vo_cursor
 
             vo_path = vo_dir / f"{iid}.wav"
             if not vo_path.exists():
+                if not has_timing:
+                    vo_cursor += DEFAULT_VO_PAUSE_SEC
                 continue
             try:
                 vo_data = read_wav_mono_or_stereo(str(vo_path), SAMPLE_RATE)
             except Exception as e:
                 print(f"  [WARN] VO read failed {vo_path}: {e}")
+                if not has_timing:
+                    vo_cursor += DEFAULT_VO_PAUSE_SEC
                 continue
+
+            vo_dur = len(vo_data) / SAMPLE_RATE
+            if not has_timing:
+                vo_cursor += vo_dur + DEFAULT_VO_PAUSE_SEC
+
+            raw_end = vo.get("end_sec")
+            if raw_end is not None and has_timing:
+                vo_end = raw_end + vo_shift
+            else:
+                vo_end = vo_start + vo_dur
+
             s = int(vo_start * SAMPLE_RATE)
             e2 = min(s + len(vo_data), n_samples)
             if s < n_samples and e2 > s:
@@ -433,7 +443,7 @@ def main():
             tl_vo_out.append({
                 "item_id": iid,
                 "start_sec": round(vo_start, 3),
-                "end_sec": round(vo_start + len(vo_data) / SAMPLE_RATE, 3),
+                "end_sec": round(vo_start + vo_dur, 3),
                 "speaker_id": vo.get("speaker_id", ""),
                 "shot_id": shot_id,
             })
@@ -583,7 +593,7 @@ def main():
     tl_path = output_dir / "timeline.json"
     tl_doc = {
         "total_dur_sec": round(total_dur + _shift_acc, 3),
-        "timing_source": "render_plan" if (render_plan and rp_vo_timing) else "manifest",
+        "timing_source": "manifest",
         "shots": tl_shots_out,
         "vo_items": tl_vo_out,
         "sfx_items": tl_sfx_out,
