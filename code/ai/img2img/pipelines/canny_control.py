@@ -1,10 +1,10 @@
 # code/ai/img2img/pipelines/canny_control.py
 """
-pipe  = SDXL + ControlNet-Canny pipeline
+pipe  = FLUX.1-dev + InstantX ControlNet-Canny pipeline (load_flux_controlnet)
 args  = Namespace: input, prompt, low_threshold, high_threshold, strength
 
 Canny edge extraction uses OpenCV (already in requirements.txt).
-No extra model needed for conditioning extraction.
+Image dimensions are snapped to multiples of 16 (FLUX requirement).
 """
 
 import cv2
@@ -26,24 +26,24 @@ def run(pipe, config, args) -> Image.Image:
     image = Image.open(args.input).convert("RGB")
     orig_size = image.size
 
-    from img2img.io_utils import resize_to_sdxl
-    image = resize_to_sdxl(image)
+    from img2img.io_utils import snap_to_flux
+    image = snap_to_flux(image)
 
-    low  = getattr(args, "low_threshold",  config.DEFAULTS["canny"]["low_threshold"])
-    high = getattr(args, "high_threshold", config.DEFAULTS["canny"]["high_threshold"])
+    d = config.DEFAULTS["canny"]
+    low  = getattr(args, "low_threshold",  None) or d["low_threshold"]
+    high = getattr(args, "high_threshold", None) or d["high_threshold"]
     canny_image = _extract_canny(image, low, high)
 
     result = pipe(
         prompt=args.prompt,
-        negative_prompt=config.NEGATIVE_PROMPT,
         image=image,
         control_image=canny_image,
-        controlnet_conditioning_scale=0.75,
-        strength=getattr(args, "strength", config.DEFAULTS["canny"]["strength"]),
-        num_inference_steps=getattr(args, "steps", config.DEFAULTS["canny"]["steps"]),
-        guidance_scale=getattr(args, "guidance", config.DEFAULTS["canny"]["guidance"]),
+        controlnet_conditioning_scale=0.7,
+        strength=getattr(args, "strength", None) or d["strength"],
+        num_inference_steps=getattr(args, "steps", None) or d["steps"],
+        guidance_scale=getattr(args, "guidance", None) or d["guidance"],
     ).images[0]
 
     result = result.resize(orig_size, Image.LANCZOS)
-    log.info("Canny ControlNet done.")
+    log.info("Canny ControlNet (FLUX) done.")
     return result

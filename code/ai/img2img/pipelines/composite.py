@@ -3,7 +3,7 @@
 Replace gen_composite_image.py.
 
 run(pipe, config, args) where:
-  pipe  = {"depth": depth_pipe | None, "sdxl": sdxl_img2img_pipe | None}
+  pipe  = {"depth": depth_pipe | None, "flux": flux_img2img_pipe | None}
   args  = Namespace with: bg, characters, char_x, char_y, blend_strength,
           depth_scale, fg_scale, bg_scale, output
 
@@ -14,7 +14,7 @@ Depth-aware scaling:
   correctly relative to each other.
 
 blend_strength=0.0 → pure Pillow composite (no GPU beyond depth model).
-blend_strength>0.0 → composite then SDXL img2img refinement at given strength.
+blend_strength>0.0 → composite then FLUX.1-schnell img2img refinement at given strength.
 
 Layer ordering:
   Characters are sorted back-to-front by char_y (smaller y = higher on screen
@@ -197,22 +197,21 @@ def run(pipe: dict, config, args) -> Image.Image:
 
     log.info(f"Pillow composite done ({n} character(s)).")
 
-    # Optional SDXL blend pass
+    # Optional FLUX schnell blend pass
     blend = getattr(args, "blend_strength", 0.0) or 0.0
-    if blend > 0.0 and pipe.get("sdxl"):
-        log.info(f"SDXL blend pass (strength={blend})...")
+    if blend > 0.0 and pipe.get("flux"):
+        log.info(f"FLUX blend pass (strength={blend})...")
         composite_rgb = canvas.convert("RGB")
-        result = pipe["sdxl"](
+        result = pipe["flux"](
             prompt=getattr(args, "prompt", "photorealistic historical scene"),
-            negative_prompt=config.NEGATIVE_PROMPT,
             image=composite_rgb,
             strength=blend,
-            num_inference_steps=20,
-            guidance_scale=5.0,
+            num_inference_steps=4,
+            guidance_scale=0.0,
         ).images[0]
         result_rgba = result.convert("RGBA")
         result_rgba.putalpha(canvas.split()[3])
         canvas = result_rgba
-        log.info("SDXL blend pass done.")
+        log.info("FLUX blend pass done.")
 
     return canvas

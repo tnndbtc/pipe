@@ -51,6 +51,14 @@ def resize_to_multiple_of_8(img: Image.Image) -> Image.Image:
     return img.resize((w, h), Image.LANCZOS) if (w, h) != img.size else img
 
 
+def snap_to_flux(img: Image.Image) -> Image.Image:
+    """Snap width and height to nearest multiple of 16 (FLUX VAE requirement)."""
+    w, h = img.size
+    nw = (w // 16) * 16
+    nh = (h // 16) * 16
+    return img.resize((nw, nh), Image.LANCZOS) if (nw, nh) != (w, h) else img
+
+
 def resize_to_sdxl(img: Image.Image, target: int = 1024) -> Image.Image:
     """Resize image so shortest side = target (default 1024), keep aspect, snap to 8."""
     w, h = img.size

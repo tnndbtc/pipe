@@ -1,12 +1,12 @@
 # code/ai/img2img/pipelines/bg_replace.py
 """
-pipe  = {"sdxl": sdxl_img2img_pipe | None}
+pipe  = {"flux": flux_img2img_pipe | None}
 args  = Namespace: input, bg, blend_strength
 
 Uses rembg (RMBG-1.4, already in requirements.txt).
 Step 1: Remove background → RGBA foreground.
 Step 2: Alpha-composite onto new background.
-Step 3 (optional): SDXL img2img blend pass if blend_strength > 0.
+Step 3 (optional): FLUX.1-schnell img2img blend pass if blend_strength > 0.
 """
 
 import logging
@@ -30,24 +30,21 @@ def run(pipe: dict, config, args) -> Image.Image:
     canvas = bg.copy()
     canvas.alpha_composite(fg_resized)
 
-    # Step 3: Optional SDXL blend
+    # Step 3: Optional FLUX schnell blend
     blend_strength = getattr(args, "blend_strength",
                               config.DEFAULTS["bg_replace"]["blend_strength"])
-    if blend_strength and blend_strength > 0.0 and pipe.get("sdxl"):
-        from img2img.io_utils import resize_to_sdxl
+    if blend_strength and blend_strength > 0.0 and pipe.get("flux"):
         canvas_rgb = canvas.convert("RGB")
-        canvas_resized = resize_to_sdxl(canvas_rgb)
-        result = pipe["sdxl"](
+        result = pipe["flux"](
             prompt=getattr(args, "prompt", "photorealistic composite, natural lighting"),
-            negative_prompt=config.NEGATIVE_PROMPT,
-            image=canvas_resized,
+            image=canvas_rgb,
             strength=blend_strength,
-            num_inference_steps=20,
-            guidance_scale=5.0,
+            num_inference_steps=4,
+            guidance_scale=0.0,
         ).images[0]
         result = result.resize(canvas.size, Image.LANCZOS)
         canvas = result.convert("RGBA")
-        log.info(f"SDXL blend pass done (strength={blend_strength}).")
+        log.info(f"FLUX blend pass done (strength={blend_strength}).")
 
     log.info(f"Background replace done → {canvas.size}")
     return canvas

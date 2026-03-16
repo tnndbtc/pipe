@@ -5,10 +5,7 @@ import logging
 import torch
 from diffusers import (
     StableDiffusionXLImg2ImgPipeline,
-    StableDiffusionXLInpaintPipeline,
     StableDiffusionUpscalePipeline,
-    ControlNetModel,
-    StableDiffusionXLControlNetImg2ImgPipeline,
 )
 from transformers import pipeline as hf_pipeline
 from img2img.config import MODEL_IDS, DEVICE
@@ -43,30 +40,6 @@ def load_sdxl_img2img(no_fp16: bool = False) -> StableDiffusionXLImg2ImgPipeline
     return pipe
 
 
-def load_sdxl_inpaint(no_fp16: bool = False) -> StableDiffusionXLInpaintPipeline:
-    log.info("Loading SDXL Inpaint...")
-    pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
-        MODEL_IDS["sdxl_inpaint"], **_fp16_kwargs(no_fp16)
-    )
-    pipe.enable_model_cpu_offload()
-    pipe.enable_vae_slicing()
-    log.info("SDXL Inpaint ready.")
-    return pipe
-
-
-def load_sdxl_controlnet(controlnet_id: str,
-                         no_fp16: bool = False) -> StableDiffusionXLControlNetImg2ImgPipeline:
-    log.info(f"Loading ControlNet: {controlnet_id}")
-    controlnet = ControlNetModel.from_pretrained(controlnet_id, **_fp16_kwargs(no_fp16))
-    pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
-        MODEL_IDS["sdxl_base"], controlnet=controlnet, **_fp16_kwargs(no_fp16)
-    )
-    pipe.enable_model_cpu_offload()
-    pipe.enable_vae_slicing()
-    log.info("SDXL + ControlNet ready.")
-    return pipe
-
-
 def load_sd_upscaler(no_fp16: bool = False) -> StableDiffusionUpscalePipeline:
     log.info("Loading SD x4 Upscaler...")
     pipe = StableDiffusionUpscalePipeline.from_pretrained(
@@ -91,12 +64,141 @@ def load_depth_model():
     return depth_pipe
 
 
-def load_ip_adapter(sdxl_pipe: StableDiffusionXLImg2ImgPipeline):
-    log.info("Loading IP-Adapter-Plus...")
-    sdxl_pipe.load_ip_adapter(
-        MODEL_IDS["ip_adapter_plus"],
-        subfolder="sdxl_models",
-        weight_name="ip-adapter-plus_sdxl_vit-h.bin",
+def load_flux_fill() -> "FluxFillPipeline":
+    """FLUX.1-Fill-dev with 4-bit BnB quantisation + VAE tiling.
+    Fits in ~6 GB VRAM on RTX 4060. Needs HF login (gated model).
+    """
+    from diffusers import FluxFillPipeline, FluxTransformer2DModel
+    from transformers import BitsAndBytesConfig
+
+    log.info("Loading FLUX.1-Fill-dev (4-bit quant + VAE tiling)...")
+    bnb_cfg = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
     )
-    log.info("IP-Adapter-Plus attached.")
-    return sdxl_pipe
+    transformer = FluxTransformer2DModel.from_pretrained(
+        MODEL_IDS["flux_fill"],
+        subfolder="transformer",
+        quantization_config=bnb_cfg,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe = FluxFillPipeline.from_pretrained(
+        MODEL_IDS["flux_fill"],
+        transformer=transformer,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe.enable_model_cpu_offload()
+    pipe.enable_vae_tiling()
+    log.info("FLUX.1-Fill ready.")
+    return pipe
+
+
+def load_flux_img2img():
+    """FLUX.1-schnell img2img with 4-bit BnB quant + VAE tiling.
+    guidance_scale=0.0 (CFG-free distilled model). No negative_prompt.
+    """
+    from diffusers import FluxImg2ImgPipeline, FluxTransformer2DModel
+    from transformers import BitsAndBytesConfig
+
+    log.info("Loading FLUX.1-schnell img2img (4-bit quant + VAE tiling)...")
+    bnb_cfg = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    transformer = FluxTransformer2DModel.from_pretrained(
+        MODEL_IDS["flux_schnell"],
+        subfolder="transformer",
+        quantization_config=bnb_cfg,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe = FluxImg2ImgPipeline.from_pretrained(
+        MODEL_IDS["flux_schnell"],
+        transformer=transformer,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe.enable_model_cpu_offload()
+    pipe.enable_vae_tiling()
+    log.info("FLUX.1-schnell img2img ready.")
+    return pipe
+
+
+def load_flux_controlnet(controlnet_id: str):
+    """FLUX.1-dev + InstantX ControlNet with 4-bit BnB quant + VAE tiling.
+    Uses FluxControlNetImg2ImgPipeline so the source image is preserved.
+    ~7 GB VRAM — tight on 8 GB; reduce controlnet_conditioning_scale if OOM.
+    """
+    from diffusers import FluxControlNetImg2ImgPipeline, FluxControlNetModel, FluxTransformer2DModel
+    from transformers import BitsAndBytesConfig
+
+    log.info(f"Loading FLUX ControlNet: {controlnet_id}")
+    bnb_cfg = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    controlnet = FluxControlNetModel.from_pretrained(
+        controlnet_id,
+        torch_dtype=torch.bfloat16,
+    )
+    transformer = FluxTransformer2DModel.from_pretrained(
+        MODEL_IDS["flux_dev"],
+        subfolder="transformer",
+        quantization_config=bnb_cfg,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe = FluxControlNetImg2ImgPipeline.from_pretrained(
+        MODEL_IDS["flux_dev"],
+        transformer=transformer,
+        controlnet=controlnet,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe.enable_model_cpu_offload()
+    pipe.enable_vae_tiling()
+    log.info("FLUX ControlNet ready.")
+    return pipe
+
+
+def load_flux_redux_prior():
+    """FLUX.1-Redux-dev prior — encodes a reference image to visual embeddings.
+    ~600 MB VRAM. Stays on GPU alongside the FLUX.1-dev img2img pipe.
+    Needs HF login (gated model).
+    """
+    from diffusers import FluxPriorReduxPipeline
+
+    log.info("Loading FLUX.1-Redux-dev prior...")
+    pipe = FluxPriorReduxPipeline.from_pretrained(
+        MODEL_IDS["flux_redux"],
+        torch_dtype=torch.bfloat16,
+    ).to(DEVICE)
+    log.info("FLUX Redux prior ready.")
+    return pipe
+
+
+def load_flux_dev_img2img():
+    """FLUX.1-dev img2img with 4-bit BnB quant + VAE tiling.
+    Paired with load_flux_redux_prior() for style-transfer-with-reference.
+    guidance_scale=3.5 typical (CFG enabled on dev, unlike schnell).
+    Needs HF login (gated model).
+    """
+    from diffusers import FluxImg2ImgPipeline, FluxTransformer2DModel
+    from transformers import BitsAndBytesConfig
+
+    log.info("Loading FLUX.1-dev img2img (4-bit quant + VAE tiling)...")
+    bnb_cfg = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    transformer = FluxTransformer2DModel.from_pretrained(
+        MODEL_IDS["flux_dev"],
+        subfolder="transformer",
+        quantization_config=bnb_cfg,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe = FluxImg2ImgPipeline.from_pretrained(
+        MODEL_IDS["flux_dev"],
+        transformer=transformer,
+        torch_dtype=torch.bfloat16,
+    )
+    pipe.enable_model_cpu_offload()
+    pipe.enable_vae_tiling()
+    log.info("FLUX.1-dev img2img ready.")
+    return pipe

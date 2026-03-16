@@ -1,7 +1,10 @@
 # code/ai/img2img/pipelines/depth_control.py
 """
-pipe  = {"sdxl_controlnet": pipe, "depth": depth_pipe}
+pipe  = {"flux_controlnet": FluxControlNetImg2ImgPipeline, "depth": depth_pipe}
 args  = Namespace: input, prompt, strength, steps, guidance
+
+Depth map is extracted with Depth-Anything-V2-Small, then used as the
+ControlNet conditioning image for FLUX.1-dev.
 """
 
 import logging
@@ -15,25 +18,25 @@ def run(pipe: dict, config, args) -> Image.Image:
     image = Image.open(args.input).convert("RGB")
     orig_size = image.size
 
-    from img2img.io_utils import resize_to_sdxl
-    image = resize_to_sdxl(image)
+    from img2img.io_utils import snap_to_flux
+    image = snap_to_flux(image)
 
     # Extract depth map
     depth_result = pipe["depth"](image)
     depth_image = depth_result["depth"]  # PIL grayscale
     depth_image = depth_image.convert("RGB").resize(image.size)
 
-    result = pipe["sdxl_controlnet"](
+    d = config.DEFAULTS["depth"]
+    result = pipe["flux_controlnet"](
         prompt=args.prompt,
-        negative_prompt=config.NEGATIVE_PROMPT,
         image=image,
         control_image=depth_image,
-        controlnet_conditioning_scale=0.75,
-        strength=getattr(args, "strength", config.DEFAULTS["depth"]["strength"]),
-        num_inference_steps=getattr(args, "steps", config.DEFAULTS["depth"]["steps"]),
-        guidance_scale=getattr(args, "guidance", config.DEFAULTS["depth"]["guidance"]),
+        controlnet_conditioning_scale=0.7,
+        strength=getattr(args, "strength", None) or d["strength"],
+        num_inference_steps=getattr(args, "steps", None) or d["steps"],
+        guidance_scale=getattr(args, "guidance", None) or d["guidance"],
     ).images[0]
 
     result = result.resize(orig_size, Image.LANCZOS)
-    log.info("Depth ControlNet done.")
+    log.info("Depth ControlNet (FLUX) done.")
     return result

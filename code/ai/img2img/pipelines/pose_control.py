@@ -1,12 +1,15 @@
 # code/ai/img2img/pipelines/pose_control.py
 """
-pipe  = SDXL + ControlNet-OpenPose pipeline
-args  = Namespace: input, pose_image (optional), prompt, strength
+pipe  = FLUX.1-dev + InstantX ControlNet-Pose pipeline (load_flux_controlnet)
+args  = Namespace: input, pose_image (optional), prompt, strength, steps, guidance
+
+Uses FluxControlNetImg2ImgPipeline: the source image is preserved (img2img)
+while the pose skeleton conditions the generated content.
 
 If args.pose_image is set: use it directly as conditioning image.
 Else: extract pose from args.input using controlnet_aux DwposeDetector.
 
-controlnet_aux is a new dependency: add controlnet_aux>=0.0.7 to requirements.txt
+controlnet_aux dependency: controlnet_aux>=0.0.7
 """
 
 import logging
@@ -27,25 +30,26 @@ def run(pipe, config, args) -> Image.Image:
     image = Image.open(args.input).convert("RGB")
     orig_size = image.size
 
-    from img2img.io_utils import resize_to_sdxl
-    image = resize_to_sdxl(image)
+    from img2img.io_utils import snap_to_flux
+    image = snap_to_flux(image)
 
     if getattr(args, "pose_image", None):
         control_image = Image.open(args.pose_image).convert("RGB").resize(image.size)
     else:
         control_image = _extract_pose(image)
+        control_image = control_image.resize(image.size)
 
+    d = config.DEFAULTS["pose"]
     result = pipe(
         prompt=args.prompt,
-        negative_prompt=config.NEGATIVE_PROMPT,
         image=image,
         control_image=control_image,
-        controlnet_conditioning_scale=0.8,
-        strength=getattr(args, "strength", config.DEFAULTS["pose"]["strength"]),
-        num_inference_steps=getattr(args, "steps", config.DEFAULTS["pose"]["steps"]),
-        guidance_scale=getattr(args, "guidance", config.DEFAULTS["pose"]["guidance"]),
+        controlnet_conditioning_scale=0.7,
+        strength=getattr(args, "strength", None) or d["strength"],
+        num_inference_steps=getattr(args, "steps", None) or d["steps"],
+        guidance_scale=getattr(args, "guidance", None) or d["guidance"],
     ).images[0]
 
     result = result.resize(orig_size, Image.LANCZOS)
-    log.info("Pose ControlNet done.")
+    log.info("Pose ControlNet (FLUX) done.")
     return result
