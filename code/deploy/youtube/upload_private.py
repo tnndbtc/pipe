@@ -335,17 +335,25 @@ def upload_thumbnail(youtube, video_id: str, thumb_path: Path,
             label="thumbnails.set"
         )
     except HttpError as e:
+        # Always print the raw error detail so we can diagnose silently-swallowed failures.
+        try:
+            err_body   = json.loads(e.content)
+            err_msg    = err_body.get("error", {}).get("message", "")
+            err_errors = err_body.get("error", {}).get("errors", [{}])
+            reason     = err_errors[0].get("reason", "")
+            domain     = err_errors[0].get("domain", "")
+        except Exception:
+            err_msg = reason = domain = ""
+
+        print(f"  ✗ thumbnails.set HTTP {e.resp.status}  reason={reason!r}  domain={domain!r}  message={err_msg!r}")
+        print(f"      Raw response: {e.content[:400]}")
+
         # 403 "forbidden" means the channel isn't verified for custom thumbnails.
         # Treat as a warning — don't block playlist or future steps.
-        if e.resp.status == 403:
-            try:
-                reason = json.loads(e.content)["error"]["errors"][0].get("reason", "")
-            except Exception:
-                reason = ""
-            if reason == "forbidden":
-                print(f"  ⚠  Thumbnail upload skipped: channel not verified for custom thumbnails.")
-                print(f"      Verify your channel at https://www.youtube.com/verify then re-run upload.")
-                return
+        if e.resp.status == 403 and reason == "forbidden":
+            print(f"  ⚠  Thumbnail upload skipped: channel not verified for custom thumbnails.")
+            print(f"      Verify your channel at https://www.youtube.com/verify then re-run upload.")
+            return
         raise
 
     print(f"  ✓ Thumbnail uploaded")
@@ -505,6 +513,27 @@ def main() -> None:
     mp4_path   = render_dir / "output.mp4"
     thumb_rel  = meta.get("thumbnail", f"renders/{locale}/thumbnail.jpg")
     thumb_path = pipe_dir / thumb_rel if not os.path.isabs(thumb_rel) else Path(thumb_rel)
+
+    # ── Verify saved video_id still exists on YouTube ─────────────────────────
+    # If the user deleted the video from YouTube Studio, reset state so it
+    # re-uploads from scratch rather than crashing on caption/thumbnail steps.
+    if state.get("video_id") and state.get("video_uploaded"):
+        _check = _api_with_retry(
+            youtube.videos().list(part="id", id=state["video_id"]),
+            label="verify video exists"
+        )
+        if not _check.get("items"):
+            print(f"  ⚠  Video {state['video_id']} no longer exists on YouTube — resetting upload state.")
+            state.update({
+                "video_id":             None,
+                "resumable_upload_uri": None,
+                "video_uploaded":       False,
+                "processing_confirmed": False,
+                "captions_uploaded":    {},
+                "thumbnail_uploaded":   False,
+                "playlist_added":       False,
+            })
+            _save_state(state_path, state)
 
     # ── Step 1: Upload video ──────────────────────────────────────────────────
     video_id = upload_video(youtube, meta, mp4_path, state, state_path)

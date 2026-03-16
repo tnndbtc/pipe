@@ -3147,7 +3147,7 @@ placeholder="Enter your story here"></textarea>
   </div>
 
   <!-- Upload status / log -->
-  <div id="yt-log-wrap" style="display:none;background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:0.82em;min-height:120px;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">
+  <div id="yt-log-wrap" style="display:none;background:#fff;color:#111;border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:0.82em;min-height:120px;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-word">
     <div id="yt-log"></div>
   </div>
 
