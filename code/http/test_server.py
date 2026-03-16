@@ -4170,7 +4170,7 @@ placeholder="Enter your story here"></textarea>
 
   // Play an ordered array of {epDir, locale, item_id} sequentially.
   // pauseMs is the gap between clips (from pause_after_ms, default 300ms).
-  async function _voPlaySequence(clips, ctxBtn) {
+  async function _voPlaySequence(clips, ctxBtn, exitTailMs = 0) {
     window._voSeqAbort = false;
     const stopBtn = document.getElementById('vo-stop-preview-btn');
     const allBtn  = document.getElementById('vo-preview-all-btn');
@@ -4205,6 +4205,10 @@ placeholder="Enter your story here"></textarea>
         await new Promise(r => setTimeout(r, clip.pauseMs));
       }
     }
+    // Scene exit tail — wait for inter-scene silence so user hears the break
+    if (!window._voSeqAbort && exitTailMs > 0) {
+      await new Promise(r => setTimeout(r, exitTailMs));
+    }
     _voStopPreview();
   }
 
@@ -4226,7 +4230,15 @@ placeholder="Enter your story here"></textarea>
         const pauseMs = parseInt(pauseEl?.value || '300', 10);
         clips.push({ epDir, locale, item_id: iid, pauseMs });
       });
-      if (clips.length) _voPlaySequence(clips, btn);
+      // Find the exit tail: the tail input for the NEXT scene after this one.
+      // scene_tails are keyed by the next scene (sc07 tail = break after sc06→before sc07).
+      const sceneOrder = window._voSceneOrder || [];
+      const sceneIdx   = sceneOrder.indexOf(scene);
+      const nextScene  = sceneIdx >= 0 ? sceneOrder[sceneIdx + 1] : null;
+      const nextScIdE  = nextScene ? nextScene.replace(/[^a-zA-Z0-9_-]/g, '_') : null;
+      const tailEl     = nextScIdE ? document.getElementById('vo-tail-' + nextScIdE) : null;
+      const exitTailMs = tailEl ? (parseInt(tailEl.value, 10) || 0) : 0;
+      if (clips.length) _voPlaySequence(clips, btn, exitTailMs);
     }, 50);
   }
 
@@ -4377,16 +4389,11 @@ placeholder="Enter your story here"></textarea>
       window._voTlRaf = null;
     };
 
-    // Show bar and auto-play
+    // Show bar — ready to play, but do NOT auto-play
     document.getElementById('vo-timeline-bar').classList.add('active');
     document.getElementById('vo-tl-scrubber').value = 0;
     document.getElementById('vo-tl-progress').style.width = '0';
-    document.getElementById('vo-tl-playbtn').textContent = '⏸';
-    audio.play().then(() => {
-      window._voTlRaf = requestAnimationFrame(_voTlTick);
-    }).catch(() => {
-      document.getElementById('vo-tl-playbtn').textContent = '▶';
-    });
+    document.getElementById('vo-tl-playbtn').textContent = '▶';
   }
 
   // Preview all VO items — concat on server, show timeline.
@@ -14266,6 +14273,7 @@ class Handler(BaseHTTPRequestHandler):
             ep_dir  = unquote_plus(params.get("ep_dir",  [""])[0]).strip()
             locale  = unquote_plus(params.get("locale",  [""])[0]).strip()
             item_id = unquote_plus(params.get("item_id", [""])[0]).strip()
+            _log.info("[vo_preview_item] item=%s  locale=%s  ep=%s", item_id, locale, ep_dir)
             if not ep_dir or not locale or not item_id or ".." in item_id:
                 self.send_response(400); self.end_headers(); return
             full_ep = os.path.join(PIPE_DIR, ep_dir) \
@@ -14296,6 +14304,7 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             ep_dir  = unquote_plus(params.get("ep_dir",  [""])[0]).strip()
             locale  = unquote_plus(params.get("locale",  [""])[0]).strip()
+            _log.info("[vo_generate_preview] locale=%s  ep=%s", locale, ep_dir)
             if not ep_dir or not locale or ".." in ep_dir:
                 self.send_response(400); self.end_headers(); return
             try:
@@ -16639,6 +16648,7 @@ class Handler(BaseHTTPRequestHandler):
                 ep_dir  = req.get("ep_dir",  "").strip()
                 locale  = req.get("locale",  "").strip()
                 item_id = req.get("item_id", "").strip()
+                _log.info("[vo_recreate] item=%s  locale=%s  ep=%s", item_id, locale, ep_dir)
                 _vo_validate_inputs(ep_dir, locale, item_id)
                 full_ep = _vo_resolve_ep_dir(ep_dir)
 
@@ -16684,6 +16694,8 @@ class Handler(BaseHTTPRequestHandler):
                 ep_dir  = req.get("ep_dir",  "").strip()
                 locale  = req.get("locale",  "").strip()
                 item_id = req.get("item_id", "").strip()
+                _log.info("[vo_save] item=%s  locale=%s  keep_audio=%s  ep=%s",
+                          item_id, locale, req.get("keep_audio", False), ep_dir)
                 _vo_validate_inputs(ep_dir, locale, item_id)
                 full_ep = _vo_resolve_ep_dir(ep_dir)
 
@@ -16730,13 +16742,16 @@ class Handler(BaseHTTPRequestHandler):
                             write_cache=True,   # INVARIANT F: vo_save writes cache
                         )
 
-                    # Update manifest with voice/style/rate/text (always)
+                    # Update manifest with voice/style/rate/text/duration (always)
                     mpath = os.path.join(full_ep, f"AssetManifest_merged.{locale}.json")
                     with open(mpath, encoding="utf-8") as _mf:
                         _mani = json.load(_mf)
                     for _it in _mani.get("vo_items", []):
                         if _it["item_id"] == item_id:
                             _it["text"] = new_text
+                            # Write the actual trimmed duration back so the manifest
+                            # stays in sync after re-creation or save.
+                            _it["duration_sec"] = round(result["trimmed_duration_sec"], 3)
                             tp = _it.setdefault("tts_prompt", {})
                             tp["azure_voice"]        = new_voice
                             tp["azure_style"]        = new_style
@@ -16868,6 +16883,8 @@ class Handler(BaseHTTPRequestHandler):
                 locale   = req.get("locale",   "").strip()
                 item_id  = req.get("item_id",  "").strip()
                 pause_ms = int(req.get("pause_ms", 300))
+                _log.info("[vo_save_pause] item=%s  pause_ms=%s  locale=%s  ep=%s",
+                          item_id, pause_ms, locale, ep_dir)
                 _vo_validate_inputs(ep_dir, locale, item_id)
                 full_ep = _vo_resolve_ep_dir(ep_dir)
                 from pathlib import Path as _P
@@ -16908,6 +16925,8 @@ class Handler(BaseHTTPRequestHandler):
                 locale  = req.get("locale",   "").strip()
                 scene   = req.get("scene",    "").strip()
                 tail_ms = int(req.get("tail_ms", 2000))
+                _log.info("[vo_save_break] scene=%s  tail_ms=%s  locale=%s  ep=%s",
+                          scene, tail_ms, locale, ep_dir)
                 if not ep_dir or not locale or not scene:
                     raise ValueError("ep_dir, locale, scene required")
                 if tail_ms < 0 or tail_ms > 30000:
@@ -17094,6 +17113,8 @@ class Handler(BaseHTTPRequestHandler):
                 ep_dir = req.get("ep_dir", "").strip()
                 locale = req.get("locale", "").strip()
                 stage  = req.get("stage",  "").strip()   # "3.5", "8.5", or "" (legacy)
+                _log.info("[vo_approve] locale=%s  stage=%r  items=%s  ep=%s",
+                          locale, stage, len(req.get("items") or []), ep_dir)
                 _vo_validate_inputs(ep_dir, locale)
                 full_ep = _vo_resolve_ep_dir(ep_dir)
                 from pathlib import Path as _P
@@ -17258,14 +17279,17 @@ class Handler(BaseHTTPRequestHandler):
                         _hashes,
                     )
 
-                    # ── Write pause_after_ms / start_sec / end_sec back to manifest ──
-                    # The frontend sends the full approved timeline including
-                    # pause_after_ms for every item.  Write these back so that
-                    # vo_preview_concat (and any other manifest reader) uses the
-                    # values the user actually approved, not stale or missing defaults.
+                    # ── Write duration_sec / pause_after_ms back to manifest ─────────
+                    # vo_approve receives the full approved timeline from the frontend
+                    # (duration from live data-dur, pause_after_ms from the pause input).
+                    # Write both back so the manifest stays in sync after any re-creation
+                    # or pause change — vo_preview_concat and downstream readers use these.
                     if _req_items:
-                        _pause_lookup = {
-                            a["item_id"]: a["pause_after_ms"]
+                        _approved_lookup = {
+                            a["item_id"]: {
+                                "duration_sec":   a["duration_sec"],
+                                "pause_after_ms": a["pause_after_ms"],
+                            }
                             for a in _approval_items
                         }
                         _mani_path = os.path.join(full_ep,
@@ -17274,14 +17298,15 @@ class Handler(BaseHTTPRequestHandler):
                             _mani2 = json.load(_mf2)
                         for _mitem in _mani2.get("vo_items", []):
                             _miid = _mitem["item_id"]
-                            if _miid in _pause_lookup:
-                                _mitem["pause_after_ms"] = _pause_lookup[_miid]
+                            if _miid in _approved_lookup:
+                                _mitem["duration_sec"]   = _approved_lookup[_miid]["duration_sec"]
+                                _mitem["pause_after_ms"] = _approved_lookup[_miid]["pause_after_ms"]
                         _mani_tmp = _mani_path + ".tmp"
                         with open(_mani_tmp, "w", encoding="utf-8") as _mf2:
                             json.dump(_mani2, _mf2, indent=2, ensure_ascii=False)
                         os.replace(_mani_tmp, _mani_path)
-                        _log.debug("[vo_approve] wrote pause_after_ms for %d items → manifest",
-                                   len(_pause_lookup))
+                        _log.debug("[vo_approve] wrote duration_sec + pause_after_ms "
+                                   "for %d items → manifest", len(_approved_lookup))
                     # ─────────────────────────────────────────────────────────────────
 
                     # Export {locale}_vo_durations.json (used by Stage 8 p_8.txt)
