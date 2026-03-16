@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Runs AFTER post_tts_analysis.py (vo_items have start_sec/end_sec).
-# Produces AssetManifest_merged.{locale}.json consumed by the renderer.
+# Produces AssetManifest.{locale}.json consumed by the renderer.
 #
 # What it does:
 #   1. Loads the shared manifest  (character_packs, backgrounds, sfx, music)
@@ -12,12 +12,12 @@
 #   3. Merges them into a single resolved view
 #   4. Computes duck_intervals per shot from VO positions + music fade_sec
 #   5. Computes a per-locale timing_lock_hash
-#   6. Writes AssetManifest_merged.{locale}.json (locale_scope: "merged")
+#   6. Writes AssetManifest.{locale}.json (locale_scope: "merged")
 #
 # Usage:
 #   python manifest_merge.py \
-#       --shared  projects/slug/ep/AssetManifest_draft.shared.json \
-#       --locale  projects/slug/ep/AssetManifest_draft.zh-Hans.json
+#       --shared  projects/slug/ep/AssetManifest.shared.json \
+#       --locale  projects/slug/ep/AssetManifest.zh-Hans.json
 #
 #   python manifest_merge.py --shared ... --locale ... --out /custom/out.json
 #
@@ -185,7 +185,7 @@ def merge_manifests(
                  vo_items so that duck_intervals are computed per shot correctly.
     """
     merged = {
-        "schema_id":      "AssetManifest_merged",
+        "schema_id":      "AssetManifest",
         "schema_version": "1.0.0",
         "manifest_id":    locale.get("manifest_id", shared.get("manifest_id", "")),
         "project_id":     shared.get("project_id", ""),
@@ -201,6 +201,11 @@ def merge_manifests(
         "vo_items":            locale.get("vo_items", []),
         # Background overrides from locale (post_tts_analysis.py populated these)
         "background_overrides": locale.get("background_overrides", []),
+        # ── Sections owned by downstream scripts ──────────────────────────
+        # Populated by resolve_assets.py. Empty [] until that script runs.
+        "resolved_assets": [],
+        # Populated by gen_render_plan.py. None until that script runs.
+        "render_plan":     None,
     }
 
     # Deep-copy music_items from shared so we can add duck_intervals
@@ -272,9 +277,9 @@ def merge_manifests(
 def derive_output_path(locale_manifest_path: Path, locale: str) -> Path:
     """
     Default output: same directory as the locale manifest,
-    named AssetManifest_merged.{locale}.json.
+    named AssetManifest.{locale}.json.
     """
-    return locale_manifest_path.parent / f"AssetManifest_merged.{locale}.json"
+    return locale_manifest_path.parent / f"AssetManifest.{locale}.json"
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -294,7 +299,7 @@ def parse_args():
                         "start_sec/end_sec populated by post_tts_analysis.py.")
     p.add_argument("--out", default=None, metavar="PATH",
                    help="Output path for merged manifest. "
-                        "Default: AssetManifest_merged.{locale}.json "
+                        "Default: AssetManifest.{locale}.json "
                         "in the same directory as the locale manifest.")
     return p.parse_args()
 
@@ -307,13 +312,6 @@ def main():
     shared_path = Path(args.shared).resolve()
     locale_path = Path(args.locale).resolve()
 
-    # NOTE: The old Stage 9 sentinel (sys.exit(0) when vo_preview_approved
-    # exists) has been removed.  manifest_merge must always run so that
-    # re-running Stages 5–8 regenerates AssetManifest_merged with the latest
-    # shared assets, ShotList, and duck_intervals.  Approved VO timing is
-    # applied below (see "Apply vo_preview_approved" block) so the merged
-    # manifest always carries the exact start_sec/end_sec the user approved.
-
     for label, path in [("shared", shared_path), ("locale", locale_path)]:
         if not path.exists():
             print(f"[ERROR] {label} manifest not found: {path}", file=sys.stderr)
@@ -321,40 +319,6 @@ def main():
 
     shared = load_manifest(shared_path)
     locale = load_manifest(locale_path)
-
-    # ── Apply vo_preview_approved timing as authoritative source ──────────────
-    # Override vo_items start_sec/end_sec/duration_sec with the approved values
-    # so duck_intervals and downstream tools always use the exact timing the user
-    # heard and approved (not the post_tts_analysis estimates or LLM guesses).
-    _ep_dir_for_approval = locale_path.parent
-    _locale_tag_for_approval = locale.get("locale", "")
-    if _locale_tag_for_approval:
-        _approved_path = _ep_dir_for_approval / f"vo_preview_approved.{_locale_tag_for_approval}.json"
-        if _approved_path.exists():
-            try:
-                with open(_approved_path, encoding="utf-8") as _af:
-                    _approved_data = json.load(_af)
-                _approved_map = {
-                    item["item_id"]: item
-                    for item in _approved_data.get("items", [])
-                }
-                _patched = 0
-                for _vo_item in locale.get("vo_items", []):
-                    _vid = _vo_item.get("item_id", "")
-                    if _vid in _approved_map:
-                        _ap = _approved_map[_vid]
-                        _vo_item["start_sec"]    = float(_ap["start_sec"])
-                        _vo_item["end_sec"]      = float(_ap["end_sec"])
-                        _vo_item["duration_sec"] = float(_ap["duration_sec"])
-                        _patched += 1
-                if _patched:
-                    print(f"  [VO-APPROVAL] Applied approved timing to {_patched} vo_items "
-                          f"from {_approved_path.name}")
-            except Exception as _exc:
-                print(f"  [WARN] Could not apply approved timing from "
-                      f"vo_preview_approved.{_locale_tag_for_approval}.json: {_exc}",
-                      file=sys.stderr)
-    # ── end vo_preview_approved override ─────────────────────────────────────
 
     # Guards
     shared_scope = shared.get("locale_scope")
@@ -365,10 +329,10 @@ def main():
         )
 
     locale_scope = locale.get("locale_scope")
-    if locale_scope not in ("locale", "monolithic", None):
+    if locale_scope not in ("locale", "monolithic", "merged", None):
         raise SystemExit(
             f"[ERROR] --locale manifest has locale_scope='{locale_scope}'. "
-            "Expected 'locale' or 'monolithic'."
+            "Expected 'locale', 'monolithic', or 'merged'."
         )
 
     locale_tag = locale.get("locale", "")

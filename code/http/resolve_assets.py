@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # =============================================================================
-# resolve_assets.py — Generate AssetManifest.media.{locale}.json
+# resolve_assets.py — Resolve assets into AssetManifest.{locale}.json (in-place)
 # =============================================================================
 #
-# Reads AssetManifest_merged.{locale}.json and probes the local filesystem
+# Reads AssetManifest.{locale}.json and probes the local filesystem
 # for each asset. Emits file:// URIs for found files, placeholder:// for
 # missing ones. No external calls — single-pass, known-path resolver.
 #
@@ -11,12 +11,11 @@
 #
 # Usage:
 #   python resolve_assets.py \
-#       --manifest projects/slug/ep/AssetManifest_merged.zh-Hans.json
+#       --manifest projects/slug/ep/AssetManifest.zh-Hans.json
 #
 #   python resolve_assets.py \
-#       --manifest projects/slug/ep/AssetManifest_merged.zh-Hans.json \
+#       --manifest projects/slug/ep/AssetManifest.zh-Hans.json \
 #       --assets-root /custom/assets \
-#       --out /custom/AssetManifest.media.zh-Hans.json \
 #       --strict
 #
 # File path conventions (relative to assets-root):
@@ -30,7 +29,7 @@
 #               Also tries short form: strip "char-" prefix + "-vN" suffix
 #               so amunhotep.png matches char-amunhotep-v1
 #
-# Output: AssetManifest.media.{locale}.json in episode directory (or --out)
+# Output: resolved_assets written in-place into the input manifest
 #
 # Requirements: stdlib only
 # =============================================================================
@@ -648,19 +647,11 @@ def resolve_all(
     return items
 
 
-# ── Output path ───────────────────────────────────────────────────────────────
-
-def derive_output_path(manifest_path: Path, locale: str) -> Path:
-    """Default: AssetManifest.media.{locale}.json next to the merged manifest."""
-    return manifest_path.parent / f"AssetManifest.media.{locale}.json"
-
-
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Resolve AssetManifest_merged.{locale}.json into "
-                    "AssetManifest.media.{locale}.json using local file paths only.",
+        description="Resolve AssetManifest.{locale}.json assets using local file paths only.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 File path conventions (relative to --assets-root):
@@ -675,17 +666,12 @@ File path conventions (relative to --assets-root):
     )
     p.add_argument(
         "--manifest", required=True, metavar="PATH",
-        help="Path to AssetManifest_merged.{locale}.json (locale_scope='merged').",
+        help="Path to AssetManifest.{locale}.json (locale_scope='merged').",
     )
     p.add_argument(
         "--assets-root", default=None, metavar="PATH",
         help="Root directory containing resolved asset files. "
              "Default: {episode_dir}/assets/",
-    )
-    p.add_argument(
-        "--out", default=None, metavar="PATH",
-        help="Output path. Default: AssetManifest.media.{locale}.json "
-             "next to the input manifest.",
     )
     p.add_argument(
         "--selections", default=None, metavar="PATH",
@@ -724,7 +710,7 @@ def main() -> None:
     if locale_scope != "merged":
         raise SystemExit(
             f"[ERROR] --manifest has locale_scope='{locale_scope}'. "
-            "Expected 'merged'. Pass AssetManifest_merged.{{locale}}.json."
+            "Expected 'merged'. Pass AssetManifest.{{locale}}.json."
         )
 
     locale = merged.get("locale", "")
@@ -738,8 +724,6 @@ def main() -> None:
     episode_dir = manifest_path.parent
     assets_root = Path(args.assets_root).resolve() if args.assets_root \
                   else (episode_dir / "assets")
-    out_path    = Path(args.out).resolve() if args.out \
-                  else derive_output_path(manifest_path, locale)
 
     if not assets_root.is_dir():
         print(f"[WARN] assets-root does not exist: {assets_root} — all assets will be placeholders")
@@ -764,30 +748,19 @@ def main() -> None:
     print(f"  Assets root : {assets_root}")
     print(f"  Selections  : {n_selections} item(s) from VC editor"
           if n_selections else "  Selections  : none")
-    print(f"  Output      : {out_path}")
     print("=" * 60)
 
     # Resolve
     items = resolve_all(merged, assets_root, selections, no_hires=args.no_hires_download)
 
-    # Build output document
-    output = {
-        "schema_id":      "AssetManifest.media",
-        "schema_version": "1.0.0",
-        "manifest_id":    merged.get("manifest_id", ""),
-        "project_id":     merged.get("project_id", ""),
-        "producer":       PRODUCER,
-        "generated_at":   DETERMINISTIC_TS,
-        "items":          items,
-    }
-
-    # Write
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
+    # Write resolved_assets back into the unified manifest (in-place)
+    merged["resolved_assets"] = items
+    _tmp = str(manifest_path) + ".tmp"
+    with open(_tmp, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2, ensure_ascii=False)
         f.write("\n")
-
-    print(f"\n  [OK] Written: {out_path}")
+    os.replace(_tmp, str(manifest_path))
+    print(f"\n  [OK] resolved_assets written to: {manifest_path.name}")
 
     # Strict mode: fail on any placeholder
     if args.strict:

@@ -1,7 +1,7 @@
 # =============================================================================
 # plan_assets.py  --  AI Asset Pipeline Orchestrator
 #
-# Reads AssetManifest_draft.json and prints:
+# Reads AssetManifest.json and prints:
 #   - Which scripts are RUNNABLE on this machine (with exact commands)
 #   - Which scripts are BLOCKED (need a larger GPU)
 #   - For each script: models used, VRAM estimate, recommended GPU
@@ -25,7 +25,7 @@ from pathlib import Path
 # Paths
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR        = Path(__file__).parent           # code/ai/
-DEFAULT_MANIFEST   = _SCRIPT_DIR / "AssetManifest_draft.json"
+DEFAULT_MANIFEST   = _SCRIPT_DIR / "AssetManifest.json"
 DEFAULT_OUTPUT_DIR = Path("projects/the-pharaoh-who-defied-death/episodes/s01e01/assets")
 
 W = 76   # report line width

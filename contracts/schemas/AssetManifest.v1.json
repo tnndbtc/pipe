@@ -15,6 +15,11 @@
   ],
   "additionalProperties": true,
   "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "AssetManifest",
+      "description": "Always 'AssetManifest' for the unified per-locale manifest produced by manifest_merge.py and extended in-place by resolve_assets.py and gen_render_plan.py."
+    },
     "schema_version": {
       "type": "string",
       "const": "1.0.0"
@@ -394,6 +399,36 @@
     "timing_lock_hash": {
       "type": "string",
       "description": "SHA-256 of the canonical per-shot duration list used to generate background overrides. Computed per-locale by manifest_merge.py. Used to detect if shared background assets need regeneration."
+    },
+    "resolved_assets": {
+      "type": "array",
+      "description": "Resolved asset list written in-place by resolve_assets.py. Empty [] (placeholder) immediately after manifest_merge runs; populated with resolved file:// or placeholder:// URIs after resolve_assets.py runs. Each item describes one asset with its resolved URI, is_placeholder flag, and metadata.",
+      "items": {
+        "type": "object",
+        "required": ["asset_id", "asset_type", "uri", "is_placeholder"],
+        "additionalProperties": true,
+        "properties": {
+          "asset_id":       { "type": "string" },
+          "asset_type":     { "type": "string" },
+          "uri":            { "type": "string" },
+          "is_placeholder": { "type": "boolean" }
+        }
+      }
+    },
+    "render_plan": {
+      "description": "Render plan written in-place by gen_render_plan.py. null (placeholder) until gen_render_plan.py runs; populated with the full per-shot render plan afterward. Also written separately to RenderPlan.{locale}.json for render_video.py.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["plan_id", "shots"],
+          "additionalProperties": true,
+          "properties": {
+            "plan_id": { "type": "string" },
+            "shots":   { "type": "array", "items": { "type": "object" } }
+          }
+        }
+      ]
     }
   },
   "$defs": {

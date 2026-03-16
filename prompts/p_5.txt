@@ -1,5 +1,5 @@
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 5 — Produce AssetManifest_draft.shared.json + AssetManifest_draft.en.json
+# STAGE 5 — Produce AssetManifest.shared.json + AssetManifest.en.json
 # ══════════════════════════════════════════════════════════════════════
 #
 # 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
@@ -15,8 +15,8 @@
 #
 # 📤 OUTPUT:
 #     • Stdout: progress + validation result  (web UI)
-#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json
-#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.shared.json
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.en.json
 #
 # ▶ Invoked by run.sh as:
 #     claude -p prompts/p_5_filled.txt
@@ -67,7 +67,7 @@ Story format: **{{STORY_FORMAT}}**
 
 Produce TWO files:
 
-### File 1: AssetManifest_draft.shared.json  (locale-free assets)
+### File 1: AssetManifest.shared.json  (locale-free assets)
 
 Required top-level fields:
   schema_id       : "AssetManifest"
@@ -368,7 +368,7 @@ Skip shots where music_item_id is null or absent.
 
 ---
 
-### File 2: AssetManifest_draft.en.json  (English locale — VO only)
+### File 2: AssetManifest.en.json  (English locale — VO only)
 
 Required top-level fields:
   schema_id        : "AssetManifest"
@@ -378,7 +378,7 @@ Required top-level fields:
   episode_id       : "{{EPISODE_ID}}"
   locale           : "en"
   locale_scope     : "locale"
-  shared_ref       : "AssetManifest_draft.shared.json"
+  shared_ref       : "AssetManifest.shared.json"
   shotlist_ref     : "ShotList.json"
   vo_items         : [...]   ← English VO items (see below)
   background_overrides : []  ← always empty at draft time; populated by post_tts_analysis.py
@@ -439,21 +439,21 @@ Validate both artifacts against contracts/schemas/AssetManifest.v1.json
 using Python + jsonschema.  If validation fails, fix and retry.
 
 Write the validated shared artifact to:
-  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.shared.json
 
 Write the validated locale artifact to:
-  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.en.json
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.en.json
 
 Print validation result:
 ```
 ── Stage 5 validation ───────────────────────────────────────
-AssetManifest_draft.shared.json  →  VALID ✓
+AssetManifest.shared.json  →  VALID ✓
   character_packs : <count>
   backgrounds     : <count>
   sfx_items       : <count>
   music_items     : <count>
 
-AssetManifest_draft.en.json      →  VALID ✓
+AssetManifest.en.json            →  VALID ✓
   vo_items        : <count>
 ────────────────────────────────────────────────────────────
 ```

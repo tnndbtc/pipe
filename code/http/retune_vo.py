@@ -8,7 +8,7 @@ Usage examples:
 
   # Retune one item: change text + style
   python retune_vo.py \\
-    --manifest projects/foo/episodes/s01e02/AssetManifest_merged.en.json \\
+    --manifest projects/foo/episodes/s01e02/AssetManifest.en.json \\
     --locale en \\
     --item vo-sc02-003 \\
     --text "New wording for this line." \\
@@ -17,26 +17,26 @@ Usage examples:
 
   # Retune multiple items: change style on all
   python retune_vo.py \\
-    --manifest projects/foo/episodes/s01e02/AssetManifest_merged.en.json \\
+    --manifest projects/foo/episodes/s01e02/AssetManifest.en.json \\
     --locale en \\
     --items vo-sc02-001 vo-sc02-002 vo-sc02-003 \\
     --style "calm"
 
   # Re-synthesize all items in a scene (current parameters, no text/style change)
   python retune_vo.py \\
-    --manifest projects/foo/episodes/s01e02/AssetManifest_merged.en.json \\
+    --manifest projects/foo/episodes/s01e02/AssetManifest.en.json \\
     --locale en \\
     --scene sc02
 
   # Dry-run: preview what would change without writing anything
   python retune_vo.py \\
-    --manifest projects/foo/episodes/s01e02/AssetManifest_merged.en.json \\
+    --manifest projects/foo/episodes/s01e02/AssetManifest.en.json \\
     --locale en \\
     --scene sc02 --style "calm" --dry-run
 
   # Retune with WAV backup
   python retune_vo.py \\
-    --manifest projects/foo/episodes/s01e02/AssetManifest_merged.en.json \\
+    --manifest projects/foo/episodes/s01e02/AssetManifest.en.json \\
     --locale en \\
     --item vo-sc02-003 --text "New text." --backup
 """
@@ -64,7 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Required
     p.add_argument(
         "--manifest", required=True,
-        help="Path to AssetManifest_merged.{locale}.json",
+        help="Path to AssetManifest.{locale}.json",
     )
     p.add_argument(
         "--locale", required=True,

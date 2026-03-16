@@ -422,10 +422,10 @@ def parse_args():
             "Generate voice-over WAV files using selectable TTS backends.\n"
             "Backends: kokoro (default), xtts, melo, all\n\n"
             "Examples:\n"
-            "  python gen_tts.py --manifest AssetManifest_draft.json\n"
-            "  python gen_tts.py --manifest AssetManifest_draft.zh-Hans.json\n"
-            "  python gen_tts.py --manifest AssetManifest_draft.json --tts_model all\n"
-            "  python gen_tts.py --manifest AssetManifest_draft.json --tts_model xtts\n"
+            "  python gen_tts.py --manifest AssetManifest.json\n"
+            "  python gen_tts.py --manifest AssetManifest.zh-Hans.json\n"
+            "  python gen_tts.py --manifest AssetManifest.json --tts_model all\n"
+            "  python gen_tts.py --manifest AssetManifest.json --tts_model xtts\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -557,8 +557,8 @@ def load_from_manifest(manifest_path: str, asset_id_filter, voice_profiles: dict
 # ---------------------------------------------------------------------------
 def locale_from_manifest_path(path: str) -> str:
     """Extract locale from manifest filename.
-    'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
-    'AssetManifest_draft.json'          -> 'en'
+    'AssetManifest.zh-Hans.json' -> 'zh-Hans'
+    'AssetManifest.json'          -> 'en'
     """
     stem = Path(path).stem
     parts = stem.split('.')

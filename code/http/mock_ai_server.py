@@ -12,25 +12,25 @@ Usage (terminal 1):
 Usage (terminal 2):
     AI_SERVER_URL=http://127.0.0.1:8001 AI_SERVER_KEY=change-me \\
         python3 code/http/fetch_ai_assets.py \\
-            --manifest projects/the-pharaoh-who-defied-death/episodes/s01e02/AssetManifest_draft.shared.json \\
+            --manifest projects/the-pharaoh-who-defied-death/episodes/s01e02/AssetManifest.shared.json \\
             --asset_type characters
 
     # Single item:
     AI_SERVER_URL=http://127.0.0.1:8001 AI_SERVER_KEY=change-me \\
         python3 code/http/fetch_ai_assets.py \\
-            --manifest projects/the-pharaoh-who-defied-death/episodes/s01e02/AssetManifest_draft.shared.json \\
+            --manifest projects/the-pharaoh-who-defied-death/episodes/s01e02/AssetManifest.shared.json \\
             --asset_type characters --asset-id tahk
 
     # SFX (42 entries, 19 unique shots):
     AI_SERVER_URL=http://127.0.0.1:8001 AI_SERVER_KEY=change-me \\
         python3 code/http/fetch_ai_assets.py \\
-            --manifest projects/the-pharaoh-who-defied-death/episodes/s01e02/AssetManifest_draft.shared.json \\
+            --manifest projects/the-pharaoh-who-defied-death/episodes/s01e02/AssetManifest.shared.json \\
             --asset_type sfx
 
     # Wrong key → 401:
     AI_SERVER_URL=http://127.0.0.1:8001 AI_SERVER_KEY=wrong \\
         python3 code/http/fetch_ai_assets.py \\
-            --manifest projects/the-pharaoh-who-defied-death/episodes/s01e02/AssetManifest_draft.shared.json \\
+            --manifest projects/the-pharaoh-who-defied-death/episodes/s01e02/AssetManifest.shared.json \\
             --asset_type characters
 """
 

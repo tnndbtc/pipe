@@ -299,8 +299,8 @@ def ensure_mattes(manifest_path, output_dir: Path) -> None:
 
 def locale_from_manifest_path(path: str) -> str:
     """Extract locale from manifest filename.
-    'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
-    'AssetManifest_draft.json'          -> 'en'
+    'AssetManifest.zh-Hans.json' -> 'zh-Hans'
+    'AssetManifest.json'          -> 'en'
     """
     stem = Path(path).stem
     parts = stem.split('.')

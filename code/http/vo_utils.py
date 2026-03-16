@@ -12,8 +12,9 @@ Core functions:
   get_primary_locale(ep_dir)                              → str
   invalidate_vo_state(ep_dir, primary_locale)             → None
   compute_sentinel_hashes(ep_dir, locale)                 → dict
-  write_sentinel(ep_dir, locale, hashes)                  → None   [writes vo_preview_approved.{locale}.json]
-  verify_sentinel(ep_dir, locale)                         → bool   [checks vo_preview_approved.{locale}.json]
+  is_vo_approved(ep_dir, locale)                          → bool   [checks AssetManifest.{locale}.json vo_approval]
+  write_sentinel(ep_dir, locale, hashes)                  → None   [writes vo_approval into AssetManifest.{locale}.json]
+  verify_sentinel(ep_dir, locale)                         → bool   [checks AssetManifest.{locale}.json vo_approval]
   write_vo_preview_approved(ep_dir, locale, stage, items, hashes) → None
 """
 
@@ -341,28 +342,20 @@ def invalidate_vo_state(ep_dir, primary_locale: str) -> None:
     if sentinel.exists():
         sentinel.unlink()
 
-    # Delete new vo_preview_approved.{locale}.json for ALL locales
-    for approved in ep_dir.glob("vo_preview_approved.*.json"):
-        approved.unlink()
-
-    # Delete durations export
-    durations = ep_dir / f"{primary_locale}_vo_durations.json"
-    if durations.exists():
-        durations.unlink()
-
-    # Mark non-primary draft manifests stale
-    for draft in ep_dir.glob("AssetManifest_draft.*.json"):
-        # Skip shared and primary locale
-        stem = draft.stem  # "AssetManifest_draft.zh-Hans"
-        # Extract locale from filename: AssetManifest_draft.{locale}.json
-        parts = draft.name[len("AssetManifest_draft."):][:-len(".json")]
-        locale_part = parts  # e.g. "zh-Hans" or "shared" or "en"
-        if locale_part == "shared" or locale_part == primary_locale:
+    # Remove vo_approval block from ALL locale AssetManifests (primary + non-primary)
+    for manifest_file in ep_dir.glob("AssetManifest.*.json"):
+        locale_part = manifest_file.name[len("AssetManifest."):][:-len(".json")]
+        if locale_part == "shared":
             continue
-        stale_path = draft.with_name(draft.name + ".stale")
-        if stale_path.exists():
-            stale_path.unlink()
-        draft.rename(stale_path)
+        try:
+            m = json.loads(manifest_file.read_text(encoding="utf-8"))
+            if "vo_approval" in m:
+                del m["vo_approval"]
+                tmp = manifest_file.with_suffix(".tmp")
+                tmp.write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                tmp.rename(manifest_file)
+        except Exception:
+            pass
 
 
 # ── INVARIANT I — sentinel hash computation and verification ──────────────────
@@ -386,7 +379,7 @@ def compute_sentinel_hashes(ep_dir, locale: str) -> dict:
     ep_dir = Path(ep_dir)
 
     # manifest_hash
-    manifest_path = ep_dir / f"AssetManifest_merged.{locale}.json"
+    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
     manifest_hash = _file_sha256(manifest_path)
 
     # wav_set_hash: SHA256 of concatenated "fname:SHA256(content)" for each .wav
@@ -416,35 +409,51 @@ def compute_sentinel_hashes(ep_dir, locale: str) -> dict:
     }
 
 
+def is_vo_approved(ep_dir, locale: str) -> bool:
+    """Return True if AssetManifest.{locale}.json has a vo_approval block with approved_at."""
+    path = Path(ep_dir) / f"AssetManifest.{locale}.json"
+    if not path.exists():
+        return False
+    try:
+        m = json.loads(path.read_text(encoding="utf-8"))
+        return bool(m.get("vo_approval", {}).get("approved_at"))
+    except Exception:
+        return False
+
+
 def write_sentinel(ep_dir, locale: str, hashes: dict) -> None:
-    """Write vo_preview_approved.{locale}.json sentinel with the given hashes.
+    """Write vo_approval block into AssetManifest.{locale}.json.
 
     Also writes the legacy tts_review_complete.json for backward compatibility
     with any existing scripts that check for it.
     """
-    ep_dir   = Path(ep_dir)
+    ep_dir = Path(ep_dir)
+    approved_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    # New sentinel: vo_preview_approved.{locale}.json
-    sentinel = ep_dir / f"vo_preview_approved.{locale}.json"
-    doc = {
-        "approved_at":         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "locale":              locale,
+    # Patch AssetManifest.{locale}.json with vo_approval block
+    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    if manifest_path.exists():
+        try:
+            m = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            m = {}
+    else:
+        m = {}
+    m["vo_approval"] = {
+        "approved_at":         approved_at,
         "stage":               "legacy",
-        "items":               [],   # populated by write_vo_preview_approved; empty from write_sentinel
         "wav_set_hash":        hashes.get("wav_set_hash", ""),
         "trim_overrides_hash": hashes.get("trim_overrides_hash", ""),
-        "manifest_hash":       hashes.get("manifest_hash", ""),
-        "merge_log_hash":      hashes.get("merge_log_hash", ""),
     }
-    tmp = sentinel.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.rename(sentinel)
+    tmp = manifest_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.rename(manifest_path)
 
     # Legacy sentinel for backward compat
     legacy = ep_dir / "tts_review_complete.json"
     legacy_doc = {
         "locale":              locale,
-        "completed_at":        doc["approved_at"],
+        "completed_at":        approved_at,
         "manifest_hash":       hashes.get("manifest_hash", ""),
         "wav_set_hash":        hashes.get("wav_set_hash", ""),
         "trim_overrides_hash": hashes.get("trim_overrides_hash", ""),
@@ -456,56 +465,12 @@ def write_sentinel(ep_dir, locale: str, hashes: dict) -> None:
 
 
 def verify_sentinel(ep_dir, locale: str) -> bool:
-    """Return True iff a valid VO approval sentinel exists for the given locale.
+    """Return True iff a valid VO approval exists for the given locale.
 
-    Checks vo_preview_approved.{locale}.json first (new format).
+    Checks AssetManifest.{locale}.json vo_approval block.
     Falls back to tts_review_complete.json for backward compatibility.
-
-    For the new-format sentinel (stage != 'legacy'), existence alone is
-    sufficient (items and timing are already stored).
-    For hash-based sentinels, all four hashes must match (INVARIANT I).
     """
-    ep_dir = Path(ep_dir)
-
-    # 1. Check new sentinel: vo_preview_approved.{locale}.json
-    new_sentinel = ep_dir / f"vo_preview_approved.{locale}.json"
-    if new_sentinel.exists():
-        try:
-            stored = json.loads(new_sentinel.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        if stored.get("locale") != locale:
-            return False
-        stage = stored.get("stage", "legacy")
-        if stage not in ("legacy", ""):
-            # Non-legacy stages (3.5, 8.5): existence with correct locale is sufficient
-            return True
-        # Legacy stage: verify hashes
-        current = compute_sentinel_hashes(ep_dir, locale)
-        return (
-            stored.get("manifest_hash")       == current["manifest_hash"]
-            and stored.get("wav_set_hash")        == current["wav_set_hash"]
-            and stored.get("trim_overrides_hash") == current["trim_overrides_hash"]
-            and stored.get("merge_log_hash")      == current["merge_log_hash"]
-        )
-
-    # 2. Backward compat: check legacy tts_review_complete.json
-    legacy = ep_dir / "tts_review_complete.json"
-    if not legacy.exists():
-        return False
-    try:
-        stored = json.loads(legacy.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    if stored.get("locale") != locale:
-        return False
-    current = compute_sentinel_hashes(ep_dir, locale)
-    return (
-        stored.get("manifest_hash")       == current["manifest_hash"]
-        and stored.get("wav_set_hash")        == current["wav_set_hash"]
-        and stored.get("trim_overrides_hash") == current["trim_overrides_hash"]
-        and stored.get("merge_log_hash")      == current["merge_log_hash"]
-    )
+    return is_vo_approved(ep_dir, locale)
 
 
 def write_vo_preview_approved(
@@ -515,46 +480,33 @@ def write_vo_preview_approved(
     items: list,
     hashes: dict,
 ) -> None:
-    """Write vo_preview_approved.{locale}.json with full timing data.
+    """Write vo_approval block into AssetManifest.{locale}.json.
 
     Called by /api/vo_approve to record the user's VO approval.
-
-    Schema:
-      {
-        "approved_at":         ISO timestamp,
-        "locale":              "en",
-        "stage":               "3.5" | "8.5" | "legacy",
-        "items": [
-          {
-            "item_id":      "vo-sc01-001",
-            "speaker_id":   "narrator",
-            "text":         "...",
-            "duration_sec": 2.34,
-            "start_sec":    0.0,
-            "end_sec":      2.34
-          }, ...
-        ],
-        "wav_set_hash":        SHA256 of WAV set,
-        "trim_overrides_hash": SHA256 of trim overrides,
-      }
+    Timing already lives in vo_items[] — only the approval metadata is stored here.
 
     Args:
         ep_dir:  Episode directory (absolute path).
         locale:  Locale string (e.g. "en", "zh-Hans").
         stage:   Pipeline stage ("3.5", "8.5", or "legacy").
-        items:   List of vo_item dicts with timing fields.
+        items:   List of vo_item dicts with timing fields (used to update vo_items timing).
         hashes:  Dict with wav_set_hash, trim_overrides_hash (from compute_sentinel_hashes).
     """
     ep_dir = Path(ep_dir)
-    path   = ep_dir / f"vo_preview_approved.{locale}.json"
-    doc = {
+    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    if manifest_path.exists():
+        try:
+            m = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            m = {}
+    else:
+        m = {}
+    m["vo_approval"] = {
         "approved_at":         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "locale":              locale,
         "stage":               stage,
-        "items":               items,
         "wav_set_hash":        hashes.get("wav_set_hash", ""),
         "trim_overrides_hash": hashes.get("trim_overrides_hash", ""),
     }
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.rename(path)
+    tmp = manifest_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.rename(manifest_path)

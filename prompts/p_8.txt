@@ -14,7 +14,7 @@
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json                    (Stage 2)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json                         (Stage 3)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json                       (Stage 4)
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.{{PRIMARY_LOCALE}}.json  (Stage 5)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.{{PRIMARY_LOCALE}}.json  (Stage 5)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json                     (Stage 6)
 #     projects/{{PROJECT_SLUG}}/canon.json                                                   (Stage 7)
 #     projects/{{PROJECT_SLUG}}/VoiceCast.json                                              (Stage 0)
@@ -49,16 +49,11 @@ for certain story formats, e.g. StoryPrompt.json is absent for ssml_narration):
   1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/StoryPrompt.json
   2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
   3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
-  4. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.{{PRIMARY_LOCALE}}.json
+  4. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.{{PRIMARY_LOCALE}}.json
   5. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.json
   6. projects/{{PROJECT_SLUG}}/canon.json
   7. projects/{{PROJECT_SLUG}}/VoiceCast.json
   8. contracts/schemas/AssetManifest.v1.json
-
-  9. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/{{PRIMARY_LOCALE}}_vo_durations.json
-     (Written by the VO review approval step — contains measured WAV durations keyed
-     by item_id.  Present only after VO has been reviewed and approved.
-     If found, use it as the authoritative source-duration data for Duration Matching.)
 
 For each non-primary locale, also try to read (if it exists):
   • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/vo_hints.<locale>.json
@@ -86,12 +81,12 @@ If `STORY_FORMAT` is `ssml_narration`:
   - Skip producing canon_diff.<locale>.json and canon.<locale>.json
     (canon pipeline runs separately; do not touch those files)
   - **For each secondary locale** (every locale that is NOT {{PRIMARY_LOCALE}}):
-    1. Read AssetManifest_draft.{{PRIMARY_LOCALE}}.json as the source of vo_items.
+    1. Read AssetManifest.{{PRIMARY_LOCALE}}.json as the source of vo_items.
     2. Translate every `text` field from the primary locale into the target locale,
        following the FAITHFULNESS RULE and Duration Matching Rule below.
     3. Apply the correct azure_voice / azure_style / azure_rate / azure_pitch /
        azure_break_ms / azure_style_degree from VoiceCast.json for the target locale.
-    4. Write the result as AssetManifest_draft.<locale>.json
+    4. Write the result as AssetManifest.<locale>.json
        (same schema as the primary locale manifest, with `"locale": "<locale>"`).
     5. Also translate Script.json (scenes[].dialogue[].line, scenes[].action_beats[],
        scenes[].actions[].description, scenes[].location, scenes[].time_of_day)
@@ -138,7 +133,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
     StoryPrompt   → <episode_dir>/StoryPrompt.<locale>.json
     Script        → <episode_dir>/Script.<locale>.json
     ShotList      → <episode_dir>/ShotList.<locale>.json
-    AssetManifest → <episode_dir>/AssetManifest_draft.<locale>.json
+    AssetManifest → <episode_dir>/AssetManifest.<locale>.json
     canon_diff    → <episode_dir>/canon_diff.<locale>.json
     canon         → <project_dir>/canon.<locale>.json
 
@@ -173,7 +168,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
     "episode_id":          "{{EPISODE_ID}}",
     "locale":              "<locale>",
     "locale_scope":        "locale",
-    "shared_ref":          "AssetManifest_draft.shared.json",
+    "shared_ref":          "AssetManifest.shared.json",
     "shotlist_ref":        "ShotList.json",
     "character_packs":     [],
     "backgrounds":         [],
@@ -182,7 +177,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
   }
   ```
 
-  For vo_items[]: copy every entry from AssetManifest_draft.{{PRIMARY_LOCALE}}.json, then apply
+  For vo_items[]: copy every entry from AssetManifest.{{PRIMARY_LOCALE}}.json, then apply
   the following changes per item:
 
   **Always change:**
@@ -195,7 +190,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
     - tts_prompt.azure_rate   → character[<locale>].azure_rate from VoiceCast.json
     - tts_prompt.azure_style  → character[<locale>].azure_style from VoiceCast.json (copy verbatim; omit if null/absent)
 
-  **Keep unchanged (copy byte-for-byte from AssetManifest_draft.{{PRIMARY_LOCALE}}.json):**
+  **Keep unchanged (copy byte-for-byte from AssetManifest.{{PRIMARY_LOCALE}}.json):**
     - item_id        ← CRITICAL: copy the exact string; never invent a new id
     - speaker_id     ← CRITICAL: copy the exact string (e.g. "narrator"); do NOT omit
     - shot_id        (may be null — copy the null)
@@ -246,8 +241,8 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
 
     **Priority order for source duration (use the first available):**
 
-    1. **`{{PRIMARY_LOCALE}}_vo_durations.json`** (most accurate — post-review measured WAVs):
-       Find the entry with matching item_id.  Use `duration_sec` as `source_duration_sec`.
+    1. **`AssetManifest.{{PRIMARY_LOCALE}}.json` → `vo_items[]`** (most accurate — post-review measured WAVs):
+       Find the entry with matching item_id, use `duration_sec` as `source_duration_sec`.
        Derive `target_chars = round(source_duration_sec × chars_per_sec_for_target_locale)`.
        A `duration_sec` ≤ 1.5 s means this is a short fragment (see short note below).
 
@@ -331,7 +326,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.<locale>.json
 
   Write the validated AssetManifest artifact to:
-    projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.<locale>.json
+    projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.<locale>.json
 
   Write the validated canon_diff artifact to:
     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/canon_diff.<locale>.json
@@ -345,7 +340,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
     StoryPrompt.<locale>.json     VALID ✓
     Script.<locale>.json          VALID ✓
     ShotList.<locale>.json        VALID ✓
-    AssetManifest_draft.<locale>.json  VALID ✓
+    AssetManifest.<locale>.json        VALID ✓
     canon_diff.<locale>.json      VALID ✓
     canon.<locale>.json           VALID ✓
   ─────────────────────────────────────────────────────────

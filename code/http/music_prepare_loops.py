@@ -9,7 +9,7 @@
 #
 # Usage:
 #   python music_prepare_loops.py \
-#       --manifest projects/slug/episodes/ep/AssetManifest_draft.shared.json
+#       --manifest projects/slug/episodes/ep/AssetManifest.shared.json
 #
 #   python music_prepare_loops.py --manifest ... --resources projects/resources/music/
 #   python music_prepare_loops.py --manifest ... --top-n 3
@@ -228,7 +228,7 @@ def parse_args():
         epilog=(
             "workflow:\n"
             "  1. Run gen_music_clip.py first\n"
-            "  2. python music_prepare_loops.py --manifest AssetManifest_draft.shared.json\n"
+            "  2. python music_prepare_loops.py --manifest AssetManifest.shared.json\n"
         ),
     )
     p.add_argument("--manifest", required=True, metavar="PATH",

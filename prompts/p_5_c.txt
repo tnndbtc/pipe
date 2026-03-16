@@ -8,14 +8,14 @@
 #     {{STORY_FORMAT}}   →  e.g. "continuous_narration", "documentary", "ssml_narration"
 #
 # 📥 FILES READ (written by scaffold script + earlier stages):
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json  (gen_manifest_structure.py)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.shared.json  (gen_manifest_structure.py)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json                    (Stage 4 / 4-C)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json                      (Stage 3)
 #     contracts/schemas/AssetManifest.v1.json
 #
 # 📤 OUTPUT:
 #     • Stdout: progress + validation result  (web UI)
-#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json  (overwritten in-place)
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.shared.json  (overwritten in-place)
 #
 # ▶ Invoked by run.sh as:
 #     claude -p prompts/p_5_c_filled.txt
@@ -35,7 +35,7 @@ Schema        : contracts/schemas/AssetManifest.v1.json
 Story format  : {{STORY_FORMAT}}
 
 Read these files before writing anything:
-  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json
+  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.shared.json
   2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
   3. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/Script.json
   4. contracts/schemas/AssetManifest.v1.json
@@ -246,7 +246,7 @@ For `illustrated_narration`:
 
 Overwrite the scaffold file in-place with the COMPLETE filled version
 (no `__FILL__` markers remaining):
-  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.shared.json
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.shared.json
 
 Validate against contracts/schemas/AssetManifest.v1.json using Python + jsonschema.
 If validation fails, fix and retry.
@@ -268,7 +268,7 @@ If any check fails, fix inline and re-validate before writing.
 Print validation result:
 ```
 ── Stage 5-C validation ─────────────────────────────────────
-AssetManifest_draft.shared.json  →  VALID ✓
+AssetManifest.shared.json  →  VALID ✓
   backgrounds     : <count>
   sfx_items       : <count>
   music_items     : <count>

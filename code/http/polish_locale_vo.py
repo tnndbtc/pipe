@@ -8,7 +8,7 @@
 #   1. Measure actual locale and primary WAV durations directly from files.
 #   2. Flag lines with ratio = locale_dur / primary_dur outside [THRESHOLD, THRESHOLD_HIGH].
 #   3. Call Claude (sonnet) to rewrite flagged text to target_chars (locale-aware).
-#   4. Patch AssetManifest_merged.{locale}.json + AssetManifest_draft.{locale}.json
+#   4. Patch AssetManifest.{locale}.json
 #      with the revised text (so re-runs from Stage 9 also use corrected text).
 #   5. Re-synthesize flagged items only via gen_tts_cloud.py --asset-id.
 #   6. Re-measure. Repeat up to MAX_ITERS times.
@@ -20,7 +20,7 @@
 #
 # Usage:
 #   python polish_locale_vo.py \
-#       --manifest  {ep_dir}/AssetManifest_merged.{locale}.json \
+#       --manifest  {ep_dir}/AssetManifest.{locale}.json \
 #       --locale    zh-Hans \
 #       --ep-dir    {ep_dir}
 # =============================================================================
@@ -273,7 +273,7 @@ def apply_rate_adjustment(
     manifest: dict,
     manifest_path: Path,
     draft: dict | None,
-    draft_locale_path: Path,
+    locale_manifest_path: Path,
     merged_idx: dict[str, dict],
     draft_idx: dict[str, dict],
     wav_locale: Path,
@@ -324,8 +324,8 @@ def apply_rate_adjustment(
     if rate_patched:
         manifest_path.write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-        if draft and draft_locale_path.exists():
-            draft_locale_path.write_text(
+        if draft and locale_manifest_path.exists():
+            locale_manifest_path.write_text(
                 json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return rate_patched
@@ -337,7 +337,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Convergence loop: expand short locale VO lines to match EN timing.")
     ap.add_argument("--manifest", required=True,
-                    help="AssetManifest_merged.{locale}.json")
+                    help="AssetManifest.{locale}.json")
     ap.add_argument("--locale",   required=True,
                     help="Target locale, e.g. zh-Hans")
     ap.add_argument("--ep-dir",   required=True,
@@ -350,7 +350,7 @@ def main() -> None:
     ep_dir            = Path(args.ep_dir)
     locale            = args.locale
     primary_locale    = args.primary_locale
-    draft_locale_path = ep_dir / f"AssetManifest_draft.{locale}.json"
+    locale_manifest_path = ep_dir / f"AssetManifest.{locale}.json"
 
     if not manifest_path.exists():
         print(f"  ✗ polish_locale_vo: {manifest_path} not found")
@@ -365,8 +365,8 @@ def main() -> None:
 
     # Load manifests
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    draft    = (json.loads(draft_locale_path.read_text(encoding="utf-8"))
-                if draft_locale_path.exists() else None)
+    draft    = (json.loads(locale_manifest_path.read_text(encoding="utf-8"))
+                if locale_manifest_path.exists() else None)
 
     # In-memory index for fast lookup
     merged_idx: dict[str, dict] = {
@@ -488,8 +488,8 @@ def main() -> None:
         # Write updated manifests to disk before re-synthesis
         manifest_path.write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-        if draft and draft_locale_path.exists():
-            draft_locale_path.write_text(
+        if draft and locale_manifest_path.exists():
+            locale_manifest_path.write_text(
                 json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
 
         # ── Re-synthesize patched items ───────────────────────────────────────
@@ -513,7 +513,7 @@ def main() -> None:
         print(f"\n  ── rate-adjustment fallback: {len(still_short)} item(s) still too short")
         rate_patched = apply_rate_adjustment(
             manifest, manifest_path,
-            draft, draft_locale_path,
+            draft, locale_manifest_path,
             merged_idx, draft_idx,
             wav_locale, wav_primary,
         )

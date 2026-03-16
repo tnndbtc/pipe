@@ -896,8 +896,8 @@ def run_params_experiments(params_path: str, pipe, input_dir: Path, out_dir: Pat
 
 def locale_from_manifest_path(path: str) -> str:
     """Extract locale from manifest filename.
-    'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans'
-    'AssetManifest_draft.json'          -> 'en'
+    'AssetManifest.zh-Hans.json' -> 'zh-Hans'
+    'AssetManifest.json'          -> 'en'
     """
     stem = Path(path).stem
     parts = stem.split('.')

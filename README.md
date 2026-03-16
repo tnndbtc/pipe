@@ -86,12 +86,9 @@ pipe/
             ├── StoryPrompt.json
             ├── Script.json
             ├── ShotList.json
-            ├── AssetManifest_draft.shared.json   # ★ locale-neutral assets
-            ├── AssetManifest_draft.{locale}.json  # locale-specific (vo_items)
-            ├── AssetManifest_merged.{locale}.json # shared + locale merged
-            ├── AssetManifest.media.{locale}.json  # resolved media paths
-            ├── AssetManifest_final.json
-            ├── RenderPlan.json
+            ├── AssetManifest.shared.json   # ★ locale-neutral assets
+            ├── AssetManifest.{locale}.json        # locale vo_items (Stage 5) + merged (Stage 9)
+            ├── RenderPlan.{locale}.json
             ├── canon_diff.json
             ├── assets/
             │   ├── {locale}/audio/vo/{item_id}.mp3
@@ -116,21 +113,21 @@ Run via `./run.sh [story_file] [from_stage] [to_stage]`
 | 2     | sonnet | `StoryPrompt.json`                             | Episode direction                  |
 | 3     | sonnet | `Script.json`                                  | Script + character dialogue        |
 | 4     | sonnet | `ShotList.json`                                | Visual shot breakdown              |
-| 5     | sonnet | `AssetManifest_draft.shared.json` + locale files | Asset manifest (images/sfx/TTS)  |
+| 5     | sonnet | `AssetManifest.shared.json` + locale files | Asset manifest (images/sfx/TTS)  |
 | 6     | haiku  | `canon_diff.json`                              | New story facts                    |
 | 7     | haiku  | `canon.json` (updated)                         | World canon update                 |
 | 8     | sonnet | `Script.{locale}.json` + locale manifests      | Translation & adaptation           |
-| 9     | haiku  | `AssetManifest_final.json`, `RenderPlan.json`  | Finalise assets & render plan      |
+| 9     | —      | `AssetManifest.{locale}.json`, `RenderPlan.{locale}.json` | Resolve assets & build render plan |
 | 9     | —      | `renders/{locale}/output.mp4`                  | 7-step render (see below)          |
 
 ### Stage 9 substeps (per locale)
 ```
-1. gen_music_clip.py    --manifest AssetManifest_draft.shared.json
-2. manifest_merge.py    --shared … --locale … (per locale)
-3. gen_tts_cloud.py     --manifest AssetManifest_merged.{locale}.json
-4. post_tts_analysis.py --manifest AssetManifest_merged.{locale}.json
-5. resolve_assets.py    --manifest … --out AssetManifest.media.{locale}.json
-6. gen_render_plan.py   --manifest … --media …
+1. gen_music_clip.py    --manifest AssetManifest.shared.json
+2. manifest_merge.py    --shared … --locale …  → AssetManifest.{locale}.json
+3. gen_tts_cloud.py     --manifest AssetManifest.{locale}.json
+4. post_tts_analysis.py --manifest AssetManifest.{locale}.json
+5. resolve_assets.py    --manifest AssetManifest.{locale}.json        (in-place)
+6. gen_render_plan.py   --manifest AssetManifest.{locale}.json        (in-place + RenderPlan)
 7. render_video.py      --plan RenderPlan.{locale}.json
 ```
 
@@ -150,8 +147,8 @@ Stage 5 produces two output files:
 
 | File | Contents | Used by |
 |------|----------|---------|
-| `AssetManifest_draft.shared.json` | `character_packs`, `backgrounds`, `sfx_items` | GPU gen scripts, gen_music_clip |
-| `AssetManifest_draft.{locale}.json` | `vo_items` (TTS dialogue), locale overrides | gen_tts_cloud.py |
+| `AssetManifest.shared.json` | `character_packs`, `backgrounds`, `sfx_items` | GPU gen scripts, gen_music_clip |
+| `AssetManifest.{locale}.json` | `vo_items` (TTS dialogue), locale overrides (`locale_scope: "locale"`) | gen_tts_cloud.py |
 
 ### Section → asset type mapping
 ```
@@ -274,9 +271,9 @@ Client wrapper around the AI asset server. Equivalent role to `gen_tts_cloud.py`
 but for GPU-side visual/audio generation.
 
 ```bash
-python3 fetch_ai_assets.py --manifest AssetManifest_draft.shared.json \
+python3 fetch_ai_assets.py --manifest AssetManifest.shared.json \
                             --asset_type characters
-python3 fetch_ai_assets.py --manifest AssetManifest_draft.shared.json \
+python3 fetch_ai_assets.py --manifest AssetManifest.shared.json \
                             --asset_type characters --asset-id char-amunhotep-v1
 ```
 
@@ -323,7 +320,7 @@ Standard-library HTTP server (no FastAPI/Flask). Key characteristics:
   `ready_videos`, `ready_dubbed`, `story_file`
 
 ### Locales note
-`_pipeline_status().locales` is derived from `AssetManifest_draft.*.json` files
+`_pipeline_status().locales` is derived from `AssetManifest.*.json` files
 → it is empty after Stage 0 (before Stage 5 runs).
 The Voice Cast editor should derive locales from `voice_cast.characters[0]` keys
 instead (filtered to exclude metadata keys).

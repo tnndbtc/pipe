@@ -62,7 +62,7 @@
         },
         "background_asset_id": {
           "type": ["string", "null"],
-          "description": "Resolved from ShotList.Shot.background_id via the two-step lookup: ShotList.background_id → AssetManifest_draft.backgrounds[bg_id].asset_id → this field. Must match an asset_id present in resolved_assets[]."
+          "description": "Resolved from ShotList.Shot.background_id via the two-step lookup: ShotList.background_id → AssetManifest.shared.backgrounds[bg_id].asset_id → this field. Must match an asset_id present in resolved_assets[]."
         },
         "character_asset_ids": {
           "type": "array",
@@ -79,7 +79,7 @@
         "sfx_asset_ids": {
           "type": "array",
           "items": {"type": "string"},
-          "description": "Resolved asset_ids for SFX clips in this shot, in the same order as AssetManifest_draft.sfx_items[] for this shot. Each must match an asset_id present in resolved_assets[]. Empty array if the shot has no SFX or all SFX are pending."
+          "description": "Resolved asset_ids for SFX clips in this shot, in the same order as AssetManifest.shared.sfx_items[] for this shot. Each must match an asset_id present in resolved_assets[]. Empty array if the shot has no SFX or all SFX are pending."
         },
         "music_asset_id": {
           "type": ["string", "null"],
@@ -145,7 +145,7 @@
       "properties": {
         "line_id": {
           "type": "string",
-          "description": "Matches AssetManifest_draft.vo_items[].item_id (and AssetManifest_final.items[].asset_id for resolved VO assets)"
+          "description": "Matches AssetManifest.{locale}.vo_items[].item_id (and AssetManifest.{locale}.json resolved_assets[].asset_id for resolved VO assets)"
         },
         "speaker_id": {
           "type": "string"

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # =============================================================================
-# patch_manifest_durations.py — Patch AssetManifest_draft.shared.json duration
+# patch_manifest_durations.py — Patch AssetManifest.shared.json duration
 #                               fields from authoritative ShotList.json
 # =============================================================================
 #
-# Runs AFTER Stage 5 (AssetManifest_draft produced) and BEFORE Stage 6.
+# Runs AFTER Stage 5 (AssetManifest.shared.json produced) and BEFORE Stage 6.
 # Called by run.sh immediately after the Stage 5 LLM completes.
 #
 # Problem it solves:
@@ -17,10 +17,10 @@
 #
 # Reads:
 #   ShotList.json                        — authoritative duration_sec per shot_id
-#   AssetManifest_draft.shared.json      — shared locale-free assets
+#   AssetManifest.shared.json      — shared locale-free assets
 #
 # Writes (in-place, atomic):
-#   AssetManifest_draft.shared.json      — three field groups patched:
+#   AssetManifest.shared.json      — three field groups patched:
 #
 #     sfx_items[].duration_sec           ← ShotList[shot_id].duration_sec
 #       Clip length passed to SFX generation model (AudioGen). If wrong, the
@@ -78,7 +78,7 @@ def patch(
     shotlist: dict,
 ) -> tuple[int, int, int, list[str]]:
     """
-    Patch AssetManifest_draft.shared.json duration fields in-place.
+    Patch AssetManifest.shared.json duration fields in-place.
 
     Returns:
         (sfx_patched, music_patched, bg_patched, warnings)
@@ -176,7 +176,7 @@ def patch(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Patch AssetManifest_draft.shared.json duration fields from ShotList.\n"
+            "Patch AssetManifest.shared.json duration fields from ShotList.\n"
             "Runs after Stage 5 LLM, before Stage 6."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -187,7 +187,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--dry-run", action="store_true",
-        help="Compute and print patches without writing AssetManifest_draft.shared.json",
+        help="Compute and print patches without writing AssetManifest.shared.json",
     )
     return p.parse_args()
 
@@ -215,10 +215,10 @@ def main() -> None:
     shotlist = load_json(shotlist_path)
 
     # ── Load shared manifest ──────────────────────────────────────────────────
-    shared_path = ep_dir / "AssetManifest_draft.shared.json"
+    shared_path = ep_dir / "AssetManifest.shared.json"
     if not shared_path.exists():
         print(
-            f"[ERROR] AssetManifest_draft.shared.json not found in {ep_dir}\n"
+            f"[ERROR] AssetManifest.shared.json not found in {ep_dir}\n"
             "       Run Stage 5 before calling this script.",
             file=sys.stderr,
         )
@@ -255,10 +255,10 @@ def main() -> None:
             print(f"    ⚠  {w}")
 
     if args.dry_run:
-        print("\n  [DRY-RUN] AssetManifest_draft.shared.json NOT written.")
+        print("\n  [DRY-RUN] AssetManifest.shared.json NOT written.")
     else:
         save_json(shared, shared_path)
-        print(f"\n  ✓ AssetManifest_draft.shared.json updated: {shared_path}")
+        print(f"\n  ✓ AssetManifest.shared.json updated: {shared_path}")
     print("=" * 60)
 
     if warnings:

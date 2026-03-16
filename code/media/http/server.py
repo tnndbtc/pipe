@@ -342,7 +342,7 @@ async def create_batch(body: BatchRequest, _: None = Depends(require_auth)):
             raise HTTPException(status_code=400, detail=f"manifest is not valid JSON: {exc}") from exc
 
     # Prefer manifest["backgrounds"] as a dict keyed by asset_id.
-    # Also accept a list (AssetManifest_draft schema) and convert it.
+    # Also accept a list (AssetManifest schema) and convert it.
     backgrounds_raw = manifest.get("backgrounds")
     if not backgrounds_raw:
         raise HTTPException(status_code=400, detail="manifest.backgrounds is empty or missing")
@@ -1058,8 +1058,8 @@ async def sfx_save(body: SfxSaveRequest, _: None = Depends(require_auth)):
     }
     sidecar.write_text(_json.dumps(info, indent=2, ensure_ascii=False))
 
-    # Patch AssetManifest_draft.shared.json with structured license fields
-    manifest_path = ep_dir / "AssetManifest_draft.shared.json"
+    # Patch AssetManifest.shared.json with structured license fields
+    manifest_path = ep_dir / "AssetManifest.shared.json"
     if manifest_path.exists():
         import fcntl as _fcntl
         lock_path = str(manifest_path) + ".lock"

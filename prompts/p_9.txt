@@ -1,6 +1,7 @@
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 9 — Produce AssetManifest_final.json + RenderPlan.json
-#           (CONDITIONAL — requires AssetManifest.media.json)
+# STAGE 9 — Populate render_plan{} in AssetManifest.{locale}.json
+#           + Write RenderPlan.{locale}.json
+#           (CONDITIONAL — requires AssetManifest.{locale}.json with resolved_assets[] populated)
 # ══════════════════════════════════════════════════════════════════════
 #
 # 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
@@ -9,15 +10,14 @@
 #     {{RENDER_PROFILE}}  →  e.g. "preview_local"
 #
 # 📥 FILES READ (required):
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.media.json  ← GATE
-#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.json  (Stage 5)
+#     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.{{EPISODE_ID}}.json  ← GATE (must have resolved_assets[] populated)
 #     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json             (Stage 4)
-#     contracts/schemas/AssetManifest_final.v1.json
+#     contracts/schemas/AssetManifest.v1.json
 #     contracts/schemas/RenderPlan.v1.json
 #
 # 📤 OUTPUT:
 #     • Stdout: progress + validation result  (web UI)
-#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_final.json
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.{locale}.json  (render_plan{} section populated in-place)
 #     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/RenderPlan.json
 #
 # ▶ Invoked by run.sh as:
@@ -25,8 +25,9 @@
 # ══════════════════════════════════════════════════════════════════════
 
 You are Stage 9 of a 10-stage AI narrative pipeline.
-Your ONLY job: produce AssetManifest_final.json and RenderPlan.json
-from the resolved media manifest.  This stage is CONDITIONAL.
+Your ONLY job: populate the render_plan{} section of AssetManifest.{locale}.json
+in-place and write RenderPlan.json from the resolved assets already present in the
+unified manifest.  This stage is CONDITIONAL.
 
 ---
 
@@ -35,78 +36,77 @@ from the resolved media manifest.  This stage is CONDITIONAL.
 Episode ID      : {{EPISODE_ID}}
 Episode dir     : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
 Render profile  : {{RENDER_PROFILE}}
-Gate file       : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.media.json
+Gate file       : projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.{locale}.json
+                  (must exist AND have resolved_assets[] populated by resolve_assets)
 
 ---
 
 ## Task
 
-Print: `▶ [9/9] Stage 9 — AssetManifest_final + RenderPlan  …`
+Print: `▶ [9/9] Stage 9 — render_plan + RenderPlan  …`
 
 ### Gate check (do this FIRST)
 
-Check whether the gate file exists:
-  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.media.json
+Check whether the gate file exists and has a non-empty resolved_assets[] array:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.{locale}.json
 
-If it does NOT exist, stop immediately and print:
+If it does NOT exist or resolved_assets[] is absent/empty, stop immediately and print:
 ```
-✗ [9/9] Stage 9 skipped — waiting for media-agent.
-  Place AssetManifest.media.json in:
+✗ [9/9] Stage 9 skipped — waiting for resolve_assets.
+  Ensure AssetManifest.{locale}.json exists with resolved_assets[] populated in:
     projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/
   Then re-run: ./run.sh story_2.txt 9 9
 ```
 (do not write any files; exit 0)
 
-If it DOES exist, read it and continue below.
+If it DOES exist with resolved_assets[] populated, read it and continue below.
 
 Also read:
-  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_draft.json
-  2. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
-  3. contracts/schemas/AssetManifest_final.v1.json
-  4. contracts/schemas/RenderPlan.v1.json
+  1. projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/ShotList.json
+  2. contracts/schemas/AssetManifest.v1.json
+  3. contracts/schemas/RenderPlan.v1.json
 
 ---
 
-### 9a — AssetManifest_final.json
+### 9a — Populate render_plan{} in AssetManifest.{locale}.json
 
-Required top-level fields:
-  schema_id      : "AssetManifest_final"
-  schema_version : "1.0.0"
-  manifest_id    : copied from AssetManifest_draft.json → manifest_id
-  project_id     : copied from AssetManifest_draft.json → project_id
-  shotlist_ref   : copied from AssetManifest_draft.json → shotlist_ref
-  items[]        : mapped from AssetManifest.media.json (character_packs[],
-                   backgrounds[], vo_items[], sfx_items[], music_items[])
+Read the existing unified manifest:
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.{locale}.json
 
-VO items rule: SKIP any vo_item where is_placeholder == true.
-Include only items where is_placeholder == false.
+This file already contains:
+  - Base fields (manifest_id, project_id, shotlist_ref, locale_scope: "merged", etc.)
+  - resolved_assets[] — populated by resolve_assets (do NOT modify this section)
+  - render_plan: null — this is what Stage 9 populates
 
-Validate against contracts/schemas/AssetManifest_final.v1.json.
+Populate the render_plan{} section with the render plan data (shots[], profile, etc.)
+and write the file back in-place.
+
+There is NO separate final manifest file — the unified AssetManifest.{locale}.json IS the final manifest.
+
+Validate the updated AssetManifest.{locale}.json against contracts/schemas/AssetManifest.v1.json.
 If validation fails, fix and retry.
-
-Write to: projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest_final.json
 
 ---
 
 ### 9b — RenderPlan.json
 
-Build these lookup dicts from AssetManifest_draft.json and AssetManifest.media.json:
+Build these lookup dicts from AssetManifest.{locale}.json:
 ```python
 # Strip "pack-" prefix from pack_id to get character_id
 char_map  = { c["pack_id"].removeprefix("pack-"): c["asset_id"]
-              for c in draft["character_packs"] }
+              for c in manifest["character_packs"] }
 bg_map    = { bg["bg_id"]: bg["asset_id"]
-              for bg in draft["backgrounds"] }
+              for bg in manifest["backgrounds"] }
 vo_map    = { v["item_id"]: v
-              for v in draft["vo_items"] }
+              for v in manifest["vo_items"] }
 sfx_map   = { s["item_id"]: s
-              for s in draft.get("sfx_items", []) }
+              for s in manifest.get("sfx_items", []) }
 music_map = { m["item_id"]: m
-              for m in draft.get("music_items", []) }
+              for m in manifest.get("music_items", []) }
 
 # Resolved-asset lookup: asset_id/item_id → is_placeholder
 media_map = { item["asset_id"]: item
-              for item in media["items"] }
+              for item in manifest["resolved_assets"] }
 ```
 
 For each shot in ShotList.shots[] (preserve order):
@@ -147,13 +147,13 @@ Required top-level fields for RenderPlan.json:
   schema_version    : "1.0.0"
   plan_id           : "plan-{{PROJECT_SLUG}}-{{EPISODE_ID}}"
   project_id        : "{{PROJECT_SLUG}}"
-  manifest_ref      : AssetManifest_final.manifest_id
+  manifest_ref      : AssetManifest.{locale}.json → manifest_id
   timing_lock_hash  : copied from ShotList.json → timing_lock_hash
   profile           : "{{RENDER_PROFILE}}"
   resolution        : "1280x720"
   aspect_ratio      : "16:9"
   fps               : 24
-  resolved_assets[] : flatten AssetManifest_final.items[], one entry per item:
+  resolved_assets[] : from AssetManifest.{locale}.json → resolved_assets[], one entry per item:
     { "asset_id", "asset_type", "uri", "license_type", "is_placeholder" }
   shots[]           : ordered shot array (built above)
 
@@ -167,11 +167,11 @@ Write to: projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/RenderPlan.json
 Print validation result:
 ```
 ── Stage 9 validation ───────────────────────────────────────
-AssetManifest_final.json  →  VALID ✓
-RenderPlan.json           →  VALID ✓
+AssetManifest.{locale}.json  →  VALID ✓  (render_plan{} populated)
+RenderPlan.json              →  VALID ✓
 Resolved assets : <count>
 Shots in plan   : <count>
 ────────────────────────────────────────────────────────────
 ```
 
-Print: `✓ [9/9] Stage 9 — AssetManifest_final + RenderPlan  done`
+Print: `✓ [9/9] Stage 9 — render_plan + RenderPlan  done`

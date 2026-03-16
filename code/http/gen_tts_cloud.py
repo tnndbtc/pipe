@@ -16,9 +16,9 @@
 #   AZURE_ENDPOINT       Custom endpoint URL (optional; overrides region routing)
 #
 # Usage:
-#   python gen_tts_cloud.py --manifest AssetManifest_draft.en.json
-#   python gen_tts_cloud.py --manifest AssetManifest_draft.zh-Hans.json
-#   python gen_tts_cloud.py --manifest AssetManifest_draft.en.json --asset-id vo-s01e02-sc01-001
+#   python gen_tts_cloud.py --manifest AssetManifest.en.json
+#   python gen_tts_cloud.py --manifest AssetManifest.zh-Hans.json
+#   python gen_tts_cloud.py --manifest AssetManifest.en.json --asset-id vo-s01e02-sc01-001
 #
 # Output:
 #   projects/{project_id}/episodes/{episode_id}/assets/{locale}/audio/vo/{item_id}.wav
@@ -2339,13 +2339,13 @@ def locale_from_manifest(manifest: dict, path: str) -> str:
       manifest["locale"] = "zh-Hans"  →  "zh-Hans"
 
     Filename fallback:
-      AssetManifest_draft.zh-Hans.json  →  "zh-Hans"
-      AssetManifest_draft.en.json       →  "en"
-      AssetManifest_draft.json          →  "en"
+      AssetManifest.zh-Hans.json  →  "zh-Hans"
+      AssetManifest.en.json       →  "en"
+      AssetManifest.json          →  "en"
     """
     if manifest.get("locale"):
         return manifest["locale"]
-    stem = Path(path).stem          # e.g. "AssetManifest_draft.zh-Hans"
+    stem = Path(path).stem          # e.g. "AssetManifest.zh-Hans"
     parts = stem.split(".")
     return parts[-1] if len(parts) > 1 else "en"
 
@@ -3732,7 +3732,7 @@ def build_manifest_from_script(
 
     Returns:
         (manifest_dict, manifest_path) — manifest_path is
-        {ep_dir}/AssetManifest_draft.{locale}.json
+        {ep_dir}/AssetManifest.{locale}.json
     """
     script = json.loads(script_path.read_text(encoding="utf-8"))
 
@@ -3818,7 +3818,7 @@ def build_manifest_from_script(
         "episode_id":           episode_id,
         "locale":               locale,
         "locale_scope":         "locale",
-        "shared_ref":           "AssetManifest_draft.shared.json",
+        "shared_ref":           "AssetManifest.shared.json",
         "shotlist_ref":         "ShotList.json",
         "character_packs":      [],
         "backgrounds":          [],
@@ -3828,7 +3828,7 @@ def build_manifest_from_script(
 
     # Write the draft manifest to ep_dir
     ep_dir = script_path.resolve().parent
-    manifest_path = ep_dir / f"AssetManifest_draft.{locale}.json"
+    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
     tmp = manifest_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.rename(manifest_path)
@@ -3847,16 +3847,16 @@ def parse_args() -> argparse.Namespace:
             "  export AZURE_SPEECH_KEY='your-key'\n"
             "  export AZURE_SPEECH_REGION='eastus'\n\n"
             "Examples:\n"
-            "  python gen_tts_cloud.py --manifest AssetManifest_draft.en.json\n"
-            "  python gen_tts_cloud.py --manifest AssetManifest_draft.zh-Hans.json\n"
-            "  python gen_tts_cloud.py --manifest AssetManifest_draft.en.json "
+            "  python gen_tts_cloud.py --manifest AssetManifest.en.json\n"
+            "  python gen_tts_cloud.py --manifest AssetManifest.zh-Hans.json\n"
+            "  python gen_tts_cloud.py --manifest AssetManifest.en.json "
             "--asset-id vo-s01e02-sc01-001\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--manifest", type=str, required=False, default=None,
-        help="Path to a locale AssetManifest JSON (locale_scope='locale' or 'monolithic'). "
+        help="Path to a locale AssetManifest JSON (locale_scope='locale', 'monolithic', or 'merged'). "
              "Mutually exclusive with --script.",
     )
     parser.add_argument(

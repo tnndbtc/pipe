@@ -6,7 +6,7 @@ Replaces gen_composite_image.py for composite mode.
 Usage:
     python gen_img2img.py --mode composite --bg bg.png --characters char1.png char2.png
     python gen_img2img.py --mode composite --bg bg.png --characters char1.png --char-x 0.3
-    python gen_img2img.py --mode composite --manifest AssetManifest_draft.json --output-dir out/
+    python gen_img2img.py --mode composite --manifest AssetManifest.json --output-dir out/
     python gen_img2img.py --mode inpaint   --input img.png --mask mask.png --prompt "..."
 """
 

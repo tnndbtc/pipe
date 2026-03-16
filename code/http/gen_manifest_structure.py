@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # =============================================================================
-# gen_manifest_structure.py — Build AssetManifest_draft.shared.json scaffold
+# gen_manifest_structure.py — Build AssetManifest.shared.json scaffold
 # =============================================================================
 #
-# Generates a deterministic scaffold for AssetManifest_draft.shared.json from
+# Generates a deterministic scaffold for AssetManifest.shared.json from
 # ShotList.json + Script.json + VoiceCast.json.  All creative fields are left
 # as __FILL__ strings so the LLM (p_5_c.txt) can complete them.
 #
@@ -17,7 +17,7 @@
 #   projects/<PROJECT_SLUG>/VoiceCast.json
 #
 # Writes:
-#   <ep_dir>/AssetManifest_draft.shared.json
+#   <ep_dir>/AssetManifest.shared.json
 #
 # Requirements: stdlib only + jsonschema
 # =============================================================================
@@ -327,7 +327,7 @@ def build_manifest(
     shots:        list[dict],
     cast_genders: dict[str, str],
 ) -> dict:
-    """Assemble the full AssetManifest_draft.shared.json scaffold."""
+    """Assemble the full AssetManifest.shared.json scaffold."""
     backgrounds     = build_backgrounds(shots)
     sfx_items       = build_sfx_items(shots)
     music_items     = build_music_items(shots)
@@ -464,7 +464,7 @@ def main() -> int:
             print(f"  - {e}")
 
     # Write output
-    out_path = ep_dir / "AssetManifest_draft.shared.json"
+    out_path = ep_dir / "AssetManifest.shared.json"
     save_json(manifest, out_path)
 
     n_bg       = len(manifest["backgrounds"])
@@ -478,7 +478,7 @@ def main() -> int:
     print(f"  music_items     : {n_music}")
     print(f"  character_packs : {n_packs}")
     print(f"  element_images  : {n_elements}")
-    print(f"✓ AssetManifest_draft.shared.json scaffold written "
+    print(f"✓ AssetManifest.shared.json scaffold written "
           f"({n_bg} backgrounds, {n_sfx} sfx, {n_music} music)")
 
     return 0

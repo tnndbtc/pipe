@@ -154,7 +154,7 @@ run_stage_10() {
   else
     echo "  [1] Generating music clips (skips gracefully if no resources)…"
     python3 "${code_dir}/gen_music_clip.py" \
-      --manifest "${EP_DIR}/AssetManifest_draft.shared.json" || true
+      --manifest "${EP_DIR}/AssetManifest.shared.json" || true
   fi
 
   # ── [1b] Music loop candidates — skip if music already approved ───────
@@ -163,7 +163,7 @@ run_stage_10() {
   else
     echo "  [1b] Analysing music loop candidates…"
     python3 "${code_dir}/music_prepare_loops.py" \
-      --manifest "${EP_DIR}/AssetManifest_draft.shared.json" || true
+      --manifest "${EP_DIR}/AssetManifest.shared.json" || true
   fi
 
   # ── Per-locale steps ──────────────────────────────────────────────────
@@ -196,34 +196,31 @@ run_stage_10() {
 
     echo "  [5] Merging shared + locale manifests…"
     python3 "${code_dir}/manifest_merge.py" \
-      --shared "${EP_DIR}/AssetManifest_draft.shared.json" \
-      --locale "${EP_DIR}/AssetManifest_draft.${locale}.json" \
-      --out    "${EP_DIR}/AssetManifest_merged.${locale}.json"
+      --shared "${EP_DIR}/AssetManifest.shared.json" \
+      --locale "${EP_DIR}/AssetManifest.${locale}.json"
 
     echo "  [5.5] Validating tts_prompt fields match VoiceCast.json…"
     python3 "${code_dir}/validate_tts_prompts.py" \
       "${EP_DIR}" --locale "${locale}" --warn-only || true
 
     # ── [6] TTS synthesis — skip if VO already approved ─────────────────
-    # If vo_preview_approved.{locale}.json exists the audio is final.
-    # Deleting that file is the explicit gate to force re-synthesis.
-    _vo_approved_sentinel="${EP_DIR}/vo_preview_approved.${locale}.json"
-    if [[ -f "$_vo_approved_sentinel" ]]; then
+    # If AssetManifest.{locale}.json has a vo_approval block the audio is final.
+    if python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${locale}"; then
       echo "  [6] VO already approved — skipping TTS synthesis."
-      echo "      (Delete vo_preview_approved.${locale}.json to force re-run)"
+      echo "      (Remove vo_approval from AssetManifest.${locale}.json to force re-run)"
     else
       echo "  [6] Generating voice-over audio…"
       if [[ "${STORY_FORMAT:-}" == "ssml_narration" && "$locale" == "$_primary" ]]; then
         # PRIMARY_LOCALE uses ssml_narration: wrapper-rebuild + inner passthrough
         python3 "${code_dir}/gen_tts_cloud.py" \
-          --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+          --manifest "${EP_DIR}/AssetManifest.${locale}.json" \
           --ssml-narration \
           --ssml-inner "${EP_DIR}/ssml_inner.xml" \
           --voice-cast "projects/${PROJECT_SLUG}/VoiceCast.json"
       else
         # Other locales (or non-ssml_narration): regular per-item TTS
         python3 "${code_dir}/gen_tts_cloud.py" \
-          --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+          --manifest "${EP_DIR}/AssetManifest.${locale}.json"
       fi
     fi
 
@@ -239,12 +236,12 @@ run_stage_10() {
     # repeats up to 3 times.
     # Writes calibration data to prompts/tts_calibration.{locale}.json.
     if [[ "$locale" != "$_primary" ]]; then
-      if [[ -f "$_vo_approved_sentinel" ]]; then
+      if python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${locale}"; then
         echo "  [6b] VO already approved — skipping alignment loop."
       else
         echo "  [6b] Polishing locale VO duration alignment…"
         python3 "${code_dir}/polish_locale_vo.py" \
-          --manifest        "${EP_DIR}/AssetManifest_merged.${locale}.json" \
+          --manifest        "${EP_DIR}/AssetManifest.${locale}.json" \
           --locale          "${locale}" \
           --ep-dir          "${EP_DIR}" \
           --primary-locale  "${_primary}" || true
@@ -253,14 +250,13 @@ run_stage_10() {
 
     echo "  [7] Analysing voice timing…"
     python3 "${code_dir}/post_tts_analysis.py" \
-      --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+      --manifest "${EP_DIR}/AssetManifest.${locale}.json"
 
     # ── Stage 8.5: Non-primary locale VO approval gate ──────────────────
     # After TTS + convergence loop + timing analysis, pause for user VO review
     # of each non-primary locale before generating the render plan.
     if [[ "$locale" != "$_primary" ]]; then
-      _s85_approved="${EP_DIR}/vo_preview_approved.${locale}.json"
-      if [[ ! -f "$_s85_approved" ]]; then
+      if ! python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${locale}"; then
         echo ""
         echo "══════════════════════════════════════════════════════════════"
         echo "  ⏸  PAUSED — Stage 8.5: VO review required for locale: ${locale}"
@@ -268,8 +264,8 @@ run_stage_10() {
         echo "  Translated voice-over for ${locale} is ready:"
         echo "    1. Switch to the 🎙 VO tab → select locale: ${locale}"
         echo "    2. Review translated lines and adjust timing as needed"
-        echo "    3. Click ✓ Approve VO to write:"
-        echo "       vo_preview_approved.${locale}.json"
+        echo "    3. Click ✓ Approve VO to write vo_approval into:"
+        echo "       AssetManifest.${locale}.json"
         echo ""
         echo "  Then resume Stage 9 for all remaining locales:"
         echo "    ./run.sh ${EP_DIR} 10"
@@ -287,7 +283,7 @@ run_stage_10() {
       if [[ ! -f "$_music_plan" ]]; then
         echo "  [8] Generating music review pack…"
         python3 "${code_dir}/music_review_pack.py" \
-          --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" || true
+          --manifest "${EP_DIR}/AssetManifest.${locale}.json" || true
         echo ""
         echo "══════════════════════════════════════════════════════════════"
         echo "  ⏸  PAUSED — Music review required"
@@ -302,11 +298,14 @@ run_stage_10() {
         echo "    ./run.sh ${EP_DIR} 9"
         echo "══════════════════════════════════════════════════════════════"
         exit 0
+      elif [[ -f "$_music_approved" ]]; then
+        echo "  [8] Music already approved — skipping apply_music_plan."
+        echo "      (render_video reads MusicApprovalSnapshot.json directly)"
       else
         echo "  [8] Applying music plan overrides…"
         python3 "${code_dir}/apply_music_plan.py" \
           --plan "$_music_plan" \
-          --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json"
+          --manifest "${EP_DIR}/AssetManifest.${locale}.json"
       fi
     else
       echo "  [8] Music disabled — skipping music review checkpoint"
@@ -322,8 +321,7 @@ run_stage_10() {
       echo "         (using stock media selections from VC editor)"
     fi
     python3 "${code_dir}/resolve_assets.py" \
-      --manifest "${EP_DIR}/AssetManifest_merged.${locale}.json" \
-      --out      "${EP_DIR}/AssetManifest.media.${locale}.json" \
+      --manifest "${EP_DIR}/AssetManifest.${locale}.json" \
       ${_sel_arg}
 
     echo "  [10] Building per-shot render plan…"
@@ -333,14 +331,12 @@ run_stage_10() {
     local _ref_plan="${EP_DIR}/RenderPlan.${_primary}.json"
     if [[ "$locale" != "$_primary" && -f "$_ref_plan" ]]; then
       python3 "${code_dir}/gen_render_plan.py" \
-        --manifest       "${EP_DIR}/AssetManifest_merged.${locale}.json" \
-        --media          "${EP_DIR}/AssetManifest.media.${locale}.json" \
+        --manifest       "${EP_DIR}/AssetManifest.${locale}.json" \
         --story-format   "${STORY_FORMAT:-episodic}" \
         --reference-plan "$_ref_plan"
     else
       python3 "${code_dir}/gen_render_plan.py" \
-        --manifest      "${EP_DIR}/AssetManifest_merged.${locale}.json" \
-        --media         "${EP_DIR}/AssetManifest.media.${locale}.json" \
+        --manifest      "${EP_DIR}/AssetManifest.${locale}.json" \
         --story-format  "${STORY_FORMAT:-episodic}"
     fi
 
@@ -447,19 +443,22 @@ auto_refresh_render_plan() {
     local _loc
     _loc="$(echo "$_arfp_raw" | tr -d ' ')"
     [[ -z "$_loc" ]] && continue
-    local _merged="${EP_DIR}/AssetManifest_merged.${_loc}.json"
-    local _media="${EP_DIR}/AssetManifest.media.${_loc}.json"
-    if [[ -f "$_merged" && -f "$_media" ]]; then
+    local _unified="${EP_DIR}/AssetManifest.${_loc}.json"
+    if [[ -f "$_unified" ]]; then
       # Step 1: re-merge if both draft manifests are available.
       # This clears any stale fields (scene_tails, old duck_intervals, etc.)
       # and applies the latest approved VO timing to vo_items.
-      local _shared="${EP_DIR}/AssetManifest_draft.shared.json"
-      local _locale_draft="${EP_DIR}/AssetManifest_draft.${_loc}.json"
-      if [[ -f "$_shared" && -f "$_locale_draft" ]]; then
-        echo "  [auto] Re-merging AssetManifest_merged.${_loc}.json…"
+      local _shared="${EP_DIR}/AssetManifest.shared.json"
+      if [[ -f "$_shared" && -f "$_unified" ]]; then
+        echo "  [auto] Re-merging AssetManifest.${_loc}.json…"
         python3 "${code_dir}/manifest_merge.py" \
           --shared "$_shared" \
-          --locale "$_locale_draft" || true
+          --locale "$_unified" || true
+        # REQUIRED: manifest_merge does a full rewrite, erasing resolved_assets[].
+        # resolve_assets must run before gen_render_plan.
+        echo "  [auto] Re-resolving assets into AssetManifest.${_loc}.json…"
+        python3 "${code_dir}/resolve_assets.py" \
+          --manifest "$_unified"
       fi
       # Step 2: rebuild RenderPlan from the freshly merged manifest
       echo "  [auto] Re-generating RenderPlan.${_loc}.json…"
@@ -470,8 +469,7 @@ auto_refresh_render_plan() {
       fi
       # shellcheck disable=SC2086
       python3 "${code_dir}/gen_render_plan.py" \
-        --manifest     "$_merged" \
-        --media        "$_media" \
+        --manifest     "$_unified" \
         --story-format "${STORY_FORMAT:-episodic}" \
         ${_ref_arg} || true
       _did_refresh=1
@@ -672,7 +670,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
         else
           echo "    ✓  Media selections: $_sel_file"
         fi
-        echo "    •  AssetManifest_final.*   — asset manifest"
+        echo "    •  AssetManifest.*         — asset manifest"
         echo "    •  RenderPlan.*            — render plan"
         echo ""
         echo "  To render:"
@@ -746,10 +744,10 @@ for N in 1 2 3 4 5 6 7 8 9; do
 
       # ── Stage 3.5 pre-gate: ensure VO preview is approved before ShotList ──
       _s35_primary="${PRIMARY_LOCALE:-en}"
-      _s35_approved="${EP_DIR}/vo_preview_approved.${_s35_primary}.json"
       _s35_script="${EP_DIR}/Script.json"
 
-      if [[ ! -f "$_s35_approved" && -f "$_s35_script" && "${STORY_FORMAT:-}" != "ssml_narration" ]]; then
+      if ! python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${_s35_primary}" && \
+         [[ -f "$_s35_script" && "${STORY_FORMAT:-}" != "ssml_narration" ]]; then
         echo ""
         echo "══════════════════════════════════════════════════════════════"
         echo "  STAGE 3.5  —  VO Preview (primary locale: ${_s35_primary})"
@@ -772,7 +770,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
 
         echo "  [2] Analysing voice timing…"
         python3 "${code_dir}/post_tts_analysis.py" \
-          --manifest "${EP_DIR}/AssetManifest_draft.${_s35_primary}.json" 2>&1 | tee -a "$_s35_log"
+          --manifest "${EP_DIR}/AssetManifest.${_s35_primary}.json" 2>&1 | tee -a "$_s35_log"
         _s35_pta_exit=${PIPESTATUS[0]}
         if [[ "$_s35_pta_exit" -ne 0 ]]; then
           echo ""
@@ -787,14 +785,14 @@ for N in 1 2 3 4 5 6 7 8 9; do
         echo "  Voice-over preview is ready for review:"
         echo "    1. Switch to the 🎙 VO tab"
         echo "    2. Review every line — trim and adjust timing as needed"
-        echo "    3. Click ✓ Approve VO to write:"
-        echo "       vo_preview_approved.${_s35_primary}.json"
+        echo "    3. Click ✓ Approve VO to write vo_approval into:"
+        echo "       AssetManifest.${_s35_primary}.json"
         echo ""
         echo "  Then resume from Stage 4:"
         echo "    ./run.sh ${EP_DIR} 4"
         echo "══════════════════════════════════════════════════════════════"
         exit 0
-      elif [[ -f "$_s35_approved" ]]; then
+      elif python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${_s35_primary}"; then
         echo "  ✓ Stage 3.5 approved — patch_shotlist_durations.py will set duration_sec after Stage 4"
       elif [[ "${STORY_FORMAT:-}" == "ssml_narration" ]]; then
         echo "  ↷  Stage 3.5 skipped (ssml_narration format)"
@@ -828,8 +826,8 @@ for N in 1 2 3 4 5 6 7 8 9; do
           --fix
         # Patch duration_sec from approved VO timings (replaces LLM placeholder 0s)
         _s4_primary="${PRIMARY_LOCALE:-en}"
-        if [[ -f "${EP_DIR}/vo_preview_approved.${_s4_primary}.json" ]]; then
-          echo "  [4] Patching ShotList.json duration_sec from vo_preview_approved.${_s4_primary}.json…"
+        if python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${_s4_primary}"; then
+          echo "  [4] Patching ShotList.json duration_sec from AssetManifest.${_s4_primary}.json…"
           python3 "${code_dir}/patch_shotlist_durations.py" \
             "${EP_DIR}" --locale "${_s4_primary}" || true
         fi
@@ -857,8 +855,8 @@ for N in 1 2 3 4 5 6 7 8 9; do
         fill_and_run "5_c"
         # FIX2: check for residual __FILL__ tokens in output (same-file pattern)
         python3 "${code_dir}/validate_scaffold.py" \
-          --scaffold "${EP_DIR}/AssetManifest_draft.shared.json" \
-          --output   "${EP_DIR}/AssetManifest_draft.shared.json" \
+          --scaffold "${EP_DIR}/AssetManifest.shared.json" \
+          --output   "${EP_DIR}/AssetManifest.shared.json" \
           --warn-only
         # Generate per-locale VO manifests deterministically
         IFS=',' read -ra _s5_locales <<< "${LOCALES:-en}"
@@ -871,32 +869,32 @@ for N in 1 2 3 4 5 6 7 8 9; do
             --shotlist  "${EP_DIR}/ShotList.json" \
             --voice-cast "projects/${PROJECT_SLUG}/VoiceCast.json" \
             --locale    "$_s5_locale" \
-            --out       "${EP_DIR}/AssetManifest_draft.${_s5_locale}.json"
+            --out       "${EP_DIR}/AssetManifest.${_s5_locale}.json"
           # Patch vo_items start_sec/end_sec/duration_sec from approved VO timing.
           # gen_vo_manifest.py only writes estimated_duration_sec; the approved file
           # is the hard truth and must be applied before manifest_merge computes
           # duck_intervals.  Skips gracefully if approval not yet done.
-          if [[ -f "${EP_DIR}/vo_preview_approved.${_s5_locale}.json" ]]; then
-            echo "  [5] Patching VO manifest timing from vo_preview_approved.${_s5_locale}.json…"
+          if python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${_s5_locale}"; then
+            echo "  [5] Patching VO manifest timing from AssetManifest.${_s5_locale}.json…"
             python3 "${code_dir}/patch_vo_draft_timings.py" \
               "${EP_DIR}" --locale "${_s5_locale}" || true
           fi
         done
         # Patch sfx/music/video-search duration fields from authoritative ShotList
-        echo "  [5] Patching AssetManifest_draft.shared.json duration fields from ShotList.json…"
+        echo "  [5] Patching AssetManifest.shared.json duration fields from ShotList.json…"
         python3 "${code_dir}/patch_manifest_durations.py" "${EP_DIR}" || true
       else
         # Episodic / monologue: full LLM (shared + locale manifests)
         fill_and_run "5"
         # Patch vo_items start_sec/end_sec from approved VO timing (episodic path).
-        # The LLM does not read vo_preview_approved, so timing fields are absent.
+        # The LLM does not read AssetManifest vo_approval, so timing fields are absent.
         IFS=',' read -ra _s5ep_locales <<< "${LOCALES:-en}"
         for _s5ep_raw in "${_s5ep_locales[@]}"; do
           _s5ep_locale="$(echo "$_s5ep_raw" | tr -d ' ')"
           [[ -z "$_s5ep_locale" ]] && continue
-          if [[ -f "${EP_DIR}/vo_preview_approved.${_s5ep_locale}.json" && \
-                -f "${EP_DIR}/AssetManifest_draft.${_s5ep_locale}.json" ]]; then
-            echo "  [5] Patching VO manifest timing from vo_preview_approved.${_s5ep_locale}.json…"
+          if python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${_s5ep_locale}" && \
+             [[ -f "${EP_DIR}/AssetManifest.${_s5ep_locale}.json" ]]; then
+            echo "  [5] Patching VO manifest timing from AssetManifest.${_s5ep_locale}.json…"
             python3 "${code_dir}/patch_vo_draft_timings.py" \
               "${EP_DIR}" --locale "${_s5ep_locale}" || true
           fi
@@ -910,7 +908,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
           echo "══════════════════════════════════════════════════════════════"
           echo "  ⏸  PAUSED after Stage 5 — media selections required"
           echo ""
-          echo "  AssetManifest_draft is ready.  Open the VC editor:"
+          echo "  AssetManifest is ready.  Open the VC editor:"
           echo "    1. Go to the 🖼 Media tab"
           echo "    2. Select this episode and click Search Media"
           echo "    3. Choose images/videos for each background"
@@ -934,20 +932,18 @@ for N in 1 2 3 4 5 6 7 8 9; do
     # absent or stale, so Stage 8 should not run.
     if [[ "$N" -eq 8 ]]; then
       _s8_primary="${PRIMARY_LOCALE:-en}"
-      _s8_approved="${EP_DIR}/vo_preview_approved.${_s8_primary}.json"
-      if [[ ! -f "$_s8_approved" ]]; then
+      if ! python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${_s8_primary}"; then
         echo ""
         echo "══════════════════════════════════════════════════════════════"
         echo "  ⛔  Stage 8 gate — VO review not yet approved"
         echo ""
-        echo "  ${_s8_approved}"
-        echo "  not found."
+        echo "  AssetManifest.${_s8_primary}.json has no vo_approval block."
         echo ""
         echo "  Before running Stage 8 (translation):"
         echo "    1. Run stages 0–4 first (Stage 3.5 pauses for VO review)"
         echo "    2. Switch to the 🎙 VO tab and review every line"
-        echo "    3. Click ✓ Approve VO to write:"
-        echo "       vo_preview_approved.${_s8_primary}.json"
+        echo "    3. Click ✓ Approve VO to write vo_approval into:"
+        echo "       AssetManifest.${_s8_primary}.json"
         echo "    4. Then re-run Stage 8"
         echo "══════════════════════════════════════════════════════════════"
         exit 1
@@ -968,7 +964,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
         [[ -z "$_loc" || "$_loc" == "$_hint_primary" ]] && continue
         echo "  [pre-8] Computing locale hints for ${_loc}…"
         python3 "${_hint_code_dir}/prep_locale_hints.py" \
-          --manifest       "${EP_DIR}/AssetManifest_draft.${_hint_primary}.json" \
+          --manifest       "${EP_DIR}/AssetManifest.${_hint_primary}.json" \
           --locale         "${_loc}" \
           --primary-locale "${_hint_primary}" || true
       done
@@ -980,8 +976,8 @@ for N in 1 2 3 4 5 6 7 8 9; do
     # Narration formats do this inside the narration block above (before continue).
     # Episodic / monologue fall through to fill_and_run, so we patch here.
     if [[ "$N" -eq 5 ]]; then
-      if [[ -f "${EP_DIR}/AssetManifest_draft.shared.json" ]]; then
-        echo "  [5] Patching AssetManifest_draft.shared.json duration fields from ShotList.json…"
+      if [[ -f "${EP_DIR}/AssetManifest.shared.json" ]]; then
+        echo "  [5] Patching AssetManifest.shared.json duration fields from ShotList.json…"
         python3 "${code_dir}/patch_manifest_durations.py" "${EP_DIR}" || true
       fi
     fi
@@ -991,8 +987,8 @@ for N in 1 2 3 4 5 6 7 8 9; do
     # Episodic / monologue fall through to fill_and_run, so we patch here.
     if [[ "$N" -eq 4 ]]; then
       _s4ep_primary="${PRIMARY_LOCALE:-en}"
-      if [[ -f "${EP_DIR}/vo_preview_approved.${_s4ep_primary}.json" ]]; then
-        echo "  [4] Patching ShotList.json duration_sec from vo_preview_approved.${_s4ep_primary}.json…"
+      if python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${_s4ep_primary}"; then
+        echo "  [4] Patching ShotList.json duration_sec from AssetManifest.${_s4ep_primary}.json…"
         python3 "${code_dir}/patch_shotlist_durations.py" \
           "${EP_DIR}" --locale "${_s4ep_primary}" || true
       fi
@@ -1008,7 +1004,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
     fi
 
     # ── Hard stop after Stage 5: media selection checkpoint ────────────
-    # Stage 5 produces AssetManifest_draft.  Stage 9 needs
+    # Stage 5 produces AssetManifest.  Stage 9 needs
     # assets/media/selections.json (written by the VC editor Media tab).
     # If the user asked to continue past stage 5 but hasn't selected
     # media yet, pause here so they can do that first.
@@ -1019,7 +1015,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
         echo "══════════════════════════════════════════════════════════════"
         echo "  ⏸  PAUSED after Stage 5 — media selections required"
         echo ""
-        echo "  AssetManifest_draft is ready.  Open the VC editor:"
+        echo "  AssetManifest is ready.  Open the VC editor:"
         echo "    1. Go to the 🖼 Media tab"
         echo "    2. Select this episode and click Search Media"
         echo "    3. Choose images/videos for each background"
@@ -1049,7 +1045,7 @@ for N in 1 2 3 4 5 6 7 8 9; do
       else
         echo "    ✓  Media selections: $_sel_file"
       fi
-      echo "    •  AssetManifest_final.*   — asset manifest"
+      echo "    •  AssetManifest.*         — asset manifest"
       echo "    •  RenderPlan.*            — render plan"
       echo ""
       echo "  To render:"

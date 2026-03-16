@@ -17,7 +17,7 @@
 #
 # Usage:
 #   python gen_music_clip.py \
-#       --manifest projects/slug/episodes/ep/AssetManifest_draft.shared.json
+#       --manifest projects/slug/episodes/ep/AssetManifest.shared.json
 #
 #   python gen_music_clip.py --manifest ...  --resources projects/resources/music/
 #   python gen_music_clip.py --manifest ...  --item-id music-s01-sh02
@@ -273,7 +273,7 @@ def load_manifest(path: Path) -> dict:
 
 
 def locale_from_path(path: Path) -> str:
-    """AssetManifest_draft.zh-Hans.json → zh-Hans; AssetManifest_draft.json → en"""
+    """AssetManifest.zh-Hans.json → zh-Hans; AssetManifest.json → en"""
     parts = path.stem.split(".")
     return parts[-1] if len(parts) > 1 else "en"
 
@@ -288,7 +288,7 @@ def parse_args():
             "workflow:\n"
             "  1. Drop MP3/WAV files into projects/resources/music/\n"
             "  2. python tag_music.py --dir projects/resources/music/\n"
-            "  3. python gen_music_clip.py --manifest AssetManifest_draft.shared.json\n"
+            "  3. python gen_music_clip.py --manifest AssetManifest.shared.json\n"
         ),
     )
     p.add_argument("--manifest", required=True, metavar="PATH",
@@ -344,7 +344,7 @@ def main():
         raise SystemExit(
             f"[ERROR] --manifest has locale_scope='{locale_scope}'. "
             "music_items live in the shared manifest only.\n"
-            "Pass AssetManifest_draft.shared.json instead."
+            "Pass AssetManifest.shared.json instead."
         )
     locale      = locale_from_path(manifest_path)
 

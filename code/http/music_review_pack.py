@@ -12,10 +12,10 @@
 #
 # Usage:
 #   python music_review_pack.py \
-#       --manifest projects/slug/ep/AssetManifest_merged.en.json
+#       --manifest projects/slug/ep/AssetManifest.en.json
 #
 #   python music_review_pack.py \
-#       --manifest projects/slug/ep/AssetManifest_merged.en.json \
+#       --manifest projects/slug/ep/AssetManifest.en.json \
 #       --output   projects/slug/ep/assets/music/MusicReviewPack/
 #
 # Requirements:
@@ -141,29 +141,29 @@ def read_wav_mono_or_stereo(path, target_sr=SAMPLE_RATE):
     return data
 
 
-def build_shot_envelope(n_samples, duck_db, fade_sec, fade_in=True, fade_out=True):
+def build_shot_envelope(n_samples, base_db, fade_sec, fade_in=True, fade_out=True):
     """
     Build a shot-boundary amplitude envelope for music.
 
-    Music holds at a constant level throughout the shot.
+    Holds at base_db level throughout the shot.
     Fades in at the start and/or out at the end only at shot boundaries
     (skipped when the same track continues from the previous/into the next shot).
 
-    duck_db = 0   → hold at base_amp (full music volume, no attenuation)
-    duck_db = -8  → hold 8 dB below base (quieter under dialogue)
+    Ducking under VO is handled separately by the duck_intervals envelope
+    in render_preview_audio — not here.
+
     fade_in/fade_out: False when same track continues across shot boundary.
     """
-    base_amp = 10 ** (BASE_MUSIC_DB / 20.0)
-    hold_amp = base_amp * (10 ** (duck_db / 20.0)) if duck_db != 0 else base_amp
+    base_amp = 10 ** (base_db / 20.0)
 
-    envelope = np.full(n_samples, hold_amp, dtype=np.float64)
+    envelope = np.full(n_samples, base_amp, dtype=np.float64)
     fade_samples = min(int(fade_sec * SAMPLE_RATE), n_samples // 2)
 
     if fade_in and fade_samples > 0:
-        envelope[:fade_samples] = np.linspace(0.0, hold_amp, fade_samples)
+        envelope[:fade_samples] = np.linspace(0.0, base_amp, fade_samples)
 
     if fade_out and fade_samples > 0:
-        envelope[n_samples - fade_samples:] = np.linspace(hold_amp, 0.0, fade_samples)
+        envelope[n_samples - fade_samples:] = np.linspace(base_amp, 0.0, fade_samples)
 
     return envelope
 
@@ -496,9 +496,11 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         fade_sec     = float(entry.get("fade_sec", DEFAULT_FADE_SEC))
         duck_intervals_shot = entry.get("duck_intervals", [])  # shot-relative seconds
 
-        # Build shot-boundary envelope (fade in/out at track boundaries)
+        # Build shot-boundary envelope (fade in/out at track boundaries).
+        # Holds at base_db level — duck_db is applied separately below,
+        # only during VO intervals.
         envelope = build_shot_envelope(
-            len(music_data), duck_db, fade_sec,
+            len(music_data), base_db, fade_sec,
             fade_in=do_fade_in, fade_out=do_fade_out,
         )
 
@@ -641,7 +643,7 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--manifest", required=True, metavar="PATH",
-                   help="Path to AssetManifest_merged.{locale}.json")
+                   help="Path to AssetManifest.{locale}.json")
     p.add_argument("--output", default=None, metavar="DIR",
                    help="Output directory for review pack. "
                         "Default: assets/music/MusicReviewPack/ under the episode.")

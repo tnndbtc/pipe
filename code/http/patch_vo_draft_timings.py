@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# patch_vo_draft_timings.py — Patch AssetManifest_draft vo_items from approved VO
+# patch_vo_draft_timings.py — Patch AssetManifest locale vo_items from approved VO
 # =============================================================================
 #
 # Runs AFTER Stage 5 (gen_vo_manifest.py) and BEFORE Stage 9 (manifest_merge).
@@ -11,16 +11,16 @@
 # are absent from the draft.  manifest_merge.py then computes duck_intervals
 # from missing timing → all duck_intervals are empty.
 #
-# Fix: this script patches each vo_item in AssetManifest_draft.{locale}.json
+# Fix: this script patches each vo_item in AssetManifest.{locale}.json
 # with the exact start_sec, end_sec, and duration_sec from the approved file.
 # The approved file is the single source of truth for all VO timing.
 #
 # Reads:
 #   vo_preview_approved.{locale}.json  — approved item timing (start/end/duration)
-#   AssetManifest_draft.{locale}.json  — draft manifest to patch
+#   AssetManifest.{locale}.json        — locale manifest to patch
 #
 # Writes:
-#   AssetManifest_draft.{locale}.json  — vo_items patched in-place (atomic)
+#   AssetManifest.{locale}.json        — vo_items patched in-place (atomic)
 #
 # =============================================================================
 
@@ -55,10 +55,10 @@ def patch(
     approved_items: dict[str, dict],
 ) -> tuple[int, int, list[str]]:
     """
-    Patch AssetManifest_draft vo_items[] start_sec/end_sec/duration_sec in-place.
+    Patch AssetManifest vo_items[] start_sec/end_sec/duration_sec in-place.
 
     Args:
-        draft:          Parsed AssetManifest_draft (mutated in-place).
+        draft:          Parsed AssetManifest locale manifest (mutated in-place).
         approved_items: {item_id: {start_sec, end_sec, duration_sec, ...}}
                         from vo_preview_approved.{locale}.json.
                         These are episode-wide cumulative timestamps.
@@ -106,7 +106,7 @@ def patch(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Patch AssetManifest_draft.{locale}.json vo_items with approved VO timing.\n"
+            "Patch AssetManifest.{locale}.json vo_items with approved VO timing.\n"
             "Runs after Stage 5 gen_vo_manifest.py, before Stage 9 manifest_merge."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -138,29 +138,36 @@ def main() -> None:
     ep_dir = ep_dir.resolve()
     locale = args.locale
 
-    # ── Load vo_preview_approved ──────────────────────────────────────────────
-    approved_path = ep_dir / f"vo_preview_approved.{locale}.json"
-    if not approved_path.exists():
+    # ── Load timing from AssetManifest (requires vo_approval block) ─────────
+    manifest_path_check = ep_dir / f"AssetManifest.{locale}.json"
+    if not manifest_path_check.exists():
         print(
-            f"[SKIP] vo_preview_approved.{locale}.json not found in {ep_dir}\n"
+            f"[SKIP] AssetManifest.{locale}.json not found in {ep_dir}\n"
             "       No timing patch applied (Stage 3.5 approval not yet done).",
         )
         sys.exit(0)  # non-fatal: patch runs opportunistically
 
-    approved_data  = load_json(approved_path)
-    approved_items = {item["item_id"]: item for item in approved_data.get("items", [])}
-
-    # ── Load AssetManifest_draft ──────────────────────────────────────────────
-    draft_path = ep_dir / f"AssetManifest_draft.{locale}.json"
-    if not draft_path.exists():
+    _manifest_check = load_json(manifest_path_check)
+    if not _manifest_check.get("vo_approval", {}).get("approved_at"):
         print(
-            f"[ERROR] AssetManifest_draft.{locale}.json not found in {ep_dir}\n"
+            f"[SKIP] AssetManifest.{locale}.json has no vo_approval block in {ep_dir}\n"
+            "       No timing patch applied (Stage 3.5 approval not yet done).",
+        )
+        sys.exit(0)  # non-fatal: patch runs opportunistically
+
+    approved_items = {item["item_id"]: item for item in _manifest_check.get("vo_items", [])}
+
+    # ── Load AssetManifest locale manifest ───────────────────────────────────
+    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    if not manifest_path.exists():
+        print(
+            f"[ERROR] AssetManifest.{locale}.json not found in {ep_dir}\n"
             "       Run Stage 5 before calling patch_vo_draft_timings.py.",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    draft = load_json(draft_path)
+    draft = load_json(manifest_path)
 
     # ── Patch ─────────────────────────────────────────────────────────────────
     vo_count = len(draft.get("vo_items", []))
@@ -185,10 +192,10 @@ def main() -> None:
             print(f"    ⚠  {w}")
 
     if args.dry_run:
-        print("\n  [DRY-RUN] AssetManifest_draft NOT written.")
+        print("\n  [DRY-RUN] AssetManifest NOT written.")
     else:
-        save_json(draft, draft_path)
-        print(f"\n  ✓ AssetManifest_draft.{locale}.json updated: {draft_path}")
+        save_json(draft, manifest_path)
+        print(f"\n  ✓ AssetManifest.{locale}.json updated: {manifest_path}")
     print("=" * 60)
 
     if warnings:

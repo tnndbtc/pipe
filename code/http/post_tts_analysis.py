@@ -19,7 +19,7 @@
 #
 # Usage:
 #   python post_tts_analysis.py \
-#       --manifest projects/slug/episodes/ep/AssetManifest_draft.zh-Hans.json
+#       --manifest projects/slug/episodes/ep/AssetManifest.zh-Hans.json
 #
 #   python post_tts_analysis.py --manifest ... --pause 0.2   # tighter pacing
 #   python post_tts_analysis.py --manifest ... --buffer 1.0  # overflow padding
@@ -254,7 +254,8 @@ def main():
     if locale_scope == "shared":
         raise SystemExit(
             "[ERROR] post_tts_analysis.py requires a locale manifest "
-            "(locale_scope='locale'). Shared manifests have no vo_items."
+            "(locale_scope='locale', 'monolithic', or 'merged'). "
+            "Shared manifests have no vo_items."
         )
 
     # Resolve VO directory

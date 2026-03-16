@@ -12,13 +12,13 @@
 # This script makes the WAV-reuse guarantee deterministic by comparing each
 # vo_item.tts_prompt against VoiceCast.json for the same character/locale.
 #
-# Runs AFTER Stage 5 (AssetManifest_draft.{locale}.json produced) and BEFORE
+# Runs AFTER Stage 5 (AssetManifest.{locale}.json produced) and BEFORE
 # gen_tts_cloud.py is called in Stage 9.
 #
 # Called by run.sh in Stage 9 for each locale before gen_tts_cloud.py.
 #
 # Reads:
-#   AssetManifest_draft.{locale}.json   — locale manifest with tts_prompt per item
+#   AssetManifest.{locale}.json         — locale manifest with tts_prompt per item
 #   projects/{slug}/VoiceCast.json      — ground truth TTS params per character/locale
 #
 # Exits 0 if all tts_prompts match VoiceCast.json.
@@ -98,7 +98,7 @@ def compare_tts(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Validate that tts_prompt fields in AssetManifest_draft.{locale}.json\n"
+            "Validate that tts_prompt fields in AssetManifest.{locale}.json\n"
             "match VoiceCast.json for each character/locale.\n"
             "Exits 1 if any field diverges."
         ),
@@ -143,9 +143,9 @@ def main() -> None:
     voicecast = load_json(voicecast_path)
 
     # ── Load locale manifest ──────────────────────────────────────────────────
-    manifest_path = ep_dir / f"AssetManifest_draft.{locale}.json"
+    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
     if not manifest_path.exists():
-        print(f"[WARN] AssetManifest_draft.{locale}.json not found — skipping")
+        print(f"[WARN] AssetManifest.{locale}.json not found — skipping")
         sys.exit(0)
     manifest = load_json(manifest_path)
 

@@ -160,9 +160,9 @@ def parse_args():
             "\n  all            Runs every model above in sequence for comparison."
             "\n\nNext test command (bg-karnak-hypostyle-hall, 4 sec, slow dolly between columns):\n\n"
             "  Option 1 -- ltx-video (lighter, try first on 8 GB):\n"
-            "  python code\\ai\\gen_background_video.py --model ltx-video --manifest ..\\AssetManifest_draft.json --asset-id bg-karnak-hypostyle-hall --output_dir projects\\the-pharaoh-who-defied-death\\episodes\\s01e01\\assets\\en\n\n"
+            "  python code\\ai\\gen_background_video.py --model ltx-video --manifest ..\\AssetManifest.json --asset-id bg-karnak-hypostyle-hall --output_dir projects\\the-pharaoh-who-defied-death\\episodes\\s01e01\\assets\\en\n\n"
             "  Option 2 -- cogvideox-2b at reduced resolution (if ltx-video unavailable):\n"
-            "  python code\\ai\\gen_background_video.py --model cogvideox-2b --manifest ..\\AssetManifest_draft.json --asset-id bg-karnak-hypostyle-hall --output_dir projects\\the-pharaoh-who-defied-death\\episodes\\s01e01\\assets\\en --width 480 --height 320 --num-frames 17"
+            "  python code\\ai\\gen_background_video.py --model cogvideox-2b --manifest ..\\AssetManifest.json --asset-id bg-karnak-hypostyle-hall --output_dir projects\\the-pharaoh-who-defied-death\\episodes\\s01e01\\assets\\en --width 480 --height 320 --num-frames 17"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

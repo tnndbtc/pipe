@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# gen_vo_manifest.py — Generate AssetManifest_draft.{locale}.json (VO only)
+# gen_vo_manifest.py — Generate AssetManifest.{locale}.json (VO only)
 #
 # Deterministically builds the locale manifest (locale_scope="locale") that
 # contains only vo_items[], derived from Script.json + ShotList.json +
@@ -13,7 +13,7 @@
 #       --shotlist   projects/slug/ep/ShotList.json \
 #       --voice-cast projects/slug/VoiceCast.json \
 #       --locale     en \
-#       --out        projects/slug/ep/AssetManifest_draft.en.json
+#       --out        projects/slug/ep/AssetManifest.en.json
 #
 #   # Positional ep_dir — derive Script/ShotList from it, --locale required:
 #   python3 gen_vo_manifest.py projects/slug/ep \
@@ -544,7 +544,7 @@ def build_manifest(
         "episode_id": episode_id,
         "locale": locale,
         "locale_scope": "locale",
-        "shared_ref": "AssetManifest_draft.shared.json",
+        "shared_ref": "AssetManifest.shared.json",
         "shotlist_ref": shotlist_ref,
         "character_packs": [],
         "backgrounds": [],
@@ -569,7 +569,7 @@ def validate_manifest(manifest: dict, schema: dict) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Generate AssetManifest_draft.{locale}.json (VO items) from "
+            "Generate AssetManifest.{locale}.json (VO items) from "
             "Script.json + ShotList.json + VoiceCast.json."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -581,7 +581,7 @@ Examples:
       --shotlist  projects/slug/ep/ShotList.json \\
       --voice-cast projects/slug/VoiceCast.json \\
       --locale    en \\
-      --out       projects/slug/ep/AssetManifest_draft.en.json
+      --out       projects/slug/ep/AssetManifest.en.json
 
   # Positional ep_dir (Script.json and ShotList.json auto-derived)
   python3 gen_vo_manifest.py projects/slug/ep \\
@@ -631,7 +631,7 @@ Examples:
         default=None,
         metavar="PATH",
         help=(
-            "Output path. Defaults to EP_DIR/AssetManifest_draft.{locale}.json "
+            "Output path. Defaults to EP_DIR/AssetManifest.{locale}.json "
             "when EP_DIR is supplied."
         ),
     )
@@ -684,7 +684,7 @@ def resolve_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
     if args.out:
         out_path = Path(args.out).resolve()
     elif ep_dir:
-        out_path = ep_dir / f"AssetManifest_draft.{locale}.json"
+        out_path = ep_dir / f"AssetManifest.{locale}.json"
     else:
         print("[ERROR] Provide --out or a positional EP_DIR.", file=sys.stderr)
         sys.exit(1)
@@ -779,7 +779,7 @@ def main() -> None:
     for sid, count in sorted(speakers.items()):
         print(f"    {sid:30s} {count:3d} line(s)")
     print()
-    print(f"✓ AssetManifest_draft.{locale}.json written ({n} VO items)")
+    print(f"✓ AssetManifest.{locale}.json written ({n} VO items)")
     print(f"  → {out_path}")
 
 

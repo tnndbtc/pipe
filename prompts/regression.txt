@@ -48,14 +48,13 @@ It has four layers:
 │      ├── StoryPrompt.json      (Stage 2)                    │
 │      ├── Script.json           (Stage 3)                    │
 │      ├── ShotList.json         (Stage 4)                    │
-│      ├── AssetManifest_draft.shared.json  (Stage 5)         │
-│      ├── AssetManifest_draft.{locale}.json (Stage 5 / 8)   │
+│      ├── AssetManifest.shared.json  (Stage 5)         │
+│      ├── AssetManifest.{locale}.json (Stage 5 / 8)         │
 │      ├── canon_diff.json       (Stage 6)                    │
 │      ├── assets/media/selections.json  (VC editor Confirm)  │
 │      ├── assets/media/{batch_id}/      (media server state) │
 │      │   └── batch_state.json                                │
-│      ├── AssetManifest_merged.{locale}.json  (Stage 9[2/8]) │
-│      ├── AssetManifest.media.{locale}.json   (Stage 9[5/8]) │
+│      ├── AssetManifest.{locale}.json          (Stage 9[2/8]) │
 │      ├── RenderPlan.{locale}.json            (Stage 9[6/8]) │
 │      └── renders/{locale}/output.mp4         (Stage 9[7/8]) │
 └─────────────────────────────────────────────────────────────┘
@@ -411,8 +410,8 @@ in the Run tab.
 **Model:** sonnet (all paths)
 **Reads:** `{{EPISODE_DIR}}/ShotList.json`, `{{EPISODE_DIR}}/Script.json` (for `cast[].gender`), `projects/{{PROJECT_SLUG}}/VoiceCast.json`, `episode_direction.txt`, `contracts/schemas/AssetManifest.v1.json`
 **Writes:**
-- `{{EPISODE_DIR}}/AssetManifest_draft.shared.json` — locale-free (images, SFX, music)
-- `{{EPISODE_DIR}}/AssetManifest_draft.{locale}.json` — per-locale VO manifests
+- `{{EPISODE_DIR}}/AssetManifest.shared.json` — locale-free (images, SFX, music)
+- `{{EPISODE_DIR}}/AssetManifest.{locale}.json` — per-locale VO manifests
 
 **Validates against:** `contracts/schemas/AssetManifest.v1.json`
 
@@ -430,7 +429,7 @@ music_items: [...]        ← derived from music_item_id in ShotList
 ```
 locale_scope: "locale"
 locale: "en"
-shared_ref: "AssetManifest_draft.shared.json"
+shared_ref: "AssetManifest.shared.json"
 character_packs: []        ← always empty (lives in shared)
 backgrounds: []            ← always empty (lives in shared)
 background_overrides: []   ← always empty at draft time (post_tts_analysis fills this)
@@ -472,10 +471,10 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 **Whisper special case:** when `azure_style = "whispering"`, set `azure_break_ms = 0` (pauses sound robotic in whispers)
 
 **Narration format scaffold+fill path (`gen_manifest_structure.py` → `p_5_c.txt` → `validate_scaffold.py` → `gen_vo_manifest.py`):**
-1. `gen_manifest_structure.py` reads Script.json + ShotList.json, builds `AssetManifest_draft.shared.json` with all deterministic fields pre-filled and 8 creative `__FILL__` fields per background (visual description, search queries, scoring hints, etc.)
+1. `gen_manifest_structure.py` reads Script.json + ShotList.json, builds `AssetManifest.shared.json` with all deterministic fields pre-filled and 8 creative `__FILL__` fields per background (visual description, search queries, scoring hints, etc.)
 2. `fill_and_run "5_c"` sends scaffold to LLM via `p_5_c.txt` — fills visual/search fields in backgrounds[] + sfx_items[] tags, overwrites shared manifest in-place
 3. `validate_scaffold.py --warn-only` checks for residual `__FILL__` tokens and pre-filled drift (warn-only because LLM may legitimately restructure some visual fields)
-4. `gen_vo_manifest.py` runs per-locale: reads Script.json + ShotList.json + VoiceCast.json, produces `AssetManifest_draft.{locale}.json` with fully-built vo_items (azure_voice, azure_style with fallback chain, azure_rate, azure_style_degree)
+4. `gen_vo_manifest.py` runs per-locale: reads Script.json + ShotList.json + VoiceCast.json, produces `AssetManifest.{locale}.json` with fully-built vo_items (azure_voice, azure_style with fallback chain, azure_rate, azure_style_degree)
 
 ---
 
@@ -532,7 +531,7 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 - `{{EPISODE_DIR}}/StoryPrompt.{locale}.json`
 - `{{EPISODE_DIR}}/Script.{locale}.json`
 - `{{EPISODE_DIR}}/ShotList.{locale}.json`
-- `{{EPISODE_DIR}}/AssetManifest_draft.{locale}.json`
+- `{{EPISODE_DIR}}/AssetManifest.{locale}.json`
 - `{{EPISODE_DIR}}/canon_diff.{locale}.json`
 - `projects/{{PROJECT_SLUG}}/canon.{locale}.json`
 
@@ -543,7 +542,7 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 {
   "locale_scope": "locale",
   "locale": "zh-Hans",
-  "shared_ref": "AssetManifest_draft.shared.json",
+  "shared_ref": "AssetManifest.shared.json",
   "character_packs": [],        ← ALWAYS empty
   "backgrounds": [],            ← ALWAYS empty
   "background_overrides": [],   ← ALWAYS empty at draft time
@@ -559,7 +558,7 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 - azure_style fallback chain (in order): angry→shouting→unfriendly→serious→(omit), fearful→terrified→whispering→sad→(omit), cheerful→excited→friendly→hopeful→(omit), etc.
 - For DragonHD voices (whose available_styles are archetype names like "assassin", "captain"): use `VoiceCast.json character[locale].azure_style` when no emotion fallback matches
 - Duration Matching Rule: translated text should take same time to speak as English (±20%)
-- **`item_id` must be copied byte-for-byte from `AssetManifest_draft.en.json`** — Stage 8 produces a brand-new locale manifest but must NOT invent new item IDs. WAV filenames = `{item_id}.wav`; any deviation means TTS writes to a different filename than gen_render_plan.py looks up.
+- **`item_id` must be copied byte-for-byte from `AssetManifest.en.json`** — Stage 8 produces a brand-new locale manifest but must NOT invent new item IDs. WAV filenames = `{item_id}.wav`; any deviation means TTS writes to a different filename than gen_render_plan.py looks up.
 - DO NOT include `start_sec`, `end_sec` in translated vo_items
 - DO NOT translate: `search_prompt`, `ai_prompt`, `motion.description`, any `*_id` field
 
@@ -568,7 +567,7 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 ### p_9.txt — SUPERSEDED (replaced by gen_render_plan.py in Stage 9)
 **File:** `prompts/p_9.txt` — still present on disk but NOT invoked by the current pipeline.
 **NOTE:** `gen_render_plan.py` (Stage 9[6/8]) does the same job deterministically without LLM calls.
-`p_9.txt` referenced the old single-locale `AssetManifest.media.json` path — incompatible with
+`p_9.txt` referenced the old single-locale gate file — incompatible with
 current multi-locale manifest structure. Do NOT re-enable p_9.txt in run.sh.
 
 ---
@@ -604,7 +603,7 @@ Web UI [11] = run.sh [7/8]  render_video          (per locale)
 
 **Sub-step [1/8] — gen_music_clip.py** (locale-free, runs once)
 ```
-Input:  projects/{slug}/episodes/{ep_id}/AssetManifest_draft.shared.json
+Input:  projects/{slug}/episodes/{ep_id}/AssetManifest.shared.json
 Output: projects/{slug}/episodes/{ep_id}/assets/music/{item_id}.wav
         (one clip per music_items[] entry in the shared manifest)
 ```
@@ -627,9 +626,9 @@ Output: projects/{slug}/episodes/{ep_id}/assets/music/music_loop_candidates.json
 
 **Sub-step [2/8] — manifest_merge.py** (per locale)
 ```
-Input:  --shared  AssetManifest_draft.shared.json
-        --locale  AssetManifest_draft.{locale}.json
-Output: AssetManifest_merged.{locale}.json  (locale_scope: "merged")
+Input:  --shared  AssetManifest.shared.json
+        --locale  AssetManifest.{locale}.json
+Output: AssetManifest.{locale}.json  (locale_scope: "merged")
 ```
 - Merges shared + locale manifest into single resolved view
 - Computes `duck_intervals` per shot from VO `start_sec`/`end_sec` + `music.fade_sec`
@@ -638,7 +637,7 @@ Output: AssetManifest_merged.{locale}.json  (locale_scope: "merged")
 
 **Sub-step [3/8] — gen_tts_cloud.py** (per locale)
 ```
-Input:  AssetManifest_merged.{locale}.json  (reads vo_items[].tts_prompt)
+Input:  AssetManifest.{locale}.json  (reads vo_items[].tts_prompt)
 Output: assets/{locale}/audio/vo/{item_id}.wav
         assets/{locale}/audio/vo/licenses/{item_id}.license.json
         assets/meta/gen_tts_cloud_results.json
@@ -678,11 +677,11 @@ Output: assets/{locale}/audio/vo/{item_id}.wav
 
 **Sub-step [3b/8] — polish_locale_vo.py** (per non-en locale only)
 ```
-Input:  AssetManifest_merged.{locale}.json
+Input:  AssetManifest.{locale}.json
         assets/{locale}/audio/vo/{item_id}.wav  (zh WAVs just synthesized)
         assets/en/audio/vo/{item_id}.wav         (EN reference WAVs)
-Output: AssetManifest_merged.{locale}.json   (patched with rewritten text)
-        AssetManifest_draft.{locale}.json    (patched in sync)
+Output: AssetManifest.{locale}.json   (patched with rewritten text)
+        AssetManifest.{locale}.json          (patched in sync — same file; draft no longer separate)
         vo_alignment.{locale}.json           (per-item before/after ratios)
         prompts/tts_calibration.{locale}.json (chars/sec history, ≤20 entries)
 ```
@@ -700,9 +699,9 @@ Output: AssetManifest_merged.{locale}.json   (patched with rewritten text)
 
 **Sub-step [4/8] — post_tts_analysis.py** (per locale)
 ```
-Input:  AssetManifest_draft.{locale}.json  (mutates IN PLACE)
+Input:  AssetManifest.{locale}.json  (mutates IN PLACE)
         assets/{locale}/audio/vo/{item_id}.wav  (measures duration)
-Output: AssetManifest_draft.{locale}.json  (adds start_sec, end_sec to vo_items[])
+Output: AssetManifest.{locale}.json  (adds start_sec, end_sec to vo_items[])
         Also writes background_overrides[] for overflow shots
 ```
 - Measures actual WAV durations with soundfile
@@ -742,9 +741,9 @@ Output: assets/music/{item_id}_loop.wav  (looped clips to cover shot duration)
 
 **Sub-step [5/8] — resolve_assets.py** (per locale)
 ```
-Input:  AssetManifest_merged.{locale}.json
+Input:  AssetManifest.{locale}.json
         assets/media/selections.json  (optional — from VC editor Media tab)
-Output: AssetManifest.media.{locale}.json
+Output: AssetManifest.{locale}.json  (resolved_assets[] section populated in-place)
 ```
 - run.sh auto-detects `selections.json` and passes `--selections <path>` if it exists
 - When selections are present, maps stock media URLs/paths to background asset_ids
@@ -761,15 +760,14 @@ Output: AssetManifest.media.{locale}.json
 
 **Sub-step [6/8] — gen_render_plan.py** (per locale)
 ```
-Input:  --manifest  AssetManifest_merged.{locale}.json
-        --media     AssetManifest.media.{locale}.json
-Output: AssetManifest_final.{locale}.json
+Input:  --manifest  AssetManifest.{locale}.json
+Output: AssetManifest.{locale}.json  (render_plan{} section populated in-place)
         RenderPlan.{locale}.json
 ```
 - Deterministic replacement for p_9.txt LLM stage
 - VO `timeline_in_ms`/`timeline_out_ms` come from measured `start_sec`/`end_sec` (NOT evenly distributed)
 - `duration_ms` respects `background_overrides` for overflow shots
-- `timing_lock_hash` comes from `AssetManifest_merged` (locale-adjusted)
+- `timing_lock_hash` comes from `AssetManifest.{locale}.json` (locale-adjusted)
 - Passes `duck_intervals`/`duck_db`/`fade_sec`/`base_db` into each shot's music entry;
   `base_db` is read from the music_item (written by apply_music_plan.py); falls back to
   `BASE_MUSIC_DB` (−6.0) if absent. Without this threading, `base_db` written by
@@ -1022,7 +1020,7 @@ API endpoints: `GET /list_projects`, `GET /pipeline_status`
 **Step 2 — User clicks 🔍 Search Media**
 - JS: `mediaStartSearch()` → `POST /api/media_batch` with `{slug, ep_id, server_url}`
 - VC editor proxy:
-  1. Reads `AssetManifest_draft.shared.json` for the selected episode
+  1. Reads `AssetManifest.shared.json` for the selected episode
   2. Injects `MEDIA_API_KEY` from `os.environ` into `X-Api-Key` header
   3. Forwards full manifest as `POST /batches` to the media server
 - Media server:
@@ -1205,7 +1203,7 @@ _AI_SERVER_KEY = os.environ.get("AI_SERVER_KEY", "")
 ### Step-by-step flow
 
 **Step 1 — User opens SFX tab, selects episode**
-- JS: `_sfxInit()` loads `sfx_items[]` from `AssetManifest_draft.shared.json`
+- JS: `_sfxInit()` loads `sfx_items[]` from `AssetManifest.shared.json`
 - Calls `_sfxLoadAll()` to search all items
 - Restores `_sfxSelected` from `localStorage` and in-flight AI jobs
 
@@ -1369,7 +1367,7 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/api/media_batches` | `slug`, `ep_id`, `server_url` | Proxied list of batches from media server |
 | `/api/media_batch_status` | `batch_id`, `server_url` | Proxied batch status/results from media server |
 | `/api/serve_media_file` | `url` | Binary file content — proxies `file://` URIs for NFS media (browsers block file:// from http:// pages) |
-| `/api/vo_locales` | `ep_dir` | `{locales: ["en", "zh-Hans", ...]}` — scans ep_dir for `AssetManifest_merged.*.json` files |
+| `/api/vo_locales` | `ep_dir` | `{locales: ["en", "zh-Hans", ...]}` — scans ep_dir for `AssetManifest.*.json` files (locale_scope: "merged") |
 | `/api/vo_items` | `ep_dir`, `locale` | `{items: [...]}` — returns `vo_items` from merged manifest, each annotated with `duration_sec` from WAV on disk |
 | `/api/sfx_search` | `slug`, `ep_id`, `item_id` | `{item_id, candidates:[{preview_url, duration_sec, title, tags, license_summary, attribution, author, rating, downloads, waveform_img, source_site, source_id, asset_page_url}]}` — searches Freesound + Openverse audio |
 | `/api/sfx_search_all` | `slug`, `ep_id` | `{item_id: {candidates[]}, ...}` — searches all sfx_items (≤3 concurrent workers) |
@@ -1386,7 +1384,7 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
 | `/api/create_episode` | `{slug, ep_id, story, title, genre, story_format, locales, no_music}` | `{ok, ep_dir, slug, ep_id}` |
 | `/save_voice_cast` | `{slug, voice_cast_json}` | `{ok}` |
 | `/api/append_status_report` | `{slug, ep_id, text}` | `{ok}` — appends timestamped entry to `status_report.txt` |
-| `/api/media_batch` | `{slug, ep_id, server_url}` | `{batch_id, poll_url}` — reads AssetManifest_draft.shared.json, forwards to media server |
+| `/api/media_batch` | `{slug, ep_id, server_url}` | `{batch_id, poll_url}` — reads AssetManifest.shared.json, forwards to media server |
 | `/api/media_confirm` | `{slug, ep_id, batch_id, version, selections}` | `{ok, path, n}` — writes selections.json (version: 1=single, 2=per-shot, 3=multi-segment per shot) |
 | `/api/episode_file` | `?slug=X&ep_id=Y&file=ShotList.json` | raw JSON — whitelisted: ShotList.json, selections.json |
 | `/api/retune_vo` | `{slug, ep_id, locale, dry_run, backup, items:[{item_id, text?, azure_style?, azure_rate?, azure_pitch?, azure_style_degree?, azure_break_ms?}]}` | `{results:[{item_id, status, before_duration_sec, after_duration_sec, duration_delta_sec, duration_warn, wav_path, error}]}` |
@@ -1412,7 +1410,7 @@ All endpoints implemented in `code/http/test_server.py`. Server runs on `localho
   `render_output.json`), merged manifest, media manifest, and render plan. Shared assets are
   untouched.
 - **All-locale purge** (`locale=""`, from `/run_stage10`): discovers all locales from
-  `AssetManifest_draft.*.json` filenames, purges each locale as above, PLUS deletes shared music
+  `AssetManifest.*.json` (locale_scope: "locale") filenames, purges each locale as above, PLUS deletes shared music
   WAVs, shared background/character images, and `assets/meta/gen_tts_cloud_results.json`.
 - After purge, `force_run = True` is set for that invocation, bypassing all "already done"
   checkpoint skips for every step in the loop.
@@ -1475,9 +1473,9 @@ ShotList.shots[].audio_intent.music_item_id = "music-{shot_id}" | null
 **VO completeness guard (gen_render_plan.py):** If a vo_item exists in the merged manifest with a valid `shot_id` but is absent from the ShotList's `vo_item_ids`, gen_render_plan.py auto-injects it into the correct shot and prints `[VO-INJECT]`. This is a safety net — Stage 4's VO count validation should prevent the gap from occurring in the first place.
 
 ### 4. Manifest split invariant
-- `AssetManifest_draft.shared.json`: `locale_scope: "shared"`, contains character_packs, backgrounds, sfx_items, music_items; `vo_items: []` (always empty)
-- `AssetManifest_draft.{locale}.json`: `locale_scope: "locale"`, contains ONLY vo_items; NO character_packs/backgrounds/sfx_items/music_items
-- `AssetManifest_merged.{locale}.json`: `locale_scope: "merged"`, contains ALL sections merged by manifest_merge.py
+- `AssetManifest.shared.json`: `locale_scope: "shared"`, contains character_packs, backgrounds, sfx_items, music_items; `vo_items: []` (always empty)
+- `AssetManifest.{locale}.json` (locale draft): `locale_scope: "locale"`, contains ONLY vo_items; NO character_packs/backgrounds/sfx_items/music_items
+- `AssetManifest.{locale}.json`: `locale_scope: "merged"`, contains ALL sections merged by manifest_merge.py; `resolved_assets: []` and `render_plan: null` written initially, then populated in-place by resolve_assets and gen_render_plan respectively
 
 ### 5. post_tts_analysis writes; no LLM writes
 - `start_sec` and `end_sec` on `vo_items[]` are ONLY written by `post_tts_analysis.py`
@@ -1505,8 +1503,8 @@ Must NOT be reordered:
 [3]  gen_tts_cloud              → writes assets/{locale}/audio/vo/*.wav
 [3b] polish_locale_vo (non-en) → rewrites zh lines outside [0.90,1.10]; re-synthesizes; updates manifests
 [4]  post_tts_analysis          → mutates locale manifest: adds start_sec/end_sec; writes background_overrides
-[5]  resolve_assets             → reads merged manifest + selections.json → AssetManifest.media.{locale}.json
-[6]  gen_render_plan            → reads merged + media → AssetManifest_final + RenderPlan
+[5]  resolve_assets             → reads AssetManifest.{locale}.json + selections.json → populates resolved_assets[] section in-place
+[6]  gen_render_plan            → reads AssetManifest.{locale}.json → populates render_plan{} section in-place + writes RenderPlan.{locale}.json
 [7]  render_video               → reads RenderPlan → output.mp4
 [8]  export_youtube_dubbed      → reads output.mp4 → youtube_dubbed.aac (skipped for en)
 ```
@@ -1582,7 +1580,7 @@ assets/sfx/{item_id}_ai_{unix_ms}.wav  ← AI-generated sound
 - AI asset_id format: `f"{item_id}-{int(time.time()*1000)}"` — NEVER `ts_ms[:8]` (integer has no slice)
 
 ### 18. Atomic manifest write for SFX and media
-All write paths that patch `AssetManifest_draft.shared.json` (SFX) or `AssetManifest_draft.{locale}.json` (media) MUST use a file lock:
+All write paths that patch `AssetManifest.shared.json` (SFX) or `AssetManifest.{locale}.json` (media) MUST use a file lock:
 ```python
 with portalocker.Lock(manifest_path + ".lock", timeout=10):
     manifest = json.loads(manifest_path.read_text())
@@ -1645,7 +1643,7 @@ All schemas in `contracts/schemas/`. Claude validates artifacts using `python -c
 | `AssetManifest.v1.json` | Stage 5, 8 | schema_id, schema_version, manifest_id, project_id, episode_id, locale_scope; backgrounds[]: 9 new optional properties (scoring_hints, search_queries, cinematic_role, motion_level, lighting, include_keywords, exclude_keywords, continuity_hints, source_filters) |
 | `CanonDiff.v1.json` | Stage 6 | episode, added_characters[], updated_states[], new_world_facts[], new_unresolved_threads[], resolved_threads[] |
 | `Canon.v1.json` | Stage 7 | project_id, characters{}, world_facts[], unresolved_threads[], episode_summaries[] |
-| `AssetManifest_final.v1.json` | gen_render_plan | schema_id, schema_version, manifest_id, project_id, shotlist_ref, items[] |
+| `AssetManifest.v1.json` | gen_render_plan | schema_id, schema_version, manifest_id, project_id, shotlist_ref, resolved_assets[], render_plan{} |
 | `RenderPlan.v1.json` | gen_render_plan | schema_id, schema_version, plan_id, project_id, timing_lock_hash, profile, shots[] |
 
 ---
@@ -1749,7 +1747,7 @@ Run through the relevant items after any modification:
 - [ ] `/api/infer_story_meta` SSML pre-check: regex `<(?:speak|voice|prosody|mstts:)\b` on first 2000 chars → returns `story_format: "ssml_narration"` without haiku call; `else:` branch runs normal haiku extraction
 
 ### After modifying any Stage 9 Python script
-- [ ] CLI arg names unchanged (`--manifest`, `--shared`, `--locale`, `--media`, `--plan`, `--out`, etc.)
+- [ ] CLI arg names unchanged (`--manifest`, `--shared`, `--locale`, `--plan`, `--out`, etc.); `--media` and `--out-final` have been removed from gen_render_plan
 - [ ] Output file paths still match what the next script reads as input
 - [ ] `_build_step_cmd()` in `test_server.py` references correct script name and args
 - [ ] `run_stage_10()` in `run.sh` still calls script with correct args
@@ -1883,10 +1881,10 @@ Run through the relevant items after any modification:
 - [ ] Exactly one of `item_ids` / `scene` accepted; both supplied → `ValueError`; neither → `ValueError`
 - [ ] `validate_patches()` rejects blocked fields: `azure_voice`, `speaker_id`, `item_id`, `start_sec`, `end_sec`, `duration_sec`
 - [ ] Empty `patches` dict is valid (zero-patch re-synthesis) — must NOT be rejected
-- [ ] Per-item loop order: snapshot → patch _merged + _draft (atomic) → resynth → commit-or-revert. Never patch-all-then-synthesize-all.
+- [ ] Per-item loop order: snapshot → patch AssetManifest.{locale}.json (atomic) → resynth → commit-or-revert. Never patch-all-then-synthesize-all.
 - [ ] Manifest/WAV consistency invariant: on synthesis failure, manifest fields are restored from snapshot (atomic write) before continuing to next item
 - [ ] `_write_manifest_atomic()` writes to `{path}.tmp` then `os.replace()` — never writes directly to final path
-- [ ] Both manifests patched: `AssetManifest_merged.{locale}.json` (immediate use) AND `AssetManifest_draft.{locale}.json` (survives Stage 9 re-run)
+- [ ] Manifest patched: `AssetManifest.{locale}.json` (source of truth — locale draft is now a single file; no separate `_draft` file to sync)
 - [ ] Manifest backups use timestamp suffix `{path}.bak.{YYYYMMDD_HHMMSS}` — never overwritten
 - [ ] WAV backups use timestamp suffix `{wav}.bak.{YYYYMMDD_HHMMSS}` when `backup=True`
 - [ ] `retune_vo_log.jsonl` always appended (never truncated); `status` is `ok/partial/error`
@@ -2144,7 +2142,7 @@ Run through the relevant items after any modification:
     client gets the full log replayed. Do NOT revert to the try/finally proc.terminate() pattern.
 
 29. **`gen_music_clip.py` failure is non-fatal (run.sh `|| true`)**
-    Stage 9[1/8] calls `gen_music_clip.py --manifest AssetManifest_draft.shared.json`. Projects
+    Stage 9[1/8] calls `gen_music_clip.py --manifest AssetManifest.shared.json`. Projects
     without a shared manifest (e.g. documentaries that never reached Stage 5) would cause `sys.exit(1)`
     inside gen_music_clip.py, aborting the entire Stage 9 run before any TTS work began.
     `run.sh` now appends `|| true` to this call — the same treatment already applied to
@@ -2165,15 +2163,13 @@ Run through the relevant items after any modification:
     but WAV is still old), which causes downstream render to play wrong audio.
     Do NOT refactor into two separate passes (patch-all, then synthesize-all).
 
-31. **VO Retune: both manifests patched, for different reasons**
-    `retune_vo.py` and `/api/retune_vo` both patch `_merged` AND `_draft`:
-    - `_merged` patch → enables immediate re-synthesis without a Stage 9 re-run
-      (gen_tts_cloud.py reads from `_merged` at synthesis time)
-    - `_draft` patch → survives any future Stage 9 re-run
-      (Stage 9[2/8] `manifest_merge.py` unconditionally re-creates `_merged` from `_draft`)
-    If only `_merged` is patched: retune works immediately but the next Stage 9 run
-    overwrites the patch. If only `_draft` is patched: retune is durable but a Stage 9
-    re-run is required to pick it up. Patching both gives both properties.
+31. **VO Retune: locale manifest patched in place**
+    `retune_vo.py` and `/api/retune_vo` patch `AssetManifest.{locale}.json` directly.
+    This file is both the immediate input to gen_tts_cloud.py and the durable source of
+    truth for future Stage 9 re-runs. Because there is no separate locale draft file,
+    exists as a separate file, manifest_merge.py reads from `AssetManifest.{locale}.json`
+    (locale-scoped) to produce the merged view. Patching in place is sufficient for both
+    immediate re-synthesis and durability across Stage 9 re-runs.
 
 32. **VO Retune: duration drift is a user responsibility in v1**
     After retune, `start_sec`/`end_sec` in the manifest are NOT updated (they are read-only
@@ -2433,7 +2429,7 @@ Run through the relevant items after any modification:
     - `file_url` is used ONLY by `_ensure_hires()` in resolve_assets.py at render time
 
     ### resolve_assets.py — _ensure_hires()
-    Called for every selected asset before the file:// URI is written to AssetManifest.media.
+    Called for every selected asset before the file:// URI is written to the resolved_assets[] section of AssetManifest.{locale}.json.
 
     Behaviour in order:
       1. No sidecar → log warning, return preview path
@@ -2487,7 +2483,7 @@ Run through the relevant items after any modification:
 Source: search.txt (fully implemented design document).
 
 ### Pipeline flow
-`AssetManifest_draft.shared.json` backgrounds[] → POST /batches (media server port 8200) →
+`AssetManifest.shared.json` backgrounds[] → POST /batches (media server port 8200) →
 downloader.py fetches from Pexels + Pixabay → scorer.py ranks → results stored in batch_state.json.
 
 Each background item carries: `search_prompt`, `search_queries` (4 queries), `ai_prompt`,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# render_video.py — Produce output.mp4 from RenderPlan + AssetManifest.media
+# render_video.py — Produce output.mp4 from RenderPlan + AssetManifest.{locale}.json
 # =============================================================================
 #
 # Reads RenderPlan.{locale}.json and resolves each shot into an MKV

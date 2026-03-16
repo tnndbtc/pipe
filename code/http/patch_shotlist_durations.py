@@ -8,7 +8,7 @@
 #
 # Reads:
 #   vo_preview_approved.{locale}.json  — approved item timing (end_sec per item)
-#   AssetManifest_draft.{locale}.json  — pause_after_ms per item  (optional)
+#   AssetManifest.{locale}.json        — pause_after_ms per item  (optional)
 #   ShotList.json                      — shot groupings (audio_intent.vo_item_ids)
 #
 # Writes:
@@ -97,7 +97,7 @@ def patch(
         approved_items: {item_id: {start_sec, end_sec, ...}} from vo_preview_approved.
                         start_sec/end_sec are episode-wide cumulative and include
                         scene tails (computed by voApproveTTS on the client).
-        manifest_pause: {item_id: pause_after_ms} from AssetManifest_draft.
+        manifest_pause: {item_id: pause_after_ms} from AssetManifest.
                         Used for ALL shots — pause_sec is always added to shot_vo_span
                         on top of tail_sec.  For the last shot it also determines
                         tail_sec (= SCENE_TAIL_SEC, pause stacks on top).
@@ -235,36 +235,36 @@ def main() -> None:
     ep_dir = ep_dir.resolve()
     locale = args.locale
 
-    # ── Load vo_preview_approved ──────────────────────────────────────────────
-    approved_path = ep_dir / f"vo_preview_approved.{locale}.json"
-    if not approved_path.exists():
+    # ── Load timing from AssetManifest (requires vo_approval block) ─────────
+    manifest_path_check = ep_dir / f"AssetManifest.{locale}.json"
+    if not manifest_path_check.exists():
         print(
-            f"[ERROR] vo_preview_approved.{locale}.json not found in {ep_dir}\n"
+            f"[ERROR] AssetManifest.{locale}.json not found in {ep_dir}\n"
             "       Stage 3.5 approval is required before Stage 4 runs.",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    approved_data  = load_json(approved_path)
-    approved_items = {item["item_id"]: item for item in approved_data.get("items", [])}
-
-    # ── Load AssetManifest_draft for pause_after_ms (optional) ───────────────
-    manifest_pause: dict[str, int] = {}
-    manifest_path = ep_dir / f"AssetManifest_draft.{locale}.json"
-    if manifest_path.exists():
-        try:
-            mani = load_json(manifest_path)
-            for v in mani.get("vo_items", []):
-                iid = v.get("item_id")
-                if iid and "pause_after_ms" in v:
-                    manifest_pause[iid] = int(v["pause_after_ms"])
-        except Exception as exc:
-            print(f"[WARN] Could not read pause_after_ms from manifest: {exc}")
-    else:
+    _manifest_check = load_json(manifest_path_check)
+    if not _manifest_check.get("vo_approval", {}).get("approved_at"):
         print(
-            f"[WARN] AssetManifest_draft.{locale}.json not found — "
-            f"using default {DEFAULT_PAUSE_MS} ms inter-item pause for all shots."
+            f"[ERROR] AssetManifest.{locale}.json has no vo_approval block in {ep_dir}\n"
+            "       Stage 3.5 approval is required before Stage 4 runs.",
+            file=sys.stderr,
         )
+        sys.exit(1)
+
+    approved_items = {item["item_id"]: item for item in _manifest_check.get("vo_items", [])}
+
+    # ── Load pause_after_ms from the already-loaded AssetManifest ────────────
+    manifest_pause: dict[str, int] = {}
+    try:
+        for v in _manifest_check.get("vo_items", []):
+            iid = v.get("item_id")
+            if iid and "pause_after_ms" in v:
+                manifest_pause[iid] = int(v["pause_after_ms"])
+    except Exception as exc:
+        print(f"[WARN] Could not read pause_after_ms from manifest: {exc}")
 
     # ── Load ShotList ─────────────────────────────────────────────────────────
     shotlist_path = ep_dir / "ShotList.json"

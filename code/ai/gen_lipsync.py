@@ -123,9 +123,9 @@ def parse_args():
             "    # Place checkpoint at: Wav2Lip/checkpoints/wav2lip_gan.pth\n"
             "    # (download link in the Wav2Lip repo README)\n"
             "    pip install -r Wav2Lip/requirements.txt\n"
-            "    python gen_lipsync.py --manifest ..\\AssetManifest_draft.json --wav2lip_dir Wav2Lip\n\n"
+            "    python gen_lipsync.py --manifest ..\\AssetManifest.json --wav2lip_dir Wav2Lip\n\n"
             "  Quick test (ffmpeg passthrough, no Wav2Lip needed):\n"
-            "    python gen_lipsync.py --manifest ..\\AssetManifest_draft.json\n\n"
+            "    python gen_lipsync.py --manifest ..\\AssetManifest.json\n\n"
             "  UPGRADE: LatentSync 1.5 requires RTX 4080 16 GB+.\n"
             "  This script has no --model flag; Wav2Lip is the only supported model."
         ),
@@ -190,7 +190,7 @@ def load_from_manifest(manifest_path: str, asset_id_filter, anim_variant: str, t
 # Helpers
 # ---------------------------------------------------------------------------
 def locale_from_manifest_path(path: str) -> str:
-    """'AssetManifest_draft.zh-Hans.json' -> 'zh-Hans', 'AssetManifest_draft.json' -> 'en'"""
+    """'AssetManifest.zh-Hans.json' -> 'zh-Hans', 'AssetManifest.json' -> 'en'"""
     stem = Path(path).stem
     parts = stem.split('.')
     return parts[-1] if len(parts) > 1 else 'en'

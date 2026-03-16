@@ -9,7 +9,7 @@ Mirrors gen_tts_cloud.py conventions:
   • Derives output path from manifest["project_id"] / manifest["episode_id"]
 
 Usage:
-  python3 fetch_ai_assets.py --manifest /path/to/AssetManifest_draft.shared.json \\
+  python3 fetch_ai_assets.py --manifest /path/to/AssetManifest.shared.json \\
                               --asset_type characters
   python3 fetch_ai_assets.py --manifest ... --asset_type sfx
   python3 fetch_ai_assets.py --manifest ... --asset_type characters \\
@@ -135,13 +135,13 @@ def _get_bytes(path: str) -> bytes:
 def load_manifest(manifest_path: str) -> dict:
     """Load manifest JSON, with fallback for older episode naming.
 
-    If AssetManifest_draft.shared.json is requested but absent, falls back to
-    AssetManifest_draft.json (produced by older Stage 5 before the shared/locale
+    If AssetManifest.shared.json is requested but absent, falls back to
+    AssetManifest.json (produced by older Stage 5 before the shared/locale
     split was introduced).
     """
     p = Path(manifest_path)
-    if not p.exists() and p.name == "AssetManifest_draft.shared.json":
-        fallback = p.parent / "AssetManifest_draft.json"
+    if not p.exists() and p.name == "AssetManifest.shared.json":
+        fallback = p.parent / "AssetManifest.json"
         if fallback.exists():
             print(f"[WARN] {p.name} not found; using fallback {fallback.name}")
             p = fallback
@@ -253,7 +253,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--manifest", required=True,
-        help="Path to AssetManifest_draft.shared.json (or base draft).",
+        help="Path to AssetManifest.shared.json (or base draft).",
     )
     parser.add_argument(
         "--asset_type", required=True,

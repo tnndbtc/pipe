@@ -20,11 +20,11 @@ canon.json.  Write no source code.  Write JSON files directly to disk.
   [2]  Produce StoryPrompt.json
   [3]  Produce Script.json
   [4]  Produce ShotList.json
-  [5]  Produce AssetManifest_draft.shared.json + AssetManifest_draft.en.json
+  [5]  Produce AssetManifest.shared.json + AssetManifest.en.json
   [6]  Write canon_diff.json
   [7]  Update canon.json
   [8]  Produce locale variants  (one pass per non-en locale)
-  [9]  AssetManifest_final.json + RenderPlan.json  ← conditional
+  [9]  AssetManifest.{locale}.json (render_plan{} section) + RenderPlan.json  ← conditional
 ══════════════════════════════════════════════════════════════
 ```
 
@@ -198,7 +198,7 @@ Each shot must have:
 background_id: set to the bg_id of the background for this shot's location.
   You know all scene locations while writing the ShotList, so assign
   background_ids now — before the manifest exists. The bg_id is the slug
-  you will use as the "bg_id" key in AssetManifest_draft.backgrounds[] in
+  you will use as the "bg_id" key in AssetManifest.shared.backgrounds[] in
   Step 5. Format: "bg-<location-slug>"  (e.g. "bg-karnak-inner-sanctuary").
   Multiple scenes may share the same background_id (e.g. archives used in
   both s02 and s05).
@@ -245,7 +245,7 @@ Produce TWO files:
 
 ### File 1 — Shared manifest (locale-free assets)
 
-Write to: <episode_dir>/AssetManifest_draft.shared.json
+Write to: <episode_dir>/AssetManifest.shared.json
 
 Required top-level fields:
   schema_id       : "AssetManifest"
@@ -282,7 +282,7 @@ music_items[] — one entry per shot with non-null music_item_id:
 
 ### File 2 — Locale manifest (English VO only)
 
-Write to: <episode_dir>/AssetManifest_draft.en.json
+Write to: <episode_dir>/AssetManifest.en.json
 
 Required top-level fields:
   schema_id        : "AssetManifest"
@@ -291,7 +291,7 @@ Required top-level fields:
   project_id, episode_id, shotlist_ref : "ShotList.json"
   locale           : "en"
   locale_scope     : "locale"
-  shared_ref       : "AssetManifest_draft.shared.json"
+  shared_ref       : "AssetManifest.shared.json"
   character_packs  : []
   backgrounds      : []
   background_overrides : []   ← always empty at draft time
@@ -380,16 +380,16 @@ For each locale in {{LOCALES}} other than "en":
     ShotList    : shots[].emotional_tag, shots[].environment_notes, shots[].action_beat,
                   shots[].audio_intent.vo_text, shots[].audio_intent.music_mood
     AssetManifest : produce a NEW locale manifest (do NOT copy the shared manifest):
-                    Write to <episode_dir>/AssetManifest_draft.<locale>.json
+                    Write to <episode_dir>/AssetManifest.<locale>.json
                     Required top-level fields:
                       schema_id, schema_version: "1.0.0",
                       manifest_id: "<project_id>-<episode_id>-<locale>-manifest"
                       project_id, episode_id, shotlist_ref
                       locale: "<locale>"
                       locale_scope: "locale"
-                      shared_ref: "AssetManifest_draft.shared.json"
+                      shared_ref: "AssetManifest.shared.json"
                       character_packs: [], backgrounds: [], background_overrides: []
-                    vo_items[]: copy from AssetManifest_draft.en.json, then:
+                    vo_items[]: copy from AssetManifest.en.json, then:
                       ── Translate text to the target locale
                       ── Set tts_prompt.locale to target locale (e.g. "zh-Hans")
                       ── Replace ALL azure_* fields from VoiceCast.json character[<locale>]
@@ -416,32 +416,29 @@ For each locale in {{LOCALES}} other than "en":
 
 ---
 
-## Step 9 — Produce AssetManifest_final.json and RenderPlan.json
+## Step 9 — Populate render_plan{} in AssetManifest.{locale}.json and write RenderPlan.json
 
-**Print:** `▶ [9/9] Step 9 — AssetManifest_final + RenderPlan  …`
+**Print:** `▶ [9/9] Step 9 — render_plan + RenderPlan  …`
 
-Prerequisite: <episode_dir>/AssetManifest.media.json must exist.
-If it does not exist, stop here and print:
-  "✗ [9/9] Step 9 skipped — waiting for media-agent.
-   Place AssetManifest.media.json in <episode_dir> and re-run from Step 9."
+Prerequisite: <episode_dir>/AssetManifest.{locale}.json must exist with `resolved_assets` populated.
+If it does not exist or `resolved_assets` is empty/null, stop here and print:
+  "✗ [9/9] Step 9 skipped — waiting for resolve_assets.
+   Ensure AssetManifest.{locale}.json exists with resolved_assets[] populated in <episode_dir> and re-run from Step 9."
 
-### 9a — AssetManifest_final.json
+### 9a — Populate render_plan{} in AssetManifest.{locale}.json
 
-Write to: <episode_dir>/AssetManifest_final.json
+Update in-place: <episode_dir>/AssetManifest.{locale}.json
 
-Merge the draft envelope with the resolved items from the media manifest:
-  schema_id      : "AssetManifest_final"
-  schema_version : "1.0.0"
-  manifest_id    : copied from AssetManifest_draft.shared.json → manifest_id
-  project_id     : copied from AssetManifest_draft.shared.json → project_id
-  shotlist_ref   : copied from AssetManifest_draft.shared.json → shotlist_ref
-  items[]        : passthrough from AssetManifest.media.json → items[]
-                   (includes all asset types: character, background, vo,
-                   sfx, music). Pass all items through unchanged.
-                   Skip any item where is_placeholder == true —
-                   include only items where is_placeholder == false.
+Populate the `render_plan` section of the unified manifest:
+  manifest_id    : from existing AssetManifest.{locale}.json → manifest_id
+  project_id     : from existing AssetManifest.{locale}.json → project_id
+  shotlist_ref   : from existing AssetManifest.{locale}.json → shotlist_ref
+  resolved_assets[]: already populated by resolve_assets (read-only at this stage)
 
-Validate against AssetManifest_final.v1.json before proceeding.
+The `render_plan` section is written into the existing file — no separate
+final manifest file is produced.
+
+Validate the updated AssetManifest.{locale}.json against AssetManifest.v1.json before proceeding.
 
 ### 9b — RenderPlan.json
 
@@ -451,7 +448,7 @@ Write to: <episode_dir>/RenderPlan.json
   schema_version    : "1.0.0"
   plan_id           : "plan-{{PROJECT_SLUG}}-{{EPISODE_ID}}"
   project_id        : "{{PROJECT_SLUG}}"
-  manifest_ref      : AssetManifest_final.manifest_id
+  manifest_ref      : AssetManifest.{locale}.json → manifest_id
   timing_lock_hash  : copied from ShotList.json → timing_lock_hash
   profile           : "preview_local"
                       (override to "draft_720p" or "final_1080p" if story.txt
@@ -459,7 +456,7 @@ Write to: <episode_dir>/RenderPlan.json
   resolution        : "1280x720"
   aspect_ratio      : "16:9"
   fps               : 24
-  resolved_assets[] : flatten AssetManifest_final.items[], one entry per item:
+  resolved_assets[] : from AssetManifest.{locale}.json → resolved_assets[], one entry per item:
     {
       "asset_id"      : item.asset_id,
       "asset_type"    : item.asset_type,
@@ -471,8 +468,7 @@ Write to: <episode_dir>/RenderPlan.json
                       per-shot asset assignments and VO lines; replaces the
                       background-grouping heuristic previously used by the renderer.
 
-                      Build lookup dicts from AssetManifest_draft.shared.json
-                      and AssetManifest.media.json:
+                      Build lookup dicts from AssetManifest.{locale}.json:
                         char_map  = { c.character_id : c.asset_id }
                                     (derive character_id by stripping "pack-" prefix
                                      from each character_pack.pack_id)
@@ -485,7 +481,7 @@ Write to: <episode_dir>/RenderPlan.json
                         music_map = { m.item_id : m }
                                     for each entry in music_items[] (empty if absent)
                         media_map = { item.asset_id : item }
-                                    for each entry in AssetManifest.media.json items[]
+                                    for each entry in resolved_assets[]
 
                       For each shot in ShotList.shots[] (preserve array order):
                         shot_id             : shot.shot_id
@@ -533,7 +529,7 @@ Write to: <episode_dir>/RenderPlan.json
 
 Validate against RenderPlan.v1.json before writing.
 
-**Print:** `✓ [9/9] Step 9 — AssetManifest_final + RenderPlan  done`
+**Print:** `✓ [9/9] Step 9 — render_plan + RenderPlan  done`
 
 ---
 
@@ -544,11 +540,11 @@ Validate against RenderPlan.v1.json before writing.
 - [ ] StoryPrompt.json written and schema-valid
 - [ ] Script.json written and schema-valid
 - [ ] ShotList.json written and schema-valid
-- [ ] AssetManifest_draft.shared.json written and schema-valid (schema_version 1.0.0)
-- [ ] AssetManifest_draft.en.json written and schema-valid (locale_scope "locale")
+- [ ] AssetManifest.shared.json written and schema-valid (schema_version 1.0.0)
+- [ ] AssetManifest.en.json written and schema-valid (locale_scope "locale")
 - [ ] canon_diff.json written and schema-valid
 - [ ] canon.json written / updated and schema-valid
 - [ ] Locale variants written and schema-valid for each locale beyond "en"
-- [ ] AssetManifest_final.json written and schema-valid (if AssetManifest.media.json present)
-- [ ] RenderPlan.json written and schema-valid (if AssetManifest.media.json present)
+- [ ] AssetManifest.{locale}.json updated with render_plan{} section and schema-valid (if resolved_assets[] populated)
+- [ ] RenderPlan.json written and schema-valid (if resolved_assets[] populated)
 - [ ] Print a final summary: list every file written and its size in bytes

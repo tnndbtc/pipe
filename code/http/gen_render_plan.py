@@ -1,42 +1,39 @@
 #!/usr/bin/env python3
 # =============================================================================
-# gen_render_plan.py — Build AssetManifest_final + RenderPlan (deterministic)
+# gen_render_plan.py — Build RenderPlan (deterministic)
 # =============================================================================
 #
 # Replaces the LLM-based Stage 9. Reads resolved media URIs and timing data
-# from the merged manifest and assembles two downstream artifacts:
+# from the unified manifest and assembles the downstream artifact:
 #
-#   1. AssetManifest_final.{locale}.json  — envelope + resolved items
-#   2. RenderPlan.{locale}.json           — per-shot render instructions
+#   1. RenderPlan.{locale}.json           — per-shot render instructions
 #
 # Key design decisions vs old p_9.txt:
 #   • VO timeline_in_ms / timeline_out_ms come from start_sec / end_sec
-#     in AssetManifest_merged (measured by post_tts_analysis), NOT evenly
+#     in AssetManifest (measured by post_tts_analysis), NOT evenly
 #     distributed approximations.
 #   • duration_ms respects background_overrides for overflow shots.
-#   • timing_lock_hash comes from AssetManifest_merged (locale-adjusted).
+#   • timing_lock_hash comes from AssetManifest (locale-adjusted).
 #   • duck_intervals / duck_db / fade_sec are passed into each shot's music
 #     entry as extra fields (RenderedShot.additionalProperties allows this).
 #
 # Usage:
 #   python gen_render_plan.py \
-#       --manifest  projects/slug/ep/AssetManifest_merged.zh-Hans.json \
-#       --media     projects/slug/ep/AssetManifest.media.zh-Hans.json
+#       --manifest  projects/slug/ep/AssetManifest.zh-Hans.json
 #
 #   python gen_render_plan.py \
-#       --manifest  ... \
-#       --media     ... \
-#       --shared    projects/slug/ep/AssetManifest_draft.shared.json \
+#       --manifest  projects/slug/ep/AssetManifest.zh-Hans.json \
+#       --shared    projects/slug/ep/AssetManifest.shared.json \
 #       --shotlist  projects/slug/ep/ShotList.json \
 #       --profile   draft_720p \
-#       --out-final projects/slug/ep/AssetManifest_final.zh-Hans.json \
 #       --out-plan  projects/slug/ep/RenderPlan.zh-Hans.json
 #
-# Requirements: stdlib only (json, pathlib, argparse)
+# Requirements: stdlib only (json, os, pathlib, argparse)
 # =============================================================================
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -72,7 +69,7 @@ def save_json(doc: dict, path: Path) -> None:
 
 def build_media_map(media: dict) -> dict[str, dict]:
     """
-    Build media lookup from AssetManifest.media items.
+    Build media lookup from resolved_assets items.
 
     Per-shot entries (with shot_id) → key = "bg_id:shot_id"
     Background-level entries        → key = "bg_id"
@@ -164,22 +161,23 @@ def build_music_map(merged: dict) -> dict[str, dict]:
     return {m["item_id"]: m for m in merged.get("music_items", [])}
 
 
-def load_vo_preview_approved(episode_dir: Path, locale: str) -> dict[str, dict]:
-    """Load vo_preview_approved.{locale}.json and return a timing map.
+def load_vo_approved_timing(manifest_path: Path) -> dict[str, dict]:
+    """Load approved VO timing from AssetManifest.{locale}.json vo_items[].
 
     Returns {item_id → item_dict} where each item_dict has:
-        duration_sec, start_sec, end_sec, speaker_id, text
+        duration_sec, start_sec, end_sec
 
-    Returns {} if the file does not exist.
+    Returns {} if the file does not exist or has no vo_approval block.
     """
-    path = episode_dir / f"vo_preview_approved.{locale}.json"
-    if not path.exists():
+    if not manifest_path.exists():
         return {}
     try:
-        doc = load_json(path)
-        return {item["item_id"]: item for item in doc.get("items", [])}
+        doc = load_json(manifest_path)
+        if not doc.get("vo_approval", {}).get("approved_at"):
+            return {}
+        return {item["item_id"]: item for item in doc.get("vo_items", [])}
     except Exception as exc:
-        print(f"  [WARN] Could not load {path.name}: {exc}", file=sys.stderr)
+        print(f"  [WARN] Could not load {manifest_path.name}: {exc}", file=sys.stderr)
         return {}
 
 
@@ -203,7 +201,7 @@ def compute_duck_intervals_from_vo(
         max(0, timeline_in_ms  - fade_ms)  to
               timeline_out_ms + fade_ms
     Overlapping intervals are merged.  Units: seconds (for compatibility with
-    the AssetManifest_merged duck_intervals convention).
+    the AssetManifest duck_intervals convention).
     """
     raw: list[tuple[float, float]] = []
     for vl in vo_lines:
@@ -220,35 +218,6 @@ def compute_duck_intervals_from_vo(
         else:
             merged.append([t0, t1])
     return [[round(a, 3), round(b, 3)] for a, b in merged]
-
-
-# ── AssetManifest_final builder ───────────────────────────────────────────────
-
-def build_final(
-    merged:    dict,
-    media:     dict,
-    shared:    dict,
-) -> dict:
-    """
-    Build AssetManifest_final.{locale}.json.
-
-    items[] = all media items, except placeholder VO (those have no audio file).
-    All other types (char, bg, sfx, music) are included even if placeholder so
-    the renderer can log missing assets correctly.
-    """
-    items = [
-        item for item in media.get("items", [])
-        if not (item["asset_type"] == "vo" and item["is_placeholder"])
-    ]
-
-    return {
-        "schema_id":      "AssetManifest_final",
-        "schema_version": "1.0.0",
-        "manifest_id":    merged.get("manifest_id", ""),
-        "project_id":     shared.get("project_id", merged.get("project_id", "")),
-        "shotlist_ref":   shared.get("shotlist_ref", merged.get("shotlist_ref", "")),
-        "items":          items,
-    }
 
 
 # ── RenderPlan shot builder ───────────────────────────────────────────────────
@@ -419,7 +388,7 @@ def build_shot(
         vo_lines.append(vo_line)
 
     # Derive per-shot tail from ShotList duration_sec (set by patch_shotlist_durations.py
-    # from vo_preview_approved).  This correctly reflects the actual inter-scene gap
+    # from AssetManifest vo_items).  This correctly reflects the actual inter-scene gap
     # (e.g. 3300 ms for sc01→sc02, 2300 ms for subsequent boundaries) rather than
     # the old fixed VO_TAIL_MS=2000 ms assumption which under-counted by up to 1300 ms
     # per boundary and caused the narrative-format CEILING to clip shots incorrectly.
@@ -593,7 +562,7 @@ def build_plan(
             except Exception as e:
                 print(f"  [WARN] Could not load SfxPlan.json: {e}", file=sys.stderr)
 
-    # resolved_assets: flat view of AssetManifest_final.items[]
+    # resolved_assets: flat view of AssetManifest.{locale}.json resolved_assets[]
     resolved_assets = [
         {
             "asset_id":     item["asset_id"],
@@ -657,7 +626,7 @@ def build_plan(
         "schema_version":    "1.0.0",
         "plan_id":           plan_id,
         "project_id":        project_id,
-        "manifest_ref":      final.get("manifest_id", ""),
+        "manifest_ref":      merged.get("manifest_id", ""),
         "timing_lock_hash":  merged.get("timing_lock_hash", ""),
         "profile":           profile,
         "resolution":        RENDER_RESOLUTION,
@@ -671,7 +640,7 @@ def build_plan(
 # ── Auto-detect helpers ───────────────────────────────────────────────────────
 
 def find_shared(episode_dir: Path) -> Path | None:
-    candidate = episode_dir / "AssetManifest_draft.shared.json"
+    candidate = episode_dir / "AssetManifest.shared.json"
     return candidate if candidate.exists() else None
 
 
@@ -682,10 +651,6 @@ def find_shotlist(episode_dir: Path) -> Path | None:
 
 # ── Output paths ──────────────────────────────────────────────────────────────
 
-def derive_final_path(episode_dir: Path, locale: str) -> Path:
-    return episode_dir / f"AssetManifest_final.{locale}.json"
-
-
 def derive_plan_path(episode_dir: Path, locale: str) -> Path:
     return episode_dir / f"RenderPlan.{locale}.json"
 
@@ -694,25 +659,20 @@ def derive_plan_path(episode_dir: Path, locale: str) -> Path:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Build AssetManifest_final.{locale}.json + RenderPlan.{locale}.json "
-                    "from merged manifest and resolved media.",
+        description="Add render_plan section to AssetManifest.{locale}.json and write "
+                    "RenderPlan.{locale}.json from the unified manifest.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--manifest", required=True, metavar="PATH",
-                   help="AssetManifest_merged.{locale}.json (locale_scope='merged').")
-    p.add_argument("--media",    required=True, metavar="PATH",
-                   help="AssetManifest.media.{locale}.json from resolve_assets.py.")
+                   help="AssetManifest.{locale}.json (unified, locale_scope='merged').")
     p.add_argument("--shared",   default=None, metavar="PATH",
-                   help="AssetManifest_draft.shared.json. "
+                   help="AssetManifest.shared.json. "
                         "Default: auto-detect from episode directory.")
     p.add_argument("--shotlist", default=None, metavar="PATH",
                    help="ShotList.json. Default: auto-detect from episode directory.")
     p.add_argument("--profile",  default="preview_local",
                    choices=["preview_local", "draft_720p", "final_1080p"],
                    help="Render profile (default: preview_local).")
-    p.add_argument("--out-final", default=None, metavar="PATH",
-                   help="Output for AssetManifest_final. "
-                        "Default: AssetManifest_final.{locale}.json in episode dir.")
     p.add_argument("--out-plan",  default=None, metavar="PATH",
                    help="Output for RenderPlan. "
                         "Default: RenderPlan.{locale}.json in episode dir.")
@@ -736,23 +696,22 @@ def main() -> None:
     args = parse_args()
 
     manifest_path = Path(args.manifest).resolve()
-    media_path    = Path(args.media).resolve()
 
-    for label, path in [("--manifest", manifest_path), ("--media", media_path)]:
-        if not path.exists():
-            print(f"[ERROR] {label} not found: {path}", file=sys.stderr)
-            sys.exit(1)
+    if not manifest_path.exists():
+        print(f"[ERROR] --manifest not found: {manifest_path}", file=sys.stderr)
+        sys.exit(1)
 
-    merged = load_json(manifest_path)
-    media  = load_json(media_path)
+    unified = load_json(manifest_path)
+    merged  = unified  # same object
+    _media_shim = {"items": unified.get("resolved_assets", [])}
 
-    # ── Apply vo_preview_approved.{locale}.json as authoritative timing source ──
+    # ── Apply AssetManifest vo_approval as authoritative timing source ──────────
     # If the user has reviewed and approved VO timing (Stage 3.5 or Stage 8.5),
-    # override the vo_items timing in the merged manifest with the approved values.
-    # This ensures the RenderPlan uses the EXACT durations the user heard and approved.
+    # the manifest has a vo_approval block. The timing already lives in vo_items[],
+    # so we just confirm the approval is present and log it.
     locale_for_approval = merged.get("locale", "")
     if locale_for_approval:
-        approved_map = load_vo_preview_approved(manifest_path.parent, locale_for_approval)
+        approved_map = load_vo_approved_timing(manifest_path)
         if approved_map:
             patched = 0
             for vo_item in merged.get("vo_items", []):
@@ -766,8 +725,8 @@ def main() -> None:
                         patched += 1
             if patched:
                 print(f"  [VO-APPROVAL] Applied approved timing to {patched} vo_items "
-                      f"from vo_preview_approved.{locale_for_approval}.json")
-    # ── end vo_preview_approved override ─────────────────────────────────────
+                      f"from AssetManifest.{locale_for_approval}.json")
+    # ── end vo_approval override ──────────────────────────────────────────────
 
     # Guard: must be merged manifest
     locale_scope = merged.get("locale_scope")
@@ -787,7 +746,7 @@ def main() -> None:
         shared_path = find_shared(episode_dir)
         if not shared_path:
             raise SystemExit(
-                "[ERROR] Could not find AssetManifest_draft.shared.json in episode dir. "
+                "[ERROR] Could not find AssetManifest.shared.json in episode dir. "
                 "Pass --shared explicitly."
             )
     shared = load_json(shared_path)
@@ -805,8 +764,6 @@ def main() -> None:
     shotlist = load_json(shotlist_path)
 
     # Derive output paths
-    out_final = Path(args.out_final).resolve() if args.out_final \
-                else derive_final_path(episode_dir, locale)
     out_plan  = Path(args.out_plan).resolve()  if args.out_plan \
                 else derive_plan_path(episode_dir, locale)
 
@@ -825,7 +782,6 @@ def main() -> None:
     print("=" * 60)
     print("  gen_render_plan")
     print(f"  Manifest    : {manifest_path.name}")
-    print(f"  Media       : {media_path.name}")
     print(f"  Shared      : {shared_path.name}")
     print(f"  ShotList    : {shotlist_path.name}")
     print(f"  Locale      : {locale}")
@@ -833,25 +789,26 @@ def main() -> None:
     print(f"  Format      : {args.story_format}")
     if ref_dur_map:
         print(f"  Ref-plan    : {Path(args.reference_plan).name}  ({len(ref_dur_map)} EN shots)")
-    _approval_path = manifest_path.parent / f"vo_preview_approved.{locale}.json"
-    if _approval_path.exists():
-        print(f"  VO-Approval : vo_preview_approved.{locale}.json  ✓ (timing override active)")
+    _has_approval = bool(merged.get("vo_approval", {}).get("approved_at"))
+    if _has_approval:
+        print(f"  VO-Approval : AssetManifest.{locale}.json → vo_approval  ✓ (timing override active)")
     else:
         print(f"  VO-Approval : not found (using post_tts_analysis timing)")
-    print(f"  Out-final   : {out_final.name}")
     print(f"  Out-plan    : {out_plan.name}")
     print("=" * 60)
 
-    # Build AssetManifest_final
-    final = build_final(merged, media, shared)
-    save_json(final, out_final)
-    n_final = len(final["items"])
-    n_placeholder_final = sum(1 for i in final["items"] if i["is_placeholder"])
-    print(f"  AssetManifest_final  : {n_final} items  ({n_placeholder_final} placeholders)")
-
     # Build RenderPlan
-    plan = build_plan(merged, media, final, shotlist, args.profile, args.story_format,
+    plan = build_plan(merged, _media_shim, _media_shim, shotlist, args.profile, args.story_format,
                       ref_dur_map or None, episode_dir=episode_dir)
+
+    # Write render_plan back into the unified manifest (atomic replace)
+    unified["render_plan"] = plan
+    _tmp = str(manifest_path) + ".tmp"
+    with open(_tmp, "w", encoding="utf-8") as f:
+        json.dump(unified, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(_tmp, str(manifest_path))
+
     save_json(plan, out_plan)
 
     n_shots   = len(plan["shots"])
@@ -893,7 +850,7 @@ def main() -> None:
     print(f"  Shots with ducking   : {n_with_duck}")
     print(f"  Timing lock hash     : {plan['timing_lock_hash'][:16]}…")
 
-    print(f"\n  [OK] {out_final.name}")
+    print(f"\n  [OK] render_plan written to {manifest_path.name}")
     print(f"  [OK] {out_plan.name}")
 
 
