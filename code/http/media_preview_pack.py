@@ -43,7 +43,7 @@ def load_json(path: Path) -> dict:
 def detect_shot_durations(ep_dir: Path, locale: str) -> tuple:
     """
     Returns (shot_id -> duration_ms dict, source_description).
-    Priority: ShotList.json > RenderPlan > MusicApprovalSnapshot.
+    Priority: ShotList.json > RenderPlan.
 
     ShotList.json is the authoritative timing source for all display tabs
     (Media, SFX, Music).  The Media tab UI derives its shot duration labels
@@ -76,21 +76,9 @@ def detect_shot_durations(ep_dir: Path, locale: str) -> tuple:
             print(f"  [dur] Using RenderPlan.{locale}.json ({len(durations)} shots) — ShotList unavailable")
             return durations, f"RenderPlan.{locale}.json"
 
-    # Priority 3: MusicApprovalSnapshot
-    snap_path = ep_dir / "assets" / "music" / "MusicApprovalSnapshot.json"
-    if snap_path.exists():
-        snap = load_json(snap_path)
-        durations = {s["shot_id"]: s["duration_ms"]
-                     for s in snap.get("shots", [])
-                     if "shot_id" in s and "duration_ms" in s}
-        if durations:
-            print(f"  [dur] Using MusicApprovalSnapshot.json ({len(durations)} shots)")
-            return durations, "MusicApprovalSnapshot.json"
-
     print(f"ERROR: No shot duration source found for locale '{locale}'.")
     print(f"  Checked: {shot_path}")
     print(f"  Checked: {rp_path}")
-    print(f"  Checked: {snap_path}")
     sys.exit(1)
 
 
@@ -248,19 +236,16 @@ def main():
                 cursor_ms += dur_ms + _DEFAULT_VO_PAUSE_MS
         print(f"  [vo] Placed {sum(len(v) for v in vo_items_by_shot.values())} VO lines sequentially from ShotList")
 
-    # Load MusicApprovalSnapshot or MusicPlan for music
+    # Load MusicPlan for music
     music_data = None
-    snap_path = ep_dir / "assets" / "music" / "MusicApprovalSnapshot.json"
     music_plan_path = ep_dir / "MusicPlan.json"
     if include_music:
-        if snap_path.exists():
-            music_data = {"type": "snapshot", "data": load_json(snap_path)}
-            print("  [music] Using MusicApprovalSnapshot.json")
-        elif music_plan_path.exists():
-            music_data = {"type": "plan", "data": load_json(music_plan_path)}
-            print("  [music] Using MusicPlan.json (fallback)")
+        if music_plan_path.exists():
+            music_data = load_json(music_plan_path)
+            print("  [music] Using MusicPlan.json")
         else:
             print("  [music] WARNING: No music source found — music track skipped")
+            music_data = None
 
     # Load SfxPlan for SFX
     sfx_index = {}  # { shot_id: [entry] }
@@ -519,19 +504,58 @@ def main():
         # ── Build music audio track ───────────────────────────────────────────
         music_audio = None
         if music_data:
-            snap_shots = music_data["data"].get("shots", [])
-            music_by_shot = {s["shot_id"]: s for s in snap_shots if "shot_id" in s}
+            music_by_shot = {o["shot_id"]: o
+                             for o in music_data.get("shot_overrides", [])
+                             if "shot_id" in o}
+            _clip_vol  = music_data.get("clip_volumes", {})
+            _track_vol = music_data.get("track_volumes", {})
+        else:
+            music_by_shot = {}
+            _clip_vol  = {}
+            _track_vol = {}
+        BASE_MUSIC_DB_PREVIEW = -6.0
 
+        if music_data:
+            import re as _re
             m_inputs, m_delays, m_volumes = [], [], []
             cum_ms = 0
             for shot_id in ordered_shots:
                 dur_ms = shot_dur_ms.get(shot_id, 0)
-                entry = music_by_shot.get(shot_id)
-                if entry:
-                    wav = entry.get("loop_wav_path", "")
+                cum_sec = cum_ms / 1000.0
+                _ovr = music_by_shot.get(shot_id, {})
+                if not _ovr:
+                    # no music override for this shot — skip music mixing for this shot
+                    pass
+                else:
+                    _music_asset_id = _ovr.get("music_asset_id", "")
+
+                    # Derive wav path (.loop.wav preferred, .wav fallback)
+                    _wav_loop = ep_dir / "assets" / "music" / f"{_music_asset_id}.loop.wav"
+                    _wav_base = ep_dir / "assets" / "music" / f"{_music_asset_id}.wav"
+                    if _wav_loop.exists():
+                        wav = str(_wav_loop)
+                    elif _wav_base.exists():
+                        wav = str(_wav_base)
+                    else:
+                        print(f"  [WARN] music preview: wav not found for {_music_asset_id}")
+                        wav = ""
+
+                    # Derive delay_ms (episode-absolute start_sec minus cumulative shot offset)
+                    _start_sec = _ovr.get("start_sec")
+                    if _start_sec is not None:
+                        delay_ms = max(0.0, float(_start_sec) - cum_sec) * 1000
+                    else:
+                        delay_ms = 0.0
+
+                    # Derive base_db (additive formula)
+                    _stem = _re.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _music_asset_id)
+                    _db_off = (_track_vol.get(_stem, 0.0) + _clip_vol.get(_music_asset_id, 0.0))
+                    base_db = BASE_MUSIC_DB_PREVIEW + _db_off
+
+                    duck_db  = _ovr.get("duck_db",  -18.0)
+                    fade_sec = _ovr.get("fade_sec", 0.5)
+
                     if wav and Path(wav).exists():
-                        delay_ms = cum_ms + float(entry.get("music_delay_sec", 0.0)) * 1000
-                        base_db  = float(entry.get("base_db", -6.0))
                         m_inputs.append(wav)
                         m_delays.append(delay_ms)
                         m_volumes.append(10 ** (base_db / 20.0))

@@ -312,9 +312,11 @@ def apply_shot_overrides(
     if not overrides:
         return 0
 
-    # Index music_items by item_id
+    # Index music_items by shot_id
     music_index: dict[str, dict] = {
-        m["item_id"]: m for m in manifest.get("music_items", [])
+        m["shot_id"]: m
+        for m in manifest.get("music_items", [])
+        if "shot_id" in m
     }
 
     # Collect existing clip filenames for stem detection
@@ -329,10 +331,10 @@ def apply_shot_overrides(
 
     updated = 0
     for override in overrides:
-        item_id = override["item_id"]
-        item = music_index.get(item_id)
+        shot_id = override.get("shot_id") or override.get("item_id", "")
+        item = music_index.get(shot_id)
         if item is None:
-            print(f"  [WARN] item_id '{item_id}' not found in manifest "
+            print(f"  [WARN] shot_id/item_id '{shot_id}' not found in manifest "
                   "— skipping override", file=sys.stderr)
             continue
 
@@ -343,11 +345,11 @@ def apply_shot_overrides(
             pre_cut_wav = assets_music_dir / f"{new_asset_id}.wav"
             if pre_cut_wav.exists():
                 # Copy/symlink pre-cut clip over the target item WAV
-                out_wav = assets_music_dir / f"{item_id}.wav"
+                out_wav = assets_music_dir / f"{shot_id}.wav"
                 if pre_cut_wav != out_wav:
                     import shutil as _shutil
                     _shutil.copy2(str(pre_cut_wav), str(out_wav))
-                    print(f"  [PRE-CUT→CLIP] {new_asset_id}.wav → {item_id}.wav")
+                    print(f"  [PRE-CUT→CLIP] {new_asset_id}.wav → {shot_id}.wav")
             elif resources_dir and resources_dir.is_dir():
                 # It's a source stem — extract a new clip from resources/music/
                 source_path = find_source_track(new_asset_id, resources_dir)
@@ -360,14 +362,14 @@ def apply_shot_overrides(
                         float(_o_end_sec) - float(clip_start)
                         if _o_end_sec is not None else None
                     ) or item.get("duration_sec", 30.0)
-                    out_wav = assets_music_dir / f"{item_id}.wav"
+                    out_wav = assets_music_dir / f"{shot_id}.wav"
                     ok = extract_clip_from_source(
                         new_asset_id, resources_dir, out_wav,
                         start_sec=float(clip_start),
                         duration_sec=float(clip_dur),
                     )
                     if ok:
-                        print(f"  [SOURCE→CLIP] {new_asset_id} → {item_id}")
+                        print(f"  [SOURCE→CLIP] {new_asset_id} → {shot_id}")
                 else:
                     print(f"  [WARN] Source stem '{new_asset_id}' not found in "
                           f"{resources_dir}", file=sys.stderr)
@@ -383,7 +385,7 @@ def apply_shot_overrides(
                 changes.append(f"{field}={override[field]}")
 
         if changes:
-            print(f"  [OVERRIDE] {item_id}: {', '.join(changes)}")
+            print(f"  [OVERRIDE] {shot_id}: {', '.join(changes)}")
             updated += 1
 
     return updated
@@ -565,14 +567,14 @@ def main():
         # shot_overrides[].music_clip_id holds the clip_id when a user-cut clip
         # is assigned to a shot.
         item_to_music_clip: dict[str, str] = {
-            o["item_id"]: o["music_clip_id"]
+            o.get("shot_id", o.get("item_id", "")): o["music_clip_id"]
             for o in shot_overrides
             if "music_clip_id" in o
         }
         for mi in music_items:
             if mi.get("base_db") is not None:
                 continue
-            clip_id = item_to_music_clip.get(mi["item_id"], "")
+            clip_id = item_to_music_clip.get(mi.get("shot_id", mi.get("item_id", "")), "")
             if not clip_id:
                 continue
             offset = clip_volumes.get(clip_id)
@@ -592,10 +594,10 @@ def main():
 
     # ── Resolve duck_db for items without an explicit override.
     #    Priority: explicit shot_override duck_db > track_type lookup > DEFAULT_DUCK_DB.
-    overridden_ids = {o["item_id"] for o in shot_overrides if "duck_db" in o}
+    overridden_ids = {o.get("shot_id", o.get("item_id", "")) for o in shot_overrides if "duck_db" in o}
     duck_reset = 0
     for mi in manifest.get("music_items", []):
-        if mi["item_id"] not in overridden_ids:
+        if mi.get("shot_id", mi.get("item_id", "")) not in overridden_ids:
             resolved = _resolve_duck_db(mi)
             old = mi.get("duck_db")
             if old != resolved:

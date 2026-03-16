@@ -72,13 +72,17 @@
       "description": "Per-shot overrides for ducking, continuity, and track assignment. Only include shots that need changes — omitted shots keep their original values.",
       "items": {
         "type": "object",
-        "required": ["item_id"],
+        "required": [],
         "additionalProperties": false,
         "properties": {
+          "shot_id": {
+            "type": "string",
+            "description": "Shot ID from ShotList (e.g. 's01e01_sc01_sh01'). Canonical lookup key. Added at save time by /api/music_plan_save."
+          },
           "item_id": {
             "type": "string",
             "pattern": "^music-",
-            "description": "Music item ID from AssetManifest (e.g. 'music-s01e01_sh01')"
+            "description": "Music item ID from AssetManifest (e.g. 'music-s01e01_sh01'). Preserved alongside shot_id for backwards compatibility."
           },
           "music_asset_id": {
             "type": "string",

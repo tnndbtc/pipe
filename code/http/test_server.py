@@ -11082,7 +11082,7 @@ placeholder="Enter your story here"></textarea>
   let _musicCutClips  = [];     // user-cut clips: [{clip_id, stem, start_sec, end_sec, path}]
   let _musicClipLookup = {};   // clip_id → { wavStem, path, item_id } — built by _musicRenderBody
   let _musicMarks     = {};     // per-stem marks: { stem: {start: N, end: N} }
-  let _musicOverrides = {};       // { item_id: {duck_db, fade_sec, ...} }
+  let _musicOverrides = {};       // { shot_id: {item_id, duck_db, fade_sec, ...} }
   let _musicTrackVolumes = {};    // { stem: dB_offset } — persists across regenerations
   let _musicClipVolumes  = {};    // { item_id|clip_id: dB_offset }
                                   // auto clips  → keyed by item_id  (e.g. "music-s01e01_sh01")
@@ -11221,7 +11221,7 @@ placeholder="Enter your story here"></textarea>
         _musicTrackVolumes = plan.track_volumes   || {};
         _musicClipVolumes  = plan.clip_volumes    || {};
         _musicOverrides    = {};
-        (plan.shot_overrides || []).forEach(o => { _musicOverrides[o.item_id] = o; });
+        (plan.shot_overrides || []).forEach(o => { if (o.shot_id) _musicOverrides[o.shot_id] = o; });
       }
     } catch (_) {}
     _musicRenderBody();
@@ -11294,7 +11294,7 @@ placeholder="Enter your story here"></textarea>
         const endSec = (c.start_sec || 0) + (c.duration_sec || 0);
         itemToClipId[c.item_id] = src + ':' + (c.start_sec || 0).toFixed(1) + 's-' + endSec.toFixed(1) + 's';
       });
-      const clipId = ovr.music_clip_id || itemToClipId[itemId] || '';
+      const clipId = ovr.music_clip_id || itemToClipId[ovr.item_id || itemId] || '';
       if (!clipId) return;
 
       // Look up clip metadata
@@ -11357,7 +11357,7 @@ placeholder="Enter your story here"></textarea>
           + '&ep_id=' + encodeURIComponent(_musicEpId) + '&file=assets/music/user_cut_clips.json');
         if (ucR.ok) { _musicCutClips = await ucR.json(); }
       } catch (_) {}
-      const currentOverrides = Object.values(_musicOverrides).filter(o => o.item_id);
+      const currentOverrides = Object.values(_musicOverrides).filter(o => o.shot_id);
       const r2 = await fetch('/api/music_review_pack', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -11434,7 +11434,7 @@ placeholder="Enter your story here"></textarea>
       // or the shot duration (no override) — adding shStart gives the episode-absolute end.
       if (sh.music_item_id) {
         const musicStart = shStart + (sh.start_sec || 0);
-        const musicEnd   = shStart + (sh.duration_sec || 0);
+        const musicEnd   = shStart + (sh.music_end_sec != null ? sh.music_end_sec : (sh.duration_sec || 0));
         musicItems.push({ item_id: sh.music_item_id, start_sec: musicStart, end_sec: musicEnd, music_mood: sh.music_mood || '' });
       }
     }
@@ -11549,7 +11549,8 @@ placeholder="Enter your story here"></textarea>
         const fmtEp = (t) => t.toFixed(1) + 's';
         musicShots.forEach((s, i) => {
           const origMid  = s.music_item_id;
-          const ovr      = _musicOverrides[origMid] || {};
+          const shotId   = s.shot_id;
+          const ovr      = _musicOverrides[shotId] || {};
           const shotDur  = s.duration_sec || 0;
           const epStart  = s.offset_sec || 0;
           const epEnd    = epStart + shotDur;
@@ -11563,9 +11564,10 @@ placeholder="Enter your story here"></textarea>
           // currentClipId: use saved override if present, then fall back to auto-assigned clip
           const currentClipId = ovr.music_clip_id || itemToClipId[origMid] || '';
           // Auto-initialize _musicOverrides so Confirm always writes all fields
-          if (!_musicOverrides[origMid]) _musicOverrides[origMid] = { item_id: origMid };
-          { const _o = _musicOverrides[origMid];
-            if (!_o.music_clip_id && currentClipId) _musicSetClipOverride(origMid, currentClipId);
+          if (!_musicOverrides[shotId]) _musicOverrides[shotId] = { shot_id: shotId, item_id: origMid };
+          { const _o = _musicOverrides[shotId];
+            if (!_o.item_id) _o.item_id = origMid;
+            if (!_o.music_clip_id && currentClipId) _musicSetClipOverride(shotId, currentClipId);
             if (_o.start_sec == null) _o.start_sec = parseFloat(dispStart.toFixed(2));
             if (_o.end_sec   == null) _o.end_sec   = parseFloat(dispEnd.toFixed(2));
             if (_o.duck_db   == null) _o.duck_db   = duckVal;
@@ -11580,7 +11582,7 @@ placeholder="Enter your story here"></textarea>
             + '</div>'
             // clip dropdown — first option is explicit "none" so unassigned shots are visible
             + '<div class="music-shot-clip">'
-            + '<select style="width:100%" onchange="_musicSetClipOverride(\'' + origMid + '\',this.value)">'
+            + '<select style="width:100%" onchange="_musicSetClipOverride(\'' + shotId + '\',this.value)">'
             + '<option value=""' + (currentClipId === '' ? ' selected' : '') + '>— no clip —</option>';
           allClips.forEach(c => {
             ovrHtml += '<option value="' + c.clip_id + '"' + (c.clip_id === currentClipId ? ' selected' : '') + '>'
@@ -11591,21 +11593,21 @@ placeholder="Enter your story here"></textarea>
             + '<div class="music-shot-params">'
             + '<label title="Episode time when music begins (seconds)">▶ start</label>'
             + '<input type="number" step="0.5" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispStart.toFixed(1) + '"'
-            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',parseFloat(this.value),null,' + epStart + ',' + epEnd + ')"'
+            + ' onchange="_musicSetStartEnd(\'' + shotId + '\',parseFloat(this.value),null,' + epStart + ',' + epEnd + ')"'
             + ' style="width:64px">'
             + '<label title="Episode time when music stops (seconds)">⏹ end</label>'
             + '<input type="number" step="0.5" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispEnd.toFixed(1) + '"'
-            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',null,parseFloat(this.value),' + epStart + ',' + epEnd + ')"'
+            + ' onchange="_musicSetStartEnd(\'' + shotId + '\',null,parseFloat(this.value),' + epStart + ',' + epEnd + ')"'
             + ' style="width:64px">'
             + '<label title="Attenuation in dB (0 = full volume)">🔉 duck</label>'
             + '<input type="number" step="1" min="-30" max="0" value="' + duckVal + '"'
-            + ' onchange="_musicSetOverride(\'' + origMid + '\',\'duck_db\',parseFloat(this.value))"'
+            + ' onchange="_musicSetOverride(\'' + shotId + '\',\'duck_db\',parseFloat(this.value))"'
             + ' style="width:50px">'
             + '<label title="Fade duration in seconds">⏱ fade</label>'
             + '<input type="number" step="0.05" min="0" max="3" value="' + fadeVal.toFixed(2) + '"'
-            + ' onchange="_musicSetOverride(\'' + origMid + '\',\'fade_sec\',parseFloat(this.value))"'
+            + ' onchange="_musicSetOverride(\'' + shotId + '\',\'fade_sec\',parseFloat(this.value))"'
             + ' style="width:50px">'
-            + _musicBuildShotLoopControls(origMid, currentClipId ? allClips.find(c => c.clip_id === currentClipId) || null : null)
+            + _musicBuildShotLoopControls(shotId, currentClipId ? allClips.find(c => c.clip_id === currentClipId) || null : null)
             + '</div>'
             + '</div>';
         });
@@ -11741,7 +11743,7 @@ placeholder="Enter your story here"></textarea>
       };
       _musicTimeline.shots.forEach(s => {
         const mood = s.music_mood || '(no music)';
-        const ovrDuck = (_musicOverrides[s.music_item_id] || {}).duck_db;
+        const ovrDuck = (_musicOverrides[s.shot_id] || {}).duck_db;
         const effectiveDuck = ovrDuck != null ? ovrDuck : (s.duck_db != null ? s.duck_db : 0);
         const duck = effectiveDuck + 'dB' + (ovrDuck != null ? ' ✎' : '');
         const t0 = s.offset_sec || 0;
@@ -11825,13 +11827,14 @@ placeholder="Enter your story here"></textarea>
   }
 
   // ── Set clip override from visual timeline dropdown ──
+  // itemId parameter now receives shot_id as the key
   function _musicSetClipOverride(itemId, clipId) {
     // Empty clipId means "no clip" — clear the override entirely
     if (!clipId) {
       delete _musicOverrides[itemId];
       return;
     }
-    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
+    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { shot_id: itemId };
     // Store full clip_id for UI dropdown matching
     _musicOverrides[itemId].music_clip_id = clipId;
     // Resolve to WAV filename stem via lookup (for backend)
@@ -11858,14 +11861,16 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
+  // itemId parameter now receives shot_id as the key
   function _musicSetOverride(itemId, field, value) {
-    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
+    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { shot_id: itemId };
     _musicOverrides[itemId][field] = value;
   }
 
   // start_sec / end_sec: episode-absolute values; either may be null (means "keep current")
+  // itemId parameter now receives shot_id as the key
   function _musicSetStartEnd(itemId, startSec, endSec, epStart, epEnd) {
-    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
+    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { shot_id: itemId };
     const ovr = _musicOverrides[itemId];
     // Resolve current values (episode-absolute)
     const curStart = startSec != null ? startSec : (ovr.start_sec != null ? ovr.start_sec : epStart);
@@ -11892,7 +11897,15 @@ placeholder="Enter your story here"></textarea>
         schema_id: 'MusicPlan',
         schema_version: '1.0',
         loop_selections: loopSelClean,
-        shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id),
+        shot_overrides: Object.entries(_musicOverrides).map(([sid, v]) => ({
+          shot_id:        sid,
+          item_id:        v.item_id || "",
+          music_asset_id: v.music_asset_id,
+          start_sec:      v.start_sec,
+          end_sec:        v.end_sec,
+          duck_db:        v.duck_db,
+          fade_sec:       v.fade_sec,
+        })).filter(o => o.shot_id),
       };
       if (Object.keys(_musicTrackVolumes).length)
         plan.track_volumes = _musicTrackVolumes;
@@ -11915,9 +11928,7 @@ placeholder="Enter your story here"></textarea>
           + '<pre style="margin:4px 0 0;font-size:0.80em;color:#f88;white-space:pre-wrap">'
           + escHtml(errLines) + '</pre>';
       } else if (d.validation_pass === true) {
-        const saveMsg = d.snapshot_exists
-          ? '✔ MusicPlan.json + MusicApprovalSnapshot.json saved'
-          : '✔ MusicPlan.json saved — ⚠ Generate Preview first to save audio snapshot, then Confirm Plan again.';
+        const saveMsg = '✔ MusicPlan.json saved';
         msgEl.innerHTML = '<span style="color:#6ec96e">' + escHtml(saveMsg) + '</span>'
           + ' <span style="color:#6ec96e;font-size:0.85em">[contract: PASS]</span>';
       } else {
@@ -13039,8 +13050,7 @@ placeholder="Enter your story here"></textarea>
               // gen_tts + post_tts:
               //   Primary locale  → always greyed (VO is authored in VO tab, never re-run from Stage 9).
               //   Non-primary     → greyed only when VO is approved for that locale.
-              // apply_music_plan: skipped when music is approved (render_video reads
-              //   MusicApprovalSnapshot directly — manifest update is redundant).
+              // apply_music_plan: skipped when music is approved (MusicPlan.json exists).
               const _voByLocale    = _approvals.vo_by_locale || {};
               const _isPrimary     = locale === (locales[0] || 'en');
               const _localeApproved =
@@ -14252,7 +14262,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
     approvals = {
         "vo":           (_is_vo_approved(ep_dir, _vo_primary) if _VO_UTILS_AVAILABLE else False) or os.path.isfile(_vo_approved_legacy),
         "vo_by_locale": _vo_by_locale,
-        "music":        os.path.isfile(os.path.join(ep_dir, "assets", "music", "MusicApprovalSnapshot.json")),
+        "music":        os.path.isfile(os.path.join(ep_dir, "MusicPlan.json")),
         "sfx":          os.path.isfile(os.path.join(ep_dir, "SfxPlan.json")),
         "media":        os.path.isfile(os.path.join(ep_dir, "assets", "media", "selections.json")),
     }
@@ -15631,7 +15641,7 @@ class Handler(BaseHTTPRequestHandler):
             # These steps are skipped when their approval sentinel exists.
             # This enforces the skip even if the UI button is somehow clicked.
             _step_ep_dir   = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
-            _step_music_ok = os.path.isfile(os.path.join(_step_ep_dir, "assets", "music", "MusicApprovalSnapshot.json"))
+            _step_music_ok = os.path.isfile(os.path.join(_step_ep_dir, "MusicPlan.json"))
             _step_sfx_ok   = os.path.isfile(os.path.join(_step_ep_dir, "SfxPlan.json"))
             _step_vo_ok    = _is_vo_approved(_step_ep_dir, locale or 'en') if _VO_UTILS_AVAILABLE else False
             _approved_skip = {
@@ -15788,7 +15798,7 @@ class Handler(BaseHTTPRequestHandler):
                 # when the corresponding approval exists, even in force_run mode.
                 _rl_ep_dir    = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
                 _rl_vo_ok     = _is_vo_approved(_rl_ep_dir, locale) if _VO_UTILS_AVAILABLE else False
-                _rl_music_ok  = os.path.isfile(os.path.join(_rl_ep_dir, "assets", "music", "MusicApprovalSnapshot.json"))
+                _rl_music_ok  = os.path.isfile(os.path.join(_rl_ep_dir, "MusicPlan.json"))
                 _rl_locale_approved = {
                     "gen_tts":          _rl_vo_ok,
                     "post_tts":         _rl_vo_ok,
@@ -15922,8 +15932,7 @@ class Handler(BaseHTTPRequestHandler):
                     write_log("O", f"   Deleted {len(_total_removed)} file(s)")
 
                 # ── Approval sentinels for shared-step skip ───────────────────
-                _s10_music_ok = os.path.isfile(os.path.join(
-                    _ep_dir_s10, "assets", "music", "MusicApprovalSnapshot.json"))
+                _s10_music_ok = os.path.isfile(os.path.join(_ep_dir_s10, "MusicPlan.json"))
                 _s10_sfx_ok   = os.path.isfile(os.path.join(
                     _ep_dir_s10, "SfxPlan.json"))
                 _s10_shared_approved = {
@@ -20056,18 +20065,36 @@ class Handler(BaseHTTPRequestHandler):
                 music_dir = os.path.join(ep_dir, "assets", "music")
                 os.makedirs(music_dir, exist_ok=True)
 
+                # Enrich overrides with shot_id from AssetManifest (CHANGE 7)
+                _am_path = os.path.join(ep_dir, "assets", "AssetManifest.json")
+                _item_to_shot = {}
+                if os.path.isfile(_am_path):
+                    try:
+                        _am = json.loads(open(_am_path, encoding="utf-8").read())
+                        _item_to_shot = {
+                            mi["item_id"]: mi["shot_id"]
+                            for mi in _am.get("music_items", [])
+                            if "item_id" in mi and "shot_id" in mi
+                        }
+                    except Exception as _ame:
+                        print(f"  [WARN] music_plan_save: AssetManifest load failed: {_ame}")
+                else:
+                    print("  [WARN] music_plan_save: AssetManifest not found — shot_id enrichment skipped")
+
+                for _ovr in plan.get("shot_overrides", []):
+                    _iid = _ovr.get("item_id", "")
+                    if _iid and _iid in _item_to_shot and "shot_id" not in _ovr:
+                        _ovr["shot_id"] = _item_to_shot[_iid]
+
                 plan_path = os.path.join(ep_dir, "MusicPlan.json")
                 with open(plan_path, "w", encoding="utf-8") as _pf:
                     json.dump(plan, _pf, indent=2, ensure_ascii=False)
                     _pf.write("\n")
 
                 rel_path = os.path.relpath(plan_path, PIPE_DIR)
-                snapshot_path = os.path.join(music_dir, "MusicApprovalSnapshot.json")
-                snapshot_exists = os.path.isfile(snapshot_path)
                 print(f"  Saved MusicPlan  slug={slug}  ep={ep_id}  "
                       f"loops={len(plan.get('loop_selections', {}))}  "
-                      f"overrides={len(plan.get('shot_overrides', []))}  "
-                      f"snapshot={'yes' if snapshot_exists else 'MISSING'}")
+                      f"overrides={len(plan.get('shot_overrides', []))}")
 
                 # Run verify_contracts.py against the just-written MusicPlan.json
                 _verify_script = os.path.join(
@@ -20098,7 +20125,6 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.dumps({
                     "ok": True,
                     "path": rel_path,
-                    "snapshot_exists": snapshot_exists,
                     "validation_pass":   _vc_pass,
                     "validation_output": _vc_output,
                     "validation_errors": _vc_errors,

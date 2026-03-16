@@ -25,10 +25,8 @@
 # =============================================================================
 
 import argparse
-import datetime
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -309,9 +307,6 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
     """
     Render a VO + music mix WAV with ducking applied.
     No SFX, no video — purely for music review listening.
-
-    After writing preview_audio.wav, also writes MusicApprovalSnapshot.json
-    to {ep_dir}/assets/music/ capturing the exact values used in the render.
     """
     project_id = manifest.get("project_id", "")
     episode_id = manifest.get("episode_id", "")
@@ -358,25 +353,8 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
 
     render_ids = [_resolve_render_id(e) for e in timeline_shots]
 
-    # Per-shot snapshot records (FIX A) — one entry per shot, filled during render
-    snapshot_shots = []
-
     for idx, entry in enumerate(timeline_shots):
         offset_samples = int(entry["offset_sec"] * SAMPLE_RATE)
-
-        # Initialise snapshot record for this shot with defaults (no music)
-        snap = {
-            "shot_id": entry["shot_id"],
-            "music_asset_id": None,
-            "duration_ms": int(entry["duration_sec"] * 1000),
-            "duck_intervals": [],
-            "duck_db": float(entry.get("duck_db", 0.0)),
-            "base_db": BASE_MUSIC_DB,
-            "fade_sec": float(entry.get("fade_sec", DEFAULT_FADE_SEC)),
-            "music_delay_sec": float(entry.get("start_sec", 0.0)),
-            "loop_wav_path": None,
-        }
-        snapshot_shots.append(snap)
 
         # ── Place VO lines ──────────────────────────────────────────────────
         vo_cursor = 0.0
@@ -516,20 +494,6 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         if length > 0:
             buf[s:e] += music_data[:length]
 
-        # ── Update snapshot record with exact values used (FIX A) ──────────
-        # duration_ms: shot duration from ShotList (already set above from entry["duration_sec"]).
-        # Do NOT overwrite with music buffer length — shot duration is what render_video needs.
-        snap["music_asset_id"] = render_id
-        snap["duck_intervals"] = entry.get("duck_intervals", [])  # shot-relative (FIX C)
-        snap["duck_db"] = duck_db
-        snap["base_db"] = base_db
-        snap["fade_sec"] = fade_sec
-        snap["music_delay_sec"] = start_sec
-        # music_end_sec: shot-relative position where music stops.
-        # Uses overridden music_end_sec if set; falls back to full shot duration.
-        snap["music_end_sec"] = float(entry.get("music_end_sec", entry["duration_sec"]))
-        snap["loop_wav_path"] = str(music_path)
-
     # Trim to last VO end + 5s fade-out, so music review doesn't play 45s of
     # music-only after narration finishes (accumulated music-loop padding).
     last_vo_end_sec = 0.0
@@ -568,38 +532,6 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         print(f"  [WARN] {missing_music} music WAV(s) not found — silence in their place")
     print(f"  [OK] {out_path}  ({total_dur:.2f}s, {SAMPLE_RATE}Hz stereo)")
 
-    # ── Write MusicApprovalSnapshot.json (FIX A) ─────────────────────────────
-    snapshot_path = episode_dir / "assets" / "music" / "MusicApprovalSnapshot.json"
-    try:
-        saved_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        snapshot_doc = {
-            "schema": "MusicApprovalSnapshot",
-            "version": "1.0",
-            "saved_at": saved_at,
-            "locale": locale,
-            "shots": snapshot_shots,
-        }
-        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-        # Write atomically via temp file + rename
-        tmp_fd, tmp_name = tempfile.mkstemp(
-            dir=snapshot_path.parent, prefix=".MusicApprovalSnapshot.", suffix=".tmp"
-        )
-        try:
-            with open(tmp_fd, "w", encoding="utf-8") as tf:
-                json.dump(snapshot_doc, tf, indent=2, ensure_ascii=False)
-                tf.write("\n")
-            Path(tmp_name).replace(snapshot_path)
-        except Exception:
-            # Clean up temp file if rename/write failed
-            try:
-                Path(tmp_name).unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise
-        print(f"  [OK] {snapshot_path}")
-    except Exception as exc:
-        print(f"  [WARN] Could not write MusicApprovalSnapshot.json: {exc}", file=sys.stderr)
-
 
 # ── Override application ─────────────────────────────────────────────────────
 
@@ -613,12 +545,18 @@ def apply_music_plan_overrides(timeline_shots, override_list, source_name, vo_sh
     source_name    : str         — label used in log messages ("MusicPlan.json", etc.)
     vo_shot_map    : dict        — {shot_id: [vo_item, …]} for duck-interval recompute
     """
-    ovr_by_item = {o["item_id"]: o for o in override_list if "item_id" in o}
+    ovr_by_shot = {o["shot_id"]: o
+                   for o in override_list
+                   if "shot_id" in o}
+    ovr_by_item = {o["item_id"]: o
+                   for o in override_list
+                   if "item_id" in o}
     applied = 0
     for entry in timeline_shots:
-        mid = entry.get("music_item_id", "")
-        if mid in ovr_by_item:
-            ovr = ovr_by_item[mid]
+        shot_id = entry.get("shot_id", "")
+        music_item_id = entry.get("music_item_id", "")
+        ovr = ovr_by_shot.get(shot_id) or ovr_by_item.get(music_item_id)
+        if ovr is not None:
             if "duck_db" in ovr:
                 entry["duck_db"] = float(ovr["duck_db"])
             if "fade_sec" in ovr:
@@ -640,9 +578,8 @@ def apply_music_plan_overrides(timeline_shots, override_list, source_name, vo_sh
             # Recompute duck intervals only if fade_sec changed (which affects
             # the margin around each VO line). Use manifest vo_items timing.
             if "fade_sec" in ovr:
-                _sid = entry["shot_id"]
                 _new_fade = float(entry.get("fade_sec", DEFAULT_FADE_SEC))
-                _vo_items = vo_shot_map.get(_sid, [])
+                _vo_items = vo_shot_map.get(shot_id, [])
                 if _vo_items:
                     entry["duck_intervals"] = compute_duck_intervals(
                         _vo_items, _new_fade,
@@ -795,8 +732,7 @@ def main():
 
     # ── Apply track_volumes and clip_volumes to each shot's base_db ──────────
     # These are per-stem or per-clip dB offsets set in the Source Music / Generated
-    # Clips panels.  They must be reflected in both the preview audio AND the
-    # MusicApprovalSnapshot (so the render reads the correct base_db).
+    # Clips panels.  They must be reflected in the preview audio (base_db).
     import re as _re
     _track_vols = {}
     _clip_vols  = {}

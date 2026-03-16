@@ -407,8 +407,9 @@ def render_shot(
     music_fadeout_sec:  float = MUSIC_FADEOUT_SEC,
     no_music:           bool  = False,
     verbose:            bool  = False,
-    music_snapshot:     dict  = None,
+    music_plan_data:    dict  = None,
     sfx_plan_override:  dict  = None,
+    _cumulative_shot_sec: float = 0.0,
 ) -> Path:
     """
     Render one shot to an MKV intermediate.
@@ -700,7 +701,7 @@ def render_shot(
     #
     # Prefer live SfxPlan.json data (sfx_plan_override) over the potentially
     # stale copy baked into RenderPlan at gen_render_plan time.  This mirrors
-    # how MusicApprovalSnapshot bypasses the stale music fields in RenderPlan.
+    # how MusicPlan overrides bypass the stale music fields in RenderPlan.
     if sfx_plan_override is not None:
         # SfxPlan.json was loaded — it is the authoritative source.
         # A missing key means the user placed no SFX on this shot (empty list).
@@ -746,48 +747,61 @@ def render_shot(
         if _loop_path.exists():
             music_path = _loop_path
 
-    # ── 6a. Apply MusicApprovalSnapshot overrides (if provided) ───────────
-    _snap = (music_snapshot or {}).get(shot.get("shot_id") or shot.get("id", ""), {})
-    _snap_provided_music = False
-    if _snap:
-        _snap_music_id       = _snap.get("music_asset_id")
-        _snap_duck_intervals = _snap.get("duck_intervals")   # [[t0,t1],...]
-        _snap_duck_db        = _snap.get("duck_db")
-        _snap_base_db        = _snap.get("base_db")
-        _snap_fade_sec       = _snap.get("fade_sec")
-        _snap_loop_wav       = _snap.get("loop_wav_path")
-        _snap_music_delay    = _snap.get("music_delay_sec")  # delay before music starts in shot
-        _snap_music_end      = _snap.get("music_end_sec")    # music end position in shot (or None)
+    # --- MusicPlan override lookup ---
+    _pd = music_plan_data or {}
+    _shot_id_key = shot.get("shot_id") or shot.get("id", "")
+    _plan_ovr = _pd.get("plan_overrides", {}).get(_shot_id_key, {})
 
-        # Override music_id from snapshot if RenderPlan has none
-        if _snap_music_id and not music_id:
-            music_id = _snap_music_id
-        # Shot duration is NOT overridden from snapshot — it always comes from
-        # RenderPlan (set by gen_render_plan with VO-ceiling). VO tab is the hard truth.
-        if _snap_loop_wav and os.path.isfile(_snap_loop_wav):
-            music_path = Path(_snap_loop_wav)    # override file resolution
-            _snap_provided_music = True
-        if _snap_duck_intervals is not None:
-            shot = dict(shot)
-            shot["duck_intervals"] = _snap_duck_intervals
-        if _snap_duck_db is not None:
-            shot = dict(shot)
-            shot["duck_db"] = _snap_duck_db
-        if _snap_base_db is not None:
-            shot = dict(shot)
-            shot["base_db"] = _snap_base_db
-        if _snap_fade_sec is not None:
-            shot = dict(shot)
-            shot["music_fade_sec"] = _snap_fade_sec
-        if _snap_music_delay is not None:
-            shot = dict(shot)
-            shot["music_delay_sec"] = _snap_music_delay   # exact delay from approved preview
-        if _snap_music_end is not None:
-            shot = dict(shot)
-            shot["music_end_sec"] = _snap_music_end       # music stops before shot end
-        print(f"  [{shot_id}] Using MusicApprovalSnapshot — approved timing.")
+    _plan_music_id = _plan_ovr.get("music_asset_id") or music_id
+    _plan_provided_music = False
 
-    if not no_music and music_path and music_path.exists() and (_snap_provided_music or not music_info.get("is_placeholder", True)):
+    if _plan_music_id:
+        # Derive loop_wav_path (.loop.wav preferred, .wav fallback)
+        # shots_dir is output_dir/.shots; episode_dir is plan_path.parent (2 levels up from shots_dir)
+        _episode_dir_str = str(shots_dir.parent.parent)
+        _wav_loop = os.path.join(_episode_dir_str, "assets", "music", f"{_plan_music_id}.loop.wav")
+        _wav_base = os.path.join(_episode_dir_str, "assets", "music", f"{_plan_music_id}.wav")
+        if os.path.isfile(_wav_loop):
+            shot["loop_wav_path"] = _wav_loop
+            music_path = Path(_wav_loop)
+            _plan_provided_music = True
+        elif os.path.isfile(_wav_base):
+            shot["loop_wav_path"] = _wav_base
+            music_path = Path(_wav_base)
+            _plan_provided_music = True
+
+        # Derive base_db (additive: BASE_MUSIC_DB + track offset + clip offset)
+        import re as _re
+        _stem = _re.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _plan_music_id)
+        _db_off = (_pd.get("track_volumes", {}).get(_stem, 0.0)
+                   + _pd.get("clip_volumes",  {}).get(_plan_music_id, 0.0))
+        shot["base_db"] = BASE_MUSIC_DB + _db_off
+
+    if _plan_ovr:
+        # duck_db and fade_sec from override
+        _plan_duck_db = _plan_ovr.get("duck_db")
+        if _plan_duck_db is not None:
+            shot["duck_db"] = _plan_duck_db
+
+        _plan_fade_sec = _plan_ovr.get("fade_sec")
+        if _plan_fade_sec is not None:
+            shot["fade_sec"] = _plan_fade_sec
+
+        # music_delay_sec: episode-absolute start_sec minus cumulative shot offset
+        _plan_start_sec = _plan_ovr.get("start_sec")
+        if _plan_start_sec is not None:
+            shot["music_delay_sec"] = max(0.0, float(_plan_start_sec) - _cumulative_shot_sec)
+
+        # music_end_sec: episode-absolute end_sec minus cumulative shot offset
+        _plan_end_sec = _plan_ovr.get("end_sec")
+        if _plan_end_sec is not None:
+            shot["music_end_sec"] = max(0.0, float(_plan_end_sec) - _cumulative_shot_sec)
+
+        print(f"  [{_shot_id_key}] Using MusicPlan overrides — approved timing.")
+
+    # duck_intervals: use value already on shot dict from RenderPlan (unchanged)
+
+    if not no_music and music_path and music_path.exists() and (_plan_provided_music or not music_info.get("is_placeholder", True)):
         duck_intervals  = shot.get("duck_intervals", [])
         duck_db         = shot.get("duck_db", -12.0)
         fade_sec        = shot.get("music_fade_sec", 0.15)
@@ -1086,25 +1100,33 @@ def main() -> None:
     shots     = rp["shots"]
     asset_map = build_asset_map(rp)
 
-    # ── Load MusicApprovalSnapshot (once) ───────────────────────────────────
-    _snapshot_path = os.path.join(episode_dir, "assets", "music", "MusicApprovalSnapshot.json")
-    _music_snapshot = {}   # shot_id -> snapshot entry
-    if os.path.isfile(_snapshot_path):
+    # --- Load MusicPlan.json (replaces MusicApprovalSnapshot.json) ---
+    _music_plan_overrides = {}
+    _music_clip_volumes   = {}
+    _music_track_volumes  = {}
+    _mp_path = os.path.join(episode_dir, "MusicPlan.json")
+    if os.path.isfile(_mp_path):
         try:
-            _snap_data = json.loads(open(_snapshot_path, encoding="utf-8").read())
-            for _se in _snap_data.get("shots", []):
-                if _se.get("shot_id"):
-                    _music_snapshot[_se["shot_id"]] = _se
-            print(f"  [render] MusicApprovalSnapshot loaded — {len(_music_snapshot)} shots")
-        except Exception as _se:
-            print(f"  [render] WARNING: Could not load MusicApprovalSnapshot: {_se}")
+            _mp_doc = json.loads(open(_mp_path, encoding="utf-8").read())
+            _music_plan_overrides = {
+                o["shot_id"]: o
+                for o in _mp_doc.get("shot_overrides", [])
+                if "shot_id" in o
+            }
+            _music_clip_volumes  = _mp_doc.get("clip_volumes",  {})
+            _music_track_volumes = _mp_doc.get("track_volumes", {})
+            if not _music_plan_overrides and _mp_doc.get("shot_overrides"):
+                print("[render] WARNING: MusicPlan overrides lack shot_id — "
+                      "run migration script before rendering.")
+            print(f"[render] MusicPlan loaded — {len(_music_plan_overrides)} shot overrides")
+        except Exception as _mpe:
+            print(f"[render] WARNING: MusicPlan.json load failed: {_mpe}")
     else:
-        print("  [render] WARNING: MusicApprovalSnapshot not found — music timing is approximate.")
-        print("           Confirm MusicPlan in Music tab for accurate results.")
+        print("[render] WARNING: MusicPlan.json not found — music timing is approximate.")
 
     # ── Load SfxPlan.json (once) — live user selections from SFX tab ────────
     # Read directly at render time so edits made in the SFX tab are honoured
-    # without requiring a gen_render_plan re-run (mirrors MusicApprovalSnapshot).
+    # without requiring a gen_render_plan re-run (mirrors MusicPlan override logic).
     _sfx_plan_path = os.path.join(episode_dir, "SfxPlan.json")
     _sfx_plan_by_shot: dict = {}   # shot_id -> list[sfx_entry]
     if os.path.isfile(_sfx_plan_path):
@@ -1212,6 +1234,7 @@ def main() -> None:
     print()
     shot_mkv_pairs: list[tuple[dict, Path]] = []
     placeholder_count = 0
+    _cumulative_shot_sec = 0.0
 
     for i, shot in enumerate(shots):
         # CHANGE 5: override bg_segments from confirmed selections if present
@@ -1255,10 +1278,16 @@ def main() -> None:
             music_fadeout_sec=args.music_fadeout_sec,
             no_music=args.no_music,
             verbose=args.verbose,
-            music_snapshot=_music_snapshot,
+            music_plan_data={
+                "plan_overrides": _music_plan_overrides,
+                "clip_volumes":   _music_clip_volumes,
+                "track_volumes":  _music_track_volumes,
+            },
             sfx_plan_override=_sfx_plan_by_shot or None,
+            _cumulative_shot_sec=_cumulative_shot_sec,
         )
         shot_mkv_pairs.append((shot, mkv))
+        _cumulative_shot_sec += shot.get("duration_ms", 0) / 1000.0
 
         # Count placeholders in this shot
         for asset_id in [shot.get("background_asset_id")] \

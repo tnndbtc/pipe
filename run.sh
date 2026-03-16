@@ -147,10 +147,10 @@ run_stage_10() {
   code_dir="$(cd "$(dirname "$0")" && pwd)/code/http"
 
   # ── [1] Music clips — skip if music already approved ─────────────────
-  _music_approved="${EP_DIR}/assets/music/MusicApprovalSnapshot.json"
+  _music_approved="${EP_DIR}/MusicPlan.json"
   if [[ -f "$_music_approved" ]]; then
     echo "  [1] Music already approved — skipping gen_music_clip."
-    echo "      (Delete assets/music/MusicApprovalSnapshot.json to force re-run)"
+    echo "      (Delete MusicPlan.json to force re-run)"
   else
     echo "  [1] Generating music clips (skips gracefully if no resources)…"
     python3 "${code_dir}/gen_music_clip.py" \
@@ -297,7 +297,7 @@ run_stage_10() {
         exit 0
       elif [[ -f "$_music_approved" ]]; then
         echo "  [8] Music already approved — skipping apply_music_plan."
-        echo "      (render_video reads MusicApprovalSnapshot.json directly)"
+        echo "      (render_video reads MusicPlan.json directly)"
       else
         echo "  [8] Applying music plan overrides…"
         python3 "${code_dir}/apply_music_plan.py" \
