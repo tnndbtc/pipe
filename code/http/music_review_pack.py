@@ -453,8 +453,8 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         # start_sec: how many seconds into the shot before music begins
         start_sec = float(entry.get("start_sec", 0.0))
         music_offset_samples = int(start_sec * SAMPLE_RATE)
-        # Music fills from its start point to the end of the shot
-        shot_samples = max(0, int((entry["duration_sec"] - start_sec) * SAMPLE_RATE))
+        # Music fills from its start point to the end of the shot (or overridden music end)
+        shot_samples = max(0, int((entry.get("music_end_sec", entry["duration_sec"]) - start_sec) * SAMPLE_RATE))
 
         # Truncate or tile music to fill the remaining shot duration
         if shot_samples == 0:
@@ -538,9 +538,8 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         snap["fade_sec"] = fade_sec
         snap["music_delay_sec"] = start_sec
         # music_end_sec: shot-relative position where music stops.
-        # = entry["duration_sec"] after _apply_overrides (which stores end_sec directly).
-        # When no end_sec override, equals shot duration.
-        snap["music_end_sec"] = float(entry.get("duration_sec", snap["duration_ms"] / 1000.0))
+        # Uses overridden music_end_sec if set; falls back to full shot duration.
+        snap["music_end_sec"] = float(entry.get("music_end_sec", entry["duration_sec"]))
         snap["loop_wav_path"] = str(music_path)
 
     # Trim to last VO end + 5s fade-out, so music review doesn't play 45s of
@@ -744,12 +743,14 @@ def main():
                 if "fade_sec" in ovr:
                     entry["fade_sec"] = float(ovr["fade_sec"])
                 if "start_sec" in ovr:
-                    entry["start_sec"] = float(ovr["start_sec"])
+                    # MusicPlan stores episode-absolute coords; convert to within-shot
+                    _shot_offset = float(entry.get("offset_sec", 0.0))
+                    entry["start_sec"] = max(0.0, float(ovr["start_sec"]) - _shot_offset)
                 if "end_sec" in ovr:
-                    # end_sec is the music play end offset within the shot (seconds from shot start).
-                    # entry["duration_sec"] here is used as an end-position sentinel:
-                    # shot_samples = (entry["duration_sec"] - entry["start_sec"]) * SR.
-                    entry["duration_sec"] = float(ovr["end_sec"])
+                    # MusicPlan stores episode-absolute coords; convert to within-shot.
+                    # Store as music_end_sec (separate from shot duration_sec to avoid corruption).
+                    _shot_offset = float(entry.get("offset_sec", 0.0))
+                    entry["music_end_sec"] = max(0.0, float(ovr["end_sec"]) - _shot_offset)
                 if "music_asset_id" in ovr:
                     # Store override separately — keep original music_item_id
                     # for UI (timeline.json). Renderer uses _override for audio.

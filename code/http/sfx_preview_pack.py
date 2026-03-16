@@ -498,8 +498,9 @@ def main():
             manifest_fade_sec = float(manifest_music_item.get("fade_sec", DEFAULT_FADE_SEC))
             duck_db  = float(ovr.get("duck_db",  manifest_duck_db))
             fade_sec = float(ovr.get("fade_sec", manifest_fade_sec))
-            music_start_sec = float(ovr.get("start_sec", 0.0))
-            music_end_sec   = float(ovr.get("end_sec", shot_dur))
+            # MusicPlan stores episode-absolute coords; convert to within-shot
+            music_start_sec = max(0.0, float(ovr["start_sec"]) - shot_offset) if "start_sec" in ovr else 0.0
+            music_end_sec   = max(0.0, float(ovr["end_sec"]) - shot_offset)   if "end_sec"   in ovr else shot_dur
 
             # Resolve base_db from track/clip volumes
             stem = clip_id.split(":")[0] if clip_id else ""
@@ -565,10 +566,12 @@ def main():
                     if s < n_samples and e2 > s:
                         buf[s:e2] += music_data[:e2 - s]
 
+                    music_actual_start = shot_offset + music_start_sec
+                    music_actual_end   = music_actual_start + shot_samples / SAMPLE_RATE
                     tl_music_out.append({
                         "item_id": mid,
-                        "start_sec": round(shot_offset, 3),
-                        "end_sec": round(shot_offset + shot_dur, 3),
+                        "start_sec": round(music_actual_start, 3),
+                        "end_sec": round(music_actual_end, 3),
                         "shot_id": shot_id,
                         "music_mood": entry.get("music_mood", ""),
                     })

@@ -2624,7 +2624,7 @@ placeholder="Enter your story here"></textarea>
     <button id="media-btn-preview" onclick="mediaGeneratePreview()"
             style="margin-left:8px;margin-right:4px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.80em;padding:5px 14px;cursor:pointer">🎬 Generate Preview (VO)</button>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-music" checked onchange="mediaUpdatePreviewLabel()"> Include Music</label>
-    <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-sfx" onchange="mediaUpdatePreviewLabel()"> Include SFX</label>
+    <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-sfx" checked onchange="mediaUpdatePreviewLabel()"> Include SFX</label>
   </div>
 
   <!-- per-source settings table (always visible once project selected) -->
@@ -2679,7 +2679,7 @@ placeholder="Enter your story here"></textarea>
     <span id="media-confirm-msg"></span>
     <button id="media-btn-reset"     onclick="mediaReset()">↺ Reset</button>
     <button id="media-btn-apply-seq" onclick="mediaApplyRecommended()" style="display:none">⚡ Apply Recommended Sequence</button>
-    <button id="media-btn-confirm"   onclick="mediaConfirm()">✔ Confirm</button>
+    <button id="media-btn-confirm"   onclick="mediaConfirm()">✔ Confirm Plan</button>
   </div>
 </div>
 
@@ -2784,7 +2784,7 @@ placeholder="Enter your story here"></textarea>
   <!-- footer -->
   <div class="sfx-footer" id="sfx-footer" style="display:none">
     <span id="sfx-confirm-msg" style="font-size:0.83em;color:var(--dim);flex:1"></span>
-    <button id="sfx-btn-confirm" onclick="sfxSaveAll()">✔ Confirm</button>
+    <button id="sfx-btn-confirm" onclick="sfxSaveAll()">✔ Confirm Plan</button>
     <button onclick="sfxReset()" style="background:transparent;border:1px solid var(--border);color:var(--dim)">↺ Reset</button>
   </div>
 </div>
@@ -2814,7 +2814,7 @@ placeholder="Enter your story here"></textarea>
   <!-- footer actions -->
   <div class="music-footer" id="music-footer" style="display:none">
     <span id="music-confirm-msg"></span>
-    <button id="music-btn-confirm" onclick="musicConfirm()">✔ Confirm</button>
+    <button id="music-btn-confirm" onclick="musicConfirm()">✔ Confirm Plan</button>
   </div>
 </div>
 
@@ -2968,14 +2968,14 @@ placeholder="Enter your story here"></textarea>
        padding-top:8px;border-top:1px solid var(--border)">
     <span id="vo-approve-icon" style="font-size:0.9em">🎙</span>
     <span id="vo-approve-msg" style="font-size:0.83em;color:var(--text);flex:1">
-      Review each VO item, then click Confirm to lock in your audio and continue.
+      Review each VO item, then click Confirm Plan to lock in your audio and continue.
     </span>
     <span id="vo-approve-error" style="display:none;color:#f88;font-size:0.83em"></span>
     <button id="vo-approve-btn" onclick="voApproveTTS()"
       style="background:var(--green);color:#fff;border:none;border-radius:6px;
              font-size:0.85em;font-weight:700;padding:8px 20px;cursor:pointer;
              transition:opacity .15s;flex-shrink:0">
-      ✔ Confirm
+      ✔ Confirm Plan
     </button>
   </div>
 </div>
@@ -4805,16 +4805,16 @@ placeholder="Enter your story here"></textarea>
       sentinelEl.style.color = '#f0963c';
       sentinelEl.style.border = '1px solid #7a4400';
       document.getElementById('vo-sentinel-icon').textContent = '⚠';
-      document.getElementById('vo-sentinel-text').textContent = 'VO edits made — click Confirm when ready';
+      document.getElementById('vo-sentinel-text').textContent = 'VO edits made — click Confirm Plan when ready';
     }
     const approveBtn = document.getElementById('vo-approve-btn');
     if (approveBtn) {
-      approveBtn.textContent = '✔ Confirm';
+      approveBtn.textContent = '✔ Confirm Plan';
       const banner = document.getElementById('vo-approve-banner');
       if (banner) {
         banner.style.display = 'flex';
         document.getElementById('vo-approve-msg').textContent =
-          'VO edits made — click Confirm before continuing to Stage 8.';
+          'VO edits made — click Confirm Plan before continuing to Stage 8.';
       }
     }
   }
@@ -4883,7 +4883,7 @@ placeholder="Enter your story here"></textarea>
 
       // Success — clear pending stage and update UI
       _pendingApproveStage = null;
-      if (btn) { btn.textContent = '✔ Confirm'; btn.disabled = false; }
+      if (btn) { btn.textContent = '✔ Confirm Plan'; btn.disabled = false; }
       const sentinelEl = document.getElementById('vo-sentinel-status');
       if (sentinelEl) {
         sentinelEl.style.display = 'flex';
@@ -4904,7 +4904,7 @@ placeholder="Enter your story here"></textarea>
         el.classList.remove('vo-timing-stale'));
 
     } catch(e) {
-      if (btn) { btn.textContent = '✔ Confirm'; btn.disabled = false; }
+      if (btn) { btn.textContent = '✔ Confirm Plan'; btn.disabled = false; }
       if (errEl) { errEl.textContent = '✗ ' + e.message; errEl.style.display = 'block'; }
     }
   }
@@ -4976,7 +4976,7 @@ placeholder="Enter your story here"></textarea>
       if (data.valid) {
         document.getElementById('vo-approve-msg').textContent =
           '✓ VO Approved — pipeline may continue.';
-        document.getElementById('vo-approve-btn').textContent = '✔ Confirm';
+        document.getElementById('vo-approve-btn').textContent = '✔ Confirm Plan';
       } else if (data.exists) {
         // Sentinel exists but hashes don't match (edits since last approval)
         _voMarkSentinelInvalid();
@@ -11428,9 +11428,13 @@ placeholder="Enter your story here"></textarea>
           voItems.push({ item_id: v.item_id, start_sec: v.start_sec, end_sec: v.end_sec, speaker_id: v.speaker_id || '' });
         }
       }
-      // Music bar: entire shot if it has music
+      // Music bar: respects within-shot start_sec delay (same logic as the renderer).
+      // sh.duration_sec is either the within-shot end position (when override applied)
+      // or the shot duration (no override) — adding shStart gives the episode-absolute end.
       if (sh.music_item_id) {
-        musicItems.push({ item_id: sh.music_item_id, start_sec: shStart, end_sec: shEnd, music_mood: sh.music_mood || '' });
+        const musicStart = shStart + (sh.start_sec || 0);
+        const musicEnd   = shStart + (sh.duration_sec || 0);
+        musicItems.push({ item_id: sh.music_item_id, start_sec: musicStart, end_sec: musicEnd, music_mood: sh.music_mood || '' });
       }
     }
 
@@ -11548,21 +11552,23 @@ placeholder="Enter your story here"></textarea>
           const shotDur  = s.duration_sec || 0;
           const epStart  = s.offset_sec || 0;
           const epEnd    = epStart + shotDur;
-          // within-shot offsets (stored in overrides / backend)
-          const startWithin = ovr.start_sec != null ? ovr.start_sec : (s.start_sec != null ? s.start_sec : 0);
-          const endWithin   = ovr.end_sec   != null ? Math.min(ovr.end_sec, shotDur)
-                                                    : Math.min(startWithin + shotDur, shotDur);
-          // episode-absolute values shown in the inputs
-          const dispStart = epStart + startWithin;
-          const dispEnd   = epStart + endWithin;
+          // episode-absolute values stored in overrides and shown in UI
+          const dispStart = ovr.start_sec != null ? ovr.start_sec
+                          : (s.start_sec  != null ? epStart + s.start_sec : epStart);
+          const dispEnd   = ovr.end_sec   != null ? ovr.end_sec : epEnd;
           const duckVal  = ovr.duck_db  != null ? ovr.duck_db  : 0;
           const fadeVal  = ovr.fade_sec != null ? ovr.fade_sec : (s.fade_sec != null ? s.fade_sec : 0.15);
           const col      = shotColors[i % shotColors.length];
-          // currentClipId: use saved override if present, else empty (no auto-default)
-          // IMPORTANT: do NOT fall back to origMid ("music-sc01-sh01") — it's not a real
-          // clip ID and causes the browser to silently show the first option without
-          // triggering onchange, leaving the override unregistered.
+          // currentClipId: use saved override if present, then fall back to auto-assigned clip
           const currentClipId = ovr.music_clip_id || itemToClipId[origMid] || '';
+          // Auto-initialize _musicOverrides so Confirm always writes all fields
+          if (!_musicOverrides[origMid]) _musicOverrides[origMid] = { item_id: origMid };
+          { const _o = _musicOverrides[origMid];
+            if (!_o.music_clip_id && currentClipId) _musicSetClipOverride(origMid, currentClipId);
+            if (_o.start_sec == null) _o.start_sec = parseFloat(dispStart.toFixed(2));
+            if (_o.end_sec   == null) _o.end_sec   = parseFloat(dispEnd.toFixed(2));
+            if (_o.duck_db   == null) _o.duck_db   = duckVal;
+            if (_o.fade_sec  == null) _o.fade_sec  = parseFloat(fadeVal.toFixed(2)); }
 
           ovrHtml += '<div class="music-shot-block">'
             // header: shot id + episode time range
@@ -11584,11 +11590,11 @@ placeholder="Enter your story here"></textarea>
             + '<div class="music-shot-params">'
             + '<label title="Episode time when music begins (seconds)">▶ start</label>'
             + '<input type="number" step="0.5" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispStart.toFixed(1) + '"'
-            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',parseFloat(this.value)-' + epStart + ',null,' + shotDur + ')"'
+            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',parseFloat(this.value),null,' + epStart + ',' + epEnd + ')"'
             + ' style="width:64px">'
             + '<label title="Episode time when music stops (seconds)">⏹ end</label>'
             + '<input type="number" step="0.5" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispEnd.toFixed(1) + '"'
-            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',null,parseFloat(this.value)-' + epStart + ',' + shotDur + ')"'
+            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',null,parseFloat(this.value),' + epStart + ',' + epEnd + ')"'
             + ' style="width:64px">'
             + '<label title="Attenuation in dB (0 = full volume)">🔉 duck</label>'
             + '<input type="number" step="1" min="-30" max="0" value="' + duckVal + '"'
@@ -11856,16 +11862,16 @@ placeholder="Enter your story here"></textarea>
     _musicOverrides[itemId][field] = value;
   }
 
-  // start_sec / end_sec: either may be null (means "keep current value")
-  function _musicSetStartEnd(itemId, startSec, endSec, shotDur) {
+  // start_sec / end_sec: episode-absolute values; either may be null (means "keep current")
+  function _musicSetStartEnd(itemId, startSec, endSec, epStart, epEnd) {
     if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
     const ovr = _musicOverrides[itemId];
-    // Resolve current values
-    const curStart = startSec != null ? startSec : (ovr.start_sec != null ? ovr.start_sec : 0);
-    const curEnd   = endSec   != null ? endSec   : (ovr.end_sec   != null ? ovr.end_sec   : Math.min(curStart + shotDur, shotDur));
-    // Clamp and store
-    const newStart = Math.max(0, Math.min(curStart, shotDur));
-    const newEnd   = Math.max(newStart, Math.min(curEnd, shotDur));
+    // Resolve current values (episode-absolute)
+    const curStart = startSec != null ? startSec : (ovr.start_sec != null ? ovr.start_sec : epStart);
+    const curEnd   = endSec   != null ? endSec   : (ovr.end_sec   != null ? ovr.end_sec   : epEnd);
+    // Clamp to shot range (episode-absolute)
+    const newStart = Math.max(epStart, Math.min(curStart, epEnd));
+    const newEnd   = Math.max(newStart, Math.min(curEnd, epEnd));
     ovr.start_sec = parseFloat(newStart.toFixed(2));
     ovr.end_sec   = parseFloat(newEnd.toFixed(2));
   }
@@ -11898,12 +11904,26 @@ placeholder="Enter your story here"></textarea>
       });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || 'save failed');
-      if (d.snapshot_exists) {
-        document.getElementById('music-confirm-msg').textContent =
-          '✔ MusicPlan.json + MusicApprovalSnapshot.json saved';
+      const msgEl = document.getElementById('music-confirm-msg');
+      // Show validation result prominently
+      if (d.validation_pass === false) {
+        const errLines = (d.validation_errors && d.validation_errors.length)
+          ? d.validation_errors.join('\n')
+          : (d.validation_output || 'unknown error');
+        msgEl.innerHTML = '<span style="color:#f88;font-weight:700">⚠ Contract validation FAILED:</span>'
+          + '<pre style="margin:4px 0 0;font-size:0.80em;color:#f88;white-space:pre-wrap">'
+          + escHtml(errLines) + '</pre>';
+      } else if (d.validation_pass === true) {
+        const saveMsg = d.snapshot_exists
+          ? '✔ MusicPlan.json + MusicApprovalSnapshot.json saved'
+          : '✔ MusicPlan.json saved — ⚠ Generate Preview first to save audio snapshot, then Confirm Plan again.';
+        msgEl.innerHTML = '<span style="color:#6ec96e">' + escHtml(saveMsg) + '</span>'
+          + ' <span style="color:#6ec96e;font-size:0.85em">[contract: PASS]</span>';
       } else {
-        document.getElementById('music-confirm-msg').textContent =
-          '✔ MusicPlan.json saved — ⚠ Generate Preview first to save audio snapshot, then Confirm again.';
+        // verify_contracts runner failed to execute — still show save status
+        msgEl.textContent = d.snapshot_exists
+          ? '✔ MusicPlan.json saved (contract check unavailable)'
+          : '✔ MusicPlan.json saved — ⚠ Generate Preview first, then Confirm Plan again.';
       }
     } catch (err) {
       document.getElementById('music-confirm-msg').textContent = 'Error: ' + err.message;
@@ -19705,10 +19725,40 @@ class Handler(BaseHTTPRequestHandler):
                       f"loops={len(plan.get('loop_selections', {}))}  "
                       f"overrides={len(plan.get('shot_overrides', []))}  "
                       f"snapshot={'yes' if snapshot_exists else 'MISSING'}")
+
+                # Run verify_contracts.py against the just-written MusicPlan.json
+                _verify_script = os.path.join(
+                    PIPE_DIR, "contracts", "tools", "verify_contracts.py")
+                _vc_errors = []
+                _vc_output = ""
+                _vc_pass   = False
+                try:
+                    import subprocess as _sp
+                    _vc_proc = _sp.run(
+                        [sys.executable, _verify_script, plan_path],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    _vc_output = (_vc_proc.stdout + _vc_proc.stderr).strip()
+                    _vc_pass   = (_vc_proc.returncode == 0)
+                    if not _vc_pass:
+                        _vc_errors = [
+                            ln.strip().lstrip("•").strip()
+                            for ln in _vc_output.splitlines()
+                            if ln.strip().startswith("•")
+                        ] or [_vc_output]
+                    print(f"  verify_contracts: {'PASS' if _vc_pass else 'FAIL'}  "
+                          f"{_vc_output[:200]}")
+                except Exception as _vc_exc:
+                    _vc_output = f"verify_contracts runner error: {_vc_exc}"
+                    print(f"  {_vc_output}")
+
                 body = json.dumps({
                     "ok": True,
                     "path": rel_path,
                     "snapshot_exists": snapshot_exists,
+                    "validation_pass":   _vc_pass,
+                    "validation_output": _vc_output,
+                    "validation_errors": _vc_errors,
                 }).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
