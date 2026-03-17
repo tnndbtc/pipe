@@ -18297,17 +18297,36 @@ class Handler(BaseHTTPRequestHandler):
                                         _sc, _last_shot["shot_id"],
                                         _old_total, _new_dur, _delta)
 
-                                if _sl_changed:
-                                    _sl["total_duration_sec"] = round(
-                                        sum(s.get("duration_sec", 0.0)
-                                            for s in _sl.get("shots", [])), 3)
+                                # Always recompute start_sec for every shot as the
+                                # cumulative sum of preceding duration_sec values.
+                                # render_video.py reads shot["start_sec"] to compute
+                                # shot-relative VO offsets; a stale start_sec (not
+                                # reflecting the scene tail in the preceding shot's
+                                # duration) shifts every VO line by the tail amount
+                                # in the final rendered video.
+                                # This runs even when _sl_changed == 0 so that a
+                                # pre-existing inconsistency between duration_sec and
+                                # start_sec (delta < 0.001 threshold) is still fixed.
+                                _start_sec_changed = 0
+                                _cum_sec = 0.0
+                                for _sh in _sl.get("shots", []):
+                                    _expected = round(_cum_sec, 3)
+                                    if abs(_sh.get("start_sec", 0.0) - _expected) >= 0.001:
+                                        _sh["start_sec"] = _expected
+                                        _start_sec_changed += 1
+                                    _cum_sec += _sh.get("duration_sec", 0.0)
+
+                                if _sl_changed or _start_sec_changed:
+                                    _sl["total_duration_sec"] = round(_cum_sec, 3)
                                     _sl_tmp = _sl_path + ".tmp"
                                     with open(_sl_tmp, "w", encoding="utf-8") as _slf2:
                                         json.dump(_sl, _slf2, indent=2, ensure_ascii=False)
                                     os.replace(_sl_tmp, _sl_path)
                                     _log.info(
                                         "[vo_approve] ShotList.json updated — "
-                                        "%d scene(s) adjusted", _sl_changed)
+                                        "%d scene(s) duration-adjusted, "
+                                        "%d shot(s) start_sec fixed",
+                                        _sl_changed, _start_sec_changed)
                             except Exception as _sl_err:
                                 _log.warning(
                                     "[vo_approve] ShotList.json update failed: %s", _sl_err)
