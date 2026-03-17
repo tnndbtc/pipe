@@ -314,24 +314,22 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
 
     n_samples = int(total_dur * SAMPLE_RATE) + SAMPLE_RATE  # +1s safety
 
-    # ── Build scene-shift lookup so VO gets the same inter-scene pauses
-    # that the VO-tab "Generate Preview" adds (scene_tails from manifest). ──────
+    # ── Grow buffer to accommodate episode-absolute VO timing (scene tails
+    # are already baked into manifest.vo_items[].start_sec by the approve flow,
+    # so the last VO item may end beyond total_dur which is shots-only). ──────
     _scene_tails_cfg = manifest.get("scene_tails", {})
     _DEFAULT_SCENE_TAIL_MS = 2000
-    _vo_scene_shift: dict = {}   # item_id → extra seconds from accumulated scene pauses
-    _prev_scene_id  = None
-    _shift_acc      = 0.0
+    _prev_scene_id = None
+    _shift_acc     = 0.0
     for _vo_item in manifest.get("vo_items", []):
         _iid   = _vo_item.get("item_id", "")
         _parts = _iid.split("-")
-        _scn   = _parts[1] if len(_parts) >= 3 else ""   # "sc01" from "vo-sc01-001"
+        _scn   = _parts[1] if len(_parts) >= 3 else ""
         if _prev_scene_id is not None and _scn != _prev_scene_id:
             _tail_ms = int(_scene_tails_cfg.get(
                 _scn, _scene_tails_cfg.get(_prev_scene_id, _DEFAULT_SCENE_TAIL_MS)))
             _shift_acc += _tail_ms / 1000.0
-        _vo_scene_shift[_iid] = _shift_acc
         _prev_scene_id = _scn
-    # Grow buffer to fit the extra scene-tail time
     n_samples += int(_shift_acc * SAMPLE_RATE)
 
     buf = np.zeros((n_samples, CHANNELS), dtype=np.float64)
@@ -375,11 +373,9 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
             vo_dur = len(vo_data) / SAMPLE_RATE
 
             if has_timing:
+                # start_sec is episode-absolute (scene tails already baked in
+                # by the approve flow) — use directly, no extra shift needed.
                 start = vo.get("start_sec", 0.0)
-                # start_sec is absolute global time; offset already baked in.
-                # Add per-item scene-tail shift so scene boundaries match the
-                # VO-tab preview (which inserts scene_tails silence).
-                start += _vo_scene_shift.get(item_id, 0.0)
                 s = int(start * SAMPLE_RATE)
             else:
                 start = vo_cursor
@@ -501,9 +497,8 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         for vo in entry.get("vo_lines", []):
             end = vo.get("end_sec")
             if end is not None:
-                # Account for scene-tail shift applied during VO placement
-                shifted_end = end + _vo_scene_shift.get(vo.get("item_id", ""), 0.0)
-                last_vo_end_sec = max(last_vo_end_sec, shifted_end)
+                # end_sec is episode-absolute (scene tails baked in by approve flow)
+                last_vo_end_sec = max(last_vo_end_sec, end)
     VO_OUTRO_SEC = 5.0
     trim_sec = min(last_vo_end_sec + VO_OUTRO_SEC, total_dur) if last_vo_end_sec > 0 else total_dur
     trim_samples = int(trim_sec * SAMPLE_RATE)

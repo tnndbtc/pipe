@@ -16755,37 +16755,26 @@ class Handler(BaseHTTPRequestHandler):
                             print(f"  [WARN] sfx_timeline: RenderPlan: {_rpe2}")
                     _tl_stl, _dur_stl = _sfx_bld_stl(
                         _shots_stl, _mf_stl, _vsm_stl, _midx_stl, {})
-                    # Build tl_doc matching SFX timeline format (no audio rendered)
-                    # Compute scene shifts for accurate offset_sec
-                    _sc_tails = _mf_stl.get("scene_tails", {})
-                    _sc_map: dict = {}
-                    _prev_sc = None
-                    _sh_acc = 0.0
-                    for _en in _tl_stl:
-                        _sc = _en["scene_id"]
-                        if _prev_sc is not None and _sc != _prev_sc:
-                            _tc = int(_sc_tails.get(_sc, _sc_tails.get(_prev_sc, 2000)))
-                            _sh_acc += _tc / 1000.0
-                        _sc_map.setdefault(_sc, _sh_acc)
-                        _prev_sc = _sc
+                    # Build tl_doc matching SFX timeline format (no audio rendered).
+                    # entry["offset_sec"] from build_shot_timeline is ShotList-based
+                    # cumulative — already episode-absolute including scene tails.
+                    # Do NOT add any extra scene-tail shift.
                     _shots_out = [{
                         "shot_id": _en["shot_id"],
                         "scene_id": _en.get("scene_id", ""),
-                        "offset_sec": round(_en["offset_sec"] + _sc_map.get(_en["scene_id"], 0.0), 3),
+                        "offset_sec": round(_en["offset_sec"], 3),
                         "duration_sec": round(_en["duration_sec"], 3),
-                        "scene_shift_sec": round(_sc_map.get(_en["scene_id"], 0.0), 3),
                     } for _en in _tl_stl]
                     _vo_out = []
                     for _en in _tl_stl:
-                        _shift = _sc_map.get(_en["scene_id"], 0.0)
                         for _v in _en.get("vo_lines", []):
                             _vs = _v.get("start_sec")
                             _ve = _v.get("end_sec")
                             if _vs is not None:
                                 _vo_out.append({
                                     "item_id": _v["item_id"],
-                                    "start_sec": round(_vs + _shift, 3),
-                                    "end_sec": round((_ve or _vs) + _shift, 3),
+                                    "start_sec": round(_vs, 3),
+                                    "end_sec": round((_ve or _vs), 3),
                                     "speaker_id": _v.get("speaker_id", ""),
                                     "shot_id": _en["shot_id"],
                                 })
@@ -16823,7 +16812,6 @@ class Handler(BaseHTTPRequestHandler):
                             _mid = _en.get("music_item_id", "")
                             if not _mid:
                                 continue
-                            _scene_shift = _sc_map.get(_en["scene_id"], 0.0)
                             _ovr = _mp_overrides.get(_mid)
                             if _ovr and "start_sec" in _ovr:
                                 # MusicPlan start_sec is episode-absolute — no scene_shift added.
@@ -16850,7 +16838,7 @@ class Handler(BaseHTTPRequestHandler):
                     _wav_stl = os.path.join(_ep_dir_stl, "assets", "sfx",
                                             "SfxPreviewPack", "preview_audio.wav")
                     _tl_doc_stl = {
-                        "total_dur_sec": round(_dur_stl + _sh_acc, 3),
+                        "total_dur_sec": round(_dur_stl, 3),
                         "timing_source": "manifest",
                         "shots": _shots_out,
                         "vo_items": _vo_out,
@@ -18240,6 +18228,89 @@ class Handler(BaseHTTPRequestHandler):
                         os.replace(_mani_tmp, _mani_path)
                         _log.debug("[vo_approve] wrote duration_sec + pause_after_ms + "
                                    "start_sec + end_sec for %d items → manifest", len(_approved_lookup))
+                    # ─────────────────────────────────────────────────────────────────
+
+                    # ── Sync ShotList.json shot durations to VO-approved scene tails ──
+                    # The last shot of each scene is padded/trimmed so its cumulative
+                    # offset matches the approved start_sec of the next scene.
+                    # This keeps Music/SFX tab shot-offset calculations in sync with
+                    # whatever inter-scene breaks the user configured in the VO tab.
+                    if _req_items and _approval_items:
+                        _sl_path = os.path.join(full_ep, "ShotList.json")
+                        if os.path.isfile(_sl_path):
+                            try:
+                                with open(_sl_path, encoding="utf-8") as _slf:
+                                    _sl = json.load(_slf)
+
+                                # Build scene order + per-scene item list from approved items.
+                                # item_id format: "vo-{scene_id}-{seq}" e.g. "vo-sc01-003"
+                                _sc_order: list = []
+                                _sc_items: dict = {}
+                                for _ai in _approval_items:
+                                    _ai_parts = _ai["item_id"].split("-")
+                                    _ai_sc = _ai_parts[1] if len(_ai_parts) >= 3 else ""
+                                    if not _ai_sc:
+                                        continue
+                                    if _ai_sc not in _sc_items:
+                                        _sc_items[_ai_sc] = []
+                                        _sc_order.append(_ai_sc)
+                                    _sc_items[_ai_sc].append(_ai)
+
+                                # Compute authoritative timeline duration per scene:
+                                #   non-last scene → next scene's first item start_sec minus this scene's first item start_sec
+                                #   last scene     → last item end_sec + pause_after_ms/1000 - this scene's first item start_sec
+                                _sc_new_dur: dict = {}
+                                for _sci, _sc in enumerate(_sc_order):
+                                    _sc_start = _sc_items[_sc][0]["start_sec"]
+                                    if _sci + 1 < len(_sc_order):
+                                        _sc_end = _sc_items[_sc_order[_sci + 1]][0]["start_sec"]
+                                    else:
+                                        _last_ai = _sc_items[_sc][-1]
+                                        _sc_end = (_last_ai["end_sec"]
+                                                   + _last_ai.get("pause_after_ms", 300) / 1000.0)
+                                    _sc_new_dur[_sc] = round(_sc_end - _sc_start, 6)
+
+                                # Group ShotList shots by scene_id (preserving JSON order)
+                                _sl_by_sc: dict = {}
+                                for _sh in _sl.get("shots", []):
+                                    _sh_sc = _sh.get("scene_id", "")
+                                    _sl_by_sc.setdefault(_sh_sc, []).append(_sh)
+
+                                # Apply delta to last shot of each scene
+                                _sl_changed = 0
+                                for _sc, _new_dur in _sc_new_dur.items():
+                                    _sc_shots = _sl_by_sc.get(_sc, [])
+                                    if not _sc_shots:
+                                        continue
+                                    _old_total = sum(
+                                        s.get("duration_sec", 0.0) for s in _sc_shots)
+                                    _delta = round(_new_dur - _old_total, 6)
+                                    if abs(_delta) < 0.001:
+                                        continue
+                                    _last_shot = _sc_shots[-1]
+                                    _old_last = _last_shot.get("duration_sec", 0.0)
+                                    _last_shot["duration_sec"] = round(_old_last + _delta, 3)
+                                    _sl_changed += 1
+                                    _log.debug(
+                                        "[vo_approve] ShotList %s last-shot=%s  "
+                                        "scene_dur %.3f→%.3f  delta=%.3f",
+                                        _sc, _last_shot["shot_id"],
+                                        _old_total, _new_dur, _delta)
+
+                                if _sl_changed:
+                                    _sl["total_duration_sec"] = round(
+                                        sum(s.get("duration_sec", 0.0)
+                                            for s in _sl.get("shots", [])), 3)
+                                    _sl_tmp = _sl_path + ".tmp"
+                                    with open(_sl_tmp, "w", encoding="utf-8") as _slf2:
+                                        json.dump(_sl, _slf2, indent=2, ensure_ascii=False)
+                                    os.replace(_sl_tmp, _sl_path)
+                                    _log.info(
+                                        "[vo_approve] ShotList.json updated — "
+                                        "%d scene(s) adjusted", _sl_changed)
+                            except Exception as _sl_err:
+                                _log.warning(
+                                    "[vo_approve] ShotList.json update failed: %s", _sl_err)
                     # ─────────────────────────────────────────────────────────────────
 
                     # ── Cache approved WAVs ───────────────────────────────────────────

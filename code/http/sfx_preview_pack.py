@@ -238,30 +238,10 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
         if sid:
             music_index[sid] = mi
 
-    # Scene-tail shift — keyed by scene_id from ShotList (Issue 18 fix)
-    _scene_tails_cfg = manifest.get("scene_tails", {})
-    _DEFAULT_SCENE_TAIL_MS = 2000
-    _scene_shift_map = {}
-    _prev_scene = None
-    _shift_acc = 0.0
-    for entry in timeline_shots:
-        sc = entry["scene_id"]
-        if _prev_scene is not None and sc != _prev_scene:
-            _tail_ms = int(_scene_tails_cfg.get(sc, _scene_tails_cfg.get(_prev_scene, _DEFAULT_SCENE_TAIL_MS)))
-            _shift_acc += _tail_ms / 1000.0
-        if sc not in _scene_shift_map:
-            _scene_shift_map[sc] = _shift_acc
-        _prev_scene = sc
-
-    _shot_scene_shift = {e["shot_id"]: _scene_shift_map.get(e["scene_id"], 0.0) for e in timeline_shots}
-    _vo_scene_shift = {}
-    for entry in timeline_shots:
-        shift = _shot_scene_shift[entry["shot_id"]]
-        for vo in entry.get("vo_lines", []):
-            _vo_scene_shift[vo["item_id"]] = shift
-
-    # Allocate buffer
-    n_samples = int((total_dur + _shift_acc) * SAMPLE_RATE) + SAMPLE_RATE
+    # Allocate buffer — total_dur is from ShotList which already bakes in
+    # scene tails (last shot of each scene carries the tail duration).
+    # No extra scene-tail shift needed here.
+    n_samples = int(total_dur * SAMPLE_RATE) + SAMPLE_RATE
     buf = np.zeros((n_samples, CHANNELS), dtype=np.float64)
 
     vo_dir = ep_dir / "assets" / locale / "audio" / "vo"
@@ -318,8 +298,9 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
 
     for idx, entry in enumerate(timeline_shots):
         shot_id = entry["shot_id"]
-        scene_shift = _shot_scene_shift.get(shot_id, 0.0)
-        shot_offset = entry["offset_sec"] + scene_shift
+        # entry["offset_sec"] is ShotList-based cumulative — already episode-absolute
+        # including scene tails. Do NOT add any extra scene-tail shift.
+        shot_offset = entry["offset_sec"]
         shot_dur = entry["duration_sec"]
         offset_samples = int(shot_offset * SAMPLE_RATE)
 
@@ -328,7 +309,6 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
             "scene_id": entry.get("scene_id", ""),
             "offset_sec": round(shot_offset, 3),
             "duration_sec": round(shot_dur, 3),
-            "scene_shift_sec": round(scene_shift, 3),
         })
 
         # ── Place VO ──
@@ -339,13 +319,12 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
         )
         for vo in entry.get("vo_lines", []):
             iid = vo.get("item_id", "")
-            vo_shift = _vo_scene_shift.get(iid, scene_shift)
 
             if has_timing:
                 raw_start = vo.get("start_sec")
                 if raw_start is None:
                     continue
-                vo_start = raw_start + vo_shift
+                vo_start = raw_start
             else:
                 # No timing in manifest or RenderPlan — place sequentially
                 # within the shot using WAV durations (same fallback as
@@ -371,7 +350,7 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
 
             raw_end = vo.get("end_sec")
             if raw_end is not None and has_timing:
-                vo_end = raw_end + vo_shift
+                vo_end = raw_end
             else:
                 vo_end = vo_start + vo_dur
 
@@ -523,7 +502,7 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
     if tl_vo_out:
         last_vo_sec = max(v["end_sec"] for v in tl_vo_out)
     else:
-        last_vo_sec = total_dur + _shift_acc
+        last_vo_sec = total_dur
     trim_samples = min(int((last_vo_sec + 5.0) * SAMPLE_RATE), n_samples)
     buf = buf[:trim_samples]
 
@@ -541,7 +520,7 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
             buf = buf * (0.891 / _peak)
 
     tl_doc = {
-        "total_dur_sec": round(total_dur + _shift_acc, 3),
+        "total_dur_sec": round(total_dur, 3),
         "timing_source": "manifest",
         "shots": tl_shots_out,
         "vo_items": tl_vo_out,
