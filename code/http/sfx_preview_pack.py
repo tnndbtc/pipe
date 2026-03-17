@@ -390,9 +390,13 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
 
         # ── Place SFX ──
         for sel in sfx_index.get(shot_id, []):
-            sfx_start_in_shot = max(0.0, float(sel.get("start", 0)))
-            sfx_end_in_shot = sel.get("end")
-            abs_start = shot_offset + sfx_start_in_shot
+            # SfxPlan stores episode-absolute times — use directly as buffer
+            # position. Do NOT add scene_shift: music is also placed without
+            # scene_shift, so both tracks stay aligned in the preview.
+            abs_start       = float(sel.get("start", 0))
+            sfx_end_ep      = sel.get("end")
+            sfx_duration    = (float(sfx_end_ep) - abs_start) if sfx_end_ep is not None else None
+            sfx_end_in_shot = sfx_duration  # repurposed: now means clip duration cap
 
             try:
                 print(f"  [SFX] Reading {sel['item_id']} from {sel['source_file']}")
@@ -403,10 +407,9 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
                 continue
 
             if sfx_end_in_shot is not None:
-                max_samples = max(0, int((float(sfx_end_in_shot) - sfx_start_in_shot) * SAMPLE_RATE))
+                max_samples = max(0, int(float(sfx_end_in_shot) * SAMPLE_RATE))
             else:
-                remaining = shot_dur - sfx_start_in_shot
-                max_samples = max(0, int(remaining * SAMPLE_RATE))
+                max_samples = len(sfx_data)  # no cap — use full clip
 
             sfx_data = sfx_data[:max_samples]
             sfx_data = sfx_data * (10 ** (SFX_DB / 20.0))

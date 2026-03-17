@@ -540,12 +540,12 @@ def main():
                         print(f"  [WARN] music preview: wav not found for {_music_asset_id}")
                         wav = ""
 
-                    # Derive delay_ms (episode-absolute start_sec minus cumulative shot offset)
+                    # Derive delay_ms: MusicPlan start_sec is episode-absolute — use directly.
                     _start_sec = _ovr.get("start_sec")
                     if _start_sec is not None:
-                        delay_ms = max(0.0, float(_start_sec) - cum_sec) * 1000
+                        delay_ms = max(0.0, float(_start_sec)) * 1000
                     else:
-                        delay_ms = 0.0
+                        delay_ms = cum_ms  # no override: music starts at shot boundary
 
                     # Derive base_db (additive formula)
                     _stem = _re.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _music_asset_id)
@@ -587,21 +587,29 @@ def main():
         # ── Build SFX audio track ─────────────────────────────────────────────
         sfx_audio = None
         if sfx_index:
-            s_inputs, s_delays = [], []
+            s_inputs, s_delays, s_durs = [], [], []
             cum_ms = 0
             for shot_id in ordered_shots:
                 dur_ms = shot_dur_ms.get(shot_id, 0)
                 for entry in sfx_index.get(shot_id, []):
                     src = entry.get("source_file") or entry.get("local_path") or ""
                     if src and Path(src).exists():
-                        delay_ms = cum_ms + float(entry.get("start_sec", 0)) * 1000
+                        start_sec_sfx = float(entry.get("start_sec", 0))
+                        end_sec_sfx   = entry.get("end_sec")
+                        delay_ms      = start_sec_sfx * 1000
+                        clip_dur      = (float(end_sec_sfx) - start_sec_sfx) if end_sec_sfx is not None else None
                         s_inputs.append(src)
                         s_delays.append(delay_ms)
+                        s_durs.append(clip_dur)
                 cum_ms += dur_ms
 
             if s_inputs:
                 sfx_audio = tmp / "sfx_mix.wav"
-                f_parts = [f"[{i}]adelay={d:.0f}|{d:.0f}[s{i}]" for i, d in enumerate(s_delays)]
+                f_parts = [
+                    (f"[{i}]atrim=duration={dur:.3f},adelay={d:.0f}|{d:.0f}[s{i}]" if dur else
+                     f"[{i}]adelay={d:.0f}|{d:.0f}[s{i}]")
+                    for i, (d, dur) in enumerate(zip(s_delays, s_durs))
+                ]
                 mix_ins = "".join(f"[s{i}]" for i in range(len(s_inputs)))
                 f_str = ";".join(f_parts) + f";{mix_ins}amix=inputs={len(s_inputs)}:normalize=0,apad=pad_dur={total_dur:.3f}[out]"
                 cmd = ["ffmpeg", "-y"]

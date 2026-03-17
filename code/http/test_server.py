@@ -5268,10 +5268,10 @@ placeholder="Enter your story here"></textarea>
         const safeIid  = iid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         const selIdx   = _sfxSelected[iid];          // undefined = no selection
         const t        = _sfxTiming[iid] || {};
-        const startWithin = t.start != null ? t.start : 0;
-        const endWithin   = t.end   != null ? t.end   : shotDur;
-        const dispStart   = (epStart + startWithin).toFixed(1);
-        const dispEnd     = (epStart + endWithin).toFixed(1);
+        const startWithin = t.start != null ? t.start : epStart;
+        const endWithin   = t.end   != null ? t.end   : epEnd;
+        const dispStart   = startWithin.toFixed(1);
+        const dispEnd     = endWithin.toFixed(1);
         const candidates  = (_sfxResults[iid] || {}).candidates || [];
 
         // ── Candidate dropdown (mirrors music-shot-clip select) ──
@@ -5361,11 +5361,22 @@ placeholder="Enter your story here"></textarea>
                              + '&file=SfxPlan.json');
         if (rp.ok) {
           const plan = await rp.json();
+          const isEpAbs = plan.timing_format === 'episode_absolute';
           (plan.sfx_entries || []).forEach(e => {
             if (e.item_id && e.candidate_idx != null)
               _sfxSelected[e.item_id] = e.candidate_idx;
-            if (e.item_id)
-              _sfxTiming[e.item_id] = { start: e.start_sec || 0, end: e.end_sec ?? null };
+            if (e.item_id) {
+              let startEp = e.start_sec || 0;
+              let endEp   = e.end_sec ?? null;
+              if (!isEpAbs) {
+                // Legacy: times were within-shot — convert to episode-absolute
+                const shotEntry = _sfxShotTimeline.find(s => s.sfx_items.some(i => i.item_id === e.item_id));
+                const epOff = shotEntry ? shotEntry.epStart : 0;
+                startEp = startEp + epOff;
+                if (endEp != null) endEp = endEp + epOff;
+              }
+              _sfxTiming[e.item_id] = { start: startEp, end: endEp };
+            }
           });
         }
       } catch(_) {}
@@ -5587,7 +5598,7 @@ placeholder="Enter your story here"></textarea>
         </div>`;
         if (isSel) {
           const t = _sfxTiming[itemId] || {};
-          const startVal = (t.start != null) ? t.start : 0;
+          const startVal = (t.start != null) ? t.start : epStart;
           const endVal = (t.end != null) ? t.end : '';
           const safeItemId = itemId.replace(/'/g, "\\'");
           rows += '<div class="sfx-timing-row" style="display:flex;align-items:center;gap:8px;'
@@ -5599,7 +5610,7 @@ placeholder="Enter your story here"></textarea>
             + '<label>End: <input type="number" min="0" step="0.1" value="' + endVal + '"'
             + ' placeholder="auto" data-sfx-timing-field="end" style="width:60px;padding:2px 4px"'
             + ' onchange="sfxSetTiming(\'' + safeItemId + '\',\'end\',this.value)"> s</label>'
-            + '<span style="opacity:0.6">(from shot start)</span></div>';
+            + '<span style="opacity:0.6">(episode seconds)</span></div>';
         }
       });
     }
@@ -6095,8 +6106,19 @@ placeholder="Enter your story here"></textarea>
     if (_tlCursorRafs[prefix]) cancelAnimationFrame(_tlCursorRafs[prefix]);
     const cursor = document.getElementById(prefix + '-tl-cursor');
     if (cursor && audioEl) {
+      // Compute the last content end point across all item types.
+      // The audio pauses here instead of playing trailing silence.
+      const _tlEndSec = Math.max(
+        0,
+        ...(tl.vo_items    || []).map(v => v.end_sec || 0),
+        ...(tl.sfx_items   || []).map(s => s.end_sec || 0),
+        ...(tl.music_items || []).map(m => m.end_sec || 0)
+      );
       function _tlTick() {
         cursor.style.left = (audioEl.currentTime / totalDur * 100).toFixed(2) + '%';
+        if (_tlEndSec > 0 && !audioEl.paused && audioEl.currentTime >= _tlEndSec) {
+          audioEl.pause();
+        }
         _tlCursorRafs[prefix] = requestAnimationFrame(_tlTick);
       }
       _tlTick();
@@ -16775,17 +16797,10 @@ class Handler(BaseHTTPRequestHandler):
                             _sfx_plan = json.load(open(_sfx_plan_path, encoding="utf-8"))
                             for _sfx_en in _sfx_plan.get("sfx_entries", []):
                                 _shot_id_sfx = _sfx_en.get("shot_id", "")
-                                _shift_sfx = _sc_map.get(
-                                    next((e["scene_id"] for e in _tl_stl
-                                          if e["shot_id"] == _shot_id_sfx), ""), 0.0)
-                                _shot_off = next(
-                                    (e["offset_sec"] for e in _tl_stl
-                                     if e["shot_id"] == _shot_id_sfx), 0.0)
-                                _ep_start = _shot_off + _shift_sfx
                                 _sfx_items_out.append({
                                     "item_id": _sfx_en.get("item_id", ""),
-                                    "start_sec": round(_ep_start + float(_sfx_en.get("start_sec", 0)), 3),
-                                    "end_sec": round(_ep_start + float(_sfx_en.get("end_sec", 0)), 3),
+                                    "start_sec": round(float(_sfx_en.get("start_sec", 0)), 3),
+                                    "end_sec": round(float(_sfx_en.get("end_sec", 0)), 3),
                                     "shot_id": _shot_id_sfx,
                                     "tag": _sfx_en.get("tag", ""),
                                 })
@@ -19088,6 +19103,7 @@ class Handler(BaseHTTPRequestHandler):
                 sfx_plan = {
                     "schema_id": "SfxPlan",
                     "schema_version": "1.0",
+                    "timing_format": "episode_absolute",
                     "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "sfx_entries": sfx_plan_entries,
                 }
