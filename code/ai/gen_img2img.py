@@ -6,10 +6,6 @@ Replaces gen_composite_image.py for composite mode.
 Usage:
     python gen_img2img.py --mode composite --bg bg.png --characters char1.png char2.png
     python gen_img2img.py --mode composite --bg bg.png --characters char1.png --char-x 0.3
-<<<<<<< Updated upstream
-    python gen_img2img.py --mode composite --manifest AssetManifest.json --output-dir out/
-    python gen_img2img.py --mode inpaint   --input img.png --mask mask.png --prompt "..."
-=======
     python gen_img2img.py --mode composite --manifest AssetManifest_draft.json --output-dir out/
 
     # Inpaint: --mask accepts a file path OR an object name.
@@ -18,7 +14,14 @@ Usage:
     python gen_img2img.py --mode inpaint --input img.png --mask "chair"
     python gen_img2img.py --mode inpaint --input img.png --mask "people"
     python gen_img2img.py --mode inpaint --input img.png --mask mask.png --prompt "stone floor"
->>>>>>> Stashed changes
+
+    # Inpaint engines (--engine):
+    #   flux    — FLUX.1-Fill-dev (default).  Creative diffusion fill.  ~6 GB VRAM.
+    #   sdxl    — SDXL patch-based inpaint.  Softer, more painterly.  ~5 GB VRAM.
+    #   lama    — LaMa texture continuation. Best for backgrounds/floors/walls.  ~0.2 GB.
+    #   opencv  — Classical OpenCV (Telea/NS).  Zero GPU, instant.  Good for small objects.
+    python gen_img2img.py --mode inpaint --engine lama  --input img.png --mask "chair"
+    python gen_img2img.py --mode inpaint --engine opencv --input img.png --mask mask.png --opencv-method ns
 """
 
 import argparse
@@ -151,6 +154,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--manifest",  help="JSON manifest or AssetManifest for batch mode")
     p.add_argument("--asset-id",  dest="asset_id", default=None,
                    help="Process only this asset_id (batch / manifest mode)")
+
+    # --- Inpaint engine ---
+    p.add_argument(
+        "--engine",
+        choices=["flux", "sdxl", "lama", "opencv"],
+        default="flux",
+        help=(
+            "Inpaint engine (--mode inpaint only). "
+            "flux=FLUX.1-Fill-dev (creative diffusion, ~6 GB); "
+            "sdxl=SDXL patch-based (~5 GB); "
+            "lama=LaMa texture continuation — best for backgrounds (~0.2 GB); "
+            "opencv=classical Telea/NS, zero GPU. "
+            "Default: flux"
+        ),
+    )
+    p.add_argument(
+        "--opencv-method",
+        dest="opencv_method",
+        choices=["telea", "ns"],
+        default="telea",
+        help="OpenCV inpaint algorithm (--engine opencv only). telea=Fast Marching (default); ns=Navier-Stokes.",
+    )
+    p.add_argument(
+        "--inpaint-radius",
+        dest="inpaint_radius",
+        type=int,
+        default=5,
+        help="Pixel radius for OpenCV inpainting (--engine opencv only). Default: 5.",
+    )
 
     # --- Generation params ---
     p.add_argument("--steps",          type=int)
@@ -514,6 +546,7 @@ def load_pipe_for_mode(mode: str, args):
         load_flux_img2img, load_flux_fill, load_flux_controlnet,
         load_flux_redux_prior, load_flux_dev_img2img,
         load_sd_upscaler, load_depth_model,
+        load_sdxl_inpaint, load_lama,
     )
     no_fp16 = getattr(args, "no_fp16", False)
 
@@ -524,7 +557,15 @@ def load_pipe_for_mode(mode: str, args):
         return pipe
 
     elif mode == "inpaint":
-        return load_flux_fill()
+        engine = getattr(args, "engine", "flux")
+        if engine == "lama":
+            return load_lama()
+        elif engine == "sdxl":
+            return load_sdxl_inpaint(no_fp16)
+        elif engine == "opencv":
+            return None          # OpenCV needs no model
+        else:                    # "flux" (default)
+            return load_flux_fill()
 
     elif mode == "outpaint":
         return load_flux_fill()
@@ -573,11 +614,21 @@ def unload_pipe(pipe) -> None:
 # Single run
 # ---------------------------------------------------------------------------
 
+_INPAINT_ENGINE_MODULE = {
+    "flux":   "img2img.pipelines.inpaint_flux",
+    "sdxl":   "img2img.pipelines.inpaint",
+    "lama":   "img2img.pipelines.inpaint_lama",
+    "opencv": "img2img.pipelines.inpaint_opencv",
+}
+
+
 def run_single(mode: str, pipe, args) -> None:
     import importlib
     module_path = PIPELINE_MODES[mode]
     if mode == "inpaint":
-        module_path = "img2img.pipelines.inpaint_flux"
+        engine      = getattr(args, "engine", "flux")
+        module_path = _INPAINT_ENGINE_MODULE.get(engine, "img2img.pipelines.inpaint_flux")
+        log.info(f"[inpaint] engine={engine}")
     module = importlib.import_module(module_path)
 
     if args.seed is not None:
@@ -747,7 +798,8 @@ def main() -> None:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    log.info(f"Mode: {args.mode} | Device: {args.device} | FP16: {not args.no_fp16}")
+    engine_tag = f" | engine={args.engine}" if args.mode == "inpaint" else ""
+    log.info(f"Mode: {args.mode}{engine_tag} | Device: {args.device} | FP16: {not args.no_fp16}")
     log.info(f"VRAM profile: {cfg.VRAM_PROFILES[args.mode]}")
 
     pipe = load_pipe_for_mode(args.mode, args)

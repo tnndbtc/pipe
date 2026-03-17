@@ -173,6 +173,42 @@ def load_flux_redux_prior():
     return pipe
 
 
+def load_sdxl_inpaint(no_fp16: bool = False):
+    """SDXL inpainting pipeline (~5 GB VRAM with FP16).
+    Patch-based with prefill — see inpaint.py for strategy details.
+    """
+    from diffusers import StableDiffusionXLInpaintPipeline
+
+    log.info("Loading SDXL Inpaint...")
+    pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
+        MODEL_IDS["sdxl_inpaint"], **_fp16_kwargs(no_fp16)
+    )
+    pipe.enable_model_cpu_offload()
+    pipe.enable_vae_slicing()
+    log.info("SDXL Inpaint ready.")
+    return pipe
+
+
+def load_lama():
+    """LaMa inpainting (simple-lama-inpainting). ~200 MB, CPU or GPU.
+    Pure texture continuation — no diffusion, no generation.
+    Ideal for architectural backgrounds: stone, brick, tile, wood.
+
+    Install: pip install simple-lama-inpainting
+    """
+    try:
+        from simple_lama_inpainting import SimpleLama
+    except ImportError:
+        raise ImportError(
+            "simple-lama-inpainting is not installed.\n"
+            "  pip install simple-lama-inpainting"
+        )
+    log.info("Loading LaMa inpainting model...")
+    lama = SimpleLama()
+    log.info("LaMa ready.")
+    return lama
+
+
 def load_flux_dev_img2img():
     """FLUX.1-dev img2img with 4-bit BnB quant + VAE tiling.
     Paired with load_flux_redux_prior() for style-transfer-with-reference.

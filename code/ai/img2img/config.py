@@ -30,7 +30,7 @@ MODEL_IDS = {
 # Describes peak VRAM for each mode; all verified to fit RTX 4060 8 GB.
 VRAM_PROFILES = {
     "composite":       {"peak_gb": 1.0,  "note": "Depth-Anything only; +5 GB with blend"},
-    "inpaint":         {"peak_gb": 6.0,  "note": "FLUX.1-Fill-dev 4-bit quant + VAE tiling"},
+    "inpaint":         {"peak_gb": 6.0,  "note": "flux=FLUX.1-Fill-dev 4-bit quant; sdxl=~5 GB FP16; lama=~0.2 GB CPU/GPU; opencv=0 GB"},
     "outpaint":        {"peak_gb": 6.0,  "note": "FLUX.1-Fill-dev 4-bit quant + VAE tiling"},
     "style":           {"peak_gb": 6.0,  "note": "FLUX.1-schnell 4-bit quant + VAE tiling"},
     "pose":            {"peak_gb": 7.0,  "note": "FLUX.1-dev + ControlNet 4-bit quant + CPU offload (tight on 8 GB)"},
@@ -46,7 +46,9 @@ VRAM_PROFILES = {
 # --- Inference defaults per mode ---
 DEFAULTS = {
     "composite":    {"blend_strength": 0.0, "depth_scale": True},
-    "inpaint":      {"steps": 50, "guidance": 30.0},
+    "inpaint":      {"steps": 50, "guidance": 30.0,
+                     # engine-specific overrides (applied in pipeline if needed)
+                     "sdxl_steps": 30, "sdxl_guidance": 7.5, "sdxl_strength": 0.55},
     "outpaint":     {"steps": 50, "guidance": 30.0, "pixels": 256, "direction": "right"},
     "style":        {"steps": 4,  "guidance": 0.0,  "strength": 0.65},
     "pose":         {"steps": 28, "guidance": 3.5,  "strength": 0.80},
