@@ -3001,3 +3001,87 @@ the corresponding `_is_step_done` branch must be updated to match.
 If done-check says "done" but the real output is stale/wrong, the UI shows a green
 checkmark and the user never re-runs the step.
 
+
+---
+
+## KW-15: render_video.py — Music and SFX wired into ffmpeg
+
+### What this tests
+Verifies that render_video.py actually passes music WAV files and SFX WAV files
+as `-i` inputs to ffmpeg when MusicPlan.json and SfxPlan.json are present.
+The test runs render_video.py directly (no HTTP server) with a fake ffmpeg that
+logs every `-i` argument, then asserts that the music and SFX WAV paths appear
+in the captured inputs.
+
+### Files involved
+- `code/http/render_video.py` — main renderer; loads MusicPlan.json + SfxPlan.json
+- `tests/step_outputs/music_review.MusicPlan.json` — fixture used as the buggy MusicPlan
+- `tests/fixtures/projects/test-proj/episodes/s01e01/assets/music/music-sc01-sh01.wav`
+- `tests/fixtures/projects/test-proj/episodes/s01e01/assets/music/music-sc02-sh02.wav`
+
+### Invariants that must hold
+- At least one ffmpeg invocation per shot must include the shot's music WAV as `-i`
+- At least one ffmpeg invocation must include the SFX source_file WAV as `-i`
+- render_video.py must exit 0 (not crash when music/SFX files exist but plan is malformed)
+
+### Most likely to break when
+- MusicPlan.json `shot_overrides` lack `shot_id` (KeyError silently drops all overrides)
+- SfxPlan.json is absent at render time (never written before render step runs)
+- `_sfx_plan_by_shot or None` evaluates to `None` on an empty dict (falsy empty dict)
+- render_video.py `_music_plan_overrides` dict comprehension is changed to a different key
+- Music WAV path resolution (`assets/music/{id}.wav`) changes
+
+---
+
+## KW-16: SFX timing coordinate-space bug
+
+### What this tests
+Verifies that render_video.py converts SFX `start_sec` from episode-absolute to
+shot-relative before computing the ffmpeg `adelay` value.  SfxPlan.json stores
+episode-absolute timestamps; the bug was that render_video.py used the raw
+`start_sec` value directly as `adelay`, placing SFX past the shot end for any
+shot that doesn't start at t=0 in the episode.
+
+### Files involved
+- `code/http/render_video.py` — SFX render section; must subtract `_cumulative_shot_sec`
+- `tests/fixtures/projects/test-proj/episodes/s01e01/ShotList.json` — shot durations
+- `tests/fixtures/projects/test-proj/episodes/s01e01/VOPlan.en.json`
+
+### Invariants that must hold
+- For any SFX entry with `start_sec = E` (episode-absolute) on shot with cumulative
+  start `C`, the ffmpeg `adelay` must equal `round((E - C) × 1000)` ms
+- `adelay` must be ≤ shot `duration_ms`; if it exceeds the shot length the SFX is silent
+
+### Most likely to break when
+- `_cumulative_shot_sec` is not passed into `render_shot()` or is reset incorrectly
+- SfxPlan.json `timing_format` field is added/changed and render_video.py uses it
+  to conditionally subtract the offset
+
+---
+
+## KW-17: Video frame-alignment accumulation bug
+
+### What this tests
+Verifies that the `-t` duration flag passed to ffmpeg for each per-shot MKV is
+snapped to the nearest video frame boundary (a multiple of `1/fps`).
+
+Without snapping, `dur_sec = dur_ms / 1000.0` is not generally a multiple of
+`1/fps`.  ffmpeg can only encode whole frames, so each shot's video ends up to
+`1/fps ≈ 41.67 ms` shorter than the audio in that shot.  Across many shots this
+accumulates: a 72-shot episode loses ~3 s of video, so the final MP4 video track
+ends ~3 s before the audio track.  The player shows the full container duration
+(audio-driven, e.g. 55 s) but the video "stops" 3 s early (at 52 s).
+
+### Files involved
+- `code/http/render_video.py` — `render_shot()`, line `dur_sec = dur_ms / 1000.0`
+  and the `-t {dur_sec:.3f}` flag in the ffmpeg command
+
+### Invariants that must hold
+- For every per-shot ffmpeg invocation, the `-t` value must satisfy:
+  `round(t × fps) / fps == t`  (within 0.1 ms tolerance)
+- Equivalently: `t × fps` must be a whole number (no fractional frame)
+
+### Most likely to break when
+- `dur_sec` derivation in `render_shot()` changes to a raw float division
+- `fps` value changes without updating the snapping formula
+- A refactor moves the `-t` flag computation to a different variable

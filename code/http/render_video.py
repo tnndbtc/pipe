@@ -244,7 +244,13 @@ def build_shots_for_render(
                 char_ids.append(media_map[cid]["asset_id"])
 
         # ── music_asset_id from MusicPlan override ───────────────────────────
-        _ovr           = music_plan_overrides.get(shot_id, {})
+        # Primary key: shot_id.  Fallback: music_item_id from audio_intent,
+        # which matches MusicPlans that store item_id instead of shot_id.
+        _ovr = music_plan_overrides.get(shot_id, {})
+        if not _ovr:
+            _music_item_id = shot.get("audio_intent", {}).get("music_item_id", "")
+            if _music_item_id:
+                _ovr = music_plan_overrides.get(_music_item_id, {})
         music_asset_id = _ovr.get("music_asset_id")
 
         # ── duration_ms — three-condition formula ─────────────────────────────
@@ -583,7 +589,12 @@ def render_shot(
     """
     shot_id = shot["shot_id"]
     dur_ms  = shot["duration_ms"]   # authoritative: set by gen_render_plan (VO ceiling)
-    dur_sec = dur_ms / 1000.0
+    # Snap to the nearest video frame so -t is always a whole-frame multiple of 1/fps.
+    # Without snapping, dur_ms/1000 is not generally a multiple of 1/fps; ffmpeg can
+    # only encode whole frames, so each shot's video ends up to 41 ms short of its
+    # audio.  Across many shots the shortfall accumulates to seconds of video/audio
+    # desync in the final MP4.
+    dur_sec = round(dur_ms * fps / 1000) / fps
 
     out_path = shots_dir / f"{shot_index:04d}_{shot_id}.mkv"
     if out_path.exists():
@@ -882,17 +893,20 @@ def render_shot(
         if not sp_path.exists():
             print(f"  [WARN] SFX plan entry missing: {sp_path_str}")
             continue
-        sp_start_sec = float(sp_entry.get("start_sec") or 0.0)
-        sp_end_sec   = sp_entry.get("end_sec")
+        sp_start_ep  = float(sp_entry.get("start_sec") or 0.0)  # episode-absolute
+        sp_end_ep    = sp_entry.get("end_sec")                    # episode-absolute (or None)
         sp_idx       = add_input([], str(sp_path))
         lbl          = f"sfxp{sp_i}"
-        delay_ms_sp  = round(sp_start_sec * 1000)
+        # SfxPlan.json stores episode-absolute timestamps; convert to shot-relative
+        # by subtracting the cumulative episode offset of this shot's start.
+        sp_start_rel = max(0.0, sp_start_ep - _cumulative_shot_sec)
+        delay_ms_sp  = round(sp_start_rel * 1000)
         filt = (
             f"[{sp_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
             f"volume={sfx_plan_amp:.6f}"
         )
-        if sp_end_sec is not None and float(sp_end_sec) > sp_start_sec:
-            trim_dur = float(sp_end_sec) - sp_start_sec
+        if sp_end_ep is not None and float(sp_end_ep) > sp_start_ep:
+            trim_dur = float(sp_end_ep) - sp_start_ep  # duration = ep-abs diff (correct as-is)
             filt += f",atrim=duration={trim_dur:.3f}"
         filt += f",adelay={delay_ms_sp}|{delay_ms_sp}[{lbl}]"
         filter_parts.append(filt)
@@ -914,14 +928,20 @@ def render_shot(
     _pd = music_plan_data or {}
     _shot_id_key = shot.get("shot_id") or shot.get("id", "")
     _plan_ovr = _pd.get("plan_overrides", {}).get(_shot_id_key, {})
+    # Fallback: look up by music_asset_id for plans keyed by item_id not shot_id
+    if not _plan_ovr:
+        _music_id_fb = shot.get("music_asset_id", "")
+        if _music_id_fb:
+            _plan_ovr = _pd.get("plan_overrides", {}).get(_music_id_fb, {})
 
     _plan_music_id = _plan_ovr.get("music_asset_id") or music_id
     _plan_provided_music = False
 
     if _plan_music_id:
         # Derive loop_wav_path (.loop.wav preferred, .wav fallback)
-        # shots_dir is output_dir/.shots; episode_dir is plan_path.parent (2 levels up from shots_dir)
-        _episode_dir_str = str(shots_dir.parent.parent)
+        # shots_dir is output_dir/.shots  (ep_dir/renders/{locale}/.shots)
+        # → go up 3 levels to reach ep_dir
+        _episode_dir_str = str(shots_dir.parent.parent.parent)
         _wav_loop = os.path.join(_episode_dir_str, "assets", "music", f"{_plan_music_id}.loop.wav")
         _wav_base = os.path.join(_episode_dir_str, "assets", "music", f"{_plan_music_id}.wav")
         if os.path.isfile(_wav_loop):
@@ -1050,7 +1070,10 @@ def render_shot(
         "-ar", "48000",
         # Explicit duration cap: guarantees output is exactly dur_sec even
         # if the amix output extends past the video track end.
-        "-t", f"{dur_sec:.3f}",
+        # Use 6 decimal places so the frame-snapped value (e.g. 1376/24 = 57.333333…)
+        # is not re-quantised to 3 decimal places, which would re-introduce a
+        # sub-frame error detectable by the KW-17 regression test.
+        "-t", f"{dur_sec:.6f}",
     ] + BITEXACT_FLAGS + [str(out_path)]
 
     print(f"  [{shot_index + 1:02d}] {shot_id}  ({dur_ms} ms, {n_chars} chars, "
@@ -1329,16 +1352,19 @@ def main() -> None:
     if os.path.isfile(_mp_path):
         try:
             _mp_doc = json.loads(open(_mp_path, encoding="utf-8").read())
-            _music_plan_overrides = {
-                o["shot_id"]: o
-                for o in _mp_doc.get("shot_overrides", [])
-                if "shot_id" in o
-            }
+            # Index by shot_id when present; fall back to item_id for MusicPlans
+            # written before the shot_id migration (avoids silently dropping all
+            # overrides when shot_id is absent).
+            _music_plan_overrides = {}
+            for _o in _mp_doc.get("shot_overrides", []):
+                _key = _o.get("shot_id") or _o.get("item_id")
+                if _key:
+                    _music_plan_overrides[_key] = _o
             _music_clip_volumes  = _mp_doc.get("clip_volumes",  {})
             _music_track_volumes = _mp_doc.get("track_volumes", {})
             if not _music_plan_overrides and _mp_doc.get("shot_overrides"):
-                print("[render] WARNING: MusicPlan overrides lack shot_id — "
-                      "run migration script before rendering.")
+                print("[render] WARNING: MusicPlan overrides have neither shot_id "
+                      "nor item_id — overrides cannot be applied.")
             print(f"[render] MusicPlan loaded — {len(_music_plan_overrides)} shot overrides")
         except Exception as _mpe:
             print(f"[render] WARNING: MusicPlan.json load failed: {_mpe}")

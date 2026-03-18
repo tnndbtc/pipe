@@ -62,6 +62,12 @@ function resetKW13() {
   if (fs.existsSync(packDir)) fs.rmSync(packDir, { recursive: true, force: true });
 }
 
+// KW-15 / KW-16 / KW-17: render_video.py invoked directly — no server state to reset.
+// Each spec manages its own tmpdir; these are no-ops kept for suite consistency.
+function resetKW15() {}
+function resetKW16() {}
+function resetKW17() {}
+
 module.exports = {
   getEpDir,
   setPipeTestDir,
@@ -70,6 +76,9 @@ module.exports = {
   resetKW1,
   resetKW2,
   resetKW13,
+  resetKW15,
+  resetKW16,
+  resetKW17,
   // EP_DIR kept for backward compat — resolves dynamically via getEpDir()
   get EP_DIR() { return getEpDir(); },
 };
