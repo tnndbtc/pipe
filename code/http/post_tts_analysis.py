@@ -6,7 +6,7 @@
 # Runs AFTER gen_tts.py (VO WAVs exist on disk).
 # Runs BEFORE manifest_merge.py.
 #
-# For each VO item in a locale AssetManifest draft:
+# For each VO item in a locale VOPlan draft:
 #   1. Measures the actual WAV duration on disk
 #   2. Computes start_sec / end_sec for every VO line within its shot
 #      (sequential placement: start[n+1] = end[n] + inter_line_pause)
@@ -223,7 +223,7 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--manifest", required=True, metavar="PATH",
-                   help="Path to a locale AssetManifest draft JSON "
+                   help="Path to a locale VOPlan draft JSON "
                         "(locale_scope must be 'locale' or 'monolithic').")
     p.add_argument("--vo-dir", default=None, metavar="DIR",
                    help="Directory containing VO WAV files. "

@@ -69,7 +69,7 @@ DURATION_WARN_THRESHOLD = 0.3   # seconds
 # ===========================================================================
 
 def load_retune_context(manifest_path: str, locale: str) -> dict:
-    """Load AssetManifest and build item index.
+    """Load VOPlan and build item index.
 
     Returns a context dict:
       manifest_path  str            path to VOPlan.{locale}.json

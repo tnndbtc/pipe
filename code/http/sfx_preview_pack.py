@@ -216,7 +216,7 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
     ----------
     timeline_shots  : list[dict]  — from build_shot_timeline()
     total_dur       : float       — total episode duration in seconds
-    manifest        : dict        — parsed AssetManifest
+    manifest        : dict        — parsed VOPlan
     manifest_path   : Path        — path to the manifest (for relative-path helpers)
     ep_dir          : Path        — episode root directory
     locale          : str         — locale code (e.g. "en")

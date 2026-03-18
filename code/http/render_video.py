@@ -1542,7 +1542,11 @@ def main() -> None:
             _cumulative_shot_sec=_cumulative_shot_sec,
         )
         shot_mkv_pairs.append((shot, mkv))
-        _cumulative_shot_sec += shot.get("duration_ms", 0) / 1000.0
+        # Advance the episode clock by the SNAPPED duration (same formula used inside
+        # render_shot) so SFX / music timing offsets stay aligned with the actual
+        # video timeline.  Using raw dur_ms/1000.0 here would let the clock drift
+        # by up to 0.5/fps per shot, misplacing audio in every subsequent shot.
+        _cumulative_shot_sec += round(shot.get("duration_ms", 0) * fps / 1000) / fps
 
         # Count placeholders in this shot
         for asset_id in [shot.get("background_asset_id")] \

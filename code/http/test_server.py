@@ -101,7 +101,7 @@ _jobs_lock = threading.Lock()
 
 # ── Per-episode VO write lock (INVARIANT G) ────────────────────────────────────
 # Keyed by ep_dir string. Acquired before any write to *.wav, *.source.wav,
-# vo_trim_overrides.json, vo_merge_log.json, AssetManifest, or
+# vo_trim_overrides.json, vo_merge_log.json, VOPlan, or
 # tts_review_complete.json. Different episodes run concurrently (not global).
 _vo_locks: dict[str, threading.Lock] = {}
 _vo_locks_meta = threading.Lock()   # protects _vo_locks dict itself
@@ -4757,7 +4757,7 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  // Approved durations from AssetManifest.{locale}.json → vo_approval — {item_id: duration_sec}.
+  // Approved durations from VOPlan.{locale}.json → vo_approval — {item_id: duration_sec}.
   // Populated by _voLoadApprovedDurations() when the VO tab loads.
   window._voApprovedDurations = window._voApprovedDurations || {};
 
@@ -6432,7 +6432,7 @@ placeholder="Enter your story here"></textarea>
       _mediaSceneBgs  = sceneBgs;
       _mediaBgToScene = bgToScene;
       _mediaSceneOrder = sceneOrder;
-      // Load optional bg_id remap (written when selections.json keys are patched to
+      // Load optional bg_id remap (written when MediaPlan.json keys are patched to
       // match a new ShotList without re-running the full media search).
       _mediaBgRemap = null;
       try {
@@ -9701,7 +9701,7 @@ placeholder="Enter your story here"></textarea>
       '\u26A1 Applied recommended sequence for ' + applied + ' item(s).';
   }
 
-  // ── Confirm and write selections.json ──
+  // ── Confirm and write MediaPlan.json ──
   // Release ALL video HTTP connections on the Media tab.
   // Call this before any critical fetch (like Confirm) to guarantee a free slot.
   function _mediaReleaseAllConnections() {
@@ -9815,7 +9815,7 @@ placeholder="Enter your story here"></textarea>
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || 'save failed');
       document.getElementById('media-confirm-msg').textContent =
-        '✔ Saved ' + nSelected + ' selection(s) → ' + (d.path || 'selections.json');
+        '✔ Saved ' + nSelected + ' selection(s) → ' + (d.path || 'MediaPlan.json');
     } catch (err) {
       document.getElementById('media-confirm-msg').textContent = 'Error: ' + err.message;
     } finally {
@@ -9880,7 +9880,7 @@ placeholder="Enter your story here"></textarea>
       }
     } catch (_) {}
 
-    // ── Try 2: load saved selections.json from disk ──────────────────────
+    // ── Try 2: load saved MediaPlan.json from disk ──────────────────────
     await _mediaLoadSavedSelections();
   }
 
@@ -9889,7 +9889,7 @@ placeholder="Enter your story here"></textarea>
     try {
       const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
         + '&ep_id=' + encodeURIComponent(_mediaEpId)
-        + '&file=assets/media/selections.json');
+        + '&file=MediaPlan.json');
       if (!r.ok) return;
       const saved = await r.json();
       if (!saved.selections || typeof saved.selections !== 'object') return;
@@ -10502,7 +10502,7 @@ placeholder="Enter your story here"></textarea>
     tabsEl.innerHTML = '';
 
     // Derive locale list from VoiceCast.json characters directly.
-    // status.locales is empty until Stage 8 writes AssetManifest files, so we
+    // status.locales is empty until Stage 8 writes VOPlan files, so we
     // can't rely on it here — read the locale keys off the first character instead.
     const SKIP = new Set(['character_id', 'role', 'gender', 'personality']);
     const vcLocaleKeys = (voiceCast.characters?.[0])
@@ -14597,7 +14597,7 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
         return [
             "python3", os.path.join(code_dir, "manifest_merge.py"),
             "--shared", ep("AssetManifest.shared.json"),
-            "--locale", ep(f"AssetManifest.{locale}.json"),
+            "--locale", ep(f"VOPlan.{locale}.json"),
             "--out",    ep(f"VOPlan.{locale}.json"),
         ]
     elif step == "gen_tts":
@@ -15031,7 +15031,7 @@ class Handler(BaseHTTPRequestHandler):
                 _json_resp(self, {"error": "ep_dir and locale required"}, 400)
                 return
             full_ep = _vo_resolve_ep_dir(ep_dir)
-            # Check AssetManifest vo_approval block, fall back to legacy sentinel
+            # Check VOPlan vo_approval block, fall back to legacy sentinel
             _leg_s  = os.path.join(full_ep, "tts_review_complete.json")
             exists  = (_is_vo_approved(full_ep, locale) if _VO_UTILS_AVAILABLE else False) \
                       or os.path.isfile(_leg_s)
@@ -16645,7 +16645,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         # ── Music: return timeline JSON (GET /api/music_timeline) ────────────
-        # Built in-memory from AssetManifest + MusicPlan — no timeline.json on disk
+        # Built in-memory from VOPlan + MusicPlan — no timeline.json on disk
         elif parsed.path == "/api/music_timeline":
             params = parse_qs(parsed.query)
             slug   = params.get("slug", [""])[0].strip()
@@ -18033,7 +18033,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 409)
 
-        # POST /api/vo_approve — validate and approve VO, write vo_approval into AssetManifest
+        # POST /api/vo_approve — validate and approve VO, write vo_approval into VOPlan
         elif self.path == "/api/vo_approve":
             try:
                 if not _VO_UTILS_AVAILABLE:
@@ -20173,10 +20173,14 @@ class Handler(BaseHTTPRequestHandler):
                 music_dir = os.path.join(ep_dir, "assets", "music")
                 os.makedirs(music_dir, exist_ok=True)
 
-                # Enrich overrides with shot_id from AssetManifest (CHANGE 7)
-                _am_path = os.path.join(ep_dir, "assets", "VOPlan.json")
+                # Enrich overrides with shot_id from VOPlan (CHANGE 7)
+                import glob as _glob
+                _voplan_files = sorted(f for f in _glob.glob(
+                    os.path.join(ep_dir, "VOPlan.*.json"))
+                    if not f.endswith(".shared.json"))
+                _am_path = _voplan_files[0] if _voplan_files else ""
                 _item_to_shot = {}
-                if os.path.isfile(_am_path):
+                if _am_path and os.path.isfile(_am_path):
                     try:
                         _am = json.loads(open(_am_path, encoding="utf-8").read())
                         _item_to_shot = {
@@ -20185,9 +20189,9 @@ class Handler(BaseHTTPRequestHandler):
                             if "item_id" in mi and "shot_id" in mi
                         }
                     except Exception as _ame:
-                        print(f"  [WARN] music_plan_save: AssetManifest load failed: {_ame}")
+                        print(f"  [WARN] music_plan_save: VOPlan load failed: {_ame}")
                 else:
-                    print("  [WARN] music_plan_save: AssetManifest not found — shot_id enrichment skipped")
+                    print("  [WARN] music_plan_save: VOPlan not found — shot_id enrichment skipped")
 
                 for _ovr in plan.get("shot_overrides", []):
                     _iid = _ovr.get("item_id", "")

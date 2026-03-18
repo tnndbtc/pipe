@@ -4,7 +4,7 @@
 # Azure Neural TTS backend for the AI Asset Generation Pipeline.
 # CPU-only; no GPU or local model required.
 #
-# Reads vo_items from an AssetManifest locale manifest and synthesises WAV
+# Reads vo_items from a VOPlan locale manifest and synthesises WAV
 # files using Azure Cognitive Services Speech SDK.
 #
 # Install:
@@ -3724,7 +3724,7 @@ def build_manifest_from_script(
     voicecast_path: Path,
     locale: str,
 ) -> tuple[dict, Path]:
-    """Build a minimal locale AssetManifest from Script.json + VoiceCast.json.
+    """Build a minimal locale VOPlan from Script.json + VoiceCast.json.
 
     Walks Script.json scenes[].actions for type="dialogue" entries and assigns
     item_ids in the form "vo-{scene_id}-{NNN:03d}" (per-scene counter, 001-based).
@@ -3841,7 +3841,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Azure Neural TTS voice-over generator (CPU-only, no GPU required).\n\n"
-            "Reads vo_items from a locale AssetManifest and synthesises WAV files.\n"
+            "Reads vo_items from a locale VOPlan and synthesises WAV files.\n"
             "Maps tts_prompt fields to Azure SSML: voice, express-as style, prosody rate.\n\n"
             "Credentials via environment variables:\n"
             "  export AZURE_SPEECH_KEY='your-key'\n"
@@ -3856,7 +3856,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--manifest", type=str, required=False, default=None,
-        help="Path to a locale AssetManifest JSON (locale_scope='locale', 'monolithic', or 'merged'). "
+        help="Path to a locale VOPlan JSON (locale_scope='locale', 'monolithic', or 'merged'). "
              "Mutually exclusive with --script.",
     )
     parser.add_argument(
