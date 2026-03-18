@@ -75,6 +75,10 @@ tests/fixtures/**/MusicReviewPack/
 tests/fixtures/**/SfxPreviewPack/
 tests/fixtures/**/MediaPreviewPack/
 
+# ── Playwright MCP ─────────────────────────────────────────────────────────────
+# Browser session cache written by the Playwright MCP tool (not source code)
+.playwright-mcp/
+
 # ── Misc ───────────────────────────────────────────────────────────────────────
 *.log
 *.tmp

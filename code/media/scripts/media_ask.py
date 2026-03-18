@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""
+media_ask.py — builds the claude -p prompt for `media ask`.
+
+Exports:
+  build_prompt(query, project, episode_id) -> str
+"""
+
+from pathlib import Path
+
+# Absolute path to server_tools.py — injected into the prompt so Claude
+# always uses an absolute path regardless of the caller's working directory.
+TOOLS_PATH = str(Path(__file__).parent.parent / "tools" / "server_tools.py")
+
+TEMPLATE = """\
+You are a media search assistant for an AI video production pipeline.
+You have access to bash. Use the following tool scripts to find and trigger
+a search for media assets for a specific shot in the episode.
+
+Project:  {PROJECT}
+Episode:  {EPISODE_ID}
+
+Available tools (each prints JSON to stdout):
+
+  Get the list of shots and their current search prompts:
+    python {TOOLS_PATH} get_manifest --project {PROJECT} --episode {EPISODE_ID}
+    Returns: [ { "asset_id": "...", "shot_id": "...", "ai_prompt": "..." }, ... ]
+
+  List existing search batches for this episode (newest first):
+    python {TOOLS_PATH} list_batches --project {PROJECT} --episode {EPISODE_ID}
+    Returns: [ { "batch_id": "...", "status": "...", "created_at": "...", "item_count": N }, ... ]
+
+  See what is already downloaded in a batch for a specific shot:
+    python {TOOLS_PATH} get_batch_results --batch_id BATCH_ID --item_id ITEM_ID
+    Returns: { "item_id": "...", "images": [...paths], "videos": [...paths], "batch_status": "..." }
+
+  Trigger a new targeted search for a shot (CC0 / CC BY only):
+    python {TOOLS_PATH} search_for_shot \\
+      --project {PROJECT} --episode {EPISODE_ID} \\
+      --item_id ITEM_ID --query "SEARCH TERMS" \\
+      [--n_img N] [--n_vid N]
+    Returns: { "batch_id": "...", "item_id": "...", "status": "queued", "poll_url": "..." }
+
+Rules:
+1. Always call get_manifest first to understand the shot structure.
+2. Identify the target shot by matching the user's shot reference (e.g. "sc01-sh01")
+   against the shot_id field (e.g. "s01e01_sc01_sh01") in the get_manifest output.
+   IMPORTANT: the --item_id argument must be the asset_id field of the matched item,
+   NOT the shot_id. These are two different fields with different values.
+3. Call list_batches to find the most recent batch, then call get_batch_results
+   to see what is already downloaded — do not re-request files already present.
+4. Call search_for_shot with the user's search terms as --query.
+   License filtering (CC0 / CC BY only via wikimedia, openverse, europeana) is
+   applied automatically by the tool — do NOT add any license flags manually.
+5. After triggering the search, report:
+     batch_id | item_id | status | poll_url
+6. Tell the user where results will be saved:
+     assets/media/<batch_id>/<item_id>/images/  and  videos/
+
+User query: {QUERY}
+"""
+
+
+def build_prompt(query: str, project: str, episode_id: str) -> str:
+    """Return the filled-in prompt string to pipe into claude -p."""
+    return (
+        TEMPLATE
+        .replace("{TOOLS_PATH}",  TOOLS_PATH)
+        .replace("{PROJECT}",     project)
+        .replace("{EPISODE_ID}",  episode_id)
+        .replace("{QUERY}",       query)
+    )

@@ -679,7 +679,7 @@ def main():
                 _dur_ms = _rs.get("duration_ms")
                 if _sid and _dur_ms is not None:
                     _rp_shot_dur[_sid] = _dur_ms / 1000.0
-            print(f"  [RenderPlan] Loaded {len(_rp_shot_dur)} shot durations from RenderPlan.{locale}.json (VO ceiling applied)")
+            print(f"  [RenderPlan] Loaded {len(_rp_shot_dur)} shot durations from RenderPlan.{locale}.json (ShotList used — no override applied)")
         except Exception as _e:
             print(f"  [WARN] Could not load RenderPlan.{locale}.json: {_e} — using ShotList durations")
     else:
