@@ -2662,3 +2662,342 @@ Fix: soft penalty after CLIP scoring:
    an incidental match (e.g. one tourist in frame of the only Pompeii ruins photo available).
 6. Using metadata as a primary relevance signal (rather than CLIP) degrades ranking when
    Pexels/Pixabay tags are generic, missing, or keyword-stuffed.
+
+---
+
+## KEY WORKFLOWS
+##
+## PURPOSE: Before making any code change, read the relevant workflow(s) here.
+## After the change, trace each step of the workflow and confirm every
+## precondition, file write, and downstream dependency still holds.
+## A workflow is only safe if EVERY step can be traced end-to-end in code.
+##
+## ══════════════════════════════════════════════════════════════════════════════
+
+---
+
+## HOW TO ADD A AUTOMATED TEST FOR A KEY WORKFLOW
+##
+## Each KW section below has a matching Playwright spec in tests/playwright/.
+## To add a new test for KW-N, you need BOTH artifacts — neither alone is enough.
+##
+## ── Step 1: Add a KW section here ────────────────────────────────────────────
+##   Follow the pattern of existing KW sections: user action, trigger, invariants,
+##   regression risks.  Pick the next unused KW number (currently KW-15+).
+##
+## ── Step 2: Create tests/playwright/kw{N}_{slug}.spec.js ─────────────────────
+##   Copy the structure of an existing spec (e.g. kw13_media_music_mix.spec.js).
+##   Every spec MUST:
+##     • import { startTestServer, stopTestServer } from '../helpers/server'
+##     • import a reset function from '../helpers/fixture_state'
+##     • call startTestServer() / stopTestServer() in beforeAll / afterAll
+##     • call the reset function in beforeEach to put the fixture in a clean state
+##
+## ── Step 3: Add a reset function to tests/helpers/fixture_state.js ───────────
+##   resetKW{N}() sets up tests/fixtures/projects/test-proj/episodes/s01e01/
+##   to the exact pre-condition the KW requires (copy in the right files, delete
+##   stale outputs).  Use step_outputs/ for pre-baked JSON snapshots that need
+##   to be copied into place.
+##
+## ── Test server conventions ───────────────────────────────────────────────────
+##   • Server:  code/http/test_server.py --test-mode --port 19999
+##   • --test-mode overrides PIPE_DIR to tests/fixtures/, so all project I/O
+##     reads from / writes to tests/fixtures/projects/test-proj/...
+##   • All API calls in specs hit http://localhost:19999
+##   • Server is started once per spec file (beforeAll), not per test.
+##
+## ── Fixture data ─────────────────────────────────────────────────────────────
+##   • Committed fixture root: tests/fixtures/projects/test-proj/episodes/s01e01/
+##   • Pre-baked step outputs (JSON snapshots): tests/step_outputs/
+##   • Large generated files (candidate WAVs, preview packs) are gitignored —
+##     see .gitignore "Test fixture exclusions" section.
+##   • The two music WAVs and two VO WAVs needed by KW-13/14 are committed.
+##
+## ── How to run ────────────────────────────────────────────────────────────────
+##   cd tests
+##   npm test                      # all specs
+##   npm run test:music            # kw1, kw2, kw9 only
+##   npx playwright test kw14      # single spec by slug
+##
+## ── KW numbering ─────────────────────────────────────────────────────────────
+##   Numbers are assigned sequentially.  The spec filename slug is a short
+##   snake_case description of the bug or workflow (e.g. music_end_sec).
+##   Do not reuse or renumber existing KW IDs — they are referenced in git history.
+##
+## ══════════════════════════════════════════════════════════════════════════════
+
+---
+
+### KW-1: Stage 9 Step 5 — Manifest Merge (Run Button)
+
+**User action**: User clicks "Run" on Step 5 in the Stage 9 panel of the Run tab.
+
+**Trigger**: `GET /run_step?step=manifest_merge&slug=...&ep_id=...&locale=...`
+
+**What must run**: `code/http/manifest_merge.py`
+  - `--shared`  → `projects/{slug}/episodes/{ep_id}/AssetManifest.shared.json`
+  - `--locale`  → `projects/{slug}/episodes/{ep_id}/AssetManifest.{locale}.json`
+  - `--out`     → `projects/{slug}/episodes/{ep_id}/VOPlan.{locale}.json`
+
+**Preconditions**:
+- `AssetManifest.shared.json` must exist (written by Stage 5 LLM)
+- `AssetManifest.{locale}.json` must exist (written by gen_tts_cloud.py)
+- `AssetManifest.{locale}.json` must have `vo_items[].start_sec/end_sec` populated
+  (written by post_tts_analysis.py — Step 7 must have run first)
+
+**What it writes** to `VOPlan.{locale}.json`:
+- `locale_scope` = `"merged"`  ← CRITICAL: must change from `"locale"`
+- `music_items[]` populated from AssetManifest.shared.json
+- `sfx_items[]` populated from AssetManifest.shared.json
+- `resolved_assets[]` initialized (empty, filled by resolve_assets.py later)
+- `timing_lock_hash` written
+
+**Done-check** (`_is_step_done` in test_server.py):
+- Reads `VOPlan.{locale}.json`, checks `locale_scope == "merged"`
+- Returns False if file missing or locale_scope != "merged"
+
+**Downstream dependencies**:
+- `POST /api/music_review_pack` — requires `locale_scope == "merged"` and `music_items` populated;
+  returns HTTP 400 if manifest is still `locale_scope == "locale"`
+- `run_step resolve_assets` — reads `VOPlan.{locale}.json`; requires `locale_scope == "merged"`
+- `run_step render_video` — reads `VOPlan.{locale}.json`; requires music_items, sfx_items present
+
+**Regression risks**:
+1. `_build_step_cmd("manifest_merge")` returns `[]` → UI shows ✓ but nothing runs →
+   VOPlan stays `locale_scope="locale"` → music_review_pack always 400.
+   (This was the bug found 2026-03-17.)
+2. Wrong `--locale` path (e.g. pointing at shared instead of locale manifest) →
+   merge succeeds but with wrong VO items.
+3. `--out` path not being `VOPlan.{locale}.json` → merge output written to wrong file,
+   downstream readers get stale pre-merge manifest.
+4. Preamble steps (gen_music_clip, music_prepare_loops) running but manifest_merge
+   being skipped → music_loop_candidates.json exists but VOPlan has no music_items.
+
+---
+
+### KW-2: Music Review Preview (Generate Preview Button)
+
+**User action**: User selects an episode in the Music tab and clicks "🎵 Generate Preview".
+
+**JS function**: `musicGenerateReview()` (~line 11356 in test_server.py HTML)
+
+**Two-step fetch sequence**:
+
+**Step A**: `POST /api/music_prepare_loops`
+  - Body: `{ slug, ep_id }`
+  - Runs: `music_prepare_loops.py --manifest AssetManifest.shared.json`
+  - Writes: `assets/music/music_loop_candidates.json`
+  - Returns: `{ candidates: [...] }`
+
+**Step B**: `POST /api/music_review_pack`
+  - Body: `{ slug, ep_id, shot_overrides: [...] | undefined }`
+  - Requires: `VOPlan.{locale}.json` with `locale_scope == "merged"` AND `music_items` populated
+  - Returns HTTP 400 with `{"error": "..."}` if precondition not met
+  - Runs in-process: `build_timeline()` + `render_preview_audio()` from music_review_pack.py
+  - Writes: `assets/music/MusicReviewPack/preview_audio.wav`
+  - Returns: `{ ok: true, timeline: { shots: [...], total_duration_sec: N } }`
+
+**Preconditions for Step B**:
+- KW-1 (manifest_merge) must have run successfully for this locale
+- `AssetManifest.shared.json` must have `music_items[]` (Stage 5 LLM output)
+- VO WAV files must exist in `assets/{locale}/audio/vo/` for audio to render correctly
+  (missing WAVs → silence in preview but not an error)
+
+**What the UI does with the response**:
+- Stores timeline in `_musicTimeline`
+- Re-fetches `ShotList.json` to overlay authoritative shot timing
+- Renders the music body (candidates, overrides, waveform)
+- Enables the "✔ Confirm Plan" button
+
+**Downstream dependencies**:
+- User must click "✔ Confirm Plan" → `POST /api/music_plan_save` → writes `MusicPlan.json`
+- `MusicPlan.json` is the gate for Stage 9 render (run.sh line 281 checks for it)
+- Without `MusicPlan.json`, pipeline pauses and displays music review instructions
+
+**Regression risks**:
+1. `locale_scope` check in music_review_pack handler is too strict or too loose →
+   wrong manifests accepted or correct ones rejected.
+2. `music_items` not populated in VOPlan (manifest_merge not run) → timeline has no music →
+   preview renders silence → user sees empty timeline.
+3. ShotList re-fetch in JS overwrites timeline timing with wrong values → shot bars misaligned.
+4. `shot_overrides: undefined` serialized differently → backend receives null instead of []
+   (currently safe: `payload.get("shot_overrides", [])` handles missing key).
+
+---
+
+### KW-3: VO Approval
+
+**User action**: User reviews VO items in the 🎙 VO tab and clicks "✔ Approve VO".
+
+**JS function**: calls `POST /api/vo_approve`
+  - Body: `{ ep_dir, locale, stage, items: [ {item_id, start_sec, end_sec, duration_sec, pause_after_ms}, ... ] }`
+
+**What the server does**:
+1. Validates all items have WAV files in `assets/{locale}/audio/vo/`
+2. Writes `vo_approval` block into `VOPlan.{locale}.json`:
+   - `vo_approval.approved_at`, `vo_approval.item_ids[]`, `vo_approval.items[]` with timing
+3. Writes updated `start_sec`/`end_sec`/`duration_sec`/`pause_after_ms` for every item into
+   `VOPlan.{locale}.json → vo_items[]`
+4. Updates `ShotList.json` — adjusts `duration_sec` for each scene's last shot to match
+   total approved VO duration
+5. Caches approved WAVs to `assets/meta/vo_approved_cache/{locale}/`
+
+**Preconditions**:
+- `VOPlan.{locale}.json` must exist with `vo_items[]`
+- All approved items must have WAV files present
+
+**Downstream dependencies**:
+- `run_step manifest_merge` (KW-1) reads `AssetManifest.{locale}.json` VO timing;
+  VO timing is written to `VOPlan.{locale}.json` not AssetManifest directly —
+  manifest_merge reads the shared + locale AssetManifest pair, not VOPlan
+- `render_video.py` reads `vo_approval` block to get final timing
+- `check_vo_approved.py` reads `vo_approval` block — gates Stage 9 TTS re-synthesis skip
+- `ShotList.json` duration changes affect music/sfx timeline placement
+
+**Regression risks**:
+1. `start_sec`/`end_sec` written to manifest in wrong coordinate space
+   (episode-absolute vs shot-relative) → music ducking and render timing wrong.
+2. `ShotList.json` duration update uses wrong scene boundary calculation →
+   shots drift, music/SFX desync.
+3. `vo_approved_cache` not refreshed after re-approval → stale WAVs used in render.
+4. `pause_after_ms` not written back → inter-line gaps revert to defaults on next load.
+
+---
+
+### KW-4: SFX Plan — Search, Select, Confirm
+
+**User action**: User opens 🔊 SFX tab, clicks "🔍 Search All SFX", reviews results,
+then clicks "✔ Confirm Plan".
+
+**Search flow**:
+- JS: `sfxSearchAll()` → iterates sfx_items from AssetManifest.shared.json
+- Each item: `POST /api/sfx_search` with `{ query, duration_sec, ... }`
+- Server proxies to Media Search Server (port 8200); returns ranked candidates
+- Results stored in `_sfxResults` (JS state), not yet persisted
+
+**Confirm flow**:
+- JS: `sfxSaveAll()` → `POST /api/sfx_save_all`
+- Body: `{ slug, ep_id, items: [ {item_id, source_url, ...}, ... ] }`
+- Server downloads each SFX WAV to `assets/sfx/{uuid}.wav`
+- Writes `SfxPlan.json` with final item assignments
+
+**Preconditions**:
+- `AssetManifest.shared.json` must have `sfx_items[]` (Stage 5 output)
+- Media Search Server must be reachable
+
+**Downstream dependencies**:
+- `render_video.py` reads `SfxPlan.json` for SFX placement and timing
+- `POST /api/sfx_preview_pack` uses SfxPlan for preview audio
+
+**Regression risks**:
+1. `sfx_items[]` missing from shared manifest → search finds nothing → SfxPlan never written
+   → render has no SFX.
+2. SFX WAV download fails silently → SfxPlan written but WAV missing → render error.
+3. `item_id` in SfxPlan mismatches `item_id` in AssetManifest → render cannot correlate
+   SFX to shots.
+
+---
+
+### KW-5: Media Selection — Batch Search & Confirm
+
+**User action**: User opens 🖼 Media tab, clicks "Search", reviews candidates,
+then clicks "Confirm Selections".
+
+**Batch flow**:
+- JS: `POST /api/media_batch` → server launches batch job on Media Search Server
+- JS polls `GET /api/media_batch_status?batch_id=...` until complete
+- Results displayed per-asset with image/video thumbnails
+
+**Confirm flow**:
+- JS: `POST /api/media_confirm`
+- Body: `{ slug, ep_id, selections: { asset_id: { url, type, ... }, ... } }`
+- Writes `MediaPlan.json` with confirmed selections
+
+**Preconditions**:
+- `AssetManifest.shared.json` must have `backgrounds[]` and/or `character_packs[]`
+- Media Search Server must be reachable with valid API keys
+
+**Downstream dependencies**:
+- `run_step resolve_assets` reads `MediaPlan.json` to embed media URLs into `VOPlan.{locale}.json`
+  `resolved_assets[]`
+- `render_video.py` reads `resolved_assets[]` from VOPlan for background/character placement
+
+**Regression risks**:
+1. `MediaPlan.json` not written on confirm → resolve_assets skips media → renders with
+   placeholder/black backgrounds.
+2. `asset_id` key format in MediaPlan mismatches what resolve_assets.py expects →
+   silent mismatch, no media in render.
+3. `resolved_assets[]` not initialized in manifest_merge → resolve_assets.py fails to append.
+
+---
+
+### KW-6: Full Stage 9 Render (Run Button → render_video)
+
+**User action**: User clicks the main "▶ Run" button targeting Stage 9,
+or clicks "Run" on individual steps through to render_video.
+
+**Prerequisite chain** (all must be satisfied before render_video runs):
+1. `VOPlan.{locale}.json` exists with `locale_scope == "merged"` (KW-1)
+2. `vo_approval` block present in `VOPlan.{locale}.json` (KW-3)
+3. `MusicPlan.json` exists (KW-2 confirm step)
+4. `SfxPlan.json` exists (KW-4)
+5. `resolved_assets[]` non-empty in `VOPlan.{locale}.json` (resolve_assets step ran)
+
+**What render_video.py reads**:
+- `VOPlan.{locale}.json` — VO timing, music_items, sfx_items, resolved_assets, scene_tails
+- `MusicPlan.json` — loop selections, shot volume overrides
+- `SfxPlan.json` — SFX placement
+- `ShotList.json` — shot boundaries and durations
+- WAV files: `assets/{locale}/audio/vo/{item_id}.wav`
+- Music WAVs: `assets/music/{stem}.wav` or `resources/music/{stem}.mp3`
+- SFX WAVs: `assets/sfx/{uuid}.wav`
+
+**Output**:
+- `renders/{locale}/output.mp4`
+
+**Regression risks**:
+1. Any prerequisite file missing → render_video crashes or produces silent/blank output
+2. `scene_tails` not read from manifest → inter-scene gaps missing from render
+3. `start_sec`/`end_sec` coordinate space mismatch between VO approval and render_video
+   → VO lines placed at wrong positions in video
+4. Music WAV path resolution order wrong → wrong music file used for shot
+5. Non-primary locale render using primary locale's timing → VO desync
+
+---
+
+### KW-7: /run_step Skip Logic
+
+**Rule**: When `_build_step_cmd(step, ...)` returns `[]` (empty list), the
+`/run_step` handler immediately responds with "✓ {step} — skipped" and does NOT
+run any subprocess.
+
+**This is intentional for**:
+- `gen_render_plan` — eliminated, render_video.py absorbed its logic
+- Any step where cmd is `[]` due to missing precondition file (e.g. no MusicPlan.json
+  for apply_music_plan)
+
+**This is a BUG if**:
+- A real script needs to run but `_build_step_cmd` returns `[]` due to a stale
+  "eliminated" comment (e.g. manifest_merge bug found 2026-03-17)
+
+**Regression check**: For every step listed in `LOCALE_STEPS` or `_LOCALE_STEPS_ALL`,
+confirm `_build_step_cmd` returns a non-empty, non-None command list.
+Steps that are truly eliminated must ALSO have their downstream consumers updated
+to not require their output.
+
+---
+
+### KW-8: Step Done-Check vs Actual Script Output
+
+**Rule**: `_is_step_done(step, ...)` must check the ACTUAL file/field that the
+step's script writes — not a proxy or approximation.
+
+**Example of correct done-check**:
+- `manifest_merge` done-check reads `VOPlan.{locale}.json → locale_scope == "merged"`
+  ✓ This is exactly what manifest_merge.py writes.
+
+**Regression check**: When a script's output format changes (field renamed, file moved),
+the corresponding `_is_step_done` branch must be updated to match.
+If done-check says "done" but the real output is stale/wrong, the UI shows a green
+checkmark and the user never re-runs the step.
+

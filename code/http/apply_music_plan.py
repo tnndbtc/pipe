@@ -12,7 +12,7 @@
 # Usage:
 #   python apply_music_plan.py \
 #       --plan projects/slug/episodes/ep/MusicPlan.json \
-#       --manifest projects/slug/episodes/ep/AssetManifest.en.json
+#       --manifest projects/slug/episodes/ep/VOPlan.en.json
 #
 #   python apply_music_plan.py --plan ... --manifest ... \
 #       --resources projects/resources/music/
@@ -403,7 +403,7 @@ def parse_args():
                    help="Path to MusicPlan.json")
     p.add_argument("--manifest", required=True, metavar="PATH",
                    help="Path to merged locale manifest "
-                        "(AssetManifest.{locale}.json)")
+                        "(VOPlan.{locale}.json)")
     p.add_argument("--resources", default=None, metavar="DIR",
                    help="Directory containing source music files. "
                         "Auto-detected from manifest project_id if omitted.")

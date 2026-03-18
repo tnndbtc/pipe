@@ -72,8 +72,8 @@ def load_retune_context(manifest_path: str, locale: str) -> dict:
     """Load AssetManifest and build item index.
 
     Returns a context dict:
-      manifest_path  str            path to AssetManifest.{locale}.json
-      draft_path     str | None     path to AssetManifest.{locale}.json (draft copy, if present)
+      manifest_path  str            path to VOPlan.{locale}.json
+      draft_path     str | None     path to VOPlan.{locale}.json (draft copy, if present)
       locale         str            e.g. "en", "zh-Hans"
       manifest       dict           parsed merged manifest (mutable)
       items_idx      dict           { item_id -> vo_item } for fast lookup
@@ -86,8 +86,8 @@ def load_retune_context(manifest_path: str, locale: str) -> dict:
     items_idx = {it["item_id"]: it for it in manifest.get("vo_items", [])}
 
     # Locate draft manifest (for durable patching that survives Stage 9 re-runs)
-    # Naming convention: AssetManifest.{locale}.json (merged)
-    #                 →  AssetManifest.{locale}.json  (draft copy, written by Stage 5)
+    # Naming convention: VOPlan.{locale}.json (merged)
+    #                 →  VOPlan.{locale}.json  (draft copy, written by Stage 5)
     draft_path_str = str(path).replace("_merged.", "_draft.")
     draft_path = Path(draft_path_str)
 

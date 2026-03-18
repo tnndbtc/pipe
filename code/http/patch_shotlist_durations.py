@@ -8,7 +8,7 @@
 #
 # Reads:
 #   vo_preview_approved.{locale}.json  — approved item timing (end_sec per item)
-#   AssetManifest.{locale}.json        — pause_after_ms per item  (optional)
+#   VOPlan.{locale}.json        — pause_after_ms per item  (optional)
 #   ShotList.json                      — shot groupings (audio_intent.vo_item_ids)
 #
 # Writes:
@@ -97,7 +97,7 @@ def patch(
         approved_items: {item_id: {start_sec, end_sec, ...}} from vo_preview_approved.
                         start_sec/end_sec are episode-wide cumulative and include
                         scene tails (computed by voApproveTTS on the client).
-        manifest_pause: {item_id: pause_after_ms} from AssetManifest.
+        manifest_pause: {item_id: pause_after_ms} from VOPlan.
                         Used for ALL shots — pause_sec is always added to shot_vo_span
                         on top of tail_sec.  For the last shot it also determines
                         tail_sec (= SCENE_TAIL_SEC, pause stacks on top).
@@ -236,10 +236,10 @@ def main() -> None:
     locale = args.locale
 
     # ── Load timing from AssetManifest (requires vo_approval block) ─────────
-    manifest_path_check = ep_dir / f"AssetManifest.{locale}.json"
+    manifest_path_check = ep_dir / f"VOPlan.{locale}.json"
     if not manifest_path_check.exists():
         print(
-            f"[ERROR] AssetManifest.{locale}.json not found in {ep_dir}\n"
+            f"[ERROR] VOPlan.{locale}.json not found in {ep_dir}\n"
             "       Stage 3.5 approval is required before Stage 4 runs.",
             file=sys.stderr,
         )
@@ -248,7 +248,7 @@ def main() -> None:
     _manifest_check = load_json(manifest_path_check)
     if not _manifest_check.get("vo_approval", {}).get("approved_at"):
         print(
-            f"[ERROR] AssetManifest.{locale}.json has no vo_approval block in {ep_dir}\n"
+            f"[ERROR] VOPlan.{locale}.json has no vo_approval block in {ep_dir}\n"
             "       Stage 3.5 approval is required before Stage 4 runs.",
             file=sys.stderr,
         )

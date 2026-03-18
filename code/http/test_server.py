@@ -46,8 +46,9 @@ _GENRE_TO_CATEGORY = {
 }
 _DEFAULT_CATEGORY = "24"
 
-PORT     = 8000
-PIPE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (pipe/)
+PORT      = 8000
+PIPE_DIR  = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (pipe/)
+_TEST_MODE = False
 
 # ── Persistent server log ──────────────────────────────────────────────────────
 # Writes to code/http/logs/server.log (10 MB cap, 5 rotated backups).
@@ -2812,7 +2813,7 @@ placeholder="Enter your story here"></textarea>
   <div class="music-body" id="music-body"></div>
 
   <!-- footer actions -->
-  <div class="music-footer" id="music-footer" style="display:none">
+  <div class="music-footer" id="music-footer">
     <span id="music-confirm-msg"></span>
     <button id="music-btn-confirm" onclick="musicConfirm()">✔ Confirm Plan</button>
   </div>
@@ -2823,7 +2824,8 @@ placeholder="Enter your story here"></textarea>
   <style>
     .vo-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-bottom:10px;border-bottom:1px solid var(--border)}
     .vo-toolbar select{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:0.82em}
-    .vo-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:0}
+    #vo-scroll-wrap{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:0}
+    .vo-body{display:flex;flex-direction:column;gap:0}
     .vo-empty{color:var(--dim);font-size:0.85em;padding:20px 0}
     .vo-scene-header{display:flex;align-items:center;gap:8px;padding:8px 4px 4px;border-top:1px solid var(--border);margin-top:6px}
     .vo-scene-break{display:flex;align-items:center;gap:6px;padding:4px 8px;margin:6px 0 0;background:var(--active-bg);border-radius:4px;border:1px dashed var(--border)}
@@ -2831,9 +2833,13 @@ placeholder="Enter your story here"></textarea>
     .vo-break-input{width:60px;font-size:0.8em;padding:2px 4px;background:var(--input-bg,#1e1e1e);color:var(--text);border:1px solid var(--border);border-radius:3px;text-align:right}
     /* ── VO Timeline Player ─────────────────────────────────────── */
     #vo-timeline-bar{display:none;flex-direction:column;gap:4px;padding:8px 12px;
-      margin:6px 0;background:#0e1f2e;border:1px solid #2a4a6a;border-radius:6px;
-      position:sticky;top:0;z-index:20}
+      margin:0 0 6px;background:#0e1f2e;border:1px solid #2a4a6a;border-radius:6px}
     #vo-timeline-bar.active{display:flex}
+    /* ── Scroll-to-top button ────────────────────────────────────── */
+    #vo-scroll-top{display:none;margin-left:auto;font-size:0.72em;padding:3px 10px;
+      background:var(--active-bg);color:var(--dim);border:1px solid var(--border);
+      border-radius:5px;cursor:pointer}
+    #vo-scroll-top:hover{color:var(--text)}
     .vo-tl-top{display:flex;align-items:center;gap:10px}
     .vo-tl-playbtn{width:28px;height:28px;border-radius:50%;background:#1e6fa8;
       border:none;color:#fff;font-size:1em;cursor:pointer;flex-shrink:0;line-height:1}
@@ -2904,6 +2910,7 @@ placeholder="Enter your story here"></textarea>
       <option value="">— select locale —</option>
     </select>
     <button class="vo-scene-btn" onclick="loadVoItems()" style="margin-left:4px">↺ Refresh</button>
+    <button id="vo-scroll-top" onclick="document.getElementById('vo-scroll-wrap').scrollTop=0" title="Scroll to top">↑ Top</button>
     <button id="vo-preview-all-btn" onclick="_voPreviewAll()"
             style="margin-left:8px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.80em;padding:5px 14px;cursor:pointer" title="Play all VO items sequentially">
       ▶ Generate Preview</button>
@@ -2911,57 +2918,60 @@ placeholder="Enter your story here"></textarea>
             style="display:none;margin-left:4px;color:#f88;border-color:#f88aa" title="Stop playback">
       ■ Stop</button>
   </div>
-  <!-- VO Timeline Player — shown after Generate Preview -->
-  <div id="vo-timeline-bar">
-    <audio id="vo-tl-audio" preload="auto" style="display:none"></audio>
-    <div class="vo-tl-top">
-      <button class="vo-tl-playbtn" id="vo-tl-playbtn" onclick="_voTlToggle()" title="Play / Pause">▶</button>
-      <span class="vo-tl-time" id="vo-tl-time">0:00 / 0:00</span>
-      <span class="vo-tl-label" id="vo-tl-label">—</span>
-      <button class="vo-tl-close" onclick="_voTlClose()" title="Close timeline">✕</button>
+  <!-- shared scroll wrapper — timeline, whisper check, col-headers, and items all scroll together -->
+  <div id="vo-scroll-wrap">
+    <!-- VO Timeline Player — shown after Generate Preview -->
+    <div id="vo-timeline-bar">
+      <audio id="vo-tl-audio" preload="auto" style="display:none"></audio>
+      <div class="vo-tl-top">
+        <button class="vo-tl-playbtn" id="vo-tl-playbtn" onclick="_voTlToggle()" title="Play / Pause">▶</button>
+        <span class="vo-tl-time" id="vo-tl-time">0:00 / 0:00</span>
+        <span class="vo-tl-label" id="vo-tl-label">—</span>
+        <button class="vo-tl-close" onclick="_voTlClose()" title="Close timeline">✕</button>
+      </div>
+      <div class="vo-tl-track" id="vo-tl-track">
+        <div  class="vo-tl-scenes"  id="vo-tl-scenes"></div>
+        <div  class="vo-tl-progress" id="vo-tl-progress" style="width:0"></div>
+        <input class="vo-tl-scrubber" id="vo-tl-scrubber" type="range" min="0" max="1000"
+               value="0" step="1"
+               oninput="_voTlSeek(this.value)"
+               onmousedown="_voTlScrubStart()" onmouseup="_voTlScrubEnd()"
+               ontouchstart="_voTlScrubStart()" ontouchend="_voTlScrubEnd()"/>
+      </div>
+      <div id="vo-vis-timeline" style="position:relative;height:26px;margin-top:4px;
+           background:var(--bg);border:1px solid #2a4a6a;border-radius:4px;
+           overflow:hidden;cursor:pointer">
+        <div id="vo-vis-tl-vo"    style="position:absolute;top:2px;bottom:2px;left:0;right:0"></div>
+        <div id="vo-vis-tl-shots" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none"></div>
+        <div id="vo-vis-tl-cursor" style="position:absolute;top:0;bottom:0;width:2px;background:red;pointer-events:none;z-index:10;left:0"></div>
+      </div>
     </div>
-    <div class="vo-tl-track" id="vo-tl-track">
-      <div  class="vo-tl-scenes"  id="vo-tl-scenes"></div>
-      <div  class="vo-tl-progress" id="vo-tl-progress" style="width:0"></div>
-      <input class="vo-tl-scrubber" id="vo-tl-scrubber" type="range" min="0" max="1000"
-             value="0" step="1"
-             oninput="_voTlSeek(this.value)"
-             onmousedown="_voTlScrubStart()" onmouseup="_voTlScrubEnd()"
-             ontouchstart="_voTlScrubStart()" ontouchend="_voTlScrubEnd()"/>
+    <!-- TTS accuracy check — populated by _voLoadWhisperCompare() after loadVoItems() -->
+    <div id="vo-whisper-section" style="display:none;margin-bottom:12px;
+         background:var(--surface);border:1px solid var(--border);
+         border-radius:8px;padding:14px">
+      <div style="font-size:0.85em;font-weight:600;color:var(--dim);
+                  margin-bottom:10px">🎙 TTS ACCURACY CHECK</div>
+      <div id="vo-whisper-summary" style="font-size:0.82em;margin-bottom:10px"></div>
+      <table id="vo-whisper-table" style="width:100%;font-size:0.78em;
+             border-collapse:collapse"></table>
     </div>
-    <div id="vo-vis-timeline" style="position:relative;height:26px;margin-top:4px;
-         background:var(--bg);border:1px solid #2a4a6a;border-radius:4px;
-         overflow:hidden;cursor:pointer">
-      <div id="vo-vis-tl-vo"    style="position:absolute;top:2px;bottom:2px;left:0;right:0"></div>
-      <div id="vo-vis-tl-shots" style="position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none"></div>
-      <div id="vo-vis-tl-cursor" style="position:absolute;top:0;bottom:0;width:2px;background:red;pointer-events:none;z-index:10;left:0"></div>
+    <!-- column headers -->
+    <div class="vo-col-headers" style="margin-top:2px">
+      <span style="min-width:160px">item_id</span>
+      <span style="flex:1;min-width:180px">text</span>
+      <span style="width:150px">voice</span>
+      <span style="width:110px">style</span>
+      <span style="width:52px">rate</span>
+      <span style="width:52px">pitch</span>
+      <span style="width:44px">deg</span>
+      <span style="min-width:52px;text-align:right">dur</span>
+      <span style="width:32px"></span>
+      <span style="width:46px"></span>
     </div>
-  </div>
-  <!-- TTS accuracy check — populated by _voLoadWhisperCompare() after loadVoItems() -->
-  <div id="vo-whisper-section" style="display:none;margin-top:12px;
-       background:var(--surface);border:1px solid var(--border);
-       border-radius:8px;padding:14px">
-    <div style="font-size:0.85em;font-weight:600;color:var(--dim);
-                margin-bottom:10px">🎙 TTS ACCURACY CHECK</div>
-    <div id="vo-whisper-summary" style="font-size:0.82em;margin-bottom:10px"></div>
-    <table id="vo-whisper-table" style="width:100%;font-size:0.78em;
-           border-collapse:collapse"></table>
-  </div>
-  <!-- column headers -->
-  <div class="vo-col-headers" style="margin-top:2px">
-    <span style="min-width:160px">item_id</span>
-    <span style="flex:1;min-width:180px">text</span>
-    <span style="width:150px">voice</span>
-    <span style="width:110px">style</span>
-    <span style="width:52px">rate</span>
-    <span style="width:52px">pitch</span>
-    <span style="width:44px">deg</span>
-    <span style="min-width:52px;text-align:right">dur</span>
-    <span style="width:32px"></span>
-    <span style="width:46px"></span>
-  </div>
-  <div id="vo-body" class="vo-body">
-    <span class="vo-empty">Select an episode and locale to see VO items.</span>
+    <div id="vo-body" class="vo-body">
+      <span class="vo-empty">Select an episode and locale to see VO items.</span>
+    </div>
   </div>
   <!-- footer actions: status left, Confirm button right -->
   <div id="vo-footer" style="flex-shrink:0;display:flex;align-items:center;gap:10px;
@@ -3770,6 +3780,17 @@ placeholder="Enter your story here"></textarea>
 
   // ── VO Retune panel ──────────────────────────────────────────────────────────
 
+  // Show ↑ Top button when vo-body is scrolled down; hide when at top.
+  (function() {
+    const _vw = document.getElementById('vo-scroll-wrap');
+    const _st = document.getElementById('vo-scroll-top');
+    if (_vw && _st) {
+      _vw.addEventListener('scroll', function() {
+        _st.style.display = _vw.scrollTop > 80 ? '' : 'none';
+      });
+    }
+  })();
+
   function populateVoEpSelect() {
     const voSel = document.getElementById('vo-ep-select');
     if (!voSel) return;
@@ -3860,10 +3881,9 @@ placeholder="Enter your story here"></textarea>
             body.innerHTML =
               '<div style="color:var(--dim);font-size:0.85em;padding:20px 0;line-height:1.7">' +
               '⚠ VO data not ready for this episode.<br>' +
-              'The VO tab requires <code>AssetManifest.{locale}.json</code> and ' +
+              'The VO tab requires <code>VOPlan.{locale}.json</code> and ' +
               'WAV files in <code>assets/{locale}/audio/vo/</code>.<br><br>' +
               'Run the following pipeline steps first:<br>' +
-              '&nbsp;&nbsp;<strong>[5] manifest_merge</strong> — merges shared + locale drafts<br>' +
               '&nbsp;&nbsp;<strong>[6] gen_tts</strong> — synthesises VO WAV files<br><br>' +
               'These run automatically as part of Stage 9 (Render) in the Run tab.' +
               '</div>';
@@ -4170,9 +4190,10 @@ placeholder="Enter your story here"></textarea>
   async function _voVisLoadTimeline() {
     const slug = window._voSlug, epId = window._voEpId;
     if (!slug || !epId) return;
+    const tlPath = 'projects/' + slug + '/episodes/' + epId
+      + '/assets/sfx/SfxPreviewPack/timeline.json';
     try {
-      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(slug)
-        + '&ep_id=' + encodeURIComponent(epId) + '&t=' + Date.now());
+      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
       if (!r.ok) return;
       _voVisTlData = await r.json();
       _tlRender('vo-vis', _voVisTlData, 'vo-tl-audio');
@@ -4937,8 +4958,9 @@ placeholder="Enter your story here"></textarea>
 
       // Table
       const tbl = document.getElementById('vo-whisper-table');
-      const rowBg = { ok: '', warn: '#78350f', fail: '#7f1d1d', missing: '#1c1917' };
-      const icon  = { ok: '✅', warn: '⚠', fail: '✗', missing: '○' };
+      const rowBg  = { ok: '', warn: '#fef3c7', fail: '#fee2e2', missing: '#f5f5f4' };
+      const rowClr = { ok: '', warn: '#78350f', fail: '#7f1d1d', missing: '#44403c' };
+      const icon   = { ok: '✅', warn: '⚠', fail: '✗', missing: '○' };
       let html = '<thead><tr style="color:var(--dim);font-size:0.75em;text-transform:uppercase">'
         + '<th style="text-align:left;padding:4px 8px">Item</th>'
         + '<th style="text-align:left;padding:4px 8px">Intended</th>'
@@ -4947,9 +4969,10 @@ placeholder="Enter your story here"></textarea>
         + '<th style="text-align:center;padding:4px 8px"></th>'
         + '</tr></thead><tbody>';
       (data.items || []).forEach(it => {
-        const bg  = rowBg[it.status] || '';
+        const bg  = rowBg[it.status]  || '';
+        const clr = rowClr[it.status] || '';
         const wer = it.wer != null ? (it.wer * 100).toFixed(1) + '%' : '—';
-        html += '<tr style="background:' + bg + ';border-top:1px solid var(--border)">'
+        html += '<tr style="background:' + bg + (clr ? ';color:' + clr : '') + ';border-top:1px solid var(--border)">'
           + '<td style="padding:4px 8px;color:var(--dim);white-space:nowrap">' + escHtml(it.item_id) + '</td>'
           + '<td style="padding:4px 8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
           +   escHtml(it.intended) + '</td>'
@@ -5268,6 +5291,8 @@ placeholder="Enter your story here"></textarea>
         const safeIid  = iid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         const selIdx   = _sfxSelected[iid];          // undefined = no selection
         const t        = _sfxTiming[iid] || {};
+        // _sfxTiming stores episode-absolute times (same unit as sfx_preview_pack
+        // abs_start).  Default to the shot's own episode window when not yet set.
         const startWithin = t.start != null ? t.start : epStart;
         const endWithin   = t.end   != null ? t.end   : epEnd;
         const dispStart   = startWithin.toFixed(1);
@@ -5293,11 +5318,11 @@ placeholder="Enter your story here"></textarea>
           + '<div class="music-shot-params">'
           + '<label title="Episode time when SFX begins (seconds)">\u25b6 start</label>'
           + '<input type="number" step="0.1" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispStart + '"'
-          + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'start\',parseFloat(this.value)-' + epStart + ')"'
+          + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'start\',parseFloat(this.value))"'
           + ' style="width:64px">'
           + '<label title="Episode time when SFX stops (seconds)">\u23f9 end</label>'
           + '<input type="number" step="0.1" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispEnd + '"'
-          + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'end\',parseFloat(this.value)-' + epStart + ')"'
+          + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'end\',parseFloat(this.value))"'
           + ' style="width:64px">'
           + '</div>';
       });
@@ -5361,22 +5386,11 @@ placeholder="Enter your story here"></textarea>
                              + '&file=SfxPlan.json');
         if (rp.ok) {
           const plan = await rp.json();
-          const isEpAbs = plan.timing_format === 'episode_absolute';
           (plan.sfx_entries || []).forEach(e => {
             if (e.item_id && e.candidate_idx != null)
               _sfxSelected[e.item_id] = e.candidate_idx;
-            if (e.item_id) {
-              let startEp = e.start_sec || 0;
-              let endEp   = e.end_sec ?? null;
-              if (!isEpAbs) {
-                // Legacy: times were within-shot — convert to episode-absolute
-                const shotEntry = _sfxShotTimeline.find(s => s.sfx_items.some(i => i.item_id === e.item_id));
-                const epOff = shotEntry ? shotEntry.epStart : 0;
-                startEp = startEp + epOff;
-                if (endEp != null) endEp = endEp + epOff;
-              }
-              _sfxTiming[e.item_id] = { start: startEp, end: endEp };
-            }
+            if (e.item_id)
+              _sfxTiming[e.item_id] = { start: e.start_sec || 0, end: e.end_sec ?? null };
           });
         }
       } catch(_) {}
@@ -5598,7 +5612,7 @@ placeholder="Enter your story here"></textarea>
         </div>`;
         if (isSel) {
           const t = _sfxTiming[itemId] || {};
-          const startVal = (t.start != null) ? t.start : epStart;
+          const startVal = (t.start != null) ? t.start : 0;
           const endVal = (t.end != null) ? t.end : '';
           const safeItemId = itemId.replace(/'/g, "\\'");
           rows += '<div class="sfx-timing-row" style="display:flex;align-items:center;gap:8px;'
@@ -5610,7 +5624,7 @@ placeholder="Enter your story here"></textarea>
             + '<label>End: <input type="number" min="0" step="0.1" value="' + endVal + '"'
             + ' placeholder="auto" data-sfx-timing-field="end" style="width:60px;padding:2px 4px"'
             + ' onchange="sfxSetTiming(\'' + safeItemId + '\',\'end\',this.value)"> s</label>'
-            + '<span style="opacity:0.6">(episode seconds)</span></div>';
+            + '<span style="opacity:0.6">(from shot start)</span></div>';
         }
       });
     }
@@ -5936,18 +5950,14 @@ placeholder="Enter your story here"></textarea>
   // Restore preview player from files written by a previous sfxGeneratePreview().
   async function _sfxTryRestorePreview() {
     if (!_sfxSlug || !_sfxEpId) return;
+    const tlPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
+      + '/assets/sfx/SfxPreviewPack/timeline.json';
     const audioPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
       + '/assets/sfx/SfxPreviewPack/preview_audio.wav';
     try {
-      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_sfxSlug)
-        + '&ep_id=' + encodeURIComponent(_sfxEpId));
+      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath));
       if (!r.ok) return;
-      const tl = await r.json();
-      // Only restore the preview UI if a WAV was actually generated previously.
-      // /api/sfx_timeline always returns 200 (unlike the old timeline.json file which
-      // only existed after a render), so we rely on the has_wav field instead.
-      if (!tl.has_wav) return;
-      _sfxTimeline = tl;
+      _sfxTimeline = await r.json();
       const audio = document.getElementById('sfx-preview-audio');
       audio.src = '/serve_media?path=' + encodeURIComponent(audioPath);
       document.getElementById('sfx-preview-wrap').style.display = '';
@@ -6019,9 +6029,10 @@ placeholder="Enter your story here"></textarea>
   let _sfxCursorRaf = null;
 
   async function sfxLoadTimeline() {
+    const tlPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
+      + '/assets/sfx/SfxPreviewPack/timeline.json';
     try {
-      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_sfxSlug)
-        + '&ep_id=' + encodeURIComponent(_sfxEpId) + '&t=' + Date.now());
+      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
       if (!r.ok) return;
       _sfxTimeline = await r.json();
       sfxRenderTimeline();
@@ -6106,19 +6117,8 @@ placeholder="Enter your story here"></textarea>
     if (_tlCursorRafs[prefix]) cancelAnimationFrame(_tlCursorRafs[prefix]);
     const cursor = document.getElementById(prefix + '-tl-cursor');
     if (cursor && audioEl) {
-      // Compute the last content end point across all item types.
-      // The audio pauses here instead of playing trailing silence.
-      const _tlEndSec = Math.max(
-        0,
-        ...(tl.vo_items    || []).map(v => v.end_sec || 0),
-        ...(tl.sfx_items   || []).map(s => s.end_sec || 0),
-        ...(tl.music_items || []).map(m => m.end_sec || 0)
-      );
       function _tlTick() {
         cursor.style.left = (audioEl.currentTime / totalDur * 100).toFixed(2) + '%';
-        if (_tlEndSec > 0 && !audioEl.paused && audioEl.currentTime >= _tlEndSec) {
-          audioEl.pause();
-        }
         _tlCursorRafs[prefix] = requestAnimationFrame(_tlTick);
       }
       _tlTick();
@@ -7587,9 +7587,10 @@ placeholder="Enter your story here"></textarea>
   let _mediaTlData = null;
   async function _mediaLoadTimeline() {
     if (!_mediaSlug || !_mediaEpId) return;
+    const tlPath = 'projects/' + _mediaSlug + '/episodes/' + _mediaEpId
+      + '/assets/sfx/SfxPreviewPack/timeline.json';
     try {
-      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_mediaSlug)
-        + '&ep_id=' + encodeURIComponent(_mediaEpId) + '&t=' + Date.now());
+      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
       if (!r.ok) return;
       _mediaTlData = await r.json();
       _tlRender('media', _mediaTlData, 'media-preview-video');
@@ -11104,7 +11105,7 @@ placeholder="Enter your story here"></textarea>
   let _musicCutClips  = [];     // user-cut clips: [{clip_id, stem, start_sec, end_sec, path}]
   let _musicClipLookup = {};   // clip_id → { wavStem, path, item_id } — built by _musicRenderBody
   let _musicMarks     = {};     // per-stem marks: { stem: {start: N, end: N} }
-  let _musicOverrides = {};       // { shot_id: {item_id, duck_db, fade_sec, ...} }
+  let _musicOverrides = {};       // { item_id: {duck_db, fade_sec, ...} }
   let _musicTrackVolumes = {};    // { stem: dB_offset } — persists across regenerations
   let _musicClipVolumes  = {};    // { item_id|clip_id: dB_offset }
                                   // auto clips  → keyed by item_id  (e.g. "music-s01e01_sh01")
@@ -11243,7 +11244,7 @@ placeholder="Enter your story here"></textarea>
         _musicTrackVolumes = plan.track_volumes   || {};
         _musicClipVolumes  = plan.clip_volumes    || {};
         _musicOverrides    = {};
-        (plan.shot_overrides || []).forEach(o => { if (o.shot_id) _musicOverrides[o.shot_id] = o; });
+        (plan.shot_overrides || []).forEach(o => { _musicOverrides[o.item_id] = o; });
       }
     } catch (_) {}
     _musicRenderBody();
@@ -11316,7 +11317,7 @@ placeholder="Enter your story here"></textarea>
         const endSec = (c.start_sec || 0) + (c.duration_sec || 0);
         itemToClipId[c.item_id] = src + ':' + (c.start_sec || 0).toFixed(1) + 's-' + endSec.toFixed(1) + 's';
       });
-      const clipId = ovr.music_clip_id || itemToClipId[ovr.item_id || itemId] || '';
+      const clipId = ovr.music_clip_id || itemToClipId[itemId] || '';
       if (!clipId) return;
 
       // Look up clip metadata
@@ -11379,7 +11380,13 @@ placeholder="Enter your story here"></textarea>
           + '&ep_id=' + encodeURIComponent(_musicEpId) + '&file=assets/music/user_cut_clips.json');
         if (ucR.ok) { _musicCutClips = await ucR.json(); }
       } catch (_) {}
-      const currentOverrides = Object.values(_musicOverrides).filter(o => o.shot_id);
+      // Re-fetch gen_music_clip_results.json — may not be loaded yet if tab just opened
+      try {
+        const crR = await fetch('/api/episode_file?slug=' + encodeURIComponent(_musicSlug)
+          + '&ep_id=' + encodeURIComponent(_musicEpId) + '&file=assets/meta/gen_music_clip_results.json');
+        if (crR.ok) { _musicClipResults = await crR.json(); }
+      } catch (_) {}
+      const currentOverrides = Object.values(_musicOverrides).filter(o => o.item_id);
       const r2 = await fetch('/api/music_review_pack', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -11451,12 +11458,14 @@ placeholder="Enter your story here"></textarea>
           voItems.push({ item_id: v.item_id, start_sec: v.start_sec, end_sec: v.end_sec, speaker_id: v.speaker_id || '' });
         }
       }
-      // Music bar: respects within-shot start_sec delay (same logic as the renderer).
-      // sh.duration_sec is either the within-shot end position (when override applied)
-      // or the shot duration (no override) — adding shStart gives the episode-absolute end.
+      // Music bar: respects within-shot start_sec and music_end_sec overrides.
+      // music_end_sec is set by apply_music_plan_overrides when the user overrides end.
+      // Falls back to shot duration when no end override is present.
       if (sh.music_item_id) {
         const musicStart = shStart + (sh.start_sec || 0);
-        const musicEnd   = shStart + (sh.music_end_sec != null ? sh.music_end_sec : (sh.duration_sec || 0));
+        const musicEnd   = sh.music_end_sec != null
+          ? shStart + sh.music_end_sec
+          : shStart + (sh.duration_sec || 0);
         musicItems.push({ item_id: sh.music_item_id, start_sec: musicStart, end_sec: musicEnd, music_mood: sh.music_mood || '' });
       }
     }
@@ -11571,8 +11580,7 @@ placeholder="Enter your story here"></textarea>
         const fmtEp = (t) => t.toFixed(1) + 's';
         musicShots.forEach((s, i) => {
           const origMid  = s.music_item_id;
-          const shotId   = s.shot_id;
-          const ovr      = _musicOverrides[shotId] || {};
+          const ovr      = _musicOverrides[origMid] || {};
           const shotDur  = s.duration_sec || 0;
           const epStart  = s.offset_sec || 0;
           const epEnd    = epStart + shotDur;
@@ -11583,13 +11591,15 @@ placeholder="Enter your story here"></textarea>
           const duckVal  = ovr.duck_db  != null ? ovr.duck_db  : 0;
           const fadeVal  = ovr.fade_sec != null ? ovr.fade_sec : (s.fade_sec != null ? s.fade_sec : 0.15);
           const col      = shotColors[i % shotColors.length];
+          // If an override entry exists but has no music_clip_id, the user explicitly
+          // chose "no clip" — do NOT fall back to the auto-assigned clip.
+          const hasExplicitNoClip = (origMid in _musicOverrides) && !_musicOverrides[origMid].music_clip_id;
           // currentClipId: use saved override if present, then fall back to auto-assigned clip
-          const currentClipId = ovr.music_clip_id || itemToClipId[origMid] || '';
+          const currentClipId = hasExplicitNoClip ? '' : (ovr.music_clip_id || itemToClipId[origMid] || '');
           // Auto-initialize _musicOverrides so Confirm always writes all fields
-          if (!_musicOverrides[shotId]) _musicOverrides[shotId] = { shot_id: shotId, item_id: origMid };
-          { const _o = _musicOverrides[shotId];
-            if (!_o.item_id) _o.item_id = origMid;
-            if (!_o.music_clip_id && currentClipId) _musicSetClipOverride(shotId, currentClipId);
+          if (!_musicOverrides[origMid]) _musicOverrides[origMid] = { item_id: origMid };
+          { const _o = _musicOverrides[origMid];
+            if (!_o.music_clip_id && !hasExplicitNoClip && currentClipId) _musicSetClipOverride(origMid, currentClipId);
             if (_o.start_sec == null) _o.start_sec = parseFloat(dispStart.toFixed(2));
             if (_o.end_sec   == null) _o.end_sec   = parseFloat(dispEnd.toFixed(2));
             if (_o.duck_db   == null) _o.duck_db   = duckVal;
@@ -11604,7 +11614,7 @@ placeholder="Enter your story here"></textarea>
             + '</div>'
             // clip dropdown — first option is explicit "none" so unassigned shots are visible
             + '<div class="music-shot-clip">'
-            + '<select style="width:100%" onchange="_musicSetClipOverride(\'' + shotId + '\',this.value)">'
+            + '<select id="music-clip-' + origMid + '" style="width:100%" onchange="_musicSetClipOverride(\'' + origMid + '\',this.value)">'
             + '<option value=""' + (currentClipId === '' ? ' selected' : '') + '>— no clip —</option>';
           allClips.forEach(c => {
             ovrHtml += '<option value="' + c.clip_id + '"' + (c.clip_id === currentClipId ? ' selected' : '') + '>'
@@ -11615,28 +11625,27 @@ placeholder="Enter your story here"></textarea>
             + '<div class="music-shot-params">'
             + '<label title="Episode time when music begins (seconds)">▶ start</label>'
             + '<input type="number" step="0.5" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispStart.toFixed(1) + '"'
-            + ' onchange="_musicSetStartEnd(\'' + shotId + '\',parseFloat(this.value),null,' + epStart + ',' + epEnd + ')"'
+            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',parseFloat(this.value),null,' + epStart + ',' + epEnd + ')"'
             + ' style="width:64px">'
             + '<label title="Episode time when music stops (seconds)">⏹ end</label>'
             + '<input type="number" step="0.5" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispEnd.toFixed(1) + '"'
-            + ' onchange="_musicSetStartEnd(\'' + shotId + '\',null,parseFloat(this.value),' + epStart + ',' + epEnd + ')"'
+            + ' onchange="_musicSetStartEnd(\'' + origMid + '\',null,parseFloat(this.value),' + epStart + ',' + epEnd + ')"'
             + ' style="width:64px">'
             + '<label title="Attenuation in dB (0 = full volume)">🔉 duck</label>'
             + '<input type="number" step="1" min="-30" max="0" value="' + duckVal + '"'
-            + ' onchange="_musicSetOverride(\'' + shotId + '\',\'duck_db\',parseFloat(this.value))"'
+            + ' onchange="_musicSetOverride(\'' + origMid + '\',\'duck_db\',parseFloat(this.value))"'
             + ' style="width:50px">'
             + '<label title="Fade duration in seconds">⏱ fade</label>'
             + '<input type="number" step="0.05" min="0" max="3" value="' + fadeVal.toFixed(2) + '"'
-            + ' onchange="_musicSetOverride(\'' + shotId + '\',\'fade_sec\',parseFloat(this.value))"'
+            + ' onchange="_musicSetOverride(\'' + origMid + '\',\'fade_sec\',parseFloat(this.value))"'
             + ' style="width:50px">'
-            + _musicBuildShotLoopControls(shotId, currentClipId ? allClips.find(c => c.clip_id === currentClipId) || null : null)
+            + _musicBuildShotLoopControls(origMid, currentClipId ? allClips.find(c => c.clip_id === currentClipId) || null : null)
             + '</div>'
             + '</div>';
         });
 
         ovrCard.innerHTML = ovrHtml;
         body.appendChild(ovrCard);
-        document.getElementById('music-footer').style.display = 'flex';
       }
     }
 
@@ -11765,7 +11774,7 @@ placeholder="Enter your story here"></textarea>
       };
       _musicTimeline.shots.forEach(s => {
         const mood = s.music_mood || '(no music)';
-        const ovrDuck = (_musicOverrides[s.shot_id] || {}).duck_db;
+        const ovrDuck = (_musicOverrides[s.music_item_id] || {}).duck_db;
         const effectiveDuck = ovrDuck != null ? ovrDuck : (s.duck_db != null ? s.duck_db : 0);
         const duck = effectiveDuck + 'dB' + (ovrDuck != null ? ' ✎' : '');
         const t0 = s.offset_sec || 0;
@@ -11780,6 +11789,9 @@ placeholder="Enter your story here"></textarea>
       tlCard.innerHTML = tlHtml;
       body.appendChild(tlCard);
     }
+
+    // Always show the Confirm Plan footer once the body is rendered
+    document.getElementById('music-footer').style.display = 'flex';
   }
 
   // ── Mark start/end positions on source tracks ──
@@ -11849,14 +11861,16 @@ placeholder="Enter your story here"></textarea>
   }
 
   // ── Set clip override from visual timeline dropdown ──
-  // itemId parameter now receives shot_id as the key
   function _musicSetClipOverride(itemId, clipId) {
-    // Empty clipId means "no clip" — clear the override entirely
+    // Empty clipId means "no clip" — keep an explicit sentinel entry so that
+    // switching tabs and back does NOT auto-reassign a clip.
     if (!clipId) {
-      delete _musicOverrides[itemId];
+      if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
+      _musicOverrides[itemId].music_clip_id  = '';
+      _musicOverrides[itemId].music_asset_id = '';
       return;
     }
-    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { shot_id: itemId };
+    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
     // Store full clip_id for UI dropdown matching
     _musicOverrides[itemId].music_clip_id = clipId;
     // Resolve to WAV filename stem via lookup (for backend)
@@ -11883,16 +11897,14 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  // itemId parameter now receives shot_id as the key
   function _musicSetOverride(itemId, field, value) {
-    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { shot_id: itemId };
+    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
     _musicOverrides[itemId][field] = value;
   }
 
   // start_sec / end_sec: episode-absolute values; either may be null (means "keep current")
-  // itemId parameter now receives shot_id as the key
   function _musicSetStartEnd(itemId, startSec, endSec, epStart, epEnd) {
-    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { shot_id: itemId };
+    if (!_musicOverrides[itemId]) _musicOverrides[itemId] = { item_id: itemId };
     const ovr = _musicOverrides[itemId];
     // Resolve current values (episode-absolute)
     const curStart = startSec != null ? startSec : (ovr.start_sec != null ? ovr.start_sec : epStart);
@@ -11919,15 +11931,7 @@ placeholder="Enter your story here"></textarea>
         schema_id: 'MusicPlan',
         schema_version: '1.0',
         loop_selections: loopSelClean,
-        shot_overrides: Object.entries(_musicOverrides).map(([sid, v]) => ({
-          shot_id:        sid,
-          item_id:        v.item_id || "",
-          music_asset_id: v.music_asset_id,
-          start_sec:      v.start_sec,
-          end_sec:        v.end_sec,
-          duck_db:        v.duck_db,
-          fade_sec:       v.fade_sec,
-        })).filter(o => o.shot_id),
+        shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id),
       };
       if (Object.keys(_musicTrackVolumes).length)
         plan.track_volumes = _musicTrackVolumes;
@@ -11950,7 +11954,9 @@ placeholder="Enter your story here"></textarea>
           + '<pre style="margin:4px 0 0;font-size:0.80em;color:#f88;white-space:pre-wrap">'
           + escHtml(errLines) + '</pre>';
       } else if (d.validation_pass === true) {
-        const saveMsg = '✔ MusicPlan.json saved';
+        const saveMsg = d.snapshot_exists
+          ? '✔ MusicPlan.json + MusicApprovalSnapshot.json saved'
+          : '✔ MusicPlan.json saved — ⚠ Generate Preview first to save audio snapshot, then Confirm Plan again.';
         msgEl.innerHTML = '<span style="color:#6ec96e">' + escHtml(saveMsg) + '</span>'
           + ' <span style="color:#6ec96e;font-size:0.85em">[contract: PASS]</span>';
       } else {
@@ -11980,10 +11986,10 @@ placeholder="Enter your story here"></textarea>
       2: [ep('StoryPrompt.json')],
       3: [ep('Script.json')],
       4: [ep('ShotList.json')],
-      5: [ep('AssetManifest.shared.json'), ep('AssetManifest.en.json')],
+      5: [ep('AssetManifest.shared.json'), ep('VOPlan.en.json')],
       6: [ep('canon_diff.json')],
       7: [ep('canon.json')],
-      9: [ep('RenderPlan.json')],
+      9: [ep('VOPlan.en.json')],
     };
     // All stages need slug/ep_id to build the episode path
     if (!currentSlug || !currentEpId) return [];
@@ -12662,28 +12668,26 @@ placeholder="Enter your story here"></textarea>
         '→ writes ShotList.json',
     5:  'gen_manifest_structure.py → claude prompts/p_5_c.txt → gen_vo_manifest.py  (narration)\n' +
         'claude -p --model sonnet prompts/p_5.txt  (episodic/monologue)\n' +
-        '→ writes AssetManifest.shared.json + AssetManifest.{locale}.json',
+        '→ writes AssetManifest.shared.json + VOPlan.{locale}.json',
     6:  'canon_diff_chars.py → claude prompts/p_6.txt → validate_scaffold.py\n→ writes canon_diff.json',
     7:  'canon_merge.py  (deterministic — no LLM)\n→ updates projects/{slug}/canon.json',
-    8:  'claude -p --model sonnet prompts/p_8.txt\n→ writes AssetManifest.{locale}.json per non-en locale',
+    8:  'claude -p --model sonnet prompts/p_8.txt\n→ writes VOPlan.{locale}.json per non-en locale',
     10: '── Shared steps (once, all locales) ──\n' +
         '[ 1] gen_music_clip.py      --manifest AssetManifest.shared.json\n' +
         '[ 2] gen_characters.py      --manifest AssetManifest.shared.json\n' +
         '[ 3] gen_backgrounds.py     --manifest AssetManifest.shared.json\n' +
         '[ 4] gen_sfx.py             --manifest AssetManifest.shared.json\n' +
         '── Per-locale steps ──\n' +
-        '[ 5] manifest_merge.py      --shared ...shared.json --locale AssetManifest.{locale}.json\n' +
-        '                            (in-place → AssetManifest.{locale}.json)\n' +
-        '[ 6] gen_tts_cloud.py       --manifest AssetManifest.{locale}.json\n' +
-        '[ 7] post_tts_analysis.py   --manifest AssetManifest.{locale}.json\n' +
+        '[ 5] manifest_merge        (manifest_merge.py → VOPlan.{locale}.json, locale_scope=merged)\n' +
+        '[ 6] gen_tts_cloud.py       --manifest VOPlan.{locale}.json\n' +
+        '[ 7] post_tts_analysis.py   --manifest VOPlan.{locale}.json\n' +
         '[ 8] apply_music_plan.py    --plan MusicPlan.json\n' +
-        '                            --manifest AssetManifest.{locale}.json\n' +
+        '                            --manifest VOPlan.{locale}.json\n' +
         '     (skipped if Music disabled; ⏸ pauses to wait for Music tab confirm if plan missing)\n' +
-        '[ 9] resolve_assets.py      --manifest AssetManifest.{locale}.json\n' +
-        '                            (writes resolved_assets[] into unified manifest)\n' +
-        '[10] gen_render_plan.py     --manifest AssetManifest.{locale}.json\n' +
-        '                            → RenderPlan.{locale}.json\n' +
-        '[11] render_video.py        --plan RenderPlan.{locale}.json --locale {locale}\n' +
+        '[ 9] resolve_assets.py      --manifest VOPlan.{locale}.json\n' +
+        '                            (writes resolved_assets[] into VOPlan)\n' +
+        '[10] gen_render_plan        (no-op — eliminated; render_video reads VOPlan directly)\n' +
+        '[11] render_video.py        --plan VOPlan.{locale}.json --locale {locale}\n' +
         '                            --out renders/{locale}/  →  renders/{locale}/output.mp4\n' +
         '[12] gen_cross_srt.py       --ep-dir {ep_dir} --locales {locales} --primary {primary}\n' +
         '                            →  renders/{locale_A}/output.{locale_B}.srt  (cross pairs)',
@@ -12956,19 +12960,19 @@ placeholder="Enter your story here"></textarea>
         // Stage 9: numbered Run / Run→11 buttons matching the main stage button style
         const LOCALE_STEPS = [
           { num: 5,  step: 'manifest_merge',   label: '5 — merge',
-            cmd: 'manifest_merge.py --shared AssetManifest.shared.json --locale AssetManifest.{locale}.json  (in-place)' },
+            cmd: 'manifest_merge.py --shared AssetManifest.shared.json --locale AssetManifest.{locale}.json --out VOPlan.{locale}.json' },
           { num: 6,  step: 'gen_tts',          label: '6 — tts',
-            cmd: 'gen_tts_cloud.py --manifest AssetManifest.{locale}.json' },
+            cmd: 'gen_tts_cloud.py --manifest VOPlan.{locale}.json' },
           { num: 7,  step: 'post_tts',         label: '7 — post_tts',
-            cmd: 'post_tts_analysis.py --manifest AssetManifest.{locale}.json' },
+            cmd: 'post_tts_analysis.py --manifest VOPlan.{locale}.json' },
           { num: 8,  step: 'apply_music_plan', label: '8 — music plan',
-            cmd: 'apply_music_plan.py --plan MusicPlan.json --manifest AssetManifest.{locale}.json  (skipped if Music disabled)' },
+            cmd: 'apply_music_plan.py --plan MusicPlan.json --manifest VOPlan.{locale}.json  (skipped if Music disabled)' },
           { num: 9,  step: 'resolve_assets',   label: '9 — resolve',
-            cmd: 'resolve_assets.py --manifest AssetManifest.{locale}.json  (writes resolved_assets[] into unified manifest)' },
+            cmd: 'resolve_assets.py --manifest VOPlan.{locale}.json  (writes resolved_assets[] into VOPlan)' },
           { num: 10, step: 'gen_render_plan',  label: '10 — plan',
-            cmd: 'gen_render_plan.py --manifest AssetManifest.{locale}.json  → RenderPlan.{locale}.json' },
+            cmd: 'gen_render_plan (no-op — eliminated; render_video reads VOPlan directly)' },
           { num: 11, step: 'render_video',     label: '11 — render',
-            cmd: 'render_video.py --plan RenderPlan.{locale}.json --locale {locale} --out renders/{locale}/  → renders/{locale}/output.mp4' },
+            cmd: 'render_video.py --plan VOPlan.{locale}.json --locale {locale} --out renders/{locale}/  → renders/{locale}/output.mp4' },
         ];
         const localeStepsMap = status.locale_steps || {};
         const sharedStepsMap = status.shared_steps || {};
@@ -13004,6 +13008,7 @@ placeholder="Enter your story here"></textarea>
           const done = (sharedStepsMap[step] || {}).done || false;
           const row = document.createElement('div');
           row.className = 'pipe-substep-row';
+          row.dataset.step = step;
           // Steps that are skipped in run.sh when the corresponding approval exists.
           // gen_music_clip and music_prepare_loops are always greyed — they run
           // automatically as a preamble to step 5 (manifest_merge) and have no
@@ -13068,11 +13073,13 @@ placeholder="Enter your story here"></textarea>
               const done = (lsteps[step] || {}).done || false;
               const row  = document.createElement('div');
               row.className = 'pipe-substep-row';
+              row.dataset.step = step;
               // Only grey steps that are actually skipped in run.sh when approved.
               // gen_tts + post_tts:
               //   Primary locale  → always greyed (VO is authored in VO tab, never re-run from Stage 9).
               //   Non-primary     → greyed only when VO is approved for that locale.
-              // apply_music_plan: skipped when music is approved (MusicPlan.json exists).
+              // apply_music_plan: skipped when music is approved (render_video reads
+              //   MusicApprovalSnapshot directly — manifest update is redundant).
               const _voByLocale    = _approvals.vo_by_locale || {};
               const _isPrimary     = locale === (locales[0] || 'en');
               const _localeApproved =
@@ -14085,11 +14092,11 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "stage_5": {
             # Primary: both canonical output files exist.
             # Fallback: stage log (handles non-en locale configs where
-            # AssetManifest.en.json might not be the written locale).
+            # VOPlan.en.json might not be the written locale).
             "done": (
-                check(ep("AssetManifest.shared.json")) and check(ep("AssetManifest.en.json"))
+                check(ep("AssetManifest.shared.json")) and check(ep("VOPlan.en.json"))
             ) or _log_done(5),
-            "artifacts": [ep_rel("AssetManifest.shared.json"), ep_rel("AssetManifest.en.json")],
+            "artifacts": [ep_rel("AssetManifest.shared.json"), ep_rel("VOPlan.en.json")],
         },
         "stage_6": {
             "done": check(ep("canon_diff.json")),
@@ -14116,13 +14123,19 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         },
     }
 
-    # Detect locales from AssetManifest.{locale}.json files
+    # Detect locales from VOPlan.{locale}.json files; fall back to AssetManifest.{locale}.json
     locales: list[str] = []
     if os.path.isdir(ep_dir):
         for f in sorted(os.listdir(ep_dir)):
-            m = re.match(r"AssetManifest\.(.+)\.json$", f)
+            m = re.match(r"VOPlan\.(.+)\.json$", f)
             if m and m.group(1) != "shared":
                 locales.append(m.group(1))
+        if not locales:
+            # No VOPlan yet — derive from AssetManifest locale files
+            for f in sorted(os.listdir(ep_dir)):
+                m = re.match(r"AssetManifest\.(.+)\.json$", f)
+                if m and m.group(1) != "shared":
+                    locales.append(m.group(1))
 
     # Per-locale post-processing status
     locale_steps: dict[str, dict] = {}
@@ -14135,7 +14148,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         # resolve_assets populates resolved_assets[] in the unified manifest.
         # Empty [] (falsy) = manifest_merge ran but resolve_assets has not yet.
         # Non-empty (truthy) = resolve_assets has run.
-        _ua_path = ep(f"AssetManifest.{locale}.json")
+        _ua_path = ep(f"VOPlan.{locale}.json")
         try:
             if os.path.isfile(_ua_path):
                 with open(_ua_path, encoding="utf-8") as _ua_f:
@@ -14145,25 +14158,15 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         except Exception:
             _ra_done = False
 
-        # manifest_merge done iff file exists AND locale_scope == "merged".
-        # Stage 5 (gen_vo_manifest.py) now writes AssetManifest.{locale}.json too
-        # (with locale_scope="locale"), so file existence alone is not sufficient.
-        _mm_path = ep(f"AssetManifest.{locale}.json")
-        try:
-            if os.path.isfile(_mm_path):
-                with open(_mm_path, encoding="utf-8") as _mm_f:
-                    _mm_done = json.load(_mm_f).get("locale_scope") == "merged"
-            else:
-                _mm_done = False
-        except Exception:
-            _mm_done = False
+        # manifest_merge is done when VOPlan.{locale}.json exists with locale_scope == "merged".
+        _mm_done = _step_is_done("manifest_merge", slug, ep_id, locale)
 
         locale_steps[locale] = {
             "manifest_merge":  {"done": _mm_done},
             "gen_tts":         {"done": gen_tts_done},
             "post_tts":        {"done": gen_tts_done},   # proxy: same check as gen_tts
             "resolve_assets":  {"done": _ra_done},
-            "gen_render_plan": {"done": check(ep(f"RenderPlan.{locale}.json"))},
+            "gen_render_plan": {"done": True},  # eliminated — always done
             "render_video":    {"done": check(os.path.join(ep_dir, "renders", locale, "output.mp4"))},
         }
 
@@ -14269,7 +14272,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             pass
 
     # ── Approval checkpoints (FIX E) ──────────────────────────────────────────
-    # VO approval: check AssetManifest.{primary_locale}.json vo_approval block
+    # VO approval: check VOPlan.{primary_locale}.json vo_approval block
     _vo_primary = meta_locales_str.split(",")[0].strip() if meta_locales_str else "en"
     _vo_approved_legacy = os.path.join(ep_dir, "tts_review_complete.json")
     # Per-locale VO approval — used by Stage 9 UI to grey gen_tts only for
@@ -14286,24 +14289,25 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "vo_by_locale": _vo_by_locale,
         "music":        os.path.isfile(os.path.join(ep_dir, "MusicPlan.json")),
         "sfx":          os.path.isfile(os.path.join(ep_dir, "SfxPlan.json")),
-        "media":        os.path.isfile(os.path.join(ep_dir, "assets", "media", "selections.json")),
+        "media":        os.path.isfile(os.path.join(ep_dir, "MediaPlan.json")),
     }
     approvals["all"] = approvals["vo"] and approvals["music"] and approvals["sfx"] and approvals["media"]
 
-    # ── Staleness guard: is RenderPlan older than VO approval? ────────────────
-    # If AssetManifest.{primary}.json is newer than RenderPlan.{locale}.json,
-    # the RenderPlan was generated before the current VO approval — step 10 must be
-    # re-run or the SRT timestamps and shot durations will be stale.
-    _render_plan_stale: dict[str, bool] = {}   # keyed by locale
-    _tts_complete_path = os.path.join(ep_dir, f"AssetManifest.{_vo_primary}.json")
+    # ── Staleness guard: is render output older than VO approval? ────────────
+    # If VOPlan.{locale}.json (which holds vo_approval.approved_at) is newer than
+    # the rendered output.mp4, the video was produced before the current VO approval
+    # and should be re-rendered.  gen_render_plan no longer exists — render_video reads
+    # VOPlan directly, so staleness is VOPlan vs output.mp4 (not vs RenderPlan).
+    _render_plan_stale: dict[str, bool] = {}   # keyed by locale (name kept for UI compat)
+    _tts_complete_path = os.path.join(ep_dir, f"VOPlan.{_vo_primary}.json")
     _tts_mtime = os.path.getmtime(_tts_complete_path) if os.path.isfile(_tts_complete_path) else None
     for _loc in (locales or ["en"]):
-        _rp_path = os.path.join(ep_dir, f"RenderPlan.{_loc}.json")
+        _render_out = os.path.join(ep_dir, "renders", _loc, "output.mp4")
         if _tts_mtime is not None:
-            if not os.path.isfile(_rp_path):
-                _render_plan_stale[_loc] = True   # RenderPlan not yet generated
-            elif os.path.getmtime(_rp_path) < _tts_mtime:
-                _render_plan_stale[_loc] = True   # RenderPlan predates VO approval
+            if not os.path.isfile(_render_out):
+                _render_plan_stale[_loc] = True   # not yet rendered
+            elif os.path.getmtime(_render_out) < _tts_mtime:
+                _render_plan_stale[_loc] = True   # render predates VO approval
             else:
                 _render_plan_stale[_loc] = False
         else:
@@ -14339,9 +14343,8 @@ def _step_is_done(step: str, slug: str, ep_id: str, locale: str) -> bool:
     def check(*paths): return all(os.path.isfile(p) for p in paths)
 
     if step == "manifest_merge":
-        # File exists with locale_scope=="merged" — gen_vo_manifest.py also writes
-        # this file (with locale_scope="locale"), so scope check is required.
-        _path = os.path.join(ep_dir, f"AssetManifest.{locale}.json")
+        # Done when VOPlan.{locale}.json exists with locale_scope == "merged".
+        _path = os.path.join(ep_dir, f"VOPlan.{locale}.json")
         if not os.path.isfile(_path):
             return False
         try:
@@ -14358,7 +14361,7 @@ def _step_is_done(step: str, slug: str, ep_id: str, locale: str) -> bool:
     elif step == "resolve_assets":
         # resolved_assets[] is always present (placeholder [] written by manifest_merge).
         # Done when the list is non-empty (truthy) — i.e. resolve_assets has populated it.
-        _path = os.path.join(ep_dir, f"AssetManifest.{locale}.json")
+        _path = os.path.join(ep_dir, f"VOPlan.{locale}.json")
         if not os.path.isfile(_path):
             return False
         try:
@@ -14367,7 +14370,7 @@ def _step_is_done(step: str, slug: str, ep_id: str, locale: str) -> bool:
         except Exception:
             return False
     elif step == "gen_render_plan":
-        return check(os.path.join(ep_dir, f"RenderPlan.{locale}.json"))
+        return True  # gen_render_plan eliminated — always considered done
     elif step == "render_video":
         return check(os.path.join(ep_dir, "renders", locale, "output.mp4"))
     elif step == "gen_cross_srt":
@@ -14394,12 +14397,12 @@ def _delete_step_output(step: str, slug: str, ep_id: str, locale: str) -> None:
     ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
 
     if step == "manifest_merge":
-        # AssetManifest.{locale}.json is ALSO the source of VO items written by
+        # VOPlan.{locale}.json is ALSO the source of VO items written by
         # Stage 5 — deleting the whole file destroys VO data that cannot be
         # recovered without re-running Stage 5.
         # Instead, strip only the merge-added fields and reset locale_scope so
         # manifest_merge will re-run cleanly while VO data is preserved.
-        _mpath = os.path.join(ep_dir, f"AssetManifest.{locale}.json")
+        _mpath = os.path.join(ep_dir, f"VOPlan.{locale}.json")
         if os.path.isfile(_mpath):
             try:
                 with open(_mpath, encoding="utf-8") as _mf:
@@ -14416,9 +14419,9 @@ def _delete_step_output(step: str, slug: str, ep_id: str, locale: str) -> None:
         return
 
     if step == "resolve_assets":
-        # Only clear resolved_assets[] — leave locale_scope='merged' intact so
+        # Only clear resolved_assets[] — leave locale_scope intact so
         # resolve_assets.py does not reject the manifest.
-        _mpath = os.path.join(ep_dir, f"AssetManifest.{locale}.json")
+        _mpath = os.path.join(ep_dir, f"VOPlan.{locale}.json")
         if os.path.isfile(_mpath):
             try:
                 with open(_mpath, encoding="utf-8") as _mf:
@@ -14449,7 +14452,7 @@ def _delete_step_output(step: str, slug: str, ep_id: str, locale: str) -> None:
         return
 
     targets: dict[str, list[str]] = {
-        "gen_render_plan": [os.path.join(ep_dir, f"RenderPlan.{locale}.json")],
+        "gen_render_plan": [],  # eliminated — nothing to delete
         "render_video":    [os.path.join(ep_dir, "renders", locale, "output.mp4"),
                             os.path.join(ep_dir, "renders", locale, "render_output.json")],
         # gen_tts / post_tts: skip deletion — TTS files are expensive to redo
@@ -14476,7 +14479,7 @@ def _purge_episode_assets(slug: str, ep_id: str, locale: str = "") -> list[str]:
       - assets/{locale}/sfx/*.wav            — generated SFX
       - assets/sfx/*.wav                     — shared SFX (only when locale="")
       - renders/{locale}/output.mp4|srt|json — render outputs
-      - AssetManifest.{locale}.json          — unified manifest (merge + resolved_assets + render_plan)
+      - VOPlan.{locale}.json          — unified manifest (merge + resolved_assets + render_plan)
       - RenderPlan.{locale}.json             — render plans
       - assets/meta/gen_tts_cloud_results.json (only when locale="")
 
@@ -14511,7 +14514,7 @@ def _purge_episode_assets(slug: str, ep_id: str, locale: str = "") -> list[str]:
         locales = []
         if os.path.isdir(ep_dir):
             for f in sorted(os.listdir(ep_dir)):
-                m = re.match(r"AssetManifest\.(.+)\.json$", f)
+                m = re.match(r"VOPlan\.(.+)\.json$", f)
                 if m and m.group(1) != "shared":
                     locales.append(m.group(1))
         purge_shared = True
@@ -14533,7 +14536,7 @@ def _purge_episode_assets(slug: str, ep_id: str, locale: str = "") -> list[str]:
         for fname in ("output.mp4", "output.srt", "render_output.json", "youtube_dubbed.m4a", "youtube_dubbed.aac"):
             _rm(os.path.join(render_loc, fname))
 
-        # Delete RenderPlan only.  AssetManifest.{loc}.json is intentionally
+        # Delete RenderPlan only.  VOPlan.{loc}.json is intentionally
         # kept — gen_tts/post_tts read it; manifest_merge recreates it via
         # _delete_step_output when a specific step is reset.
         _rm(os.path.join(ep_dir, f"RenderPlan.{loc}.json"))
@@ -14593,14 +14596,14 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
     elif step == "manifest_merge":
         return [
             "python3", os.path.join(code_dir, "manifest_merge.py"),
-            "--shared", ep(f"AssetManifest.shared.json"),
+            "--shared", ep("AssetManifest.shared.json"),
             "--locale", ep(f"AssetManifest.{locale}.json"),
-            # --out omitted: manifest_merge writes in-place to AssetManifest.{locale}.json
+            "--out",    ep(f"VOPlan.{locale}.json"),
         ]
     elif step == "gen_tts":
         cmd = [
             "python3", os.path.join(code_dir, "gen_tts_cloud.py"),
-            "--manifest", ep(f"AssetManifest.{locale}.json"),
+            "--manifest", ep(f"VOPlan.{locale}.json"),
         ]
         # ssml_narration mode: primary locale uses wrapper-rebuild + inner
         # passthrough (same logic as run.sh lines 170-176).
@@ -14628,7 +14631,7 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
     elif step == "post_tts":
         return [
             "python3", os.path.join(code_dir, "post_tts_analysis.py"),
-            "--manifest", ep(f"AssetManifest.{locale}.json"),
+            "--manifest", ep(f"VOPlan.{locale}.json"),
         ]
     elif step == "apply_music_plan":
         music_plan = os.path.join(ep_dir, "MusicPlan.json")
@@ -14637,54 +14640,35 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
         return [
             "python3", os.path.join(code_dir, "apply_music_plan.py"),
             "--plan",     music_plan,
-            "--manifest", ep(f"AssetManifest.{locale}.json"),
+            "--manifest", ep(f"VOPlan.{locale}.json"),
         ]
     elif step == "resolve_assets":
         return [
             "python3", os.path.join(code_dir, "resolve_assets.py"),
-            "--manifest", ep(f"AssetManifest.{locale}.json"),
+            "--manifest", ep(f"VOPlan.{locale}.json"),
         ]
     elif step == "gen_render_plan":
-        # Read story_format from meta.json so the ceiling logic in gen_render_plan.py
-        # knows whether this is a narrative format (continuous_narration, documentary,
-        # illustrated_narration) or an episodic/monologue format.
-        _story_format = ""
-        _meta_path = ep("meta.json")
-        if os.path.isfile(_meta_path):
-            try:
-                _mj = json.load(open(_meta_path, encoding="utf-8"))
-                _story_format = _mj.get("story_format", "")
-            except Exception:
-                pass
-        if not _story_format:
-            # Fall back to pipeline_vars.sh
-            _pvars = os.path.join(ep_dir, "pipeline_vars.sh")
-            if os.path.isfile(_pvars):
-                with open(_pvars, encoding="utf-8") as _pf:
-                    for _line in _pf:
-                        _line = _line.strip()
-                        if _line.startswith("export STORY_FORMAT="):
-                            _story_format = _line.split("=", 1)[1].strip().strip('"').strip("'")
-                            break
-        if not _story_format:
-            _story_format = "episodic"
-        return [
-            "python3", os.path.join(code_dir, "gen_render_plan.py"),
-            "--manifest",     ep(f"AssetManifest.{locale}.json"),
-            "--profile",      profile,
-            "--story-format", _story_format,
-        ]
+        # gen_render_plan.py is ELIMINATED — its logic is absorbed into render_video.py.
+        # Return [] (empty command = no-op skip) so any legacy /run_step call is harmless.
+        return []
     elif step == "render_video":
         out_dir = os.path.join(ep_dir, "renders", locale)
         cmd = [
             "python3", os.path.join(code_dir, "render_video.py"),
-            "--plan",    ep(f"RenderPlan.{locale}.json"),
+            "--plan",    ep(f"VOPlan.{locale}.json"),
             "--locale",  locale,
             "--out",     out_dir,
             "--profile", profile,
         ]
         if no_music:
             cmd.append("--no-music")
+        # Phase 2 — Timeline Lock: pass primary locale's approved VO timing so non-primary
+        # locales cannot produce shorter shots than the primary locale.
+        _primary_loc_rv = (payload or {}).get("primary_locale", "en")
+        if locale != _primary_loc_rv:
+            _ref_vp_rv = ep(f"VOPlan.{_primary_loc_rv}.json")
+            if os.path.isfile(_ref_vp_rv):
+                cmd += ["--reference-approval", _ref_vp_rv]
         return cmd
     elif step == "gen_cross_srt":
         # Episode-level step: locale arg is "" — derive locales from meta.json
@@ -14721,6 +14705,61 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
             "--primary", _gcs_primary,
         ]
     return None
+
+
+def _fake_subprocess(cmd, step_name, ep_dir, locale):
+    """In --test-mode: copy pre-baked fixture outputs, return fake process."""
+    import shutil as _shutil
+    # PIPE_DIR in test mode is <repo>/tests/fixtures.
+    # step_outputs lives at <repo>/tests/step_outputs/ — one level up from fixtures.
+    _step_dir   = os.path.join(os.path.dirname(PIPE_DIR), "step_outputs")
+
+    def _copy_merged_voplan():
+        src = os.path.join(_step_dir, "manifest_merge.VOPlan.en.json")
+        dst = os.path.join(ep_dir, f"VOPlan.{locale or 'en'}.json")
+        _shutil.copy(src, dst)
+
+    def _stub_render():
+        out = os.path.join(ep_dir, "renders", locale or "en")
+        os.makedirs(out, exist_ok=True)
+        open(os.path.join(out, "output.mp4"), "wb").write(b"\x00" * 100)
+
+    _actions = {
+        "manifest_merge":     _copy_merged_voplan,
+        "gen_tts_cloud":      lambda: None,
+        "post_tts_analysis":  lambda: None,
+        "gen_music_clip":     lambda: None,
+        "music_prepare_loops": lambda: None,
+        "apply_music_plan":   lambda: None,
+        "resolve_assets":     lambda: None,
+        "render_video":       _stub_render,
+    }
+
+    action = _actions.get(step_name)
+    if action is None:
+        raise RuntimeError(
+            f"_fake_subprocess: unknown step {step_name!r} — "
+            f"add it to _actions in _fake_subprocess()"
+        )
+    try:
+        action()
+    except Exception as _fe:
+        print(f"  [TEST MODE] _fake_subprocess {step_name}: {_fe}", flush=True)
+
+    class _FakeProc:
+        returncode = 0
+        def __init__(self):
+            self._lines = iter([f"  [TEST MODE] {step_name} — fixture applied\n"])
+        @property
+        def stdout(self):
+            return self
+        def __iter__(self):
+            return self._lines
+        def wait(self, timeout=None):
+            return 0
+        def poll(self):
+            return 0
+    return _FakeProc()
 
 
 # ── Request handler ────────────────────────────────────────────────────────────
@@ -14842,11 +14881,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(400); self.end_headers(); return
             try:
                 full_ep = _vo_resolve_ep_dir(ep_dir)
-                manifest_path = os.path.join(full_ep, "AssetManifest.en.json") \
+                manifest_path = os.path.join(full_ep, "VOPlan.en.json") \
                     if locale == "en" else \
-                    os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                    os.path.join(full_ep, f"VOPlan.{locale}.json")
                 if not os.path.exists(manifest_path):
-                    manifest_path = os.path.join(full_ep, "AssetManifest.en.json")
+                    manifest_path = os.path.join(full_ep, "VOPlan.en.json")
                 with open(manifest_path, encoding="utf-8") as _mf:
                     _mfdata = json.load(_mf)
                 vo_items = _mfdata.get("vo_items", [])
@@ -14998,7 +15037,7 @@ class Handler(BaseHTTPRequestHandler):
             if _VO_UTILS_AVAILABLE:
                 try:
                     valid = _verify_sentinel(full_ep, locale)
-                    _mani_p = os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                    _mani_p = os.path.join(full_ep, f"VOPlan.{locale}.json")
                     if os.path.isfile(_mani_p):
                         with open(_mani_p, encoding="utf-8") as _sf:
                             _mani_d = json.load(_sf)
@@ -15041,7 +15080,7 @@ class Handler(BaseHTTPRequestHandler):
                               if not os.path.isabs(ep_dir) else ep_dir
                 if os.path.isdir(full_ep_dir):
                     for fname in sorted(os.listdir(full_ep_dir)):
-                        m = re.match(r"AssetManifest\.(.+)\.json$", fname)
+                        m = re.match(r"VOPlan\.(.+)\.json$", fname)
                         if m and m.group(1) != "shared":
                             locales.append(m.group(1))
             body = json.dumps({"locales": locales}).encode()
@@ -15067,8 +15106,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 full_ep_dir = os.path.join(PIPE_DIR, ep_dir) \
                               if not os.path.isabs(ep_dir) else ep_dir
-                # AssetManifest.{locale}.json is the single source for all stages
-                mpath = os.path.join(full_ep_dir, f"AssetManifest.{locale}.json")
+                # VOPlan.{locale}.json is the single source for all stages
+                mpath = os.path.join(full_ep_dir, f"VOPlan.{locale}.json")
                 try:
                     with open(mpath, encoding="utf-8") as fh:
                         manifest = json.load(fh)
@@ -15140,7 +15179,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
 
         # ── GET /api/vo_approved_timing — approved durations for drift detection ──
-        # Returns {item_id: duration_sec} from AssetManifest.{locale}.json vo_items[].
+        # Returns {item_id: duration_sec} from VOPlan.{locale}.json vo_items[].
         # Used by the VO tab JS to detect timing drift after re-synthesis.
         elif parsed.path == "/api/vo_approved_timing":
             params = parse_qs(parsed.query)
@@ -15150,7 +15189,7 @@ class Handler(BaseHTTPRequestHandler):
             if ep_dir and locale:
                 _full_ep = os.path.join(PIPE_DIR, ep_dir) \
                            if not os.path.isabs(ep_dir) else ep_dir
-                _apath = os.path.join(_full_ep, f"AssetManifest.{locale}.json")
+                _apath = os.path.join(_full_ep, f"VOPlan.{locale}.json")
                 if os.path.isfile(_apath):
                     try:
                         with open(_apath, encoding="utf-8") as _fh:
@@ -15495,11 +15534,11 @@ class Handler(BaseHTTPRequestHandler):
                 def _ep(f): return os.path.join(ep_dir, f)
                 def _pr(f): return os.path.join(proj_dir, f)
 
-                # Detect locales from AssetManifest.{locale}.json files
+                # Detect locales from VOPlan.{locale}.json files
                 _locales: list[str] = []
                 if os.path.isdir(ep_dir):
                     for _f in sorted(os.listdir(ep_dir)):
-                        _m = re.match(r"AssetManifest\.(.+)\.json$", _f)
+                        _m = re.match(r"VOPlan\.(.+)\.json$", _f)
                         if _m and _m.group(1) != "shared":
                             _locales.append(_m.group(1))
 
@@ -15510,9 +15549,7 @@ class Handler(BaseHTTPRequestHandler):
                     _ep("StoryPrompt.json"), _ep("Script.json"),
                     _ep("ShotList.json"), _ep("AssetManifest.shared.json"),
                     _ep("canon_diff.json"), _pr("canon.json"),
-                    _ep("RenderPlan.json"),
-                ] + [_ep(f"AssetManifest.{l}.json") for l in _locales] \
-                  + [_ep(f"RenderPlan.{l}.json")           for l in _locales] \
+                ] + [_ep(f"VOPlan.{l}.json") for l in _locales] \
                   + [_ep(f"renders/{l}/output.mp4")        for l in _locales]
 
                 # Cache key: mtime hash of all watched files
@@ -15583,14 +15620,14 @@ class Handler(BaseHTTPRequestHandler):
                              [_pr("canon.json")]),
                         (8,  "Translate & adapt locales",
                              [_ep("AssetManifest.shared.json"), _pr("VoiceCast.json")],
-                             [_ep(f"AssetManifest.{l}.json") for l in _locales]),
-                        (9,  "Finalize assets & render plan",
+                             [_ep(f"VOPlan.{l}.json") for l in _locales]),
+                        (9,  "Resolve assets",
                              [_ep("AssetManifest.shared.json")]
-                             + [_ep(f"AssetManifest.{l}.json") for l in _locales],
-                             [_ep("RenderPlan.json")]),
-                        (10, "Merge assets & render video",
-                             [_pr("VoiceCast.json"), _ep("RenderPlan.json")]
-                             + [_ep(f"RenderPlan.{l}.json") for l in _locales],
+                             + [_ep(f"VOPlan.{l}.json") for l in _locales],
+                             [_ep(f"VOPlan.{l}.json") for l in _locales]),
+                        (10, "Render video",
+                             [_pr("VoiceCast.json"), _ep("ShotList.json")]
+                             + [_ep(f"VOPlan.{l}.json") for l in _locales],
                              [_ep(f"renders/{l}/output.mp4") for l in _locales]),
                     ]
 
@@ -15687,12 +15724,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(sse("done", "1"))
                 self.wfile.flush()
                 return
-            if cmd == []:
-                self.wfile.write(sse("line", f"  ✓ {step} — skipped (no plan file)"))
-                self.wfile.write(sse("done", "0"))
-                self.wfile.flush()
-                return
-
             step_env = os.environ.copy()
             step_env.pop("CLAUDECODE", None)   # prevent nested-session guard from firing
 
@@ -15701,6 +15732,10 @@ class Handler(BaseHTTPRequestHandler):
             # ── manifest_merge preamble: gen_music_clip → music_prepare_loops ──
             # Steps 1 and 1b are prerequisites for step 5 and run automatically
             # here so the Music tab is ready after "Run 5" completes.
+            # NOTE: manifest_merge still produces a real subprocess cmd (not []).
+            # Only gen_render_plan returns [] (eliminated step).
+            # Preamble runs BEFORE the cmd==[] check so it also fires for any
+            # future step that may become a no-op.
             if step == "manifest_merge" and not _step_music_ok:
                 for _pre_name in ["gen_music_clip", "music_prepare_loops"]:
                     _pre_cmd = _build_step_cmd(_pre_name, slug, ep_id, "", profile, no_music)
@@ -15708,6 +15743,12 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     self.wfile.write(sse("line", f"  [preamble] {_pre_name}…"))
                     self.wfile.flush()
+                    if _TEST_MODE:
+                        _pre_stem = os.path.splitext(os.path.basename(_pre_cmd[1]))[0]
+                        _fake_subprocess(_pre_cmd, _pre_stem, _step_ep_dir, locale)
+                        self.wfile.write(sse("line", f"  [TEST MODE] {_pre_name} — fixture applied"))
+                        self.wfile.flush()
+                        continue
                     _pre_proc = subprocess.Popen(
                         _pre_cmd,
                         stdout=subprocess.PIPE,
@@ -15730,6 +15771,23 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                         return
             # ─────────────────────────────────────────────────────────────────
+
+            if cmd == []:
+                self.wfile.write(sse("line", f"  ✓ {step} — skipped (no plan file)"))
+                self.wfile.write(sse("done", "0"))
+                self.wfile.flush()
+                return
+
+            if _TEST_MODE and cmd:
+                _tm_step_stem = os.path.splitext(os.path.basename(cmd[1]))[0]
+                _tm_ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                _tm_fake = _fake_subprocess(cmd, _tm_step_stem, _tm_ep_dir, locale)
+                for _tm_line in _tm_fake.stdout:
+                    self.wfile.write(sse("line", _tm_line.rstrip()))
+                    self.wfile.flush()
+                self.wfile.write(sse("done", "0"))
+                self.wfile.flush()
+                return
 
             proc   = None
             try:
@@ -15917,12 +15975,12 @@ class Handler(BaseHTTPRequestHandler):
                                   "gen_render_plan", "render_video"]
             from_idx = _SHARED_STEPS.index(from_step) if from_step in _SHARED_STEPS else 0
 
-            # Detect locales from AssetManifest.{locale}.json files
+            # Detect locales from VOPlan.{locale}.json files
             _ep_dir_s10 = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
             _locales_s10: list[str] = []
             if os.path.isdir(_ep_dir_s10):
                 for _f in sorted(os.listdir(_ep_dir_s10)):
-                    _m = re.match(r"AssetManifest\.(.+)\.json$", _f)
+                    _m = re.match(r"VOPlan\.(.+)\.json$", _f)
                     if _m and _m.group(1) != "shared":
                         _locales_s10.append(_m.group(1))
 
@@ -16162,9 +16220,9 @@ class Handler(BaseHTTPRequestHandler):
 
                 # Step 2: post_tts_analysis on draft manifest
                 write_log("O", f"\n── post_tts_analysis [{_locale_35}] ──────────────────────")
-                _draft_manifest = os.path.join(_ep_dir_35, f"AssetManifest.{_locale_35}.json")
+                _draft_manifest = os.path.join(_ep_dir_35, f"VOPlan.{_locale_35}.json")
                 if not os.path.isfile(_draft_manifest):
-                    write_log("E", f"AssetManifest.{_locale_35}.json not found after TTS")
+                    write_log("E", f"VOPlan.{_locale_35}.json not found after TTS")
                     write_log("D", "1")
                     return
                 _cmd_pta = [
@@ -16598,10 +16656,10 @@ class Handler(BaseHTTPRequestHandler):
                     import re as _re_mtl
                     _ep_dir_mtl = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
                     _manifests = [p for p in _glob_mtl.glob(
-                        os.path.join(_ep_dir_mtl, "AssetManifest.*.json"))
+                        os.path.join(_ep_dir_mtl, "VOPlan.*.json"))
                         if os.path.basename(p) != "AssetManifest.shared.json"]
                     if not _manifests:
-                        raise FileNotFoundError("No AssetManifest found")
+                        raise FileNotFoundError("No VOPlan found")
                     _locale_mtl = "en"
                     _vars_mtl = os.path.join(_ep_dir_mtl, "pipeline_vars.sh")
                     if os.path.isfile(_vars_mtl):
@@ -16610,7 +16668,7 @@ class Handler(BaseHTTPRequestHandler):
                             open(_vars_mtl).read())
                         if _vm:
                             _locale_mtl = _vm.group(1).strip()
-                    _pm = os.path.join(_ep_dir_mtl, f"AssetManifest.{_locale_mtl}.json")
+                    _pm = os.path.join(_ep_dir_mtl, f"VOPlan.{_locale_mtl}.json")
                     _mpath = _pm if os.path.isfile(_pm) else sorted(_manifests)[0]
 
                     from music_review_pack import (
@@ -16703,10 +16761,10 @@ class Handler(BaseHTTPRequestHandler):
                     import re as _re_stl
                     _ep_dir_stl = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
                     _mf_list = [p for p in _glob_stl.glob(
-                        os.path.join(_ep_dir_stl, "AssetManifest.*.json"))
+                        os.path.join(_ep_dir_stl, "VOPlan.*.json"))
                         if os.path.basename(p) != "AssetManifest.shared.json"]
                     if not _mf_list:
-                        raise FileNotFoundError("No AssetManifest found")
+                        raise FileNotFoundError("No VOPlan found")
                     _loc_stl = "en"
                     _vars_stl = os.path.join(_ep_dir_stl, "pipeline_vars.sh")
                     if os.path.isfile(_vars_stl):
@@ -16715,7 +16773,7 @@ class Handler(BaseHTTPRequestHandler):
                             open(_vars_stl).read())
                         if _vm_s:
                             _loc_stl = _vm_s.group(1).strip()
-                    _pm_stl = os.path.join(_ep_dir_stl, f"AssetManifest.{_loc_stl}.json")
+                    _pm_stl = os.path.join(_ep_dir_stl, f"VOPlan.{_loc_stl}.json")
                     _mpath_stl = _pm_stl if os.path.isfile(_pm_stl) else sorted(_mf_list)[0]
 
                     from sfx_preview_pack import (
@@ -16738,21 +16796,8 @@ class Handler(BaseHTTPRequestHandler):
                         mi["shot_id"]: mi
                         for mi in _mf_stl.get("music_items", []) if mi.get("shot_id")
                     }
-                    # Patch shot durations from RenderPlan if available
-                    _rp_stl = os.path.join(_ep_dir_stl, f"RenderPlan.{_loc_stl}.json")
-                    if os.path.isfile(_rp_stl):
-                        try:
-                            _rpd = json.loads(open(_rp_stl, encoding="utf-8").read())
-                            _rpdur = {
-                                _rs["shot_id"]: _rs["duration_ms"] / 1000.0
-                                for _rs in _rpd.get("shots", [])
-                                if _rs.get("shot_id") and _rs.get("duration_ms") is not None
-                            }
-                            for _sh in _shots_stl:
-                                if _sh.get("shot_id") in _rpdur:
-                                    _sh["duration_sec"] = _rpdur[_sh["shot_id"]]
-                        except Exception as _rpe2:
-                            print(f"  [WARN] sfx_timeline: RenderPlan: {_rpe2}")
+                    # RenderPlan is eliminated — ShotList.duration_sec is authoritative.
+                    # No patching needed; _shots_stl already contains ShotList durations.
                     _tl_stl, _dur_stl = _sfx_bld_stl(
                         _shots_stl, _mf_stl, _vsm_stl, _midx_stl, {})
                     # Build tl_doc matching SFX timeline format (no audio rendered).
@@ -16910,9 +16955,8 @@ class Handler(BaseHTTPRequestHandler):
         # Returns raw file contents as application/json.
         # Whitelisted files only to limit exposure.
         elif parsed.path == "/api/episode_file":
-            _EPISODE_FILE_WHITELIST = {"ShotList.json", "selections.json",
+            _EPISODE_FILE_WHITELIST = {"ShotList.json", "MediaPlan.json",
                                        "meta.json",
-                                       "assets/media/selections.json",
                                        "assets/media/bg_id_remap.json",
                                        "MusicPlan.json",
                                        "assets/music/user_cut_clips.json",
@@ -16953,12 +16997,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(data)
 
-        # ── RenderPlan shot durations — for SFX Shot Overrides timeline ─────
+        # ── Shot durations — for SFX Shot Overrides timeline ────────────────
         # GET /api/rp_shot_durations?slug=X&ep_id=Y
-        # Returns {durations: {shot_id: duration_sec}} from the locale-appropriate
-        # RenderPlan.  The frontend _sfxLoadShotTimeline() uses this to replace
-        # stale ShotList duration_sec values (which pre-date the VO-ceiling applied
-        # by gen_render_plan).  Locale is auto-detected via pipeline_vars.sh.
+        # Returns {durations: {shot_id: duration_sec}} from ShotList.json.
+        # RenderPlan is eliminated; ShotList.duration_sec is the authoritative
+        # floor.  VO ceiling is applied at render time by render_video.py.
         elif parsed.path == "/api/rp_shot_durations":
             try:
                 params = parse_qs(parsed.query)
@@ -16967,45 +17010,28 @@ class Handler(BaseHTTPRequestHandler):
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
                 ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
-                # Detect primary locale via pipeline_vars.sh (mirrors sfx_preview handler)
-                import re as _re_rpd
-                _primary_locale = "en"
-                _vars_file = os.path.join(ep_dir, "pipeline_vars.sh")
-                if os.path.isfile(_vars_file):
-                    with open(_vars_file, encoding="utf-8") as _vf:
-                        _m = _re_rpd.search(
-                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
-                            _vf.read())
-                        if _m:
-                            _primary_locale = _m.group(1).strip()
-                rp_path = os.path.join(ep_dir, f"RenderPlan.{_primary_locale}.json")
-                if not os.path.isfile(rp_path):
-                    # Fallback: first RenderPlan.*.json found alphabetically
-                    import glob as _glob_rpd
-                    _candidates = sorted(_glob_rpd.glob(
-                        os.path.join(ep_dir, "RenderPlan.*.json")))
-                    rp_path = _candidates[0] if _candidates else None
-                if not rp_path or not os.path.isfile(rp_path):
+                sl_path = os.path.join(ep_dir, "ShotList.json")
+                if not os.path.isfile(sl_path):
                     _json_resp(self, {"durations": {}})
                 else:
-                    with open(rp_path, encoding="utf-8") as _rpf:
-                        _rp = json.load(_rpf)
+                    with open(sl_path, encoding="utf-8") as _slf:
+                        _sl = json.load(_slf)
                     _durs = {
-                        s["shot_id"]: round(s["duration_ms"] / 1000.0, 4)
-                        for s in _rp.get("shots", [])
-                        if s.get("shot_id") and s.get("duration_ms") is not None
+                        s["shot_id"]: round(float(s.get("duration_sec", 0)), 4)
+                        for s in _sl.get("shots", [])
+                        if s.get("shot_id")
                     }
                     _json_resp(self, {"durations": _durs})
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 400)
 
-        # ── Authoritative episode shot timeline from RenderPlan ───────────────
+        # ── Authoritative episode shot timeline from ShotList.json ───────────
         # GET /api/vo_timeline?slug=X&ep_id=Y
-        # Computes episode-absolute start/end for every shot using the locale-
-        # appropriate RenderPlan duration_ms values.  Shots concatenate directly
-        # in render_video.py — there are NO inter-scene gaps in the output file.
-        # Result is also persisted to assets/meta/VOTimeline.json so the same
-        # data is available offline / between server restarts.
+        # Returns episode-absolute start/end for every shot using ShotList.json
+        # start_sec / duration_sec.  RenderPlan is eliminated — render_video.py
+        # applies the VO ceiling at render time.  Shot start_sec in ShotList is
+        # already episode-absolute.
+        # Result is also persisted to assets/meta/VOTimeline.json.
         elif parsed.path == "/api/vo_timeline":
             try:
                 params = parse_qs(parsed.query)
@@ -17014,40 +17040,23 @@ class Handler(BaseHTTPRequestHandler):
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
                 ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
-                # Detect primary locale (same logic as /api/rp_shot_durations)
-                _primary_locale = "en"
-                _vars_file = os.path.join(ep_dir, "pipeline_vars.sh")
-                if os.path.isfile(_vars_file):
-                    with open(_vars_file, encoding="utf-8") as _vf:
-                        _lm = re.search(
-                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
-                            _vf.read())
-                        if _lm:
-                            _primary_locale = _lm.group(1).strip()
-                rp_path = os.path.join(ep_dir, f"RenderPlan.{_primary_locale}.json")
-                if not os.path.isfile(rp_path):
-                    _vot_cands = sorted(glob.glob(
-                        os.path.join(ep_dir, "RenderPlan.*.json")))
-                    rp_path = _vot_cands[0] if _vot_cands else None
-                if not rp_path or not os.path.isfile(rp_path):
-                    _json_resp(self, {"error": "RenderPlan not found"}, 404)
+                sl_path = os.path.join(ep_dir, "ShotList.json")
+                if not os.path.isfile(sl_path):
+                    _json_resp(self, {"error": "ShotList.json not found"}, 404)
                 else:
-                    with open(rp_path, encoding="utf-8") as _rpf:
-                        _rp = json.load(_rpf)
-                    # Cumulative shot start/end — no inter-scene gaps (shots
-                    # are concatenated directly by render_video.py).
-                    _cum = 0.0
+                    with open(sl_path, encoding="utf-8") as _slf:
+                        _sl = json.load(_slf)
                     _shot_entries = []
-                    _scene_map: dict = {}  # scene_id → {start_sec, end_sec}
-                    for _rs in _rp.get("shots", []):
+                    _scene_map: dict = {}
+                    _cum = 0.0
+                    for _rs in _sl.get("shots", []):
                         _sid  = _rs.get("shot_id", "")
-                        _dms  = _rs.get("duration_ms")
                         _scid = _rs.get("scene_id", "")
-                        if not _sid or _dms is None:
+                        _dur  = round(float(_rs.get("duration_sec") or 0.0), 4)
+                        _t0   = round(float(_rs.get("start_sec") or _cum), 4)
+                        _t1   = round(_t0 + _dur, 4)
+                        if not _sid:
                             continue
-                        _dur   = round(_dms / 1000.0, 4)
-                        _t0    = round(_cum, 4)
-                        _t1    = round(_cum + _dur, 4)
                         _shot_entries.append({
                             "shot_id":      _sid,
                             "scene_id":     _scid,
@@ -17064,19 +17073,12 @@ class Handler(BaseHTTPRequestHandler):
                                 }
                             else:
                                 _scene_map[_scid]["end_sec"] = _t1
-                        _cum += _dur
-                    _total = round(_cum, 4)
+                        _cum = _t1
                     _vot_result = {
                         "shots":     _shot_entries,
                         "scenes":    list(_scene_map.values()),
-                        "total_sec": _total,
+                        "total_sec": round(_cum, 4),
                     }
-                    # Persist to assets/meta/VOTimeline.json
-                    _meta_dir = os.path.join(ep_dir, "assets", "meta")
-                    os.makedirs(_meta_dir, exist_ok=True)
-                    _vot_path = os.path.join(_meta_dir, "VOTimeline.json")
-                    with open(_vot_path, "w", encoding="utf-8") as _vtf:
-                        json.dump(_vot_result, _vtf, indent=2, ensure_ascii=False)
                     _json_resp(self, _vot_result)
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 400)
@@ -17484,7 +17486,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 ep_dir        = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
                 manifest_path = os.path.join(ep_dir,
-                                             f"AssetManifest.{locale}.json")
+                                             f"VOPlan.{locale}.json")
 
                 # Build per-item patches from request items
                 # Each item: { item_id, text?, azure_style?, azure_rate?,
@@ -17540,7 +17542,7 @@ class Handler(BaseHTTPRequestHandler):
                 full_ep = _vo_resolve_ep_dir(ep_dir)
 
                 # Read current params from manifest as base
-                mpath = os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                mpath = os.path.join(full_ep, f"VOPlan.{locale}.json")
                 with open(mpath, encoding="utf-8") as _mf:
                     _mani = json.load(_mf)
                 _item = next((v for v in _mani.get("vo_items", [])
@@ -17638,10 +17640,10 @@ class Handler(BaseHTTPRequestHandler):
                         )
 
                     # ── Update unified manifest with text + tts_prompt ──
-                    # AssetManifest.{locale}.json is now the single source of truth.
+                    # VOPlan.{locale}.json is now the single source of truth.
                     # Only clear start_sec/end_sec when a new WAV was synthesized
                     # (keep_audio=True keeps the existing WAV, so timing remains valid).
-                    _mpath = os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                    _mpath = os.path.join(full_ep, f"VOPlan.{locale}.json")
                     with open(_mpath, encoding="utf-8") as _df:
                         _unified_m = json.load(_df)
                     for _dit in _unified_m.get("vo_items", []):
@@ -17664,10 +17666,10 @@ class Handler(BaseHTTPRequestHandler):
                     _log.debug("[vo_save] manifest patched: %s locale=%s", item_id, locale)
 
                     # ── Re-run manifest_merge to recompute duck_intervals ──
-                    # Reads from AssetManifest.{locale}.json (in-place).
+                    # Reads from VOPlan.{locale}.json (in-place).
                     _mm_script  = os.path.join(os.path.dirname(__file__), "manifest_merge.py")
                     _mm_shared  = os.path.join(full_ep, "AssetManifest.shared.json")
-                    _mm_locale  = os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                    _mm_locale  = os.path.join(full_ep, f"VOPlan.{locale}.json")
                     _mm_env     = os.environ.copy()
                     _mm_env.pop("CLAUDECODE", None)
                     _mm_result  = subprocess.run(
@@ -17812,7 +17814,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 with _get_vo_lock(full_ep):
                     # Update manifest pause_after_ms (no WAV touched — INVARIANT E)
-                    mpath = os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                    mpath = os.path.join(full_ep, f"VOPlan.{locale}.json")
                     with open(mpath, encoding="utf-8") as _mf:
                         _mani = json.load(_mf)
                     found = False
@@ -17855,7 +17857,7 @@ class Handler(BaseHTTPRequestHandler):
                 full_ep = _vo_resolve_ep_dir(ep_dir)
                 from pathlib import Path as _P
                 with _get_vo_lock(full_ep):
-                    mpath = os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                    mpath = os.path.join(full_ep, f"VOPlan.{locale}.json")
                     with open(mpath, encoding="utf-8") as _mf:
                         _mani = json.load(_mf)
                     _mani.setdefault("scene_tails", {})[scene] = tail_ms
@@ -17889,7 +17891,7 @@ class Handler(BaseHTTPRequestHandler):
                 from pathlib import Path as _P
 
                 with _get_vo_lock(full_ep):
-                    mpath = os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                    mpath = os.path.join(full_ep, f"VOPlan.{locale}.json")
                     with open(mpath, encoding="utf-8") as _mf:
                         _mani = json.load(_mf)
 
@@ -17993,7 +17995,7 @@ class Handler(BaseHTTPRequestHandler):
                     # item_id-independent (backgrounds, characters, SFX, music).
                     for _f in _P(full_ep).glob("RenderPlan.*.json"):
                         _f.unlink(missing_ok=True)
-                    for _f in _P(full_ep).glob("AssetManifest.*.json"):
+                    for _f in _P(full_ep).glob("VOPlan.*.json"):
                         if _f.name != "AssetManifest.shared.json":
                             _f.unlink(missing_ok=True)
 
@@ -18059,11 +18061,11 @@ class Handler(BaseHTTPRequestHandler):
                         # allow if their merged manifest exists (Stage 8.5 run from
                         # run.sh, which never fires a vo_review_ready SSE, so the
                         # JS cannot set _pendingApproveStage automatically).
-                        _merged_check = os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                        _merged_check = os.path.join(full_ep, f"VOPlan.{locale}.json")
                         if not os.path.isfile(_merged_check):
                             raise ValueError(
                                 f"Cannot approve non-primary locale ({locale!r}) — "
-                                f"AssetManifest.{locale}.json not found. "
+                                f"VOPlan.{locale}.json not found. "
                                 "Run Stage 8 (translation) before approving this locale."
                             )
 
@@ -18082,11 +18084,11 @@ class Handler(BaseHTTPRequestHandler):
                                 )
 
                     # Pre-flight check (d): manifest structurally valid
-                    # AssetManifest.{locale}.json is now the single source for all stages.
-                    mpath = os.path.join(full_ep, f"AssetManifest.{locale}.json")
+                    # VOPlan.{locale}.json is now the single source for all stages.
+                    mpath = os.path.join(full_ep, f"VOPlan.{locale}.json")
                     if not os.path.isfile(mpath):
                         raise FileNotFoundError(
-                            f"AssetManifest.{locale}.json not found — "
+                            f"VOPlan.{locale}.json not found — "
                             "run Stage 5 (or Stage 3.5 TTS) first"
                         )
                     with open(mpath, encoding="utf-8") as _mf:
@@ -18187,7 +18189,7 @@ class Handler(BaseHTTPRequestHandler):
                                        _w5["start_sec"] - _w4["end_sec"])
                     # ──────────────────────────────────────────────────────
 
-                    # Compute hashes and write vo_approval block into AssetManifest.{locale}.json
+                    # Compute hashes and write vo_approval block into VOPlan.{locale}.json
                     _hashes = _compute_sentinel_hashes(full_ep, locale)
                     write_vo_preview_approved(
                         full_ep, locale,
@@ -18212,7 +18214,7 @@ class Handler(BaseHTTPRequestHandler):
                             for a in _approval_items
                         }
                         _mani_path = os.path.join(full_ep,
-                                                  f"AssetManifest.{locale}.json")
+                                                  f"VOPlan.{locale}.json")
                         with open(_mani_path, encoding="utf-8") as _mf2:
                             _mani2 = json.load(_mf2)
                         for _mitem in _mani2.get("vo_items", []):
@@ -19112,7 +19114,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 # Load manifest to get shot_id per item
                 import glob as _gl2
-                _manifests = [p for p in _gl2.glob(os.path.join(ep_dir, "AssetManifest.*.json"))
+                _manifests = [p for p in _gl2.glob(os.path.join(ep_dir, "VOPlan.*.json"))
                               if os.path.basename(p) != "AssetManifest.shared.json"]
                 _sfx_shot_map = {}   # item_id → shot_id
                 if _manifests:
@@ -19224,11 +19226,11 @@ class Handler(BaseHTTPRequestHandler):
                 import glob as _glob_mod
                 import re as _re_sfx
                 merged_manifests = [p for p in _glob_mod.glob(
-                    os.path.join(ep_dir, "AssetManifest.*.json"))
+                    os.path.join(ep_dir, "VOPlan.*.json"))
                     if os.path.basename(p) != "AssetManifest.shared.json"]
                 if not merged_manifests:
                     raise FileNotFoundError(
-                        "No AssetManifest.*.json found. Run stages 5+ first.")
+                        "No VOPlan.*.json found. Run stages 5+ first.")
                 _primary_locale = "en"
                 _vars_file = os.path.join(ep_dir, "pipeline_vars.sh")
                 if os.path.isfile(_vars_file):
@@ -19238,7 +19240,7 @@ class Handler(BaseHTTPRequestHandler):
                             _vf.read())
                         if _m:
                             _primary_locale = _m.group(1).strip()
-                _primary_manifest = os.path.join(ep_dir, f"AssetManifest.{_primary_locale}.json")
+                _primary_manifest = os.path.join(ep_dir, f"VOPlan.{_primary_locale}.json")
                 if os.path.isfile(_primary_manifest):
                     manifest_path = _primary_manifest
                 else:
@@ -19364,21 +19366,8 @@ class Handler(BaseHTTPRequestHandler):
                     if mi.get("shot_id")
                 }
 
-                # Patch shot durations from RenderPlan (VO ceiling)
-                _rp_sfx = os.path.join(ep_dir, f"RenderPlan.{_sfx_locale}.json")
-                if os.path.isfile(_rp_sfx):
-                    try:
-                        _rp_d = json.loads(open(_rp_sfx, encoding="utf-8").read())
-                        _rp_dur = {
-                            _rs["shot_id"]: _rs["duration_ms"] / 1000.0
-                            for _rs in _rp_d.get("shots", [])
-                            if _rs.get("shot_id") and _rs.get("duration_ms") is not None
-                        }
-                        for _sh in _sfx_shots:
-                            if _sh.get("shot_id") in _rp_dur:
-                                _sh["duration_sec"] = _rp_dur[_sh["shot_id"]]
-                    except Exception as _rpe:
-                        print(f"  [WARN] sfx_preview: RenderPlan: {_rpe}")
+                # RenderPlan is eliminated — ShotList.duration_sec is the authoritative floor.
+                # _sfx_shots already uses ShotList durations; no patching needed.
 
                 _sfx_tl, _sfx_dur = _sfx_build_tl(
                     _sfx_shots, _sfx_manifest, _sfx_vsm, _sfx_midx, {})
@@ -19397,6 +19386,10 @@ class Handler(BaseHTTPRequestHandler):
                         if os.path.exists(_tp):
                             os.unlink(_tp)
                     _sfx_ep_lock.release()
+
+                # Write timeline.json to disk so sfxLoadTimeline() can fetch it
+                _sfx_tl_json = _sfx_out_wav.parent / "timeline.json"
+                _sfx_tl_json.write_text(json.dumps(_tl_doc), encoding="utf-8")
 
                 _json_resp(self, {"ok": True, "timeline": _tl_doc})
 
@@ -19655,7 +19648,7 @@ class Handler(BaseHTTPRequestHandler):
                         tmp_path = tf.name
                     result = subprocess.run(
                         [sys.executable,
-                         os.path.join(PIPE_DIR, "code", "http", "media_preview_pack.py"),
+                         os.path.join(os.path.dirname(os.path.abspath(__file__)), "media_preview_pack.py"),
                          "--input", tmp_path],
                         capture_output=True, text=True
                     )
@@ -19674,7 +19667,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 500)
 
-        # ── Media: write selections.json (POST /api/media_confirm) ───────────
+        # ── Media: write MediaPlan.json (POST /api/media_confirm) ────────────
         elif self.path == "/api/media_confirm":
             try:
                 length   = int(self.headers.get("Content-Length", 0))
@@ -19691,9 +19684,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(selections, dict):
                     raise ValueError("selections must be a dict")
 
-                ep_dir    = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
-                media_dir = os.path.join(ep_dir, "assets", "media")
-                os.makedirs(media_dir, exist_ok=True)
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                os.makedirs(ep_dir, exist_ok=True)
 
                 # Detect primary locale from pipeline_vars.sh
                 import re as _re_mc
@@ -19707,7 +19699,7 @@ class Handler(BaseHTTPRequestHandler):
                         if _m_mc:
                             _confirmed_locale = _m_mc.group(1).strip()
 
-                sel_path = os.path.join(media_dir, "selections.json")
+                sel_path = os.path.join(ep_dir, "MediaPlan.json")
                 out = {
                     "batch_id":         batch_id,
                     "slug":             slug,
@@ -19855,14 +19847,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not os.path.isfile(manifest_path):
                     raise FileNotFoundError("AssetManifest.shared.json not found")
 
-                code_dir = os.path.join(PIPE_DIR, "code", "http")
-                result = subprocess.run(
-                    ["python3", os.path.join(code_dir, "music_prepare_loops.py"),
-                     "--manifest", manifest_path],
-                    capture_output=True, text=True, timeout=120, cwd=PIPE_DIR,
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(result.stderr[-2000:] if result.stderr else "process failed")
+                if not _TEST_MODE:
+                    code_dir = os.path.join(PIPE_DIR, "code", "http")
+                    result = subprocess.run(
+                        ["python3", os.path.join(code_dir, "music_prepare_loops.py"),
+                         "--manifest", manifest_path],
+                        capture_output=True, text=True, timeout=120, cwd=PIPE_DIR,
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(result.stderr[-2000:] if result.stderr else "process failed")
 
                 # Read and return the candidates file
                 cand_path = os.path.join(ep_dir, "assets", "music", "music_loop_candidates.json")
@@ -20006,11 +19999,11 @@ class Handler(BaseHTTPRequestHandler):
                 # pipeline_vars.sh, then fall back to alphabetical first.
                 import glob as _glob_mod
                 merged_manifests = [p for p in _glob_mod.glob(
-                    os.path.join(ep_dir, "AssetManifest.*.json"))
+                    os.path.join(ep_dir, "VOPlan.*.json"))
                     if os.path.basename(p) != "AssetManifest.shared.json"]
                 if not merged_manifests:
                     raise FileNotFoundError(
-                        "No AssetManifest.*.json found. "
+                        "No VOPlan.*.json found. "
                         "Run stages 10[1]–10[4] first.")
                 # Read PRIMARY_LOCALE from pipeline_vars.sh
                 _primary_locale = "en"  # default
@@ -20026,25 +20019,24 @@ class Handler(BaseHTTPRequestHandler):
                         _primary_locale = _m.group(1).strip()
                 # Try primary locale first, then fall back to first available
                 _primary_manifest = os.path.join(
-                    ep_dir, f"AssetManifest.{_primary_locale}.json")
+                    ep_dir, f"VOPlan.{_primary_locale}.json")
                 if os.path.isfile(_primary_manifest):
                     manifest_path = _primary_manifest
                 else:
                     manifest_path = sorted(merged_manifests)[0]
 
-                # Guard: music_review_pack requires locale_scope='merged'.
-                # AssetManifest.{locale}.json exists from Stage 5 (locale_scope='locale')
-                # but only has music_items after manifest_merge runs (Stage 9).
+                # Guard: music_review_pack requires a locale or merged VOPlan.
+                # VOPlan.{locale}.json is produced by Stage 5 (locale_scope='locale').
+                # manifest_merge is eliminated; locale-scope manifests are now accepted.
                 try:
                     with open(manifest_path, encoding="utf-8") as _mm_chk:
                         _mm_scope = json.load(_mm_chk).get("locale_scope")
                 except Exception:
                     _mm_scope = None
-                if _mm_scope not in ("merged", "monolithic", None):
+                if _mm_scope not in ("merged", "monolithic", "locale", None):
                     raise ValueError(
                         f"Manifest not ready for music preview (locale_scope='{_mm_scope}'). "
-                        "Run Stage 9 (manifest_merge) first so music_items and "
-                        "duck_intervals are populated."
+                        "Expected a VOPlan.{{locale}}.json produced by Stage 5."
                     )
 
                 # Direct in-process call — no subprocess, no temp files
@@ -20126,12 +20118,14 @@ class Handler(BaseHTTPRequestHandler):
                             _entry["base_db"] = (
                                 _entry.get("base_db", _MRP_BASE_DB) + _db)
 
-                # Render preview audio WAV
-                _prev_dir = os.path.join(ep_dir, "assets", "music", "MusicReviewPack")
-                os.makedirs(_prev_dir, exist_ok=True)
-                _mrp_render(
-                    _tl_shots, _total_dur, _manifest, Path(manifest_path),
-                    Path(_prev_dir) / "preview_audio.wav")
+                # Render preview audio WAV (skip in test mode — tests only check
+                # the timeline JSON, not the audio file, and real WAV paths differ)
+                if not _TEST_MODE:
+                    _prev_dir = os.path.join(ep_dir, "assets", "music", "MusicReviewPack")
+                    os.makedirs(_prev_dir, exist_ok=True)
+                    _mrp_render(
+                        _tl_shots, _total_dur, _manifest, Path(manifest_path),
+                        Path(_prev_dir) / "preview_audio.wav")
 
                 body = json.dumps({
                     "ok": True,
@@ -20147,6 +20141,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
 
             except Exception as exc:
+                import traceback as _tb_mrp
+                print(f"  [ERROR] music_review_pack: {exc}", flush=True)
+                _tb_mrp.print_exc()
                 body = json.dumps({"error": str(exc)}).encode()
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
@@ -20174,7 +20171,7 @@ class Handler(BaseHTTPRequestHandler):
                 os.makedirs(music_dir, exist_ok=True)
 
                 # Enrich overrides with shot_id from AssetManifest (CHANGE 7)
-                _am_path = os.path.join(ep_dir, "assets", "AssetManifest.json")
+                _am_path = os.path.join(ep_dir, "assets", "VOPlan.json")
                 _item_to_shot = {}
                 if os.path.isfile(_am_path):
                     try:
@@ -20982,6 +20979,16 @@ class ReusableServer(ThreadingHTTPServer):
 
 
 if __name__ == "__main__":
+    import argparse as _argparse
+    _ap = _argparse.ArgumentParser(add_help=False)
+    _ap.add_argument("--test-mode", action="store_true", dest="test_mode")
+    _ap.add_argument("--port", type=int, default=PORT)
+    _args, _ = _ap.parse_known_args()
+    _TEST_MODE = _args.test_mode
+    PORT = _args.port
+    if _TEST_MODE:
+        PIPE_DIR = os.path.join(PIPE_DIR, "tests", "fixtures")
+        print(f"  [TEST MODE] PIPE_DIR overridden to: {PIPE_DIR}", flush=True)
     ip     = local_ip()
     server = ReusableServer(("0.0.0.0", PORT), Handler)
     print(f"\n🤖  Claude Runner  —  story pipeline UI")

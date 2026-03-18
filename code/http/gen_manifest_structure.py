@@ -356,7 +356,7 @@ def build_manifest(
 # Schema validation
 # ---------------------------------------------------------------------------
 def validate_manifest(manifest: dict) -> list[str]:
-    """Validate manifest against AssetManifest.v1.json schema.
+    """Validate manifest against VOPlan.v1.json schema.
 
     Returns a list of error strings (empty = valid).
     Only validates the deterministic / non-__FILL__ portions to avoid false
@@ -365,7 +365,7 @@ def validate_manifest(manifest: dict) -> list[str]:
     if not _HAS_JSONSCHEMA:
         return ["jsonschema not installed — skipping validation"]
 
-    schema_path = PIPE_DIR / "contracts" / "schemas" / "AssetManifest.v1.json"
+    schema_path = PIPE_DIR / "contracts" / "schemas" / "VOPlan.v1.json"
     if not schema_path.is_file():
         return [f"Schema not found: {schema_path}"]
 

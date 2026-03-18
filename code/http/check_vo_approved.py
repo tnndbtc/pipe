@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""check_vo_approved.py — Exit 0 if AssetManifest.{locale}.json has a vo_approval block.
+"""check_vo_approved.py — Exit 0 if VOPlan.{locale}.json has a vo_approval block.
 
 Usage: python3 check_vo_approved.py <ep_dir> <locale>
 Exits 0 if approved_at is non-empty, exits 1 if not.
@@ -17,7 +17,7 @@ def main() -> None:
 
     ep_dir = Path(sys.argv[1])
     locale = sys.argv[2]
-    path = ep_dir / f"AssetManifest.{locale}.json"
+    path = ep_dir / f"VOPlan.{locale}.json"
 
     if not path.exists():
         sys.exit(1)

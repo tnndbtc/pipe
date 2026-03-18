@@ -11,16 +11,16 @@
 # are absent from the draft.  manifest_merge.py then computes duck_intervals
 # from missing timing → all duck_intervals are empty.
 #
-# Fix: this script patches each vo_item in AssetManifest.{locale}.json
+# Fix: this script patches each vo_item in VOPlan.{locale}.json
 # with the exact start_sec, end_sec, and duration_sec from the approved file.
 # The approved file is the single source of truth for all VO timing.
 #
 # Reads:
 #   vo_preview_approved.{locale}.json  — approved item timing (start/end/duration)
-#   AssetManifest.{locale}.json        — locale manifest to patch
+#   VOPlan.{locale}.json        — locale manifest to patch
 #
 # Writes:
-#   AssetManifest.{locale}.json        — vo_items patched in-place (atomic)
+#   VOPlan.{locale}.json        — vo_items patched in-place (atomic)
 #
 # =============================================================================
 
@@ -106,7 +106,7 @@ def patch(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Patch AssetManifest.{locale}.json vo_items with approved VO timing.\n"
+            "Patch VOPlan.{locale}.json vo_items with approved VO timing.\n"
             "Runs after Stage 5 gen_vo_manifest.py, before Stage 9 manifest_merge."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -139,10 +139,10 @@ def main() -> None:
     locale = args.locale
 
     # ── Load timing from AssetManifest (requires vo_approval block) ─────────
-    manifest_path_check = ep_dir / f"AssetManifest.{locale}.json"
+    manifest_path_check = ep_dir / f"VOPlan.{locale}.json"
     if not manifest_path_check.exists():
         print(
-            f"[SKIP] AssetManifest.{locale}.json not found in {ep_dir}\n"
+            f"[SKIP] VOPlan.{locale}.json not found in {ep_dir}\n"
             "       No timing patch applied (Stage 3.5 approval not yet done).",
         )
         sys.exit(0)  # non-fatal: patch runs opportunistically
@@ -150,7 +150,7 @@ def main() -> None:
     _manifest_check = load_json(manifest_path_check)
     if not _manifest_check.get("vo_approval", {}).get("approved_at"):
         print(
-            f"[SKIP] AssetManifest.{locale}.json has no vo_approval block in {ep_dir}\n"
+            f"[SKIP] VOPlan.{locale}.json has no vo_approval block in {ep_dir}\n"
             "       No timing patch applied (Stage 3.5 approval not yet done).",
         )
         sys.exit(0)  # non-fatal: patch runs opportunistically
@@ -158,10 +158,10 @@ def main() -> None:
     approved_items = {item["item_id"]: item for item in _manifest_check.get("vo_items", [])}
 
     # ── Load AssetManifest locale manifest ───────────────────────────────────
-    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    manifest_path = ep_dir / f"VOPlan.{locale}.json"
     if not manifest_path.exists():
         print(
-            f"[ERROR] AssetManifest.{locale}.json not found in {ep_dir}\n"
+            f"[ERROR] VOPlan.{locale}.json not found in {ep_dir}\n"
             "       Run Stage 5 before calling patch_vo_draft_timings.py.",
             file=sys.stderr,
         )
@@ -195,7 +195,7 @@ def main() -> None:
         print("\n  [DRY-RUN] AssetManifest NOT written.")
     else:
         save_json(draft, manifest_path)
-        print(f"\n  ✓ AssetManifest.{locale}.json updated: {manifest_path}")
+        print(f"\n  ✓ VOPlan.{locale}.json updated: {manifest_path}")
     print("=" * 60)
 
     if warnings:

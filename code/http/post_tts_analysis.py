@@ -19,7 +19,7 @@
 #
 # Usage:
 #   python post_tts_analysis.py \
-#       --manifest projects/slug/episodes/ep/AssetManifest.zh-Hans.json
+#       --manifest projects/slug/episodes/ep/VOPlan.zh-Hans.json
 #
 #   python post_tts_analysis.py --manifest ... --pause 0.2   # tighter pacing
 #   python post_tts_analysis.py --manifest ... --buffer 1.0  # overflow padding

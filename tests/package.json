@@ -1,0 +1,11 @@
+{
+  "name": "pipe-integration-tests",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:music": "playwright test kw1 kw2 kw9"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0"
+  }
+}

@@ -9,7 +9,7 @@
 #   1. RenderPlan.{locale}.json           — per-shot render instructions
 #
 # Key design decisions vs old p_9.txt:
-#   • VO timing (start_sec / end_sec) is read directly from AssetManifest.{locale}.json
+#   • VO timing (start_sec / end_sec) is read directly from VOPlan.{locale}.json
 #     vo_items[] (written authoritatively at VO Approve). No vo_lines are written
 #     to RenderPlan — consumers read AssetManifest directly.
 #   • duration_ms respects background_overrides for overflow shots.
@@ -19,10 +19,10 @@
 #
 # Usage:
 #   python gen_render_plan.py \
-#       --manifest  projects/slug/ep/AssetManifest.zh-Hans.json
+#       --manifest  projects/slug/ep/VOPlan.zh-Hans.json
 #
 #   python gen_render_plan.py \
-#       --manifest  projects/slug/ep/AssetManifest.zh-Hans.json \
+#       --manifest  projects/slug/ep/VOPlan.zh-Hans.json \
 #       --shared    projects/slug/ep/AssetManifest.shared.json \
 #       --shotlist  projects/slug/ep/ShotList.json \
 #       --profile   draft_720p \
@@ -162,7 +162,7 @@ def build_music_map(merged: dict) -> dict[str, dict]:
 
 
 def load_vo_approved_timing(manifest_path: Path) -> dict[str, dict]:
-    """Load approved VO timing from AssetManifest.{locale}.json vo_items[].
+    """Load approved VO timing from VOPlan.{locale}.json vo_items[].
 
     Returns {item_id → item_dict} where each item_dict has:
         duration_sec, start_sec, end_sec
@@ -323,7 +323,7 @@ def build_shot(
         if cid and cid in media_map:
             character_asset_ids.append(media_map[cid]["asset_id"])
 
-    # VO timing: read start_sec / end_sec directly from AssetManifest.{locale}.json
+    # VO timing: read start_sec / end_sec directly from VOPlan.{locale}.json
     # vo_items[] (written authoritatively at VO Approve). Compute shot-relative
     # last_vo_out_ms needed for duration ceiling/floor and duck interval computation.
     # vo_lines are NOT written to RenderPlan — consumers read AssetManifest directly.
@@ -533,7 +533,7 @@ def build_plan(
             except Exception as e:
                 print(f"  [WARN] Could not load SfxPlan.json: {e}", file=sys.stderr)
 
-    # resolved_assets: flat view of AssetManifest.{locale}.json resolved_assets[]
+    # resolved_assets: flat view of VOPlan.{locale}.json resolved_assets[]
     resolved_assets = [
         {
             "asset_id":     item["asset_id"],
@@ -630,12 +630,12 @@ def derive_plan_path(episode_dir: Path, locale: str) -> Path:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Add render_plan section to AssetManifest.{locale}.json and write "
+        description="Add render_plan section to VOPlan.{locale}.json and write "
                     "RenderPlan.{locale}.json from the unified manifest.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--manifest", required=True, metavar="PATH",
-                   help="AssetManifest.{locale}.json (unified, locale_scope='merged').")
+                   help="VOPlan.{locale}.json (unified, locale_scope='merged').")
     p.add_argument("--shared",   default=None, metavar="PATH",
                    help="AssetManifest.shared.json. "
                         "Default: auto-detect from episode directory.")
@@ -696,7 +696,7 @@ def main() -> None:
                         patched += 1
             if patched:
                 print(f"  [VO-APPROVAL] Applied approved timing to {patched} vo_items "
-                      f"from AssetManifest.{locale_for_approval}.json")
+                      f"from VOPlan.{locale_for_approval}.json")
     # ── end vo_approval override ──────────────────────────────────────────────
 
     # Guard: must be merged manifest
@@ -762,7 +762,7 @@ def main() -> None:
         print(f"  Ref-plan    : {Path(args.reference_plan).name}  ({len(ref_dur_map)} EN shots)")
     _has_approval = bool(merged.get("vo_approval", {}).get("approved_at"))
     if _has_approval:
-        print(f"  VO-Approval : AssetManifest.{locale}.json → vo_approval  ✓ (timing override active)")
+        print(f"  VO-Approval : VOPlan.{locale}.json → vo_approval  ✓ (timing override active)")
     else:
         print(f"  VO-Approval : not found (using post_tts_analysis timing)")
     print(f"  Out-plan    : {out_plan.name}")

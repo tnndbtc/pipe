@@ -1,0 +1,58 @@
+{
+  "schema_id": "ShotList",
+  "schema_version": "1.0.0",
+  "created_at": "2026-03-17T00:00:00Z",
+  "script_id": "test-proj-s01e01",
+  "shotlist_id": "test-proj-s01e01",
+  "timing_lock_hash": "b114fc1a7b1678029d028ca7595131f40889dfde06b03595953c6ff213f66a3f",
+  "total_duration_sec": 60.63,
+  "shots": [
+    {
+      "shot_id": "sc01-sh01",
+      "scene_id": "sc01",
+      "duration_sec": 28.86,
+      "characters": [],
+      "background_id": "bg-reactor-control-room-night",
+      "camera_framing": "wide",
+      "camera_movement": "slow_push",
+      "audio_intent": {
+        "sfx_tags": ["alarm_buzzing", "reactor_hum", "explosion_distant"],
+        "music_mood": "tense strings, low drone",
+        "vo_speaker_id": "narrator",
+        "vo_text": "At 1:23 a.m., a single button was pressed. Seconds later, a nuclear reactor exploded. Within hours, invisible radiation was drifting across Europe, and decades later scientists still cannot fully explain everything that happened inside that reactor. This is the story of the night humanity came dangerously close to losing control of nuclear power.",
+        "vo_item_ids": [
+          "vo-sc01-001",
+          "vo-sc01-002",
+          "vo-sc01-003",
+          "vo-sc01-004"
+        ],
+        "sfx_item_ids": ["sfx-sc01-sh01-001", "sfx-sc01-sh01-002", "sfx-sc01-sh01-003"],
+        "music_item_id": "music-sc01-sh01"
+      }
+    },
+    {
+      "shot_id": "sc02-sh02",
+      "scene_id": "sc02",
+      "duration_sec": 31.77,
+      "characters": [],
+      "background_id": "bg-chernobyl-plant-exterior-dawn",
+      "camera_framing": "wide",
+      "camera_movement": "pan",
+      "audio_intent": {
+        "sfx_tags": ["machinery_hum", "footsteps_concrete"],
+        "music_mood": "subdued orchestral, building unease",
+        "vo_speaker_id": "narrator",
+        "vo_text": "April 26, 1986. Northern Ukraine, inside the Soviet Union. Engineers at the Chernobyl Nuclear Power Plant were preparing for what seemed like a routine safety test. They wanted to know whether the turbines could keep producing electricity during a power outage long enough to run the cooling pumps. If the pumps kept running, the reactor would remain safe.",
+        "vo_item_ids": [
+          "vo-sc02-001",
+          "vo-sc02-002",
+          "vo-sc02-003",
+          "vo-sc02-004",
+          "vo-sc02-005"
+        ],
+        "sfx_item_ids": ["sfx-sc02-sh02-001", "sfx-sc02-sh02-002"],
+        "music_item_id": "music-sc02-sh02"
+      }
+    }
+  ]
+}

@@ -1,0 +1,532 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VOPlan",
+  "type": "object",
+  "required": [
+    "schema_id",
+    "schema_version",
+    "manifest_id",
+    "project_id",
+    "episode_id",
+    "shotlist_ref",
+    "character_packs",
+    "backgrounds",
+    "vo_items"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema_id": {
+      "type": "string",
+      "const": "VOPlan",
+      "description": "Always 'VOPlan'. Renamed from AssetManifest. Written by gen_tts_cloud.py and extended in-place by post_tts_analysis.py, polish_locale_vo.py, vo_retune.py, apply_music_plan.py, and resolve_assets.py."
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "manifest_id": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Matches the project directory slug under projects/"
+    },
+    "episode_id": {
+      "type": "string",
+      "description": "Episode identifier (e.g. s01e02). Together with project_id forms the canonical asset path: projects/{project_id}/episodes/{episode_id}/",
+      "pattern": "^s[0-9]{2}e[0-9]{2}$"
+    },
+    "shotlist_ref": {
+      "type": "string"
+    },
+    "locale_scope": {
+      "type": "string",
+      "enum": ["monolithic", "merged"],
+      "description": "'monolithic' = legacy flat manifest. 'merged' = per-locale VOPlan produced by gen_tts_cloud.py, combining shared assets + locale VO items in one file. The 'shared' and 'locale' split-manifest scopes are eliminated (manifest_merge.py removed from pipeline)."
+    },
+    "locale": {
+      "type": "string",
+      "description": "BCP-47 locale tag (e.g. 'en', 'zh-Hans'). Required when locale_scope is 'merged'."
+    },
+    "character_packs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "license_type",
+          "gender"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "asset_id": {
+            "type": "string"
+          },
+          "license_type": {
+            "type": "string"
+          },
+          "gender": {
+            "type": "string",
+            "enum": ["male", "female", "neutral"],
+            "description": "Voice gender for TTS assignment. Always derive explicitly from the story — 'male', 'female', or 'neutral' for non-human/ambiguous voices."
+          },
+          "search_prompt": {
+            "type": "string",
+            "description": "5-10 keywords for free library image search"
+          },
+          "search_filters": {
+            "$ref": "#/$defs/SearchFilters"
+          },
+          "ai_prompt": {
+            "type": "string",
+            "description": "Detailed text-to-image generation prompt"
+          },
+          "motion": {
+            "$ref": "#/$defs/MotionIntent"
+          }
+        }
+      }
+    },
+    "backgrounds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "license_type"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "asset_id": {
+            "type": "string"
+          },
+          "license_type": {
+            "type": "string"
+          },
+          "search_prompt": {
+            "type": "string",
+            "description": "5-10 keywords for free library image search"
+          },
+          "search_filters": {
+            "$ref": "#/$defs/SearchFilters"
+          },
+          "ai_prompt": {
+            "type": "string",
+            "description": "Detailed text-to-image generation prompt"
+          },
+          "ai_prompt_variations": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "description": "Additional AI image generation prompts for the same scene. Each varies one primary visual dimension from ai_prompt (composition, lighting, atmosphere, or tonal emphasis). Same ~2 sentence cinematic format as ai_prompt."
+          },
+          "search_queries": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "maxItems": 4,
+            "description": "2–4 diverse query variant strings for multi-query rotation in the media search service. Each query is issued independently; results are deduplicated before trimming to n."
+          },
+          "source_filters": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Per-source native API filter parameters. Keys are source names ('pexels', 'pixabay'). Values are dicts of API params that override the media server's always-on defaults.",
+            "properties": {
+              "pexels":  { "type": "object", "additionalProperties": true,
+                           "description": "Pexels API params: color, orientation, size, locale" },
+              "pixabay": { "type": "object", "additionalProperties": true,
+                           "description": "Pixabay API params: category, editors_choice, colors, order" }
+            }
+          },
+          "scoring_hints": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Per-dimension CLIP scoring hints. Each dimension is a list of descriptive text phrases. The media scorer computes CLIP similarity for each phrase and takes the max per dimension.",
+            "properties": {
+              "subjects":    { "type": "array", "items": { "type": "string" } },
+              "environment": { "type": "array", "items": { "type": "string" } },
+              "style":       { "type": "array", "items": { "type": "string" } },
+              "motion":      { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "cinematic_role": {
+            "type": "string",
+            "enum": ["establish", "hold", "transition", "emotional_support", "atmosphere"],
+            "description": "How this background functions cinematically. Adjusts scorer weight profile: establish→boost environment; hold→boost subjects; transition→boost motion; emotional_support→boost style; atmosphere→boost environment+style."
+          },
+          "motion_level": {
+            "type": "string",
+            "enum": ["none", "very_low", "low", "medium", "high"],
+            "description": "Expected amount of visual motion in the background."
+          },
+          "lighting": {
+            "type": "string",
+            "enum": ["soft_night", "low_key_soft", "warm_dawn", "diffused_daylight", "bright_open", "dramatic"],
+            "description": "Desired lighting quality. Injected as an extra style CLIP sub-prompt during scoring."
+          },
+          "include_keywords": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Terms that MUST appear in asset metadata/tags. Used as post-search filter."
+          },
+          "exclude_keywords": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Terms that must NOT appear in asset metadata/tags. Used as hard-exclude post-search filter."
+          },
+          "continuity_hints": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Shot continuity / sequence ranking hints for the DP sequence ranker.",
+            "properties": {
+              "group_id": {
+                "type": "string",
+                "description": "Shared identifier for a sequence of shots that should look visually consistent."
+              },
+              "palette_target": {
+                "type": "string",
+                "enum": ["warm_amber", "cool_blue", "earthy_brown", "desaturated_grey", "deep_green", "none"]
+              },
+              "motion_budget": {
+                "type": "string",
+                "enum": ["none", "very_low", "low", "medium", "high"]
+              },
+              "camera_energy": {
+                "type": "string",
+                "enum": ["locked", "gentle_drift", "active", "handheld"]
+              },
+              "allowed_shift": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Maximum allowed hue-histogram L1 distance between consecutive shots in the group (0.0–1.0, default 0.4)."
+              }
+            }
+          },
+          "motion": {
+            "$ref": "#/$defs/MotionIntent"
+          }
+        }
+      }
+    },
+    "vo_items": {
+      "type": "array",
+      "description": "Per-VO-item timing and synthesis parameters. BOUNDARY: start_sec/end_sec are ITEM-LEVEL episode-absolute timestamps only. VOPlan does NOT store shot-level or scene-level start_sec/end_sec — those belong exclusively in ShotList.json.",
+      "items": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "speaker_id",
+          "text",
+          "license_type"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "speaker_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "license_type": {
+            "type": "string"
+          },
+          "visual": {
+            "type": "boolean",
+            "description": "Set to false for VO-only speakers with no visual representation. Renderer holds on the current background instead of looking up a character_pack.",
+            "default": true
+          },
+          "tts_prompt": {
+            "$ref": "#/$defs/TtsPrompt"
+          },
+          "start_sec": {
+            "type": "number",
+            "description": "Episode-absolute start time of this VO item (seconds). Written by post_tts_analysis.py after TTS approval. Absent before approval."
+          },
+          "end_sec": {
+            "type": "number",
+            "description": "Episode-absolute end time of this VO item (seconds). Written by post_tts_analysis.py after TTS approval. Absent before approval. render_video.py derives shot-relative VO end as (end_sec − shot.start_sec)."
+          },
+          "pause_after_ms": {
+            "type": "number",
+            "description": "Silence gap in milliseconds appended after this VO item before the next begins. Written by post_tts_analysis.py."
+          }
+        },
+        "not": {
+          "required": ["duration_sec"],
+          "description": "duration_sec is PROHIBITED — always derive as (end_sec − start_sec). Do NOT write or read this field."
+        }
+      }
+    },
+    "vo_approval": {
+      "type": "object",
+      "description": "Written atomically by /api/vo_approve when the user approves the VO take. Protected from pipeline wipe — all in-place writers must re-read and preserve this block before writing.",
+      "required": ["approved_at"],
+      "additionalProperties": true,
+      "properties": {
+        "approved_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 UTC timestamp of approval."
+        },
+        "approved_by": {
+          "type": "string",
+          "description": "User identifier who approved."
+        },
+        "stage": {
+          "type": "string",
+          "description": "Pipeline stage at time of approval (e.g. 'legacy', 'tts_v2')."
+        },
+        "wav_set_hash": {
+          "type": "string",
+          "description": "SHA-256 of the WAV file set approved. Used to detect if TTS re-generation would invalidate the approval."
+        },
+        "trim_overrides_hash": {
+          "type": "string",
+          "description": "SHA-256 of any per-item trim override values at time of approval."
+        },
+        "scene_breaks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional list of shot_ids that mark scene boundaries, recorded at approval time."
+        }
+      }
+    },
+    "scene_tails": {
+      "type": "object",
+      "description": "Per-shot tail silence in milliseconds, keyed by shot_id. Written by the VO approval UI. render_video.py resolves scene_tail_ms with three-level priority: (1) this dict, (2) shot.duration_sec*1000 − last_vo_out_ms, (3) constant fallback VO_TAIL_MS=2000.",
+      "additionalProperties": {
+        "type": "number",
+        "description": "Tail silence in milliseconds for this shot_id."
+      }
+    },
+    "sfx_items": {
+      "type": "array",
+      "description": "One entry per (shot, sfx_tag) pair. item_id format: 'sfx-{shot_id}-{NNN}'. The tag field is the natural-language description for audio generation. ShotList.AudioIntent.sfx_item_ids[] references these by item_id.",
+      "items": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "shot_id",
+          "tag",
+          "duration_sec",
+          "license_type"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "description": "Format: sfx-{shot_id}-{NNN}"
+          },
+          "shot_id": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string",
+            "description": "Natural-language audio description for AudioGen"
+          },
+          "duration_sec": {
+            "type": "number",
+            "description": "Clip duration to generate, matching the shot duration"
+          },
+          "license_type": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "music_items": {
+      "type": "array",
+      "description": "One entry per shot with a non-null music_mood. item_id format: 'music-{shot_id}'. Editorial duck_intervals are written by apply_music_plan.py from approved MusicPlan.json. NOTE: render_video.py reads music timing from MusicPlan.json (shot_overrides), NOT from this field.",
+      "items": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "shot_id",
+          "music_mood",
+          "duration_sec",
+          "license_type"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "description": "Format: music-{shot_id}"
+          },
+          "shot_id": {
+            "type": "string"
+          },
+          "music_mood": {
+            "type": "string",
+            "description": "Natural-language music direction for MusicGen (from ShotList audio_intent.music_mood)"
+          },
+          "duration_sec": {
+            "type": "number"
+          },
+          "license_type": {
+            "type": "string"
+          },
+          "start_sec": {
+            "type": "number",
+            "description": "Music start time within the shot (seconds). LLM-authored editorial intent."
+          },
+          "duck_db": {
+            "type": "number",
+            "description": "Music attenuation in dB during VO playback (e.g. -12.0)."
+          },
+          "fade_sec": {
+            "type": "number",
+            "description": "Linear ramp duration in seconds at each duck interval boundary (e.g. 0.15)."
+          },
+          "duck_intervals": {
+            "type": "array",
+            "description": "List of [t0, t1] episode-absolute intervals (seconds) during which music is ducked. Written in-place by apply_music_plan.py.",
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "element_images": {
+      "type": "array",
+      "description": "Per-shot scene element image entries. Each entry describes one physical visual element identified from the shot's narration. item_id format: 'el-{shot_id}-{element-slug}'.",
+      "items": {
+        "type": "object",
+        "required": ["item_id", "shot_id", "label", "ai_prompt"],
+        "additionalProperties": true,
+        "properties": {
+          "item_id": { "type": "string" },
+          "shot_id": { "type": "string" },
+          "label": { "type": "string" },
+          "ai_prompt": { "type": "string" },
+          "ai_prompt_variations": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "background_overrides": {
+      "type": "array",
+      "description": "Locale-specific background video overrides for shots where VO duration exceeds the shared background clip. Written by post_tts_analysis.py.",
+      "items": {
+        "$ref": "#/$defs/BackgroundOverrideItem"
+      }
+    },
+    "timing_lock_hash": {
+      "type": "string",
+      "description": "SHA-256 of the canonical per-shot duration list used to generate background overrides."
+    },
+    "resolved_assets": {
+      "type": "array",
+      "description": "Written in-place by resolve_assets.py (receives VOPlan path via --manifest in run.sh). Empty [] immediately after gen_tts_cloud.py; populated with resolved URIs after resolve_assets.py runs. render_video.py reads via build_media_map() shim: media_shim = {'items': voplan['resolved_assets']}.",
+      "items": {
+        "type": "object",
+        "required": ["asset_id", "asset_type", "uri", "is_placeholder"],
+        "additionalProperties": true,
+        "properties": {
+          "asset_id":       { "type": "string" },
+          "asset_type":     { "type": "string" },
+          "uri":            { "type": "string" },
+          "is_placeholder": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "SearchFilters": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Metadata filters applied when querying free libraries (Pexels, Pixabay, Unsplash, Freesound).",
+      "properties": {
+        "orientation": {
+          "type": "string",
+          "enum": ["landscape", "portrait", "square"]
+        },
+        "media_type": {
+          "type": "string",
+          "enum": ["photo", "illustration", "vector", "video"]
+        },
+        "color_mood": {
+          "type": "string",
+          "enum": ["warm", "cool", "dark", "neutral", "monochrome"]
+        },
+        "min_width":  { "type": "integer" },
+        "min_height": { "type": "integer" },
+        "min_duration_sec": { "type": "number" },
+        "max_duration_sec": { "type": "number" },
+        "category": {
+          "type": "string",
+          "enum": [
+            "backgrounds", "fashion", "nature", "science", "education",
+            "feelings", "health", "people", "religion", "places", "animals",
+            "industry", "computer", "food", "sports", "transportation",
+            "travel", "buildings", "business", "music"
+          ]
+        }
+      }
+    },
+    "MotionIntent": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["type", "description", "participants", "duration_sec", "style"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["camera", "idle", "walk", "gesture", "fight", "interact"]
+            },
+            "description": { "type": "string" },
+            "participants": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "duration_sec": {
+              "type": "number",
+              "minimum": 0.5
+            },
+            "style": {
+              "type": "string",
+              "enum": ["slow", "normal", "fast"]
+            }
+          }
+        }
+      ]
+    },
+    "BackgroundOverrideItem": {
+      "type": "object",
+      "required": ["item_id", "shot_id", "duration_sec", "uri"],
+      "additionalProperties": true,
+      "properties": {
+        "item_id":      { "type": "string", "description": "Format: bg-override-{shot_id}-{locale}" },
+        "shot_id":      { "type": "string" },
+        "duration_sec": { "type": "number" },
+        "uri":          { "type": "string" },
+        "description":  { "type": "string" }
+      }
+    },
+    "TtsPrompt": {
+      "type": "object",
+      "required": ["locale", "azure_voice"],
+      "properties": {
+        "locale":             { "type": "string" },
+        "azure_voice":        { "type": "string" },
+        "azure_style":        { "type": "string" },
+        "azure_style_degree": { "type": "number", "minimum": 1.0, "maximum": 2.0 },
+        "azure_rate":         { "type": "string" },
+        "azure_pitch":        { "type": "string" },
+        "azure_break_ms":     { "type": "integer", "minimum": 0, "maximum": 5000 }
+      }
+    }
+  }
+}

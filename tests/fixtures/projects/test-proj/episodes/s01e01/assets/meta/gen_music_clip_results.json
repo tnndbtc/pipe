@@ -1,0 +1,30 @@
+[
+  {
+    "item_id": "music-sc01-sh01",
+    "shot_id": "sc01-sh01",
+    "source_file": "cher2.mp3",
+    "source_tag": "low frequency, drone, ambient, mysterious, supernatural, crescendo, deep drums, haunting, atmospheric, foreboding",
+    "match_score": 0.6017,
+    "start_sec": 114.0,
+    "duration_sec": 28.089,
+    "seg_score": 0.5105,
+    "output": "/home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/music/music-sc01-sh01.wav",
+    "license": "/home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/music/licenses/music-sc01-sh01.license.json",
+    "size_bytes": 2696588,
+    "status": "success"
+  },
+  {
+    "item_id": "music-sc02-sh02",
+    "shot_id": "sc02-sh02",
+    "source_file": "cher1.mp3",
+    "source_tag": "mysterious, drone, ambient, supernatural, atmospheric, crescendo, haunting, deep drums, low frequency, suspenseful",
+    "match_score": 0.3836,
+    "start_sec": 126.0,
+    "duration_sec": 29.559,
+    "seg_score": 0.3996,
+    "output": "/home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/music/music-sc02-sh02.wav",
+    "license": "/home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/music/licenses/music-sc02-sh02.license.json",
+    "size_bytes": 2837708,
+    "status": "success"
+  }
+]

@@ -8,7 +8,7 @@
 #   1. Measure actual locale and primary WAV durations directly from files.
 #   2. Flag lines with ratio = locale_dur / primary_dur outside [THRESHOLD, THRESHOLD_HIGH].
 #   3. Call Claude (sonnet) to rewrite flagged text to target_chars (locale-aware).
-#   4. Patch AssetManifest.{locale}.json
+#   4. Patch VOPlan.{locale}.json
 #      with the revised text (so re-runs from Stage 9 also use corrected text).
 #   5. Re-synthesize flagged items only via gen_tts_cloud.py --asset-id.
 #   6. Re-measure. Repeat up to MAX_ITERS times.
@@ -20,7 +20,7 @@
 #
 # Usage:
 #   python polish_locale_vo.py \
-#       --manifest  {ep_dir}/AssetManifest.{locale}.json \
+#       --manifest  {ep_dir}/VOPlan.{locale}.json \
 #       --locale    zh-Hans \
 #       --ep-dir    {ep_dir}
 # =============================================================================
@@ -337,7 +337,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Convergence loop: expand short locale VO lines to match EN timing.")
     ap.add_argument("--manifest", required=True,
-                    help="AssetManifest.{locale}.json")
+                    help="VOPlan.{locale}.json")
     ap.add_argument("--locale",   required=True,
                     help="Target locale, e.g. zh-Hans")
     ap.add_argument("--ep-dir",   required=True,
@@ -350,7 +350,7 @@ def main() -> None:
     ep_dir            = Path(args.ep_dir)
     locale            = args.locale
     primary_locale    = args.primary_locale
-    locale_manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    locale_manifest_path = ep_dir / f"VOPlan.{locale}.json"
 
     if not manifest_path.exists():
         print(f"  ✗ polish_locale_vo: {manifest_path} not found")

@@ -14,10 +14,10 @@
 #
 # Usage:
 #   python music_review_pack.py \
-#       --manifest projects/slug/ep/AssetManifest.en.json
+#       --manifest projects/slug/ep/VOPlan.en.json
 #
 #   python music_review_pack.py \
-#       --manifest projects/slug/ep/AssetManifest.en.json \
+#       --manifest projects/slug/ep/VOPlan.en.json \
 #       --output   projects/slug/ep/assets/music/MusicReviewPack/
 #
 # Requirements:
@@ -589,11 +589,11 @@ def apply_music_plan_overrides(timeline_shots, override_list, source_name, vo_sh
 def parse_args():
     p = argparse.ArgumentParser(
         description="Generate music review artifacts (timeline + preview audio) "
-                    "from a merged AssetManifest.",
+                    "from a merged VOPlan.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--manifest", required=True, metavar="PATH",
-                   help="Path to AssetManifest.{locale}.json")
+                   help="Path to VOPlan.{locale}.json")
     p.add_argument("--output", default=None, metavar="DIR",
                    help="Output directory for review pack. "
                         "Default: assets/music/MusicReviewPack/ under the episode.")
@@ -619,9 +619,9 @@ def main():
     manifest = load_manifest(manifest_path)
 
     locale_scope = manifest.get("locale_scope")
-    if locale_scope not in ("merged", "monolithic", None):
+    if locale_scope not in ("merged", "monolithic", "locale", None):
         raise SystemExit(
-            f"[ERROR] Expected merged manifest (locale_scope='merged'), "
+            f"[ERROR] Expected a VOPlan manifest (locale_scope='locale', 'merged', or 'monolithic'), "
             f"got '{locale_scope}'."
         )
 

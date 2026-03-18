@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # =============================================================================
-# render_video.py — Produce output.mp4 from RenderPlan + AssetManifest.{locale}.json
+# render_video.py — Produce output.mp4 from VOPlan.{locale}.json + ShotList.json
 # =============================================================================
 #
-# Reads RenderPlan.{locale}.json and resolves each shot into an MKV
+# Reads VOPlan.{locale}.json + ShotList.json and resolves each shot into an MKV
 # intermediate, then concatenates into a final output.mp4.
 #
 # Architecture (per /tmp/v1 spec):
@@ -32,10 +32,10 @@
 #
 # Usage:
 #   python render_video.py \
-#       --plan projects/slug/ep/RenderPlan.en.json
+#       --plan projects/slug/ep/VOPlan.en.json
 #
 #   python render_video.py \
-#       --plan   projects/slug/ep/RenderPlan.en.json \
+#       --plan   projects/slug/ep/VOPlan.en.json \
 #       --locale en \
 #       --out    projects/slug/ep/renders/en \
 #       --profile preview_local \
@@ -119,13 +119,179 @@ def uri_to_path(uri: str) -> Path | None:
     return Path(unquote(parsed.path))
 
 
-def build_asset_map(render_plan: dict) -> dict[str, dict]:
-    """Build {asset_id → resolved_asset} from RenderPlan.resolved_assets."""
-    return {item["asset_id"]: item for item in render_plan.get("resolved_assets", [])}
+_VO_TAIL_MS = 2000  # fallback tail when scene tail cannot be derived from ShotList
+
+
+def build_asset_map(source: dict) -> dict[str, dict]:
+    """Build {asset_id → resolved_asset} from resolved_assets[]."""
+    return {item["asset_id"]: item for item in source.get("resolved_assets", [])}
+
+
+def build_media_map(media: dict) -> dict:
+    """Build media lookup from resolved_assets items (same logic as gen_render_plan.py).
+
+    Per-shot entries (with shot_id)    → key = "bg_id:shot_id"
+    Background-level entries           → key = "bg_id"
+    Multi-segment entries              → grouped in "_segments" sub-dict,
+                                         keyed as "bg_id:shot_id" → [sorted by segment_index]
+    """
+    out: dict = {}
+    segments: dict = {}
+    for item in media.get("items", []):
+        aid = item["asset_id"]
+        if "segment_index" in item:
+            key = f"{aid}:{item['shot_id']}"
+            segments.setdefault(key, []).append(item)
+        elif "shot_id" in item:
+            out[f"{aid}:{item['shot_id']}"] = item
+        else:
+            out[aid] = item
+    for seg_list in segments.values():
+        seg_list.sort(key=lambda x: x.get("segment_index", 0))
+    if segments:
+        out["_segments"] = segments
+    return out
+
+
+def compute_duck_intervals_from_vo(
+    vo_items: list,
+    fade_ms: int,
+    shot_start_sec: float = 0.0,
+) -> list:
+    """Compute shot-relative music duck intervals from VO items (episode-absolute timing)."""
+    raw: list = []
+    for vi in vo_items:
+        s = vi.get("start_sec")
+        e = vi.get("end_sec")
+        if s is None or e is None:
+            continue
+        t0 = max(0.0, ((s - shot_start_sec) * 1000 - fade_ms) / 1000.0)
+        t1 =          ((e - shot_start_sec) * 1000 + fade_ms) / 1000.0
+        raw.append((t0, t1))
+    if not raw:
+        return []
+    ivs = sorted(raw, key=lambda x: x[0])
+    merged = [list(ivs[0])]
+    for t0, t1 in ivs[1:]:
+        if t0 <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], t1)
+        else:
+            merged.append([t0, t1])
+    return [[round(a, 3), round(b, 3)] for a, b in merged]
+
+
+def build_shots_for_render(
+    shotlist: dict,
+    media_map: dict,
+    vo_items: list,
+    music_plan_overrides: dict,
+    scene_tails: dict | None = None,
+    ref_dur_map: dict | None = None,
+) -> list:
+    """Build shot dicts for render_shot() from ShotList + VOPlan + MusicPlan.
+
+    Builds shot dicts equivalent to what RenderPlan used to provide. Each returned dict has all fields
+    render_shot() reads: shot_id, scene_id, duration_ms, background_asset_id,
+    background_segments, character_asset_ids, music_asset_id, duck_intervals,
+    duck_db, music_fade_sec, start_sec.
+    """
+    vo_lookup = {v["item_id"]: v for v in vo_items}
+    shots_out = []
+
+    for shot in shotlist.get("shots", []):
+        shot_id      = shot["shot_id"]
+        scene_id     = shot.get("scene_id", "")
+        shot_start   = shot.get("start_sec", 0.0)
+        duration_sec = shot.get("duration_sec", 0.0)
+
+        # ── background_asset_id + background_segments ────────────────────────
+        bg_id      = shot.get("background_id")
+        bg_media   = None
+        bg_segments: list | None = None
+        if bg_id:
+            seg_key  = f"{bg_id}:{shot_id}"
+            seg_list = media_map.get("_segments", {}).get(seg_key)
+            if seg_list:
+                bg_segments = []
+                for si in seg_list:
+                    uri  = si.get("uri", "")
+                    ext  = Path(uri.split("://", 1)[-1] if "://" in uri else uri).suffix.lower()
+                    mtyp = "video" if ext in {".mp4", ".mov", ".webm", ".mkv"} else "image"
+                    se   = {
+                        "asset_id":       si["asset_id"],
+                        "uri":            uri,
+                        "media_type":     mtyp,
+                        "duration_sec":   si.get("duration_sec"),
+                        "hold_sec":       si.get("hold_sec"),
+                        "animation_type": si.get("animation_type"),
+                    }
+                    if si.get("start_sec") is not None:
+                        se["start_sec"] = si["start_sec"]
+                    if si.get("end_sec") is not None:
+                        se["end_sec"]       = si["end_sec"]
+                        se["duration_sec"]  = si["end_sec"] - se.get("start_sec", 0.0)
+                    bg_segments.append(se)
+                bg_media = seg_list[0]
+            else:
+                bg_media = media_map.get(f"{bg_id}:{shot_id}") or media_map.get(bg_id)
+        background_asset_id = bg_media["asset_id"] if bg_media else None
+
+        # ── character_asset_ids ───────────────────────────────────────────────
+        char_ids: list[str] = []
+        for char in shot.get("characters", []):
+            cid = char.get("character_id")
+            if cid and cid in media_map:
+                char_ids.append(media_map[cid]["asset_id"])
+
+        # ── music_asset_id from MusicPlan override ───────────────────────────
+        _ovr           = music_plan_overrides.get(shot_id, {})
+        music_asset_id = _ovr.get("music_asset_id")
+
+        # ── duration_ms — three-condition formula ─────────────────────────────
+        _vo_ids  = shot.get("audio_intent", {}).get("vo_item_ids", [])
+        _shot_vo = [vo_lookup[i] for i in _vo_ids
+                    if i in vo_lookup and vo_lookup[i].get("end_sec") is not None]
+        base_ms  = round(duration_sec * 1000)
+        if _shot_vo:
+            last_ms  = round((max(v["end_sec"] for v in _shot_vo) - shot_start) * 1000)
+            # scene_tail_ms: three-level resolution
+            _tail_ms = _VO_TAIL_MS
+            if duration_sec:
+                _derived = round(duration_sec * 1000) - last_ms
+                if _derived > 0:
+                    _tail_ms = _derived
+            if scene_tails:
+                _tail_ms = int(scene_tails.get(scene_id, scene_tails.get(shot_id, _tail_ms)))
+            duration_ms = max(last_ms + _tail_ms, base_ms)
+        else:
+            duration_ms = base_ms
+        if ref_dur_map:
+            duration_ms = max(duration_ms, ref_dur_map.get(shot_id, 0))
+
+        # ── duck_intervals from VO timing ─────────────────────────────────────
+        _fade_sec = float(_ovr.get("fade_sec", 0.15))
+        _fade_ms  = round(_fade_sec * 1000)
+        duck_intervals = compute_duck_intervals_from_vo(_shot_vo, _fade_ms, shot_start)
+
+        shots_out.append({
+            "shot_id":             shot_id,
+            "scene_id":            scene_id,
+            "start_sec":           shot_start,
+            "duration_ms":         duration_ms,
+            "background_asset_id": background_asset_id,
+            "background_segments": bg_segments,
+            "character_asset_ids": char_ids,
+            "music_asset_id":      music_asset_id,
+            "duck_intervals":      duck_intervals,
+            "duck_db":             float(_ovr.get("duck_db", -12.0)),
+            "music_fade_sec":      _fade_sec,
+        })
+
+    return shots_out
 
 
 def load_vo_timing(manifest_path: Path, shotlist_path: Path) -> dict:
-    """Load VO timing from AssetManifest.{locale}.json + ShotList.json.
+    """Load VO timing from VOPlan.{locale}.json + ShotList.json.
 
     Returns {shot_id: [{item_id, speaker_id, text,
                          shot_rel_in_ms, shot_rel_out_ms,
@@ -137,7 +303,7 @@ def load_vo_timing(manifest_path: Path, shotlist_path: Path) -> dict:
     result: dict = {}
 
     if not manifest_path.exists():
-        print(f"  [render] WARNING: AssetManifest not found: {manifest_path}")
+        print(f"  [render] WARNING: VOPlan not found: {manifest_path}")
         return result
     if not shotlist_path.exists():
         print(f"  [render] WARNING: ShotList not found: {shotlist_path}")
@@ -699,16 +865,13 @@ def render_shot(
     # sfx_plan_entries each carry source_file (local path), start_sec (delay
     # from shot start), and optionally end_sec (trim length).
     #
-    # Prefer live SfxPlan.json data (sfx_plan_override) over the potentially
-    # stale copy baked into RenderPlan at gen_render_plan time.  This mirrors
-    # how MusicPlan overrides bypass the stale music fields in RenderPlan.
+    # SfxPlan.json is the authoritative source for SFX entries.
+    # If sfx_plan_override is provided (SfxPlan.json was loaded), use it.
+    # A missing key means the user placed no SFX on this shot (empty list).
     if sfx_plan_override is not None:
-        # SfxPlan.json was loaded — it is the authoritative source.
-        # A missing key means the user placed no SFX on this shot (empty list).
-        # Do NOT fall back to a potentially stale RenderPlan entry.
         _sfx_entries = sfx_plan_override.get(shot_id, [])
     else:
-        # No live SfxPlan available — use whatever gen_render_plan baked in.
+        # No SfxPlan available — fall back to sfx_plan_entries on the shot dict (if any).
         _sfx_entries = shot.get("sfx_plan_entries", [])
     sfx_plan_amp = 10 ** (SFX_DB / 20.0)
     for sp_i, sp_entry in enumerate(_sfx_entries):
@@ -799,7 +962,7 @@ def render_shot(
 
         print(f"  [{_shot_id_key}] Using MusicPlan overrides — approved timing.")
 
-    # duck_intervals: use value already on shot dict from RenderPlan (unchanged)
+    # duck_intervals: use value computed in build_shots_for_render() (unchanged)
 
     if not no_music and music_path and music_path.exists() and (_plan_provided_music or not music_info.get("is_placeholder", True)):
         duck_intervals  = shot.get("duck_intervals", [])
@@ -1011,16 +1174,21 @@ def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int,
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Render RenderPlan.{locale}.json → output.mp4 using FFmpeg.",
+        description="Render VOPlan.{locale}.json → output.mp4 using FFmpeg.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
         "--plan", required=True, metavar="PATH",
-        help="Path to RenderPlan.{locale}.json.",
+        help="Path to VOPlan.{locale}.json (or legacy RenderPlan.{locale}.json).",
     )
     p.add_argument(
         "--locale", default=None, metavar="LOCALE",
-        help="Locale string (e.g. en, zh-Hans). Auto-detected from plan_id if omitted.",
+        help="Locale string (e.g. en, zh-Hans). Auto-detected from filename if omitted.",
+    )
+    p.add_argument(
+        "--reference-approval", default=None, metavar="PATH",
+        help="Path to VOPlan.en.json for non-EN locale EN-floor duration computation. "
+             "render_video.py exits 1 if this flag is passed but the file is missing.",
     )
     p.add_argument(
         "--out", default=None, metavar="DIR",
@@ -1057,23 +1225,23 @@ def main() -> None:
 
     plan_path = Path(args.plan).resolve()
     if not plan_path.exists():
-        print(f"[ERROR] RenderPlan not found: {plan_path}", file=sys.stderr)
+        print(f"[ERROR] VOPlan not found: {plan_path}", file=sys.stderr)
         sys.exit(1)
 
-    rp = load_json(plan_path)
+    voplan = load_json(plan_path)
 
     # ── Locale detection ────────────────────────────────────────────────────
     # Prefer explicit --locale arg; otherwise derive from the filename:
-    # "RenderPlan.zh-Hans.json" → "zh-Hans"  (handles compound locales with hyphens)
-    # Fall back to the plan_id field only if the filename doesn't match.
+    # "VOPlan.zh-Hans.json" → "zh-Hans"  (handles compound locales with hyphens)
     locale = args.locale
     if not locale:
-        stem = plan_path.stem   # e.g. "RenderPlan.zh-Hans"
-        if stem.startswith("RenderPlan."):
+        stem = plan_path.stem   # e.g. "VOPlan.zh-Hans"
+        if stem.startswith("VOPlan."):
+            locale = stem[len("VOPlan."):]
+        elif stem.startswith("RenderPlan."):
             locale = stem[len("RenderPlan."):]
         else:
-            plan_id = rp.get("plan_id", "")
-            locale  = plan_id.rsplit("-", 1)[-1] if plan_id else "en"
+            locale = voplan.get("locale") or voplan.get("plan_id", "en").rsplit("-", 1)[-1]
 
     # ── Paths ────────────────────────────────────────────────────────────────
     episode_dir = plan_path.parent
@@ -1084,21 +1252,74 @@ def main() -> None:
     shots_dir = output_dir / ".shots"
     shots_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Plan-hash cache invalidation ────────────────────────────────────────
-    _plan_hash = rp.get("timing_lock_hash") or hashlib.md5(json.dumps(rp, sort_keys=True).encode()).hexdigest()
+    # ── Load ShotList.json ───────────────────────────────────────────────────
+    _shotlist_path = episode_dir / "ShotList.json"
+    if not _shotlist_path.exists():
+        print(f"[ERROR] ShotList.json not found: {_shotlist_path}", file=sys.stderr)
+        sys.exit(1)
+    shotlist = load_json(_shotlist_path)
+
+    # ── Plan-hash cache invalidation (keyed on ShotList timing_lock_hash) ───
+    _plan_hash = (shotlist.get("timing_lock_hash")
+                  or hashlib.md5(json.dumps(shotlist, sort_keys=True).encode()).hexdigest())
     _hash_file = shots_dir / ".plan_hash"
     if _hash_file.exists() and _hash_file.read_text().strip() != _plan_hash:
-        print(f"  [render] RenderPlan changed — clearing cached shots")
+        print(f"  [render] ShotList changed — clearing cached shots")
         shutil.rmtree(shots_dir)
         shots_dir.mkdir(parents=True, exist_ok=True)
     _hash_file.write_text(_plan_hash)
 
-    fps          = rp.get("fps", FPS)
-    profile_name = args.profile or rp.get("profile", DEFAULT_PROFILE)
+    fps          = FPS
+    profile_name = args.profile or DEFAULT_PROFILE
     profile      = PROFILES.get(profile_name, PROFILES[DEFAULT_PROFILE])
 
-    shots     = rp["shots"]
-    asset_map = build_asset_map(rp)
+    # ── Build media_map + asset_map from VOPlan.resolved_assets[] ───────────
+    _media_shim = {"items": voplan.get("resolved_assets", [])}
+    media_map   = build_media_map(_media_shim)
+    asset_map   = build_asset_map(voplan)
+
+    # ── EN locale reference floor (--reference-approval) ────────────────────
+    _ref_dur_map: dict = {}
+    if args.reference_approval:
+        _ref_path = Path(args.reference_approval).resolve()
+        if not _ref_path.exists():
+            print(f"[ERROR] --reference-approval file not found: {_ref_path}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            _ref_voplan  = load_json(_ref_path)
+            _ref_vo      = _ref_voplan.get("vo_items", [])
+            _ref_shotlist_path = _ref_path.parent / "ShotList.json"
+            _ref_shotlist = load_json(_ref_shotlist_path) if _ref_shotlist_path.exists() else shotlist
+            # Build ref duration_ms for each shot using same three-condition formula
+            _ref_vo_lookup = {v["item_id"]: v for v in _ref_vo}
+            _ref_scene_tails = _ref_voplan.get("scene_tails")
+            for _rs in _ref_shotlist.get("shots", []):
+                _rs_id   = _rs["shot_id"]
+                _rs_st   = _rs.get("start_sec", 0.0)
+                _rs_dur  = _rs.get("duration_sec", 0.0)
+                _rs_vids = _rs.get("audio_intent", {}).get("vo_item_ids", [])
+                _rs_vo   = [_ref_vo_lookup[i] for i in _rs_vids
+                            if i in _ref_vo_lookup and _ref_vo_lookup[i].get("end_sec") is not None]
+                _rs_base = round(_rs_dur * 1000)
+                if _rs_vo:
+                    _rs_last = round((max(v["end_sec"] for v in _rs_vo) - _rs_st) * 1000)
+                    _rs_tail = _VO_TAIL_MS
+                    if _rs_dur:
+                        _d = round(_rs_dur * 1000) - _rs_last
+                        if _d > 0:
+                            _rs_tail = _d
+                    if _ref_scene_tails:
+                        _sc = _rs.get("scene_id", "")
+                        _rs_tail = int(_ref_scene_tails.get(_sc, _ref_scene_tails.get(_rs_id, _rs_tail)))
+                    _ref_dur_map[_rs_id] = max(_rs_last + _rs_tail, _rs_base)
+                else:
+                    _ref_dur_map[_rs_id] = _rs_base
+            print(f"  [render] EN floor loaded from {_ref_path.name} — {len(_ref_dur_map)} shots")
+        except Exception as _ref_err:
+            print(f"  [render] WARNING: Could not load --reference-approval: {_ref_err}")
+
+    # ── Build shots list from ShotList + VOPlan + MusicPlan ─────────────────
+    # (MusicPlan is loaded first so music_asset_id is available per shot)
 
     # --- Load MusicPlan.json (replaces MusicApprovalSnapshot.json) ---
     _music_plan_overrides = {}
@@ -1141,19 +1362,27 @@ def main() -> None:
                   f"across {len(_sfx_plan_by_shot)} shot(s)")
         except Exception as _sfx_err:
             print(f"  [render] WARNING: Could not load SfxPlan.json: {_sfx_err}")
-    # If SfxPlan.json is absent, _sfx_plan_by_shot stays {} and render falls
-    # back to sfx_plan_entries already baked into RenderPlan.
+    # If SfxPlan.json is absent, _sfx_plan_by_shot stays {} and no SFX is mixed.
 
-    # ── Load VO timing from AssetManifest + ShotList ─────────────────────────
-    _manifest_path = episode_dir / f"AssetManifest.{locale}.json"
-    _shotlist_path = episode_dir / "ShotList.json"
+    # ── Load VO timing from VOPlan + ShotList (for render_shot subtitle track) ─
+    _manifest_path = episode_dir / f"VOPlan.{locale}.json"
     _vo_timing_by_shot = load_vo_timing(_manifest_path, _shotlist_path)
+
+    # ── Build shot dicts from ShotList + VOPlan + MusicPlan ──────────────────
+    shots = build_shots_for_render(
+        shotlist           = shotlist,
+        media_map          = media_map,
+        vo_items           = voplan.get("vo_items", []),
+        music_plan_overrides = _music_plan_overrides,
+        scene_tails        = voplan.get("scene_tails"),
+        ref_dur_map        = _ref_dur_map if _ref_dur_map else None,
+    )
 
     # ── Load confirmed media selections (CHANGE 5) ───────────────────────────
     def _url_to_path(url: str) -> str:
         """Return a URI that uri_to_path() can resolve.
 
-        selections.json stores file:// URIs.  The previous implementation stripped
+        MediaPlan.json stores file:// URIs.  The previous implementation stripped
         the 'file://' prefix, producing a bare absolute path which uri_to_path()
         cannot handle (it requires the file:// scheme).  Now we preserve the scheme.
         Plain absolute paths are wrapped so they also work downstream.
@@ -1167,8 +1396,8 @@ def main() -> None:
             return (_sel_path.parent / url).resolve().as_uri()
         return url
 
-    _sel_path = episode_dir / "assets" / "media" / "selections.json"
-    _shot_to_segments = None   # None = no selections file; {} = file present but empty
+    _sel_path = episode_dir / "MediaPlan.json"
+    _shot_to_segments = None   # None = no MediaPlan; {} = file present but empty
 
     if _sel_path.exists():
         try:
@@ -1189,11 +1418,11 @@ def main() -> None:
                 )
             print(f"  [media] Loaded confirmed selections: {len(_shot_to_segments)} shots")
         except Exception as _exc:
-            print(f"  [media] WARNING: Failed to load selections.json: {_exc}")
+            print(f"  [media] WARNING: Failed to load MediaPlan.json: {_exc}")
             _shot_to_segments = None
     else:
         print(
-            "WARNING: No confirmed media selections found — using RenderPlan.background_segments.\n"
+            "WARNING: No confirmed media selections found (MediaPlan.json missing).\n"
             "         Video trim offsets (start_sec/end_sec from Confirm Selections) are NOT applied.\n"
             "         To apply confirmed trims, run 'Confirm Selections' in the Media tab first."
         )
@@ -1242,7 +1471,7 @@ def main() -> None:
         if _shot_to_segments is not None:
             if _shot_id_cur in _shot_to_segments:
                 _confirmed_segs = _shot_to_segments[_shot_id_cur]
-                shot = dict(shot)  # shallow copy — do not mutate RenderPlan list
+                shot = dict(shot)  # shallow copy — do not mutate shots list
                 shot["background_segments"] = [
                     {
                         "uri":                   _url_to_path(seg.get("url", "")),
@@ -1256,13 +1485,13 @@ def main() -> None:
                     }
                     for seg in _confirmed_segs
                 ]
-                print(f"  [{_shot_id_cur}] Using confirmed media selections — overriding RenderPlan bg.")
+                print(f"  [{_shot_id_cur}] Using confirmed media selections — overriding computed bg.")
             else:
-                # selections.json present but shot not confirmed → black background
+                # MediaPlan.json present but shot not confirmed → black background
                 shot = dict(shot)
                 shot["background_segments"] = []
                 print(f"  [{_shot_id_cur}] No confirmed selection — rendering black background.")
-        # else: _shot_to_segments is None → use existing RenderPlan bg_segments (no change)
+        # else: _shot_to_segments is None → use bg_segments from build_shots_for_render (no change)
 
         m_start, m_fadeout = shot_music_params[i]
         mkv = render_shot(
@@ -1311,7 +1540,7 @@ def main() -> None:
     with open(concat_list, "w", encoding="utf-8") as f:
         for idx, (shot, mkv) in enumerate(shot_mkv_pairs):
             f.write(f"file '{mkv}'\n")
-            total_ms += shot["duration_ms"]   # RenderPlan duration (VO-ceiling authoritative)
+            total_ms += shot["duration_ms"]   # VO-ceiling authoritative duration
 
             if idx < len(shot_mkv_pairs) - 1:
                 next_shot = shot_mkv_pairs[idx + 1][0]
@@ -1338,7 +1567,7 @@ def main() -> None:
         "schema_id":        "render_output",
         "schema_version":   "1.0.0",
         "producer":         PRODUCER,
-        "plan_id":          rp.get("plan_id", ""),
+        "plan_id":          voplan.get("plan_id", voplan.get("manifest_id", "")),
         "locale":           locale,
         "output_video":     str(final_mp4),
         "output_srt":       str(srt_path),
@@ -1388,7 +1617,7 @@ def write_license_manifest(
     One entry per confirmed media segment, each with:
       - Timing in the final video (video_start_sec / video_end_sec)
       - Clip offsets within the source file (start_sec / end_sec)
-      - Full license / attribution metadata from selections.json
+      - Full license / attribution metadata from MediaPlan.json
     """
     entries: list[dict] = []
     total_sec = 0.0

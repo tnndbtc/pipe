@@ -214,11 +214,18 @@ def main():
 
     _DEFAULT_VO_PAUSE_MS = 300  # 0.3 s between lines when no timing
     shot_path = ep_dir / "ShotList.json"
+    # shot_id → music_item_id  (e.g. "sc01-sh01" → "music-sc01-sh01")
+    # Built from ShotList audio_intent.music_item_id so music_by_item lookup
+    # works even when MusicPlan shot_overrides carry no shot_id field.
+    shot_to_music_item: dict = {}
     if shot_path.exists():
         sl = load_json(shot_path)
         for shot in sl.get("shots", []):
             sid = shot.get("shot_id", "")
             cursor_ms = 0
+            mid = shot.get("audio_intent", {}).get("music_item_id", "")
+            if sid and mid:
+                shot_to_music_item[sid] = mid
             for iid in shot.get("audio_intent", {}).get("vo_item_ids", []):
                 wav = vo_dir / f"{iid}.wav"
                 dur_ms = 0
@@ -504,25 +511,28 @@ def main():
         # ── Build music audio track ───────────────────────────────────────────
         music_audio = None
         if music_data:
-            music_by_shot = {o["shot_id"]: o
+            # MusicPlan shot_overrides are keyed by music item_id, NOT shot_id.
+            # Use shot_to_music_item (built from ShotList) to resolve per shot.
+            music_by_item = {o["item_id"]: o
                              for o in music_data.get("shot_overrides", [])
-                             if "shot_id" in o}
+                             if "item_id" in o}
             _clip_vol  = music_data.get("clip_volumes", {})
             _track_vol = music_data.get("track_volumes", {})
         else:
-            music_by_shot = {}
+            music_by_item = {}
             _clip_vol  = {}
             _track_vol = {}
         BASE_MUSIC_DB_PREVIEW = -6.0
 
         if music_data:
             import re as _re
-            m_inputs, m_delays, m_volumes = [], [], []
+            m_inputs, m_delays, m_volumes, m_clip_durs = [], [], [], []
             cum_ms = 0
             for shot_id in ordered_shots:
                 dur_ms = shot_dur_ms.get(shot_id, 0)
                 cum_sec = cum_ms / 1000.0
-                _ovr = music_by_shot.get(shot_id, {})
+                _music_item_id = shot_to_music_item.get(shot_id, "")
+                _ovr = music_by_item.get(_music_item_id, {})
                 if not _ovr:
                     # no music override for this shot — skip music mixing for this shot
                     pass
@@ -547,6 +557,16 @@ def main():
                     else:
                         delay_ms = cum_ms  # no override: music starts at shot boundary
 
+                    # Derive clip duration from end_sec so the WAV is trimmed and
+                    # does not bleed past the intended stop point.
+                    _end_sec = _ovr.get("end_sec")
+                    if _end_sec is not None and _start_sec is not None:
+                        clip_dur_sec = max(0.0, float(_end_sec) - float(_start_sec))
+                        print(f"  [music] {_music_asset_id}: trimmed to {clip_dur_sec:.2f}s "
+                              f"(start_sec={_start_sec}, end_sec={_end_sec})")
+                    else:
+                        clip_dur_sec = None  # no trim: play full WAV
+
                     # Derive base_db (additive formula)
                     _stem = _re.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _music_asset_id)
                     _db_off = (_track_vol.get(_stem, 0.0) + _clip_vol.get(_music_asset_id, 0.0))
@@ -559,14 +579,22 @@ def main():
                         m_inputs.append(wav)
                         m_delays.append(delay_ms)
                         m_volumes.append(10 ** (base_db / 20.0))
+                        m_clip_durs.append(clip_dur_sec)
                 cum_ms += dur_ms
 
             if m_inputs:
                 music_audio = tmp / "music_mix.wav"
-                f_parts = [
-                    f"[{i}]adelay={d:.0f}|{d:.0f},volume={v:.4f}[m{i}]"
-                    for i, (d, v) in enumerate(zip(m_delays, m_volumes))
-                ]
+                f_parts = []
+                for i, (d, v, cd) in enumerate(zip(m_delays, m_volumes, m_clip_durs)):
+                    if cd is not None:
+                        f_parts.append(
+                            f"[{i}]atrim=duration={cd:.3f},volume={v:.4f},"
+                            f"adelay={d:.0f}|{d:.0f}[m{i}]"
+                        )
+                    else:
+                        f_parts.append(
+                            f"[{i}]adelay={d:.0f}|{d:.0f},volume={v:.4f}[m{i}]"
+                        )
                 mix_ins = "".join(f"[m{i}]" for i in range(len(m_inputs)))
                 f_str = ";".join(f_parts) + f";{mix_ins}amix=inputs={len(m_inputs)}:normalize=0,apad=pad_dur={total_dur:.3f}[out]"
                 cmd = ["ffmpeg", "-y"]

@@ -4,7 +4,7 @@
 # Usage:
 #   python3 whisper_compare.py <ep_dir> <locale>
 #
-# Reads:  {ep_dir}/AssetManifest.{locale}.json   → vo_items[].{item_id, text}
+# Reads:  {ep_dir}/VOPlan.{locale}.json   → vo_items[].{item_id, text}
 #         {ep_dir}/assets/{locale}/audio/vo/{item_id}.wav
 # Writes: {ep_dir}/assets/{locale}/whisper_compare.json
 #
@@ -93,7 +93,7 @@ def main() -> None:
     lang   = _lang_code(locale)
 
     # Load manifest
-    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    manifest_path = ep_dir / f"VOPlan.{locale}.json"
     if not manifest_path.exists():
         print(f"[whisper_compare] Manifest not found: {manifest_path}", file=sys.stderr)
         sys.exit(1)

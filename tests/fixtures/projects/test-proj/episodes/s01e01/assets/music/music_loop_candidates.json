@@ -1,0 +1,89 @@
+{
+  "episode_id": "s01e01",
+  "tracks": {
+    "cher1": {
+      "source_path": "projects/test-proj/resources/music/cher1.mp3",
+      "duration_total_sec": 194.0,
+      "bpm": 144.2,
+      "candidates": [
+        {
+          "start_sec": 126.0,
+          "duration_sec": 34.0,
+          "score": 0.9841,
+          "rank": 1,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher1__cand01__ss126.0__t34.0.wav"
+        },
+        {
+          "start_sec": 36.0,
+          "duration_sec": 30.0,
+          "score": 0.9833,
+          "rank": 2,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher1__cand02__ss36.0__t30.0.wav"
+        },
+        {
+          "start_sec": 162.0,
+          "duration_sec": 22.0,
+          "score": 0.9799,
+          "rank": 3,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher1__cand03__ss162.0__t22.0.wav"
+        },
+        {
+          "start_sec": 100.0,
+          "duration_sec": 30.0,
+          "score": 0.977,
+          "rank": 4,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher1__cand04__ss100.0__t30.0.wav"
+        },
+        {
+          "start_sec": 80.0,
+          "duration_sec": 20.0,
+          "score": 0.9769,
+          "rank": 5,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher1__cand05__ss80.0__t20.0.wav"
+        }
+      ]
+    },
+    "cher2": {
+      "source_path": "projects/test-proj/resources/music/cher2.mp3",
+      "duration_total_sec": 125.0,
+      "bpm": 0.0,
+      "candidates": [
+        {
+          "start_sec": 12.0,
+          "duration_sec": 26.0,
+          "score": 0.9902,
+          "rank": 1,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher2__cand01__ss12.0__t26.0.wav"
+        },
+        {
+          "start_sec": 26.0,
+          "duration_sec": 28.0,
+          "score": 0.987,
+          "rank": 2,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher2__cand02__ss26.0__t28.0.wav"
+        },
+        {
+          "start_sec": 68.0,
+          "duration_sec": 32.0,
+          "score": 0.9834,
+          "rank": 3,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher2__cand03__ss68.0__t32.0.wav"
+        },
+        {
+          "start_sec": 100.0,
+          "duration_sec": 24.0,
+          "score": 0.9806,
+          "rank": 4,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher2__cand04__ss100.0__t24.0.wav"
+        },
+        {
+          "start_sec": 50.0,
+          "duration_sec": 30.0,
+          "score": 0.9712,
+          "rank": 5,
+          "preview_path": "projects/test-proj/episodes/s01e01/assets/music/candidates/cher2__cand05__ss50.0__t30.0.wav"
+        }
+      ]
+    }
+  }
+}

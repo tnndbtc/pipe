@@ -1,0 +1,266 @@
+{
+  "schema_id": "AssetManifest",
+  "schema_version": "1.0.0",
+  "manifest_id": "test-proj-s01e01-shared",
+  "project_id": "test-proj",
+  "episode_id": "s01e01",
+  "shotlist_ref": "ShotList.json",
+  "locale_scope": "shared",
+  "vo_items": [],
+  "character_packs": [],
+  "backgrounds": [
+    {
+      "asset_id": "bg-reactor-control-room-night",
+      "type": "background",
+      "license_type": "proprietary_cleared",
+      "motion_level": "low",
+      "cinematic_role": "hold",
+      "search_filters": {
+        "orientation": "landscape",
+        "media_type": "photo",
+        "min_width": 1920,
+        "min_height": 1080
+      },
+      "ai_prompt": "Interior of a Soviet-era nuclear reactor control room at 1:23 a.m., banks of analogue instrument panels casting a dim green and amber glow across the empty chamber. Shadows dominate the frame — only the instrument backlight and faint overhead fluorescents illuminate rows of switches, gauges, and blinking indicators in cold, oppressive stillness.",
+      "ai_prompt_variations": [
+        "Extreme close-up on a single Soviet control panel button in a nuclear reactor room at night, the recessed circular switch lit only by the faint glow of surrounding indicator lights. Metal housing scratched and worn, the button label in Cyrillic partially legible, deep shadow filling the edges of the frame.",
+        "Wide interior shot of a Soviet nuclear reactor control room at night under harsh emergency lighting, red warning lights slicing across the instrument consoles in high-contrast bands. The room appears abandoned mid-shift — gauges reading in abnormal ranges, alarm panels illuminated, absolute stillness.",
+        "Overhead angle looking down into the reactor control room at night, the curved rows of instrument panels receding into near-darkness. Soft blue-green instrument glow outlines the workstations in the otherwise black space, no movement, no people.",
+        "Tight side-profile of a Soviet control room instrument wall at night, moisture condensation visible on the metal panel surfaces. A single bare incandescent bulb provides harsh directional light from above, throwing deep shadows behind each dial housing.",
+        "Atmospheric wide shot of the reactor control room at night from the doorway, a long perspective down the central aisle between two facing banks of instrumentation. The far end disappears into darkness, the nearest panels feebly lit by their own indicator lights — claustrophobic, silent, and tense."
+      ],
+      "search_prompt": "nuclear reactor control room night Soviet industrial dark instruments",
+      "search_queries": [
+        "Soviet nuclear reactor control room night interior",
+        "Chernobyl control room dark instrument panels",
+        "industrial control room night abandoned dim lighting",
+        "nuclear plant operator room analogue gauges dark"
+      ],
+      "scoring_hints": {
+        "subjects": ["control panel", "instrument gauges", "toggle switches", "indicator lights", "analogue dials"],
+        "environment": ["enclosed interior", "concrete walls", "industrial facility", "no windows", "low ceiling"],
+        "style": ["cinematic photography", "low key lighting", "deep shadows", "cold industrial atmosphere", "high contrast"],
+        "motion": ["completely still", "no movement", "static scene"]
+      },
+      "include_keywords": ["control room", "nuclear", "industrial"],
+      "exclude_keywords": ["people", "person", "daylight", "outdoor", "nature", "modern office"],
+      "continuity_hints": {
+        "group_id": "chernobyl-facility",
+        "palette_target": "desaturated_grey",
+        "motion_budget": "low",
+        "camera_energy": "locked",
+        "allowed_shift": 0.3
+      },
+      "lighting": "soft_night"
+    },
+    {
+      "asset_id": "bg-chernobyl-plant-exterior-dawn",
+      "type": "background",
+      "license_type": "proprietary_cleared",
+      "motion_level": "medium",
+      "cinematic_role": "hold",
+      "search_filters": {
+        "orientation": "landscape",
+        "media_type": "photo",
+        "min_width": 1920,
+        "min_height": 1080
+      },
+      "ai_prompt": "Wide exterior view of the Chernobyl Nuclear Power Plant at dawn, the massive reactor building and cooling towers silhouetted against a pale sky washed in cold grey-blue light. The plant stands immense and industrial on the flat Ukrainian steppe, cooling towers venting faint wisps of steam into the still morning air — vast, foreboding, and eerily quiet.",
+      "ai_prompt_variations": [
+        "Extreme-wide aerial perspective of the Chernobyl Nuclear Power Plant complex at early dawn, the entire facility spread across a treeless plain under an overcast sky. The reactor buildings appear small against the enormous grey expanse of sky and flat land, emphasising the isolation of the site.",
+        "Ground-level exterior shot of the Chernobyl plant at dawn from across a cooling pond, the reactor building and chimney stacks reflected in the still dark water. Warm first light catching only the tops of the structures while the lower plant remains in cold shadow.",
+        "Tight telephoto compression of the Chernobyl cooling tower at dawn under overcast clouds pressing down behind the concrete hyperboloid structure. Steam billowing from the tower top disperses into the grey sky, almost monochromatic, no saturation.",
+        "Misty dawn exterior of the Chernobyl plant, morning fog lying low across the surrounding pine forest and creeping toward the reactor complex. The plant buildings partially obscured by haze, looming shapes visible through the mist — atmospheric, ominous.",
+        "High contrast dramatic dawn shot of the Chernobyl Number 4 reactor building exterior, strong directional light from just above the horizon casting long shadows across the concrete facade. The sky behind it is bruised purple and amber at the horizon, the building imposing and severe."
+      ],
+      "search_prompt": "Chernobyl nuclear plant exterior dawn Ukraine industrial cooling tower",
+      "search_queries": [
+        "Chernobyl nuclear power plant exterior dawn",
+        "Soviet nuclear facility cooling towers morning",
+        "Ukraine industrial power plant dawn atmospheric",
+        "nuclear reactor building exterior wide shot overcast"
+      ],
+      "scoring_hints": {
+        "subjects": ["reactor building", "cooling towers", "chimney stacks", "industrial complex"],
+        "environment": ["flat open plain", "overcast sky", "Ukrainian steppe", "vast landscape"],
+        "style": ["cinematic wide angle", "cold morning light", "industrial documentary", "dramatic scale"],
+        "motion": ["very slight steam drift", "near static", "minimal movement"]
+      },
+      "include_keywords": ["nuclear plant", "cooling tower"],
+      "exclude_keywords": ["people", "person", "interior", "modern city", "text", "sign"],
+      "continuity_hints": {
+        "group_id": "chernobyl-facility",
+        "palette_target": "desaturated_grey",
+        "motion_budget": "low",
+        "camera_energy": "gentle_drift",
+        "allowed_shift": 0.3
+      },
+      "lighting": "warm_dawn"
+    }
+  ],
+  "sfx_items": [
+    {
+      "item_id": "sfx-sc01-sh01-001",
+      "type": "sfx",
+      "shot_id": "sc01-sh01",
+      "duration_sec": 28.089,
+      "license_type": "proprietary_cleared",
+      "tag": "A sharp mechanical button click in a dimly lit Soviet nuclear control room, isolated and close, with a brief metallic resonance decaying into near-silence — precise, deliberate, and final.",
+      "search_queries": [
+        "mechanical button click industrial control panel",
+        "Soviet control room switch press sound effect",
+        "hard button click metallic resonance"
+      ]
+    },
+    {
+      "item_id": "sfx-sc01-sh01-002",
+      "type": "sfx",
+      "shot_id": "sc01-sh01",
+      "duration_sec": 28.089,
+      "license_type": "proprietary_cleared",
+      "tag": "A deep distant explosion heard from inside a nuclear facility, a muffled low-frequency concussion wave rolling outward with heavy bass rumble, the sound muted by thick concrete walls and fading slowly into reverberant industrial silence.",
+      "search_queries": [
+        "distant explosion muffled low frequency rumble",
+        "nuclear explosion distant indoor reverb",
+        "far away blast concussion wave sound effect"
+      ]
+    },
+    {
+      "item_id": "sfx-sc01-sh01-003",
+      "type": "sfx",
+      "shot_id": "sc01-sh01",
+      "duration_sec": 28.089,
+      "license_type": "proprietary_cleared",
+      "tag": "Urgent Soviet nuclear emergency alarm blaring continuously inside a concrete industrial facility, a harsh electronic klaxon with metallic overtones bouncing off hard walls, loud and unrelenting — the sound of critical failure.",
+      "search_queries": [
+        "nuclear emergency alarm klaxon industrial",
+        "Soviet facility alert alarm blaring continuous",
+        "emergency warning siren indoor concrete reverb"
+      ]
+    },
+    {
+      "item_id": "sfx-sc02-sh02-001",
+      "type": "sfx",
+      "shot_id": "sc02-sh02",
+      "duration_sec": 29.559,
+      "license_type": "proprietary_cleared",
+      "tag": "Steady low-frequency machinery hum of nuclear plant turbines running at full operational load, a constant industrial drone with subtle vibration that permeates the entire facility structure — powerful, rhythmic, and relentless.",
+      "search_queries": [
+        "industrial turbine machinery hum low frequency drone",
+        "nuclear power plant machinery ambient sound",
+        "generator hum industrial facility constant background"
+      ]
+    },
+    {
+      "item_id": "sfx-sc02-sh02-002",
+      "type": "sfx",
+      "shot_id": "sc02-sh02",
+      "duration_sec": 29.559,
+      "license_type": "proprietary_cleared",
+      "tag": "Wind moving across the exterior of a large industrial nuclear facility at dawn, gusting between massive concrete structures and metal ductwork, carrying a faint mechanical undertone from running plant equipment — cold, open-air, and vast.",
+      "search_queries": [
+        "wind industrial complex exterior concrete ambient",
+        "cold wind nuclear plant outdoor morning sound",
+        "gusty wind large building exterior atmospheric"
+      ]
+    }
+  ],
+  "music_items": [
+    {
+      "item_id": "music-sc01-sh01",
+      "type": "music",
+      "shot_id": "sc01-sh01",
+      "music_mood": "dark orchestral, low rumble building to tension",
+      "duration_sec": 28.089,
+      "start_sec": 0.0,
+      "duck_db": -12.0,
+      "fade_sec": 0.15,
+      "license_type": "proprietary_cleared"
+    },
+    {
+      "item_id": "music-sc02-sh02",
+      "type": "music",
+      "shot_id": "sc02-sh02",
+      "music_mood": "sparse strings, contemplative and foreboding",
+      "duration_sec": 29.559,
+      "start_sec": 0.0,
+      "duck_db": -12.0,
+      "fade_sec": 0.15,
+      "license_type": "proprietary_cleared"
+    }
+  ],
+  "element_images": [
+    {
+      "item_id": "el-sc01-sh01-control-button",
+      "shot_id": "sc01-sh01",
+      "label": "Reactor Control Button — AZ-5 Scram Switch",
+      "ai_prompt": "Extreme close-up of a single Soviet-era reactor control button, a large recessed circular switch with a Cyrillic label on a brushed-metal instrument panel. The button housing is worn and scratched from years of use, lit only by the faint amber glow of surrounding indicator lights — the physical object at the centre of catastrophe.",
+      "ai_prompt_variations": [
+        "Side-angle close-up of a Soviet nuclear control room button on an instrument panel, harsh directional fluorescent light casting a sharp shadow to one side of the switch housing. The Cyrillic label is etched into tarnished metal, the button surface slightly discoloured from decades of contact."
+      ]
+    },
+    {
+      "item_id": "el-sc01-sh01-reactor-core",
+      "shot_id": "sc01-sh01",
+      "label": "RBMK Reactor Core — Fuel Rod Channels",
+      "ai_prompt": "Technical close-up view of an RBMK nuclear reactor core cross-section, showing the graphite moderator blocks and vertical fuel rod channels arranged in a dense cylindrical lattice. Materials appear industrial and precise — machined graphite blocks dark and porous, zirconium fuel rod housings metallic and systematic, lit from above in clean technical light.",
+      "ai_prompt_variations": [
+        "Tight close-up of a single nuclear fuel rod assembly from an RBMK reactor, the zirconium cladding tube catching harsh white light against a dark industrial background. Surface textures are sharply detailed — smooth metallic cylinder with seam welds visible, sterile and engineered with absolute precision."
+      ]
+    },
+    {
+      "item_id": "el-sc01-sh01-alarm-panel",
+      "shot_id": "sc01-sh01",
+      "label": "Emergency Alarm Panel — Control Room Warning System",
+      "ai_prompt": "Close-up of a Soviet nuclear facility emergency alarm panel, rows of rectangular indicator lights and labelled warning segments mounted in a large metal housing on the control room wall. Several indicator lights glow red and amber in the darkness, Cyrillic warning labels barely legible, the panel surface showing years of industrial wear and heat discolouration.",
+      "ai_prompt_variations": [
+        "Straight-on macro shot of a single illuminated red warning indicator on a Soviet alarm panel, the translucent plastic lens glowing intensely against the surrounding dark metal housing. The Cyrillic text beneath the light is sharp and urgent, scratches in the panel surface catching light at the frame edges."
+      ]
+    },
+    {
+      "item_id": "el-sc01-sh01-dosimeter",
+      "shot_id": "sc01-sh01",
+      "label": "Radiation Dosimeter — Soviet Measurement Instrument",
+      "ai_prompt": "Close-up of a Soviet-era handheld radiation dosimeter, a cylindrical Bakelite device with a small analogue dial and exposure scale visible through a scratched glass window. The instrument shows signs of age — yellowed housing, worn lettering, the needle frozen at a high reading — lit by a single harsh directional light against a dark background.",
+      "ai_prompt_variations": [
+        "Extreme close-up of the dosimeter dial face, the analogue needle pointing deep into the danger zone of the radiation scale, the scale markings worn and partially rubbed away. The glass cover is slightly cracked, the metal housing pitted and corroded, conveying catastrophic exposure levels."
+      ]
+    },
+    {
+      "item_id": "el-sc02-sh02-turbine-generator",
+      "shot_id": "sc02-sh02",
+      "label": "Steam Turbine Generator — Nuclear Plant Turbine Hall",
+      "ai_prompt": "Wide close-up of a massive Soviet steam turbine generator in a nuclear power plant turbine hall, the enormous cylindrical turbine casing stretching the length of the frame. The machined steel surface is dark with age and condensation, bolted flanges running along the full length, industrial lighting from above casting parallel shadows across the metal housing.",
+      "ai_prompt_variations": [
+        "Side-profile close-up of the turbine shaft coupling at the end of a generator assembly, the heavy flanged connection and alignment bolts shown in sharp industrial detail. Cold overhead lighting picks out the texture of machined metal against oil-stained concrete flooring."
+      ]
+    },
+    {
+      "item_id": "el-sc02-sh02-cooling-pump",
+      "shot_id": "sc02-sh02",
+      "label": "Reactor Coolant Pump Assembly",
+      "ai_prompt": "Close-up of a large Soviet nuclear reactor coolant pump, a heavy industrial centrifugal pump with thick flanged pipework entering and exiting the housing. The pump casing is painted industrial grey, surface paint worn and stained with water mineral deposits, heavy bolts securing the flanged pipe connections — the critical component keeping the reactor from overheating.",
+      "ai_prompt_variations": [
+        "Tight angle looking along a coolant pipe leading into the main reactor cooling pump, the large-diameter steel pipe showing rust streaks and partially unwrapped lagging insulation. The pump housing beyond is lit by a single bare industrial bulb, casting harsh shadow behind the pipework."
+      ]
+    },
+    {
+      "item_id": "el-sc02-sh02-cooling-tower",
+      "shot_id": "sc02-sh02",
+      "label": "Cooling Tower — Chernobyl Plant Exterior Structure",
+      "ai_prompt": "Low-angle wide shot of a Chernobyl nuclear plant cooling tower at dawn, the massive concrete hyperboloid structure rising against a pale overcast sky. The tower exterior is stained with decades of moisture and mineral deposits, steam billowing from the open top and dissipating into the grey morning air — monumental, functional, and foreboding.",
+      "ai_prompt_variations": [
+        "Tight telephoto compression of the upper rim of a nuclear cooling tower against a cold grey dawn sky, the concrete lip curving in and out of frame. Steam pours upward in dense white columns before dispersing, the aged concrete surface texture sharp and heavily stained."
+      ]
+    },
+    {
+      "item_id": "el-sc02-sh02-switchboard",
+      "shot_id": "sc02-sh02",
+      "label": "Electrical Switchboard — Power Distribution Panel",
+      "ai_prompt": "Close-up of a Soviet nuclear plant electrical switchboard, a tall metal cabinet filled with knife switches, circuit breakers, and copper bus bars mounted on a black phenolic board. The cabinet doors are open, wiring visible inside, ceramic insulators holding thick cables — the equipment routing power between the turbine generator and the plant cooling systems.",
+      "ai_prompt_variations": [
+        "Detail shot of individual knife-switch blades on a Soviet electrical distribution board, the copper contacts dark with oxidation except at the contact surfaces, ceramic insulator mounts showing fine cracking. Industrial overhead light reflects harshly off the copper bus bars."
+      ]
+    }
+  ]
+}

@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # Runs AFTER post_tts_analysis.py (vo_items have start_sec/end_sec).
-# Produces AssetManifest.{locale}.json consumed by the renderer.
+# Produces VOPlan.{locale}.json consumed by the renderer.
 #
 # What it does:
 #   1. Loads the shared manifest  (character_packs, backgrounds, sfx, music)
@@ -12,12 +12,12 @@
 #   3. Merges them into a single resolved view
 #   4. Computes duck_intervals per shot from VO positions + music fade_sec
 #   5. Computes a per-locale timing_lock_hash
-#   6. Writes AssetManifest.{locale}.json (locale_scope: "merged")
+#   6. Writes VOPlan.{locale}.json (locale_scope: "merged")
 #
 # Usage:
 #   python manifest_merge.py \
 #       --shared  projects/slug/ep/AssetManifest.shared.json \
-#       --locale  projects/slug/ep/AssetManifest.zh-Hans.json
+#       --locale  projects/slug/ep/VOPlan.zh-Hans.json
 #
 #   python manifest_merge.py --shared ... --locale ... --out /custom/out.json
 #
@@ -185,7 +185,7 @@ def merge_manifests(
                  vo_items so that duck_intervals are computed per shot correctly.
     """
     merged = {
-        "schema_id":      "AssetManifest",
+        "schema_id":      "VOPlan",
         "schema_version": "1.0.0",
         "manifest_id":    locale.get("manifest_id", shared.get("manifest_id", "")),
         "project_id":     shared.get("project_id", ""),
@@ -283,9 +283,9 @@ def merge_manifests(
 def derive_output_path(locale_manifest_path: Path, locale: str) -> Path:
     """
     Default output: same directory as the locale manifest,
-    named AssetManifest.{locale}.json.
+    named VOPlan.{locale}.json.
     """
-    return locale_manifest_path.parent / f"AssetManifest.{locale}.json"
+    return locale_manifest_path.parent / f"VOPlan.{locale}.json"
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -305,7 +305,7 @@ def parse_args():
                         "start_sec/end_sec populated by post_tts_analysis.py.")
     p.add_argument("--out", default=None, metavar="PATH",
                    help="Output path for merged manifest. "
-                        "Default: AssetManifest.{locale}.json "
+                        "Default: VOPlan.{locale}.json "
                         "in the same directory as the locale manifest.")
     return p.parse_args()
 

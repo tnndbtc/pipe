@@ -1,0 +1,42 @@
+{
+  "schema_id": "VoiceCast",
+  "schema_version": "1.0.0",
+  "project_id": "test-proj",
+  "characters": [
+    {
+      "character_id": "narrator",
+      "role": "narrator",
+      "gender": "neutral",
+      "personality": "authoritative, cinematic",
+      "en": {
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "available_styles": [],
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600,
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_style": null
+      },
+      "zh-Hans": {
+        "azure_voice": "zh-CN-YunjianNeural",
+        "available_styles": [
+          "narration-relaxed",
+          "sports-commentary",
+          "sports-commentary-excited",
+          "angry",
+          "disgruntled",
+          "cheerful",
+          "sad",
+          "serious",
+          "depressed",
+          "documentary-narration"
+        ],
+        "azure_pitch": "",
+        "azure_break_ms": 0,
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_style": "documentary-narration"
+      }
+    }
+  ]
+}

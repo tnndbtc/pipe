@@ -136,12 +136,12 @@ def load_manifest(manifest_path: str) -> dict:
     """Load manifest JSON, with fallback for older episode naming.
 
     If AssetManifest.shared.json is requested but absent, falls back to
-    AssetManifest.json (produced by older Stage 5 before the shared/locale
+    VOPlan.json (produced by older Stage 5 before the shared/locale
     split was introduced).
     """
     p = Path(manifest_path)
     if not p.exists() and p.name == "AssetManifest.shared.json":
-        fallback = p.parent / "AssetManifest.json"
+        fallback = p.parent / "VOPlan.json"
         if fallback.exists():
             print(f"[WARN] {p.name} not found; using fallback {fallback.name}")
             p = fallback

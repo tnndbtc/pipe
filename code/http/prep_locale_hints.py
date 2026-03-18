@@ -15,7 +15,7 @@
 #
 # Usage:
 #   python prep_locale_hints.py \
-#       --manifest  projects/{slug}/{ep}/AssetManifest.en.json \
+#       --manifest  projects/{slug}/{ep}/VOPlan.en.json \
 #       --locale    zh-Hans
 # =============================================================================
 
@@ -126,7 +126,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Compute locale character-count hints from EN WAV durations.")
     ap.add_argument("--manifest", required=True,
-                    help="Path to AssetManifest.en.json")
+                    help="Path to VOPlan.en.json")
     ap.add_argument("--locale",   required=True,
                     help="Target locale, e.g. zh-Hans")
     ap.add_argument("--primary-locale", default="en",

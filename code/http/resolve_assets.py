@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # =============================================================================
-# resolve_assets.py — Resolve assets into AssetManifest.{locale}.json (in-place)
+# resolve_assets.py — Resolve assets into VOPlan.{locale}.json (in-place)
 # =============================================================================
 #
-# Reads AssetManifest.{locale}.json and probes the local filesystem
+# Reads VOPlan.{locale}.json and probes the local filesystem
 # for each asset. Emits file:// URIs for found files, placeholder:// for
 # missing ones. No external calls — single-pass, known-path resolver.
 #
@@ -11,10 +11,10 @@
 #
 # Usage:
 #   python resolve_assets.py \
-#       --manifest projects/slug/ep/AssetManifest.zh-Hans.json
+#       --manifest projects/slug/ep/VOPlan.zh-Hans.json
 #
 #   python resolve_assets.py \
-#       --manifest projects/slug/ep/AssetManifest.zh-Hans.json \
+#       --manifest projects/slug/ep/VOPlan.zh-Hans.json \
 #       --assets-root /custom/assets \
 #       --strict
 #
@@ -651,7 +651,7 @@ def resolve_all(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Resolve AssetManifest.{locale}.json assets using local file paths only.",
+        description="Resolve VOPlan.{locale}.json assets using local file paths only.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 File path conventions (relative to --assets-root):
@@ -666,7 +666,7 @@ File path conventions (relative to --assets-root):
     )
     p.add_argument(
         "--manifest", required=True, metavar="PATH",
-        help="Path to AssetManifest.{locale}.json (locale_scope='merged').",
+        help="Path to VOPlan.{locale}.json (locale_scope='merged').",
     )
     p.add_argument(
         "--assets-root", default=None, metavar="PATH",
@@ -675,7 +675,7 @@ File path conventions (relative to --assets-root):
     )
     p.add_argument(
         "--selections", default=None, metavar="PATH",
-        help="Path to selections.json written by the VC editor Media tab. "
+        help="Path to MediaPlan.json (formerly selections.json) written by the VC editor Media tab. "
              "When present, user-chosen stock media (Pexels / Pixabay) takes "
              "priority over the regular filesystem scan for background assets.",
     )
@@ -705,12 +705,12 @@ def main() -> None:
     with open(manifest_path, encoding="utf-8") as f:
         merged = json.load(f)
 
-    # Guard: must be a merged manifest
+    # Guard: must be a locale or merged manifest (not a shared manifest)
     locale_scope = merged.get("locale_scope")
-    if locale_scope != "merged":
+    if locale_scope not in ("merged", "locale"):
         raise SystemExit(
             f"[ERROR] --manifest has locale_scope='{locale_scope}'. "
-            "Expected 'merged'. Pass AssetManifest.{{locale}}.json."
+            "Expected 'locale' or 'merged'. Pass VOPlan.{{locale}}.json."
         )
 
     locale = merged.get("locale", "")
@@ -734,8 +734,11 @@ def main() -> None:
         sel_path   = Path(args.selections).resolve()
         selections = _load_selections(sel_path)
     else:
-        # Auto-detect: look for selections.json in episode_dir/assets/media/
-        auto_sel = episode_dir / "assets" / "media" / "selections.json"
+        # Auto-detect: look for MediaPlan.json in episode_dir (new location),
+        # fall back to legacy assets/media/selections.json for backward compat.
+        auto_sel = episode_dir / "MediaPlan.json"
+        if not auto_sel.exists():
+            auto_sel = episode_dir / "assets" / "media" / "selections.json"
         if auto_sel.exists():
             selections = _load_selections(auto_sel)
 

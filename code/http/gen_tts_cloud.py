@@ -16,9 +16,9 @@
 #   AZURE_ENDPOINT       Custom endpoint URL (optional; overrides region routing)
 #
 # Usage:
-#   python gen_tts_cloud.py --manifest AssetManifest.en.json
-#   python gen_tts_cloud.py --manifest AssetManifest.zh-Hans.json
-#   python gen_tts_cloud.py --manifest AssetManifest.en.json --asset-id vo-s01e02-sc01-001
+#   python gen_tts_cloud.py --manifest VOPlan.en.json
+#   python gen_tts_cloud.py --manifest VOPlan.zh-Hans.json
+#   python gen_tts_cloud.py --manifest VOPlan.en.json --asset-id vo-s01e02-sc01-001
 #
 # Output:
 #   projects/{project_id}/episodes/{episode_id}/assets/{locale}/audio/vo/{item_id}.wav
@@ -2339,13 +2339,13 @@ def locale_from_manifest(manifest: dict, path: str) -> str:
       manifest["locale"] = "zh-Hans"  →  "zh-Hans"
 
     Filename fallback:
-      AssetManifest.zh-Hans.json  →  "zh-Hans"
-      AssetManifest.en.json       →  "en"
-      AssetManifest.json          →  "en"
+      VOPlan.zh-Hans.json  →  "zh-Hans"
+      VOPlan.en.json       →  "en"
+      VOPlan.json          →  "en"
     """
     if manifest.get("locale"):
         return manifest["locale"]
-    stem = Path(path).stem          # e.g. "AssetManifest.zh-Hans"
+    stem = Path(path).stem          # e.g. "VOPlan.zh-Hans"
     parts = stem.split(".")
     return parts[-1] if len(parts) > 1 else "en"
 
@@ -2381,7 +2381,7 @@ def assets_dir_from_manifest(manifest: dict) -> Path:
 
 
 def load_items_from_manifest(manifest: dict, path: str, asset_id_filter: str | None) -> list[dict]:
-    """Load and resolve VO items from a locale AssetManifest.
+    """Load and resolve VO items from a locale VOPlan.
 
     For each vo_item, resolves Azure voice/style/rate in this priority order:
       1. Explicit azure_* fields in tts_prompt  (authored by LLM / Stage 5)
@@ -3732,7 +3732,7 @@ def build_manifest_from_script(
 
     Returns:
         (manifest_dict, manifest_path) — manifest_path is
-        {ep_dir}/AssetManifest.{locale}.json
+        {ep_dir}/VOPlan.{locale}.json
     """
     script = json.loads(script_path.read_text(encoding="utf-8"))
 
@@ -3811,7 +3811,7 @@ def build_manifest_from_script(
 
     manifest_id = f"{project_id}-{episode_id}-{locale}-manifest"
     manifest = {
-        "schema_id":            "AssetManifest",
+        "schema_id":            "VOPlan",
         "schema_version":       "1.0.0",
         "manifest_id":          manifest_id,
         "project_id":           project_id,
@@ -3828,7 +3828,7 @@ def build_manifest_from_script(
 
     # Write the draft manifest to ep_dir
     ep_dir = script_path.resolve().parent
-    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    manifest_path = ep_dir / f"VOPlan.{locale}.json"
     tmp = manifest_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.rename(manifest_path)
@@ -3847,9 +3847,9 @@ def parse_args() -> argparse.Namespace:
             "  export AZURE_SPEECH_KEY='your-key'\n"
             "  export AZURE_SPEECH_REGION='eastus'\n\n"
             "Examples:\n"
-            "  python gen_tts_cloud.py --manifest AssetManifest.en.json\n"
-            "  python gen_tts_cloud.py --manifest AssetManifest.zh-Hans.json\n"
-            "  python gen_tts_cloud.py --manifest AssetManifest.en.json "
+            "  python gen_tts_cloud.py --manifest VOPlan.en.json\n"
+            "  python gen_tts_cloud.py --manifest VOPlan.zh-Hans.json\n"
+            "  python gen_tts_cloud.py --manifest VOPlan.en.json "
             "--asset-id vo-s01e02-sc01-001\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -4080,6 +4080,12 @@ def main() -> None:
                 vo_items[idx]["pause_after_ms"] = frag["pause_ms"]
                 patched += 1
         manifest_path = Path(manifest_path_str)
+        # Re-read vo_approval from disk just before writing so a concurrent or
+        # sequential VO approval is never wiped by this SSML-narration re-run.
+        if manifest_path.is_file():
+            _on_disk = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if "vo_approval" in _on_disk:
+                manifest["vo_approval"] = _on_disk["vo_approval"]
         manifest_path.write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False),
             encoding="utf-8",

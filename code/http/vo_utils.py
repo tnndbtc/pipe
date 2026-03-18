@@ -12,9 +12,9 @@ Core functions:
   get_primary_locale(ep_dir)                              → str
   invalidate_vo_state(ep_dir, primary_locale)             → None
   compute_sentinel_hashes(ep_dir, locale)                 → dict
-  is_vo_approved(ep_dir, locale)                          → bool   [checks AssetManifest.{locale}.json vo_approval]
-  write_sentinel(ep_dir, locale, hashes)                  → None   [writes vo_approval into AssetManifest.{locale}.json]
-  verify_sentinel(ep_dir, locale)                         → bool   [checks AssetManifest.{locale}.json vo_approval]
+  is_vo_approved(ep_dir, locale)                          → bool   [checks VOPlan.{locale}.json vo_approval]
+  write_sentinel(ep_dir, locale, hashes)                  → None   [writes vo_approval into VOPlan.{locale}.json]
+  verify_sentinel(ep_dir, locale)                         → bool   [checks VOPlan.{locale}.json vo_approval]
   write_vo_preview_approved(ep_dir, locale, stage, items, hashes) → None
 """
 
@@ -346,8 +346,8 @@ def invalidate_vo_state(ep_dir, primary_locale: str) -> None:
         sentinel.unlink()
 
     # Remove vo_approval block from ALL locale AssetManifests (primary + non-primary)
-    for manifest_file in ep_dir.glob("AssetManifest.*.json"):
-        locale_part = manifest_file.name[len("AssetManifest."):][:-len(".json")]
+    for manifest_file in ep_dir.glob("VOPlan.*.json"):
+        locale_part = manifest_file.name[len("VOPlan."):][:-len(".json")]
         if locale_part == "shared":
             continue
         try:
@@ -382,7 +382,7 @@ def compute_sentinel_hashes(ep_dir, locale: str) -> dict:
     ep_dir = Path(ep_dir)
 
     # manifest_hash
-    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    manifest_path = ep_dir / f"VOPlan.{locale}.json"
     manifest_hash = _file_sha256(manifest_path)
 
     # wav_set_hash: SHA256 of concatenated "fname:SHA256(content)" for each .wav
@@ -413,8 +413,8 @@ def compute_sentinel_hashes(ep_dir, locale: str) -> dict:
 
 
 def is_vo_approved(ep_dir, locale: str) -> bool:
-    """Return True if AssetManifest.{locale}.json has a vo_approval block with approved_at."""
-    path = Path(ep_dir) / f"AssetManifest.{locale}.json"
+    """Return True if VOPlan.{locale}.json has a vo_approval block with approved_at."""
+    path = Path(ep_dir) / f"VOPlan.{locale}.json"
     if not path.exists():
         return False
     try:
@@ -425,7 +425,7 @@ def is_vo_approved(ep_dir, locale: str) -> bool:
 
 
 def write_sentinel(ep_dir, locale: str, hashes: dict) -> None:
-    """Write vo_approval block into AssetManifest.{locale}.json.
+    """Write vo_approval block into VOPlan.{locale}.json.
 
     Also writes the legacy tts_review_complete.json for backward compatibility
     with any existing scripts that check for it.
@@ -433,8 +433,8 @@ def write_sentinel(ep_dir, locale: str, hashes: dict) -> None:
     ep_dir = Path(ep_dir)
     approved_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    # Patch AssetManifest.{locale}.json with vo_approval block
-    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    # Patch VOPlan.{locale}.json with vo_approval block
+    manifest_path = ep_dir / f"VOPlan.{locale}.json"
     if manifest_path.exists():
         try:
             m = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -470,7 +470,7 @@ def write_sentinel(ep_dir, locale: str, hashes: dict) -> None:
 def verify_sentinel(ep_dir, locale: str) -> bool:
     """Return True iff a valid VO approval exists for the given locale.
 
-    Checks AssetManifest.{locale}.json vo_approval block.
+    Checks VOPlan.{locale}.json vo_approval block.
     Falls back to tts_review_complete.json for backward compatibility.
     """
     return is_vo_approved(ep_dir, locale)
@@ -483,7 +483,7 @@ def write_vo_preview_approved(
     items: list,
     hashes: dict,
 ) -> None:
-    """Write vo_approval block into AssetManifest.{locale}.json.
+    """Write vo_approval block into VOPlan.{locale}.json.
 
     Called by /api/vo_approve to record the user's VO approval.
     Timing already lives in vo_items[] — only the approval metadata is stored here.
@@ -496,7 +496,7 @@ def write_vo_preview_approved(
         hashes:  Dict with wav_set_hash, trim_overrides_hash (from compute_sentinel_hashes).
     """
     ep_dir = Path(ep_dir)
-    manifest_path = ep_dir / f"AssetManifest.{locale}.json"
+    manifest_path = ep_dir / f"VOPlan.{locale}.json"
     if manifest_path.exists():
         try:
             m = json.loads(manifest_path.read_text(encoding="utf-8"))

@@ -273,7 +273,7 @@ def load_manifest(path: Path) -> dict:
 
 
 def locale_from_path(path: Path) -> str:
-    """AssetManifest.zh-Hans.json → zh-Hans; AssetManifest.json → en"""
+    """VOPlan.zh-Hans.json → zh-Hans; VOPlan.json → en"""
     parts = path.stem.split(".")
     return parts[-1] if len(parts) > 1 else "en"
 

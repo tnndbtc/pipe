@@ -1,0 +1,160 @@
+{
+  "schema_id": "AssetManifest",
+  "schema_version": "1.0.0",
+  "manifest_id": "test-proj-s01e01-en-manifest",
+  "project_id": "test-proj",
+  "episode_id": "s01e01",
+  "locale": "en",
+  "locale_scope": "locale",
+  "shared_ref": "AssetManifest.shared.json",
+  "shotlist_ref": "ShotList.json",
+  "character_packs": [],
+  "backgrounds": [],
+  "background_overrides": [],
+  "vo_items": [
+    {
+      "item_id": "vo-sc01-001",
+      "speaker_id": "narrator",
+      "text": "At 1:23 a.m., a single button was pressed.",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "locale": "en",
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600
+      },
+      "start_sec": 0.0,
+      "end_sec": 4.424
+    },
+    {
+      "item_id": "vo-sc01-002",
+      "speaker_id": "narrator",
+      "text": "Seconds later, a nuclear reactor exploded.",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "locale": "en",
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600
+      },
+      "start_sec": 4.724,
+      "end_sec": 8.773
+    },
+    {
+      "item_id": "vo-sc01-003",
+      "speaker_id": "narrator",
+      "text": "Within hours, invisible radiation was drifting across Europe, and decades later scientists still cannot fully explain everything that happened inside that reactor.",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "locale": "en",
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600
+      },
+      "start_sec": 9.073,
+      "end_sec": 19.096
+    },
+    {
+      "item_id": "vo-sc01-004",
+      "speaker_id": "narrator",
+      "text": "This is the story of the night humanity came dangerously close to losing control of nuclear power.",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "locale": "en",
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600
+      },
+      "start_sec": 19.396,
+      "end_sec": 25.79
+    },
+    {
+      "item_id": "vo-sc02-001",
+      "speaker_id": "narrator",
+      "text": "April 26, 1986.",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "locale": "en",
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600
+      },
+      "start_sec": 26.09,
+      "end_sec": 30.014
+    },
+    {
+      "item_id": "vo-sc02-002",
+      "speaker_id": "narrator",
+      "text": "Northern Ukraine, inside the Soviet Union.",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "locale": "en",
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600
+      },
+      "start_sec": 30.314,
+      "end_sec": 34.351
+    },
+    {
+      "item_id": "vo-sc02-003",
+      "speaker_id": "narrator",
+      "text": "Engineers at the Chernobyl Nuclear Power Plant were preparing for what seemed like a routine safety test.",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "locale": "en",
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600
+      },
+      "start_sec": 34.651,
+      "end_sec": 41.076
+    },
+    {
+      "item_id": "vo-sc02-004",
+      "speaker_id": "narrator",
+      "text": "They wanted to know whether the turbines could keep producing electricity during a power outage long enough to run the cooling pumps.",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "locale": "en",
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600
+      },
+      "start_sec": 41.376,
+      "end_sec": 48.712
+    },
+    {
+      "item_id": "vo-sc02-005",
+      "speaker_id": "narrator",
+      "text": "If the pumps kept running, the reactor would remain safe.",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "locale": "en",
+        "azure_voice": "en-GB-OllieMultilingualNeural",
+        "azure_style_degree": 1,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 600
+      },
+      "start_sec": 49.012,
+      "end_sec": 53.349
+    }
+  ]
+}
