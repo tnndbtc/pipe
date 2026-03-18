@@ -6,7 +6,7 @@ const { test, expect } = require('@playwright/test');
 const fs   = require('fs');
 const path = require('path');
 const { startTestServer, stopTestServer } = require('../helpers/server');
-const { resetKW2, EP_DIR } = require('../helpers/fixture_state');
+const { resetKW2, getEpDir } = require('../helpers/fixture_state');
 
 let serverProc;
 test.beforeAll(async () => { serverProc = await startTestServer(); });
@@ -14,7 +14,7 @@ test.afterAll(async ()  => { await stopTestServer(serverProc); });
 test.beforeEach(() => {
   resetKW2();
   // Remove any leftover SfxPreviewPack from a previous run
-  const packDir = path.join(EP_DIR, 'assets', 'sfx', 'SfxPreviewPack');
+  const packDir = path.join(getEpDir(), 'assets', 'sfx', 'SfxPreviewPack');
   if (fs.existsSync(packDir)) fs.rmSync(packDir, { recursive: true, force: true });
 });
 
@@ -89,7 +89,7 @@ test('KW-11c: timeline.json is written to disk by /api/sfx_preview', async ({ pa
   expect(body.ok).toBe(true);
 
   // Verify timeline.json was written to disk (required by sfxLoadTimeline)
-  const tlPath = path.join(EP_DIR, 'assets', 'sfx', 'SfxPreviewPack', 'timeline.json');
+  const tlPath = path.join(getEpDir(), 'assets', 'sfx', 'SfxPreviewPack', 'timeline.json');
   expect(fs.existsSync(tlPath)).toBe(true);
   const tl = JSON.parse(fs.readFileSync(tlPath, 'utf8'));
   expect(tl.total_dur_sec).toBeGreaterThan(0);

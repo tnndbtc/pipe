@@ -14710,9 +14710,12 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
 def _fake_subprocess(cmd, step_name, ep_dir, locale):
     """In --test-mode: copy pre-baked fixture outputs, return fake process."""
     import shutil as _shutil
-    # PIPE_DIR in test mode is <repo>/tests/fixtures.
-    # step_outputs lives at <repo>/tests/step_outputs/ — one level up from fixtures.
-    _step_dir   = os.path.join(os.path.dirname(PIPE_DIR), "step_outputs")
+    # step_outputs lives at <repo>/tests/step_outputs/ — always relative to the
+    # script location regardless of how PIPE_DIR was overridden.
+    _step_dir   = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "tests", "step_outputs"
+    )
 
     def _copy_merged_voplan():
         src = os.path.join(_step_dir, "manifest_merge.VOPlan.en.json")
@@ -20987,7 +20990,11 @@ if __name__ == "__main__":
     _TEST_MODE = _args.test_mode
     PORT = _args.port
     if _TEST_MODE:
-        PIPE_DIR = os.path.join(PIPE_DIR, "tests", "fixtures")
+        _env_test_dir = os.environ.get("PIPE_TEST_DIR", "")
+        if _env_test_dir:
+            PIPE_DIR = _env_test_dir
+        else:
+            PIPE_DIR = os.path.join(PIPE_DIR, "tests", "fixtures")
         print(f"  [TEST MODE] PIPE_DIR overridden to: {PIPE_DIR}", flush=True)
     ip     = local_ip()
     server = ReusableServer(("0.0.0.0", PORT), Handler)

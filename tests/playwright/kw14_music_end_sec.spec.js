@@ -27,7 +27,7 @@ const fs               = require('fs');
 const os               = require('os');
 const path             = require('path');
 const { startTestServer, stopTestServer } = require('../helpers/server');
-const { resetKW13, EP_DIR }              = require('../helpers/fixture_state');
+const { resetKW13, getEpDir }            = require('../helpers/fixture_state');
 
 // Threshold in 16-bit PCM amplitude units.
 // Music at BASE_MUSIC_DB_PREVIEW = -6 dB → amplitude ≈ 16 000.
@@ -101,7 +101,7 @@ test('KW-14: music stops at end_sec=35 (not at wav_duration 59.6s)', async ({ re
   const noBody = await noResp.json();
   expect(noBody.ok).toBe(true);
 
-  const packDir    = path.join(EP_DIR, 'assets', 'media', 'MediaPreviewPack');
+  const packDir    = path.join(getEpDir(), 'assets', 'media', 'MediaPreviewPack');
   const withMp4   = path.join(packDir, 'kw14_with_music.mp4');
   const noMp4     = path.join(packDir, 'kw14_no_music.mp4');
 

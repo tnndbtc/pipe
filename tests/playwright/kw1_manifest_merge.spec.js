@@ -2,7 +2,7 @@
 // Source: prompts/regression.txt § "KW-1: Stage 9 Step 5 — Manifest Merge"
 const { test, expect } = require('@playwright/test');
 const { startTestServer, stopTestServer } = require('../helpers/server');
-const { resetKW1, EP_DIR } = require('../helpers/fixture_state');
+const { resetKW1, getEpDir } = require('../helpers/fixture_state');
 const fs = require('fs'), path = require('path');
 
 let serverProc;
@@ -59,7 +59,7 @@ test('KW-1a: Run 5 button writes VOPlan with locale_scope=merged', async ({ page
   }, { timeout: 20000, polling: 500 });
 
   // Verify file on disk
-  const vp = JSON.parse(fs.readFileSync(path.join(EP_DIR, 'VOPlan.en.json'), 'utf8'));
+  const vp = JSON.parse(fs.readFileSync(path.join(getEpDir(), 'VOPlan.en.json'), 'utf8'));
   expect(vp.locale_scope).toBe('merged');
   expect(vp.music_items.length).toBeGreaterThan(0);
 });

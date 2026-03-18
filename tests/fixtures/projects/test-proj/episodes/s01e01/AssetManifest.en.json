@@ -89,8 +89,8 @@
         "azure_pitch": "-5%",
         "azure_break_ms": 600
       },
-      "start_sec": 26.09,
-      "end_sec": 30.014
+      "start_sec": 28.089,
+      "end_sec": 32.013
     },
     {
       "item_id": "vo-sc02-002",
@@ -105,8 +105,8 @@
         "azure_pitch": "-5%",
         "azure_break_ms": 600
       },
-      "start_sec": 30.314,
-      "end_sec": 34.351
+      "start_sec": 32.313,
+      "end_sec": 36.35
     },
     {
       "item_id": "vo-sc02-003",
@@ -121,8 +121,8 @@
         "azure_pitch": "-5%",
         "azure_break_ms": 600
       },
-      "start_sec": 34.651,
-      "end_sec": 41.076
+      "start_sec": 36.65,
+      "end_sec": 43.075
     },
     {
       "item_id": "vo-sc02-004",
@@ -137,8 +137,8 @@
         "azure_pitch": "-5%",
         "azure_break_ms": 600
       },
-      "start_sec": 41.376,
-      "end_sec": 48.712
+      "start_sec": 43.375,
+      "end_sec": 50.711
     },
     {
       "item_id": "vo-sc02-005",
@@ -153,8 +153,8 @@
         "azure_pitch": "-5%",
         "azure_break_ms": 600
       },
-      "start_sec": 49.012,
-      "end_sec": 53.349
+      "start_sec": 51.011,
+      "end_sec": 55.348
     }
   ]
 }
