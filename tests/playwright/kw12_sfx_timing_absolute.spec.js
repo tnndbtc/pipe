@@ -363,7 +363,7 @@ test('KW-12e: Generate Preview creates preview_audio.wav on disk (non-empty)', a
   // ── Step 3: preview_audio.wav must exist on disk and be non-empty ─────────
   // getEpDir() returns the server's temp episode dir (set via _pipeTestDir),
   // so fs reads go to the same directory the server writes to — same pattern
-  // as KW-11c's timeline.json check.
+  // as other SfxPreviewPack file checks.
   const previewWav = path.join(getEpDir(), 'assets', 'sfx', 'SfxPreviewPack', 'preview_audio.wav');
   expect(fs.existsSync(previewWav)).toBe(true);
   const stats = fs.statSync(previewWav);

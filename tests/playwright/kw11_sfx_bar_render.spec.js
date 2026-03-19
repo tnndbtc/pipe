@@ -1,7 +1,7 @@
 // TEST COVERAGE: KW-11
 // Regression: SFX tab PREVIEW AUDIO section shows no VO/SFX/Music bars after
-// Generate Preview because /api/sfx_preview never writes timeline.json to disk,
-// so sfxLoadTimeline() fetches a 404 and returns early without rendering bars.
+// Generate Preview because the frontend did not use d.timeline from the POST
+// response, causing sfxRenderTimeline() to never be called.
 //
 // KW-11d: sfx_preview with include_music=true must return music_items in the
 //         timeline response. Catches: music stripped from SFX preview when
@@ -66,9 +66,8 @@ test('KW-11b: VO bars render in sfx-tl-vo after Generate Preview', async ({ page
   ]);
   expect(resp.status()).toBe(200);
 
-  // Wait for sfxLoadTimeline() to fetch timeline.json and sfxRenderTimeline() to run.
-  // With the bug: timeline.json never written → 404 → sfxRenderTimeline() skipped → 0 bars.
-  // With the fix: timeline.json written → fetch OK → bars rendered.
+  // Wait for sfxRenderTimeline() to process d.timeline from the POST response
+  // and render VO bars into #sfx-tl-vo.
   await page.waitForFunction(
     () => {
       const voDiv = document.getElementById('sfx-tl-vo');
@@ -85,7 +84,10 @@ test('KW-11b: VO bars render in sfx-tl-vo after Generate Preview', async ({ page
   expect(voBarCount).toBeGreaterThanOrEqual(2);
 });
 
-test('KW-11c: timeline.json is written to disk by /api/sfx_preview', async ({ page }) => {
+// KW-11c: /api/sfx_preview response contains a valid timeline object.
+// timeline.json is no longer written to disk — the timeline is returned
+// directly in the POST response body and used in-memory by the frontend.
+test('KW-11c: /api/sfx_preview response contains valid timeline with total_dur_sec and vo_items', async ({ page }) => {
   await openSfxTabAndSelectEp(page);
 
   const [resp] = await Promise.all([
@@ -96,12 +98,14 @@ test('KW-11c: timeline.json is written to disk by /api/sfx_preview', async ({ pa
   const body = await resp.json();
   expect(body.ok).toBe(true);
 
-  // Verify timeline.json was written to disk (required by sfxLoadTimeline)
+  // Timeline is returned in the response body — no file on disk needed.
+  expect(body.timeline).toBeDefined();
+  expect(body.timeline.total_dur_sec).toBeGreaterThan(0);
+  expect(body.timeline.vo_items.length).toBeGreaterThan(0);
+
+  // Confirm timeline.json is NOT written to disk.
   const tlPath = path.join(getEpDir(), 'assets', 'sfx', 'SfxPreviewPack', 'timeline.json');
-  expect(fs.existsSync(tlPath)).toBe(true);
-  const tl = JSON.parse(fs.readFileSync(tlPath, 'utf8'));
-  expect(tl.total_dur_sec).toBeGreaterThan(0);
-  expect(tl.vo_items.length).toBeGreaterThan(0);
+  expect(fs.existsSync(tlPath)).toBe(false);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

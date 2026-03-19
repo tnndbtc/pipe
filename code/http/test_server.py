@@ -4190,10 +4190,9 @@ placeholder="Enter your story here"></textarea>
   async function _voVisLoadTimeline() {
     const slug = window._voSlug, epId = window._voEpId;
     if (!slug || !epId) return;
-    const tlPath = 'projects/' + slug + '/episodes/' + epId
-      + '/assets/sfx/SfxPreviewPack/timeline.json';
     try {
-      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
+      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(slug)
+        + '&ep_id=' + encodeURIComponent(epId) + '&t=' + Date.now());
       if (!r.ok) return;
       _voVisTlData = await r.json();
       _tlRender('vo-vis', _voVisTlData, 'vo-tl-audio');
@@ -6339,14 +6338,18 @@ placeholder="Enter your story here"></textarea>
   // Restore preview player from files written by a previous sfxGeneratePreview().
   async function _sfxTryRestorePreview() {
     if (!_sfxSlug || !_sfxEpId) return;
-    const tlPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
-      + '/assets/sfx/SfxPreviewPack/timeline.json';
     const audioPath = 'projects/' + _sfxSlug + '/episodes/' + _sfxEpId
       + '/assets/sfx/SfxPreviewPack/preview_audio.wav';
     try {
-      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath));
-      if (!r.ok) return;
-      _sfxTimeline = await r.json();
+      // Check preview_audio.wav exists — that is the authoritative signal that a
+      // previous Generate Preview completed.  Then fetch the timeline in-memory
+      // from /api/sfx_timeline (no timeline.json file needed on disk).
+      const audioCheck = await fetch('/serve_media?path=' + encodeURIComponent(audioPath), { method: 'HEAD' });
+      if (!audioCheck.ok) return;
+      const tlR = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_sfxSlug)
+        + '&ep_id=' + encodeURIComponent(_sfxEpId));
+      if (!tlR.ok) return;
+      _sfxTimeline = await tlR.json();
       const audio = document.getElementById('sfx-preview-audio');
       audio.src = '/serve_media?path=' + encodeURIComponent(audioPath);
       document.getElementById('sfx-preview-wrap').style.display = '';
@@ -6388,7 +6391,8 @@ placeholder="Enter your story here"></textarea>
       const audio = document.getElementById('sfx-preview-audio');
       audio.src = '/serve_media?path=' + encodeURIComponent(previewPath) + '&t=' + Date.now();
       document.getElementById('sfx-preview-wrap').style.display = '';
-      await sfxLoadTimeline();
+      _sfxTimeline = d.timeline;
+      sfxRenderTimeline();
       // Log timeline so user can confirm SFX items were mixed in
       if (_sfxTimeline && _sfxTimeline.sfx_items && _sfxTimeline.sfx_items.length) {
         console.group('[SFX Preview] SFX mixed into preview (' + _sfxTimeline.sfx_items.length + ' items):');
@@ -8001,10 +8005,9 @@ placeholder="Enter your story here"></textarea>
   let _mediaTlData = null;
   async function _mediaLoadTimeline() {
     if (!_mediaSlug || !_mediaEpId) return;
-    const tlPath = 'projects/' + _mediaSlug + '/episodes/' + _mediaEpId
-      + '/assets/sfx/SfxPreviewPack/timeline.json';
     try {
-      const r = await fetch('/serve_media?path=' + encodeURIComponent(tlPath) + '&t=' + Date.now());
+      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_mediaSlug)
+        + '&ep_id=' + encodeURIComponent(_mediaEpId) + '&t=' + Date.now());
       if (!r.ok) return;
       _mediaTlData = await r.json();
       _tlRender('media', _mediaTlData, 'media-preview-video');
@@ -20016,10 +20019,6 @@ class Handler(BaseHTTPRequestHandler):
                         if os.path.exists(_tp):
                             os.unlink(_tp)
                     _sfx_ep_lock.release()
-
-                # Write timeline.json to disk so sfxLoadTimeline() can fetch it
-                _sfx_tl_json = _sfx_out_wav.parent / "timeline.json"
-                _sfx_tl_json.write_text(json.dumps(_tl_doc), encoding="utf-8")
 
                 _json_resp(self, {"ok": True, "timeline": _tl_doc})
 

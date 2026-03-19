@@ -891,15 +891,16 @@ def render_shot(
         sp_fade_sec    = float(sp_entry.get("fade_sec",      0) or 0)
         sfx_plan_amp   = 10 ** ((SFX_DB + sp_vol_db + sp_duck_db + sp_clip_vol_db) / 20.0)
 
-        # Resolve source: cut clip path takes priority over source_file + start/end
+        # Resolve source: cut clip path takes priority over source_file + start/end.
+        # start_sec is always the episode-absolute placement time regardless of source.
         sp_clip_path = sp_entry.get("clip_path")
         if sp_clip_path:
             if not os.path.isabs(sp_clip_path):
                 _episode_dir_rv = str(shots_dir.parent.parent.parent)
                 sp_clip_path = os.path.join(_episode_dir_rv, sp_clip_path)
             sfx_source = sp_clip_path
-            sp_start   = 0.0
-            sp_end     = None
+            sp_start   = float(sp_entry.get("start_sec") or 0.0)
+            sp_end     = sp_entry.get("end_sec")
         else:
             sfx_source = sp_entry.get("source_file", "")
             sp_start   = float(sp_entry.get("start_sec") or 0.0)

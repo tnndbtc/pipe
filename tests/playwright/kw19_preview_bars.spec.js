@@ -113,7 +113,7 @@ test('KW-19a: SFX bars render in #sfx-tl-sfx after Generate Preview', async ({ r
   expect(body.ok).toBe(true);
 
   // ── Step 5: verify SFX bars rendered in #sfx-tl-sfx ────────────────────────
-  // sfxLoadTimeline() reads timeline.json → sfxRenderTimeline() → _tlRender writes bars
+  // sfxGeneratePreview() sets _sfxTimeline = d.timeline → sfxRenderTimeline() → _tlRender writes bars
   await page.waitForFunction(
     () => {
       const el = document.getElementById('sfx-tl-sfx');
