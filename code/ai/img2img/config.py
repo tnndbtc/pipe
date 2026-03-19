@@ -21,7 +21,7 @@ MODEL_IDS = {
     "flux_schnell":       "black-forest-labs/FLUX.1-schnell",    # Apache 2.0
     "flux_dev":           "black-forest-labs/FLUX.1-dev",        # non-commercial
     "flux_controlnet_pose":  "InstantX/FLUX.1-dev-Controlnet-Pose",   # Apache 2.0
-    "flux_controlnet_depth": "InstantX/FLUX.1-dev-Controlnet-Depth",  # Apache 2.0
+    "flux_controlnet_depth": "Shakker-Labs/FLUX.1-dev-ControlNet-Depth",  # Apache 2.0
     "flux_controlnet_canny": "InstantX/FLUX.1-dev-Controlnet-Canny",  # Apache 2.0
     "flux_redux":            "black-forest-labs/FLUX.1-Redux-dev",     # non-commercial
 }

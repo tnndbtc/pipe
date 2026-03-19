@@ -45,11 +45,23 @@ logging.basicConfig(
 )
 log = logging.getLogger("gen_img2img")
 
+# Modes marked SHOULD_NOT_USE are kept for completeness but must be rejected
+# by any AI routing layer (e.g. HTTP server) before dispatch.
+# Reason is documented inline so the AI server can return an honest explanation.
+SHOULD_NOT_USE = {
+    "style": (
+        "FLUX schnell img2img cannot preserve scene structure. "
+        "Low strength (<=0.75) produces no visible style change. "
+        "High strength (>=0.78) hallucinates new objects and completely alters scene composition. "
+        "Use --mode canny or --mode depth (ControlNet) for structure-preserving style transfer instead."
+    ),
+}
+
 PIPELINE_MODES = {
     "composite":    "img2img.pipelines.composite",
     "inpaint":      "img2img.pipelines.inpaint",
     "outpaint":     "img2img.pipelines.outpaint",
-    "style":        "img2img.pipelines.style_transfer",
+    "style":        "img2img.pipelines.style_transfer",   # see SHOULD_NOT_USE
     "pose":         "img2img.pipelines.pose_control",
     "depth":        "img2img.pipelines.depth_control",
     "canny":        "img2img.pipelines.canny_control",
@@ -797,6 +809,10 @@ def main() -> None:
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    if args.mode in SHOULD_NOT_USE:
+        log.error(f"[{args.mode}] SHOULD NOT USE: {SHOULD_NOT_USE[args.mode]}")
+        sys.exit(2)
 
     engine_tag = f" | engine={args.engine}" if args.mode == "inpaint" else ""
     log.info(f"Mode: {args.mode}{engine_tag} | Device: {args.device} | FP16: {not args.no_fp16}")

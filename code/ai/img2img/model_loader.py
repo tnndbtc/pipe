@@ -152,7 +152,10 @@ def load_flux_controlnet(controlnet_id: str):
         torch_dtype=torch.bfloat16,
     )
     pipe.enable_model_cpu_offload()
-    pipe.enable_vae_tiling()
+    if hasattr(pipe, "enable_vae_tiling"):
+        pipe.enable_vae_tiling()
+    elif hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+        pipe.vae.enable_tiling()
     log.info("FLUX ControlNet ready.")
     return pipe
 
