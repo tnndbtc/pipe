@@ -212,6 +212,28 @@ function resetKW18Sfx() {
   if (fs.existsSync(sfxPlan)) fs.unlinkSync(sfxPlan);
 }
 
+// KW-22: VOPlan.en.json exists but VOPlan.zh-Hans.json does NOT yet exist.
+// AssetManifest.zh-Hans.json is present (written by Stage 7/8).
+// This is the exact state a user is in before running Step 5 for zh-Hans.
+// The regression: once VOPlan.en.json existed, the fallback locale scan was
+// skipped, so zh-Hans never appeared in /pipeline_status locales list.
+function resetKW22() {
+  const ep = getEpDir();
+  // VOPlan.en.json present (primary locale already merged)
+  fs.copyFileSync(
+    path.join(FIXTURE_EP, 'VOPlan.en.json'),
+    path.join(ep, 'VOPlan.en.json')
+  );
+  // AssetManifest.zh-Hans.json present (Stage 7/8 output for translated locale)
+  fs.copyFileSync(
+    path.join(FIXTURE_EP, 'AssetManifest.zh-Hans.json'),
+    path.join(ep, 'AssetManifest.zh-Hans.json')
+  );
+  // VOPlan.zh-Hans.json must NOT exist — manifest_merge hasn't run yet
+  const zhVoPlan = path.join(ep, 'VOPlan.zh-Hans.json');
+  if (fs.existsSync(zhVoPlan)) fs.unlinkSync(zhVoPlan);
+}
+
 module.exports = {
   getEpDir,
   setPipeTestDir,
@@ -228,6 +250,7 @@ module.exports = {
   resetKW18Music,
   resetKW18Sfx,
   resetKW19c,
+  resetKW22,
   // EP_DIR kept for backward compat — resolves dynamically via getEpDir()
   get EP_DIR() { return getEpDir(); },
 };

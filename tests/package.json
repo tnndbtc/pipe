@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "test": "playwright test",
+    "test:e2e": "playwright test",
     "test:music": "playwright test kw1 kw2 kw9"
   },
   "devDependencies": {

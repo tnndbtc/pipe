@@ -392,12 +392,16 @@ try:
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from gen_tts_cloud import build_ssml as _build_ssml
+    from gen_tts_cloud import segment_zh_phonemes as _segment_zh_phonemes
     import azure.cognitiveservices.speech as _speechsdk
     _TTS_AVAILABLE = True
 except ImportError:
     _build_ssml    = None  # type: ignore
     _speechsdk     = None  # type: ignore
     _TTS_AVAILABLE = False
+    def _segment_zh_phonemes(text: str, azure_lang: str) -> list:  # type: ignore
+        """Fallback when gen_tts_cloud is unavailable — single text segment."""
+        return [{"type": "text", "content": text}]
 
 # ── VO polish thresholds — single source of truth is polish_locale_vo
 try:
@@ -539,6 +543,7 @@ def synthesize_vo_item(
     rate           = params.get("rate", "0%")
     pitch          = params.get("pitch", "")
     break_ms       = int(params.get("break_ms", 0))
+    phoneme_overrides = params.get("phoneme_overrides", {})
 
     if not azure_voice:
         raise ValueError("voice is required in params")
@@ -547,6 +552,7 @@ def synthesize_vo_item(
         text, azure_voice, azure_locale, style,
         style_degree=style_degree, rate=rate,
         pitch=pitch, break_ms=break_ms,
+        phoneme_overrides=phoneme_overrides,
     )
 
     # TTS call (with or without cache)
@@ -575,6 +581,7 @@ def synthesize_vo_item(
             pass
 
     # Always synthesize fresh WAV for actual VO items
+    _log.info("[synthesize_vo] ssml=%s", ssml)
     result = _tts_throttled_call(_get_synth(), ssml)
     wav_bytes = result.audio_data  # PCM WAV bytes from Azure
 
@@ -995,32 +1002,103 @@ def _get_synth():
         if not key:
             raise RuntimeError("AZURE_SPEECH_KEY not set")
         config = _speechsdk.SpeechConfig(subscription=key, region=region)
-        config.set_speech_synthesis_output_format(
-            _speechsdk.SpeechSynthesisOutputFormat.Riff24Khz16BitMonoPcm)
+        # output format left at SDK default — matches voice2.py behaviour
         _tts_synth = _speechsdk.SpeechSynthesizer(speech_config=config, audio_config=None)
     return _tts_synth
 
 
 def _preview_build_ssml(text: str, azure_voice: str, azure_locale: str,
                          style: str | None, *, style_degree: float = 1.0,
-                         rate: str = "0%", pitch: str = "", break_ms: int = 0) -> str:
-    """Build SSML for a preview request (identical format to pre_cache_voices.py)."""
-    escaped = (text.replace("&", "&amp;").replace("<", "&lt;")
-                   .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
-    spoken = f'<lang xml:lang="{azure_locale}">{escaped}</lang>'
-    if break_ms:
-        spoken = f'{spoken}<break time="{break_ms}ms"/>'
+                         rate: str = "0%", pitch: str = "", break_ms: int = 0,
+                         phoneme_overrides: dict | None = None) -> str:
+    """Build SSML for a preview / Re-Create request.
+
+    For zh-* locales, known mispronounced characters are emitted as bare
+    <phoneme> elements that are DIRECT children of <voice>, outside any
+    <mstts:express-as> block.  Azure rejects <phoneme> inside express-as
+    (error 1007), but accepts it as a <voice>-level sibling of express-as.
+    """
     rate_attr  = f' rate="{rate}"'   if rate  and rate  != "0%" else ""
     pitch_attr = f' pitch="{pitch}"' if pitch and pitch != "0%" else ""
-    if rate_attr or pitch_attr:
-        spoken = f'<prosody{rate_attr}{pitch_attr}>{spoken}</prosody>'
-    if style:
-        spoken = (f'<mstts:express-as style="{style}" styledegree="{style_degree}">'
-                  f"{spoken}</mstts:express-as>")
+
+    def _xml_esc(s: str) -> str:
+        return (s.replace("&", "&amp;").replace("<", "&lt;")
+                 .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
+
+    def _wrap(content: str) -> str:
+        """Wrap an escaped text fragment in lang → prosody → express-as layers."""
+        if not azure_locale.startswith("zh"):
+            content = f'<lang xml:lang="{azure_locale}">{content}</lang>'
+        # Always emit <prosody> for zh locales — Azure requires the wrapper
+        # for <phoneme alphabet="sapi"> to be honoured.
+        # An empty <prosody> (no attributes) causes error 1007, so fall back to
+        # rate="0%" when neither rate nor pitch is set.
+        if rate_attr or pitch_attr or azure_locale.startswith("zh"):
+            r = rate_attr or (' rate="0%"' if azure_locale.startswith("zh") else "")
+            content = f'<prosody{r}{pitch_attr}>\n{content}</prosody>'
+        if style:
+            content = (f'<mstts:express-as style="{style}" styledegree="{style_degree}">'
+                       f'{content}</mstts:express-as>')
+        return content
+
+    voice_parts: list[str] = []
+    # Build inner content with sapi phonemes inline — alphabet="sapi" is accepted
+    # inside <mstts:express-as> (unlike alphabet="pinyin" which caused error 1007).
+    # Merge global corrections with per-item overrides (item wins on conflict).
+    # Pinyin tone format conversion: "hou4" → "hou 4" (insert space before tone digit).
+    _ph_overrides = phoneme_overrides or {}
+    try:
+        from gen_tts_cloud import _ZH_PHONEME_CORRECTIONS as _g_corrections
+        _merged = {**_g_corrections, **_ph_overrides}
+    except Exception:
+        _merged = dict(_ph_overrides)
+
+    def _seg_with_merged(t):
+        if not azure_locale.startswith("zh") or not _merged:
+            return [{"type": "text", "content": t}]
+        segs, buf = [], []
+        for ch in t:
+            py = _merged.get(ch)
+            if py:
+                if buf:
+                    segs.append({"type": "text", "content": "".join(buf)})
+                    buf = []
+                segs.append({"type": "phoneme", "content": ch, "pinyin": py})
+            else:
+                buf.append(ch)
+        if buf:
+            segs.append({"type": "text", "content": "".join(buf)})
+        return segs or [{"type": "text", "content": t}]
+
+    inner_parts: list[str] = []
+    for seg in _seg_with_merged(text):
+        if seg["type"] == "text":
+            inner_parts.append(_xml_esc(seg["content"]))
+        else:  # phoneme
+            raw_py = seg["pinyin"]   # e.g. "hou4" or "hou 4"
+            # Normalise to SAPI format: insert space before trailing tone digit if missing
+            if len(raw_py) > 1 and raw_py[-1].isdigit() and raw_py[-2] != ' ':
+                sapi = raw_py[:-1] + " " + raw_py[-1]
+            else:
+                sapi = raw_py
+            # Phoneme goes INSIDE the current express-as+prosody block (at end),
+            # then the block is flushed.  Text after the phoneme opens a new block.
+            # This matches voice4.ssml: <express-as><prosody>text<phoneme/></prosody></express-as>
+            inner_parts.append(
+                f'<phoneme alphabet="sapi" ph="{sapi}">'
+                f'{_xml_esc(seg["content"])}</phoneme>'
+            )
+            voice_parts.append(_wrap("".join(inner_parts)))
+            inner_parts = []
+    if inner_parts:
+        voice_parts.append(_wrap("".join(inner_parts)))
+    if break_ms:
+        voice_parts.append(f'<break time="{break_ms}ms"/>')
+
     return (f"<speak version='1.0' xml:lang='{azure_locale}' "
             f"xmlns='http://www.w3.org/2001/10/synthesis' "
             f"xmlns:mstts='http://www.w3.org/2001/mstts'>"
-            f"<voice name='{azure_voice}'>{spoken}</voice></speak>")
+            f"<voice name='{azure_voice}'>{''.join(voice_parts)}</voice></speak>")
 
 
 # ── SSE helper ─────────────────────────────────────────────────────────────────
@@ -2894,6 +2972,18 @@ placeholder="Enter your story here"></textarea>
     .vo-badge-long{background:#3a1a3a;color:#c070d0}
     .vo-badge-stale{background:#3a2200;color:#c09030}
     .vo-trim-row{display:flex;align-items:center;gap:6px;padding:2px 4px 4px 160px;font-size:0.78em;flex-wrap:wrap}
+    .vo-phoneme-row{display:flex;align-items:center;gap:6px;padding:1px 4px 3px 160px;font-size:0.78em;flex-wrap:wrap;min-height:20px}
+    .vo-ph-label{color:var(--dim);font-size:0.85em;flex-shrink:0;user-select:none}
+    .vo-ph-chip{display:inline-flex;align-items:center;gap:3px;background:#1a3a2a;border:1px solid #2a6a4a;border-radius:10px;padding:1px 7px 1px 8px;font-size:0.82em;font-family:monospace;color:#7ecfa0}
+    .vo-ph-chip-rm{background:none;border:none;color:#558;cursor:pointer;padding:0 0 0 2px;font-size:0.9em;line-height:1}
+    .vo-ph-chip-rm:hover{color:#f88}
+    #vo-ph-popover{position:fixed;z-index:9999;background:var(--surface,#1e1e1e);border:1px solid var(--border,#444);border-radius:7px;padding:7px 10px;box-shadow:0 4px 18px rgba(0,0,0,0.5);display:none;align-items:center;gap:7px;font-size:0.82em}
+    #vo-ph-popover .ph-char{font-family:monospace;font-size:1.1em;color:#7ecfa0;min-width:1ch}
+    #vo-ph-popover .ph-arrow{color:var(--dim)}
+    #vo-ph-pop-pinyin{width:72px;background:var(--hover-bg,#2a2a2a);color:var(--text,#eee);border:1px solid var(--border,#444);border-radius:4px;padding:3px 6px;font-family:monospace;font-size:0.95em}
+    #vo-ph-popover .ph-btn{padding:2px 8px;border-radius:4px;border:1px solid var(--border,#444);background:var(--active-bg,#2a2a2a);color:var(--text,#eee);cursor:pointer;font-size:0.85em}
+    #vo-ph-popover .ph-btn:hover{background:rgba(255,255,255,0.1)}
+    #vo-ph-popover .ph-hint{font-size:0.75em;color:var(--dim);margin-left:2px}
     .vo-trim-input{width:70px;background:var(--hover-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 5px;font-size:0.9em;font-family:monospace}
     .vo-trim-btn{font-size:0.78em;padding:2px 8px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:4px;cursor:pointer}
     .vo-trim-btn:hover{background:rgba(0,0,0,0.12);color:var(--text)}
@@ -2917,6 +3007,14 @@ placeholder="Enter your story here"></textarea>
     <button class="vo-scene-btn" id="vo-stop-preview-btn" onclick="_voStopPreview()"
             style="display:none;margin-left:4px;color:#f88;border-color:#f88aa" title="Stop playback">
       ■ Stop</button>
+  </div>
+  <div id="vo-ph-popover">
+    <span class="ph-char" id="vo-ph-pop-char"></span>
+    <span class="ph-arrow">→</span>
+    <input id="vo-ph-pop-pinyin" placeholder="e.g. hou 4" autocomplete="off"/>
+    <button class="ph-btn" onclick="_voPhCommit()">✓</button>
+    <button class="ph-btn" onclick="_voPhCancel()">✕</button>
+    <span class="ph-hint">sapi pinyin</span>
   </div>
   <!-- shared scroll wrapper — timeline, whisper check, col-headers, and items all scroll together -->
   <div id="vo-scroll-wrap">
@@ -4077,6 +4175,8 @@ placeholder="Enter your story here"></textarea>
                   title="Trimmed duration | Pause after (INVARIANT E: not summed)">${escHtml(durLabel)}</span>
           <button class="vo-preview-btn"     id="vo-preview-${iidE}" title="Preview active .wav"
                   onclick='_voPreviewItem(${iidJ},${slugJ},${epIdJ},${locJ})'>▶</button>
+          <button class="vo-resynth-btn"     id="vo-recreate-${iidE}" title="Re-Create: fresh TTS with same params (bypasses cache)"
+                  onclick='_voRecreateItem(${iidJ},${epDirJ},${locJ})'>🔄 Re-Create</button>
           <button class="vo-resynth-btn"     id="vo-btn-${iidE}" title="Save: commit changed params to manifest"
                   onclick='_voSaveItem(${iidJ},${epDirJ},${locJ})'>💾 Save</button>
         </div>
@@ -4098,7 +4198,11 @@ placeholder="Enter your story here"></textarea>
                  oninput="_voRecalcSceneTimes()"/>
           <span style="color:var(--dim);font-size:0.8em">ms</span>
           <button class="vo-trim-btn" onclick='_voSavePause(${iidJ},${epDirJ},${locJ})'>Save Pause</button>
-        </div>`;
+        </div>
+        ${locale.startsWith('zh') ? `<div class="vo-phoneme-row" id="vo-phoneme-row-${iidE}">
+          <span class="vo-ph-label">🔤</span>
+          <div class="vo-ph-chips" id="vo-ph-chips-${iidE}">${_voRenderPhChips(tp.phoneme_overrides||{}, iid)}</div>
+        </div>` : ''}`;
       });
     });
     body.innerHTML = html;
@@ -4641,6 +4745,32 @@ placeholder="Enter your story here"></textarea>
   window._voKeepAudio = window._voKeepAudio || {};
 
   // POST /api/vo_save — save with (possibly changed) voice/style/rate/text.
+  // POST /api/vo_recreate — fresh TTS with same params, bypass cache.
+  // Use when the voice rendering is poor but params are correct — gets a new
+  // non-deterministic synthesis without touching any manifest fields.
+  // After success: sets keep_audio so the next Save commits without another TTS call.
+  async function _voRecreateItem(itemId, epDir, locale) {
+    const btn = document.getElementById('vo-recreate-' + itemId);
+    if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+    try {
+      // Read current UI values so displayed params are honoured, not stale tts_prompt defaults
+      const degree = (document.getElementById('vo-degree-' + itemId)?.value ?? '').trim();
+      const data = await _voPost('/api/vo_recreate', {
+        ep_dir: epDir, locale, item_id: itemId,
+        style_degree: parseFloat(degree) || 1.0,
+      }, itemId);
+      window._voKeepAudio[itemId] = true;
+      const saveBtn = document.getElementById('vo-btn-' + itemId);
+      if (saveBtn) saveBtn.textContent = '📌 Keep';
+      if (btn) { btn.textContent = '✓'; setTimeout(() => { if (btn) { btn.textContent = '🔄 Re-Create'; btn.disabled = false; } }, 2500); }
+      _voUpdateDur(itemId, data.trimmed_duration_sec);
+      _voMarkSentinelInvalid();
+    } catch(e) {
+      if (btn) { btn.textContent = '✗'; setTimeout(() => { if (btn) { btn.textContent = '🔄 Re-Create'; btn.disabled = false; } }, 2500); }
+      alert('vo_recreate error: ' + e.message);
+    }
+  }
+
   // If keep_audio flag is set for this item (Preview wrote WAV and params unchanged),
   // skips Azure TTS and just commits the existing WAV + updates manifest.
   async function _voSaveItem(itemId, epDir, locale) {
@@ -4669,6 +4799,113 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
+
+  // ── Phoneme override helpers ────────────────────────────────────────────────
+
+  function _voRenderPhChips(overrides, itemId) {
+    if (!overrides || !Object.keys(overrides).length) return '';
+    return Object.entries(overrides).map(([ch, py]) => {
+      const chJ = JSON.stringify(ch);
+      const idJ = JSON.stringify(itemId);
+      return `<span class="vo-ph-chip">${escHtml(ch)} → ${escHtml(py)}<button class="vo-ph-chip-rm" onclick="_voPhRemove(${idJ},${chJ})" title="Remove phoneme override">✕</button></span>`;
+    }).join('');
+  }
+
+  // Track current popover context
+  let _voPhCtx = null;
+
+  // Show popover after text selection in a vo-text input (zh locales only)
+  document.addEventListener('mouseup', function(e) {
+    const input = e.target.closest('input.vo-text');
+    if (!input) { _voPhCancel(); return; }
+    const row = input.closest('.vo-item-row');
+    if (!row) return;
+    const locale = row.dataset.locale || '';
+    if (!locale.startsWith('zh')) return;
+    const s = input.selectionStart, en = input.selectionEnd;
+    if (s === en) { _voPhCancel(); return; }
+    const selected = input.value.substring(s, en).trim();
+    if (!selected) { _voPhCancel(); return; }
+    _voPhCtx = { itemId: row.dataset.itemId, char: selected };
+    const pop = document.getElementById('vo-ph-popover');
+    document.getElementById('vo-ph-pop-char').textContent = selected;
+    document.getElementById('vo-ph-pop-pinyin').value = '';
+    pop.style.display = 'flex';
+    // Position near mouse, keep inside viewport
+    requestAnimationFrame(() => {
+      const pw = pop.offsetWidth  || 240;
+      const ph = pop.offsetHeight || 40;
+      pop.style.left = Math.min(e.clientX + 10, window.innerWidth  - pw - 12) + 'px';
+      pop.style.top  = Math.min(e.clientY + 14, window.innerHeight - ph - 12) + 'px';
+    });
+    setTimeout(() => document.getElementById('vo-ph-pop-pinyin').focus(), 60);
+    e.stopPropagation();
+  });
+
+  // Hide popover on click outside
+  document.addEventListener('mousedown', function(e) {
+    const pop = document.getElementById('vo-ph-popover');
+    if (pop && !pop.contains(e.target)) _voPhCancel();
+  });
+
+  // Commit on Enter key in pinyin input
+  document.getElementById('vo-ph-pop-pinyin') && document.getElementById('vo-ph-pop-pinyin').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') _voPhCommit();
+    if (e.key === 'Escape') _voPhCancel();
+  });
+  // The above won't work if element isn't yet in DOM — use event delegation instead:
+  document.addEventListener('keydown', function(e) {
+    const el = document.getElementById('vo-ph-pop-pinyin');
+    if (document.activeElement === el) {
+      if (e.key === 'Enter') { e.preventDefault(); _voPhCommit(); }
+      if (e.key === 'Escape') _voPhCancel();
+    }
+  });
+
+  function _voPhCancel() {
+    const pop = document.getElementById('vo-ph-popover');
+    if (pop) pop.style.display = 'none';
+    _voPhCtx = null;
+  }
+
+  async function _voPhCommit() {
+    if (!_voPhCtx) return;
+    const pinyin = (document.getElementById('vo-ph-pop-pinyin').value || '').trim();
+    if (!pinyin) return;
+    const { itemId, char } = _voPhCtx;
+    _voPhCancel();
+    const row    = document.getElementById('vo-row-' + itemId);
+    const epDir  = row?.dataset.epDir  || '';
+    const locale = row?.dataset.locale || '';
+    try {
+      await _voPost('/api/vo_phoneme', { ep_dir: epDir, locale, item_id: itemId, char, pinyin, action: 'add' }, itemId);
+      // Add chip to DOM
+      const chips = document.getElementById('vo-ph-chips-' + itemId);
+      if (chips) {
+        // Remove existing chip for same char if present
+        chips.querySelectorAll('.vo-ph-chip').forEach(c => {
+          if (c.textContent.trim().startsWith(char + ' →')) c.remove();
+        });
+        const chJ = JSON.stringify(char);
+        const idJ = JSON.stringify(itemId);
+        chips.insertAdjacentHTML('beforeend',
+          `<span class="vo-ph-chip">${escHtml(char)} → ${escHtml(pinyin)}<button class="vo-ph-chip-rm" onclick="_voPhRemove(${idJ},${chJ})" title="Remove phoneme override">✕</button></span>`);
+      }
+    } catch(e) { appendLine('⚠ phoneme save error: ' + e.message, 'err'); }
+  }
+
+  async function _voPhRemove(itemId, char) {
+    const row    = document.getElementById('vo-row-' + itemId);
+    const epDir  = row?.dataset.epDir  || '';
+    const locale = row?.dataset.locale || '';
+    try {
+      await _voPost('/api/vo_phoneme', { ep_dir: epDir, locale, item_id: itemId, char, action: 'remove' }, itemId);
+      const chips = document.getElementById('vo-ph-chips-' + itemId);
+      if (chips) chips.querySelectorAll('.vo-ph-chip').forEach(c => {
+        if (c.textContent.trim().startsWith(char + ' →')) c.remove();
+      });
+    } catch(e) { appendLine('⚠ phoneme remove error: ' + e.message, 'err'); }
+  }
 
   // POST /api/vo_trim — apply trim handles
   async function _voApplyTrim(itemId, epDir, locale) {
@@ -14594,19 +14831,27 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         },
     }
 
-    # Detect locales from VOPlan.{locale}.json files; fall back to AssetManifest.{locale}.json
+    # Detect locales from VOPlan.{locale}.json files, then fill in any
+    # additional locales from AssetManifest.{locale}.json that don't have a
+    # VOPlan yet.  This ensures translated locales appear in Stage 9 (so the
+    # user can click "Run 5" to create their VOPlan) even before manifest_merge
+    # has run for them.  Previously the AssetManifest scan was a fallback that
+    # only ran when NO VOPlan existed at all — so once VOPlan.en.json appeared,
+    # zh-Hans (which only had an AssetManifest) was silently dropped.
     locales: list[str] = []
+    _locales_seen: set[str] = set()
     if os.path.isdir(ep_dir):
         for f in sorted(os.listdir(ep_dir)):
             m = re.match(r"VOPlan\.(.+)\.json$", f)
             if m and m.group(1) != "shared":
+                _locales_seen.add(m.group(1))
                 locales.append(m.group(1))
-        if not locales:
-            # No VOPlan yet — derive from AssetManifest locale files
-            for f in sorted(os.listdir(ep_dir)):
-                m = re.match(r"AssetManifest\.(.+)\.json$", f)
-                if m and m.group(1) != "shared":
-                    locales.append(m.group(1))
+        # Always also scan AssetManifest files and add any locale not yet seen
+        for f in sorted(os.listdir(ep_dir)):
+            m = re.match(r"AssetManifest\.(.+)\.json$", f)
+            if m and m.group(1) != "shared" and m.group(1) not in _locales_seen:
+                _locales_seen.add(m.group(1))
+                locales.append(m.group(1))
 
     # Per-locale post-processing status
     locale_steps: dict[str, dict] = {}
@@ -18046,12 +18291,13 @@ class Handler(BaseHTTPRequestHandler):
 
                 tp = _item.get("tts_prompt", {})
                 params = {
-                    "voice":        tp.get("azure_voice") or tp.get("voice", ""),
-                    "style":        tp.get("azure_style") or tp.get("style", ""),
-                    "style_degree": tp.get("azure_style_degree", 1.5),
-                    "rate":         tp.get("azure_rate") or tp.get("rate", "0%"),
-                    "pitch":        tp.get("azure_pitch", ""),
-                    "break_ms":     tp.get("azure_break_ms", 0),
+                    "voice":             tp.get("azure_voice") or tp.get("voice", ""),
+                    "style":             tp.get("azure_style") or tp.get("style", ""),
+                    "style_degree":      tp.get("azure_style_degree", 1.5),
+                    "rate":              tp.get("azure_rate") or tp.get("rate", "0%"),
+                    "pitch":             tp.get("azure_pitch", ""),
+                    "break_ms":          tp.get("azure_break_ms", 0),
+                    "phoneme_overrides": tp.get("phoneme_overrides", {}),
                 }
                 text = _item.get("text", "")
 
@@ -18071,6 +18317,42 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 _json_resp(self, {"item_id": item_id, **result})
 
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
+        # POST /api/vo_phoneme — add or remove a phoneme override for one VO item
+        elif self.path == "/api/vo_phoneme":
+            try:
+                if not _VO_UTILS_AVAILABLE:
+                    raise RuntimeError("vo_utils not available")
+                length = int(self.headers.get("Content-Length", 0))
+                req     = json.loads(self.rfile.read(length))
+                ep_dir  = req.get("ep_dir",  "").strip()
+                locale  = req.get("locale",  "").strip()
+                item_id = req.get("item_id", "").strip()
+                char    = req.get("char",    "").strip()
+                pinyin  = req.get("pinyin",  "").strip()
+                action  = req.get("action",  "add")   # "add" | "remove"
+                _vo_validate_inputs(ep_dir, locale, item_id)
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                mpath   = os.path.join(full_ep, f"VOPlan.{locale}.json")
+                with _get_vo_lock(full_ep):
+                    with open(mpath, encoding="utf-8") as _mf:
+                        mani = json.load(_mf)
+                    item = next((v for v in mani.get("vo_items", [])
+                                 if v["item_id"] == item_id), None)
+                    if item is None:
+                        raise ValueError(f"item_id {item_id!r} not found in manifest")
+                    tp = item.setdefault("tts_prompt", {})
+                    overrides = tp.setdefault("phoneme_overrides", {})
+                    if action == "add" and char and pinyin:
+                        overrides[char] = pinyin
+                    elif action == "remove" and char:
+                        overrides.pop(char, None)
+                    with open(mpath, "w", encoding="utf-8") as _mf:
+                        json.dump(mani, _mf, ensure_ascii=False, indent=2)
+                _log.info("[vo_phoneme] %s item=%s char=%r action=%s", locale, item_id, char, action)
+                _json_resp(self, {"ok": True, "phoneme_overrides": overrides})
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 409)
 

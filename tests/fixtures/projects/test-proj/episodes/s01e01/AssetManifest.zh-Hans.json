@@ -1,0 +1,28 @@
+{
+  "schema_id": "AssetManifest",
+  "schema_version": "1.0.0",
+  "manifest_id": "test-proj-s01e01-zh-Hans-manifest",
+  "project_id": "test-proj",
+  "episode_id": "s01e01",
+  "locale": "zh-Hans",
+  "locale_scope": "locale",
+  "shared_ref": "AssetManifest.shared.json",
+  "shotlist_ref": "ShotList.json",
+  "character_packs": [],
+  "backgrounds": [],
+  "background_overrides": [],
+  "vo_items": [
+    {
+      "item_id": "vo-sc01-001",
+      "speaker_id": "narrator",
+      "text": "凌晨1时23分，一个按钮被按下。",
+      "license_type": "commercial_reusable",
+      "tts_prompt": {
+        "voice": "zh-CN-YunxiNeural",
+        "style": "documentary-narration",
+        "rate": "0%",
+        "pitch": ""
+      }
+    }
+  ]
+}

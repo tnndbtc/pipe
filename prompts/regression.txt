@@ -2858,20 +2858,39 @@ Fix: soft penalty after CLIP scoring:
 
 ## HOW TO ADD A AUTOMATED TEST FOR A KEY WORKFLOW
 ##
-## Each KW section below has a matching Playwright spec in tests/playwright/.
-## To add a new test for KW-N, you need BOTH artifacts — neither alone is enough.
+## Two test types are used in this repo:
+##
+## A) Playwright browser/HTTP tests — for UI behaviour and API endpoints.
+##    Test files live in:  tests/playwright/kw{N}_{slug}.spec.js
+##    Run with:            cd tests && npx playwright test
+##
+## B) Python unit tests — for pure Python functions (no browser, no server).
+##    Test files live in:  tests/unit/test_{slug}.py
+##    Run with:            pytest tests/unit/ -v
+##    (KW-21 is the first example of this type.)
+##
+## Pick the next unused KW number (currently KW-22+).
+##
+## Each KW section below has a matching test file — neither alone is enough.
 ##
 ## ── Step 1: Add a KW section here ────────────────────────────────────────────
 ##   Follow the pattern of existing KW sections: user action, trigger, invariants,
-##   regression risks.  Pick the next unused KW number (currently KW-15+).
+##   regression risks.
 ##
-## ── Step 2: Create tests/playwright/kw{N}_{slug}.spec.js ─────────────────────
+## ── Step 2A (browser/HTTP test): Create tests/playwright/kw{N}_{slug}.spec.js
 ##   Copy the structure of an existing spec (e.g. kw13_media_music_mix.spec.js).
 ##   Every spec MUST:
 ##     • import { startTestServer, stopTestServer } from '../helpers/server'
 ##     • import a reset function from '../helpers/fixture_state'
 ##     • call startTestServer() / stopTestServer() in beforeAll / afterAll
 ##     • call the reset function in beforeEach to put the fixture in a clean state
+##
+## ── Step 2B (Python unit test): Create tests/unit/test_{slug}.py
+##   Use pytest.  No server, no browser — import the Python module directly.
+##   Every test file MUST:
+##     • add code/http to sys.path via _HTTP_DIR insertion (see test_ssml_phoneme.py)
+##     • include the KW-N tag at the top matching this regression.txt section
+##     • verify the test FAILS when the bug is present (per Rule F-4 above)
 ##
 ## ── Step 3: Add a reset function to tests/helpers/fixture_state.js ───────────
 ##   resetKW{N}() sets up tests/fixtures/projects/test-proj/episodes/s01e01/
@@ -3323,3 +3342,135 @@ triggers. Removing the VOPlan (forcing 500) also triggers the fallback but misse
 the real regression path (200 with empty shots), masking a broken _tlShots.length check.
 
 See the "FRONTEND (UI) TEST PATTERNS" section at the top of this file.
+
+---
+
+## KW-21: Chinese TTS SSML — <phoneme> placement (Azure error 1007)
+
+### Files involved
+- `code/http/gen_tts_cloud.py` — `build_ssml()`, `build_episode_ssml()`, `segment_zh_phonemes()`, `_ZH_PHONEME_CORRECTIONS`
+- `code/http/test_server.py` — `_preview_build_ssml()` (used by `/api/vo_recreate`, `/api/vo_preview`)
+- `tests/unit/test_ssml_phoneme.py` — pytest unit tests (no server, no browser)
+
+### The bug
+Azure TTS rejects any SSML that contains a `<phoneme>` element inside
+`<mstts:express-as>`, even if every other part of the SSML is valid.
+The rejection fires with:
+
+    Error code: 1007 — SSML parsing error: 0x80045003
+    "The caller has spec USP state: TurnStarted. Received audio size: 0 bytes."
+
+The user sees this as a failed Re-Create or Preview call in the VO tab.
+
+### Root cause pattern
+Whenever SSML builders are modified to add phoneme corrections, the naive
+approach wraps the whole text in express-as first, then tries to inject
+`<phoneme>` inside.  Azure rejects this.
+
+### The invariant
+```
+<speak>
+  <voice>
+    <mstts:express-as style="...">   ← style wrapper
+      <prosody rate="...">
+        前半句话                       ← plain text
+      </prosody>
+    </mstts:express-as>
+    <phoneme alphabet="pinyin" ph="hou4">后</phoneme>  ← DIRECT voice child
+    <mstts:express-as style="...">   ← another style wrapper
+      <prosody rate="...">
+        后半句话
+      </prosody>
+    </mstts:express-as>
+  </voice>
+</speak>
+```
+
+`<phoneme>` MUST be a **direct child of `<voice>`**, never nested inside
+`<mstts:express-as>` or `<prosody>`.
+
+### How the fix works
+`segment_zh_phonemes(text, azure_lang)` in `gen_tts_cloud.py` splits the text
+at correction-character boundaries into `{"type": "text"}` and
+`{"type": "phoneme"}` segments.  Callers loop over segments:
+- text segments → wrapped in the normal `express-as → prosody` stack
+- phoneme segments → emitted bare as `<phoneme>` direct children of `<voice>`
+
+Both `build_ssml()` and `_preview_build_ssml()` use this pattern.
+
+### Correction table
+`_ZH_PHONEME_CORRECTIONS` in `gen_tts_cloud.py` maps characters to pinyin:
+
+| Char | Pinyin | Correct reading       | Default misread   |
+|------|--------|-----------------------|-------------------|
+| 后   | hou4   | hòu (after/behind)    | hóu (monkey, T2)  |
+
+Add new entries to this dict as more mispronunciations are discovered.
+
+### Test file
+`tests/unit/test_ssml_phoneme.py`
+
+Run:
+```
+cd tests && npm test          # runs unit tests first, then all Playwright tests
+cd tests && npm run test:unit # unit tests only (fast, no server needed)
+```
+
+### Invariants checked
+1. `segment_zh_phonemes("科后学", "zh-CN")` returns `后` as a phoneme segment with `pinyin="hou4"`
+2. `segment_zh_phonemes("后", "en-US")` returns a single text segment (no correction outside zh-*)
+3. `build_ssml(text_with_后, ..., style="documentary-narration")` → no `<phoneme>` inside `<mstts:express-as>`
+4. `build_ssml("后", ..., style=None)` → exactly one `<phoneme ph="hou4">` element
+5. `build_ssml(english_text, ...)` → zero `<phoneme>` elements
+6. `_preview_build_ssml(text_with_后, ...)` (test_server.py path) — same structural invariants
+
+### Regression risks — things most likely to break this
+- Editing `build_ssml()` and accidentally putting the phoneme segment inside the
+  `_wrap_spoken()` call instead of appending it bare to `voice_parts`
+- Editing `_preview_build_ssml()` in `test_server.py` and similarly wrapping
+  phoneme segments inside the `_wrap()` call
+- Reverting `segment_zh_phonemes` to a simpler function that returns a single
+  text segment (removes the correction entirely — different failure mode:
+  Azure accepts the SSML but mispronounces the word)
+- Adding a new SSML builder function for a new code path that does not call
+  `segment_zh_phonemes` at all
+
+---
+
+## KW-22: Stage 9 — translated locale visible before VOPlan exists
+
+### Files involved
+- `code/http/test_server.py` — `_pipeline_status()` locale detection loop
+- `tests/playwright/kw22_stage9_translated_locale_visibility.spec.js`
+- `tests/fixtures/projects/test-proj/episodes/s01e01/AssetManifest.zh-Hans.json`
+
+### The bug
+`_pipeline_status()` first scanned for `VOPlan.{locale}.json` files.  If any
+were found (e.g. `VOPlan.en.json`), it skipped the `AssetManifest.{locale}.json`
+fallback scan entirely.  A translated locale (zh-Hans) that had an
+`AssetManifest.zh-Hans.json` but no `VOPlan.zh-Hans.json` yet was silently
+dropped from `status.locales`.  The Stage 9 UI therefore never rendered steps
+5-11 for zh-Hans, so the user had no way to click "Run 5" (manifest_merge) to
+create the VOPlan from the web UI.
+
+### The fix
+Always scan both `VOPlan.*` and `AssetManifest.*` files; use a seen-set to
+de-duplicate.  Any locale that appears in either source is included in `locales`.
+
+### Fixture state
+- `VOPlan.en.json` present (primary locale already merged)
+- `AssetManifest.zh-Hans.json` present (Stage 7/8 wrote it for the translated locale)
+- `VOPlan.zh-Hans.json` absent (manifest_merge has not yet run for zh-Hans)
+
+### Invariants that must hold
+1. `GET /pipeline_status?slug=test-proj&ep_id=s01e01` returns HTTP 200
+2. `status.locales` contains both `"en"` and `"zh-Hans"`
+3. `VOPlan.zh-Hans.json` is NOT created by the status call (read-only)
+
+### Regression risks — things most likely to break this
+- Restoring the `if not locales:` guard around the AssetManifest scan, which
+  would reintroduce the original bug
+- Changing the AssetManifest filename pattern so the regex no longer matches
+  `AssetManifest.zh-Hans.json`
+- Sorting locales in a way that drops duplicates but also drops the zh-Hans
+  entry added by the AssetManifest scan

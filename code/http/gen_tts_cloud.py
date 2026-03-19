@@ -331,6 +331,70 @@ def resolve_azure_style(emotion: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Chinese phoneme corrections
+# ---------------------------------------------------------------------------
+# Azure TTS Chinese voices sometimes mispronounce certain characters.
+# Add new entries here as they are discovered; the pinyin uses tone numbers
+# (1–4, e.g. "hou4" = hòu).  Only applied when azure_lang starts with "zh".
+
+_ZH_PHONEME_CORRECTIONS: dict[str, str] = {
+    "后": "hou4",   # hòu (after/behind, tone 4) — mispronounced as hóu (monkey, tone 2)
+}
+
+
+def _xml_escape(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
+
+
+def segment_zh_phonemes(text: str, azure_lang: str) -> list[dict]:
+    """Split *text* into plain-text and phoneme-correction segments.
+
+    Returns a list of dicts, each either:
+        {'type': 'text',    'content': str}
+        {'type': 'phoneme', 'content': str, 'pinyin': str}
+
+    <phoneme> elements must be emitted as direct children of <voice>, OUTSIDE
+    any <mstts:express-as> block — Azure rejects <phoneme> inside express-as
+    with error 1007.
+
+    For non-zh locales (or when there are no corrections) returns a single
+    text segment so callers can use the same code path everywhere.
+    """
+    if not azure_lang.startswith("zh") or not _ZH_PHONEME_CORRECTIONS:
+        return [{"type": "text", "content": text}]
+    segments: list[dict] = []
+    buf: list[str] = []
+    for ch in text:
+        pinyin = _ZH_PHONEME_CORRECTIONS.get(ch)
+        if pinyin:
+            if buf:
+                segments.append({"type": "text", "content": "".join(buf)})
+                buf = []
+            segments.append({"type": "phoneme", "content": ch, "pinyin": pinyin})
+        else:
+            buf.append(ch)
+    if buf:
+        segments.append({"type": "text", "content": "".join(buf)})
+    return segments or [{"type": "text", "content": text}]
+
+
+def _wrap_spoken(escaped: str, prosody_parts: list[str],
+                 style: str | None, style_degree: float) -> str:
+    """Wrap an already-XML-escaped text fragment in prosody + express-as."""
+    spoken = (
+        f"<prosody {' '.join(prosody_parts)}>{escaped}</prosody>"
+        if prosody_parts else escaped
+    )
+    if style:
+        spoken = (
+            f'<mstts:express-as style="{style}" styledegree="{style_degree}">'
+            f"{spoken}</mstts:express-as>"
+        )
+    return spoken
+
+
 def build_ssml(
     text: str,
     voice: str,
@@ -359,22 +423,7 @@ def build_ssml(
     # Normalise newlines → single space so Azure TTS doesn't insert pauses
     text = re.sub(r'\s*\n+\s*', ' ', text).strip()
 
-    escaped = (text
-               .replace("&", "&amp;")
-               .replace("<", "&lt;")
-               .replace(">", "&gt;")
-               .replace('"', "&quot;")
-               .replace("'", "&apos;"))
-
-    # Optionally inject sentence-end breaks
-    if break_ms > 0:
-        escaped = re.sub(
-            r'([.!?](?:\s|$))',
-            lambda m: m.group(1).rstrip() + f'<break time="{break_ms}ms"/>' + (m.group(1)[len(m.group(1).rstrip()):] or ' '),
-            escaped,
-        )
-
-    # Prosody — emit whenever rate, pitch, or duration_sec is meaningful
+    # Prosody attrs
     prosody_parts: list[str] = []
     if duration_sec is not None:
         prosody_parts.append(f'duration="{duration_sec:.3f}s"')
@@ -383,23 +432,33 @@ def build_ssml(
     if pitch:
         prosody_parts.append(f'pitch="{pitch}"')
 
-    spoken = (
-        f"<prosody {' '.join(prosody_parts)}>{escaped}</prosody>"
-        if prosody_parts else escaped
-    )
-
-    # Style
-    if style:
-        spoken = (
-            f'<mstts:express-as style="{style}" styledegree="{style_degree}">'
-            f"{spoken}</mstts:express-as>"
-        )
+    # Split at phoneme-correction boundaries.  Each 'text' segment is wrapped
+    # in the normal express-as/prosody stack; each 'phoneme' segment becomes a
+    # bare <phoneme> direct child of <voice> (Azure rejects <phoneme> inside
+    # <mstts:express-as>).
+    voice_parts: list[str] = []
+    for seg in segment_zh_phonemes(text, azure_lang):
+        if seg["type"] == "text":
+            escaped = _xml_escape(seg["content"])
+            if break_ms > 0:
+                escaped = re.sub(
+                    r'([.!?](?:\s|$))',
+                    lambda m: m.group(1).rstrip() + f'<break time="{break_ms}ms"/>'
+                              + (m.group(1)[len(m.group(1).rstrip()):] or ' '),
+                    escaped,
+                )
+            voice_parts.append(_wrap_spoken(escaped, prosody_parts, style, style_degree))
+        else:  # phoneme
+            voice_parts.append(
+                f'<phoneme alphabet="pinyin" ph="{seg["pinyin"]}">'
+                f'{_xml_escape(seg["content"])}</phoneme>'
+            )
 
     return (
         f"<speak version='1.0' xml:lang='{azure_lang}' "
         f"xmlns='http://www.w3.org/2001/10/synthesis' "
         f"xmlns:mstts='http://www.w3.org/2001/mstts'>"
-        f"<voice name='{voice}'>{spoken}</voice>"
+        f"<voice name='{voice}'>{''.join(voice_parts)}</voice>"
         f"</speak>"
     )
 
