@@ -283,11 +283,16 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
             continue
         shot_id = sfx_meta.get("shot_id", "")
         sfx_index.setdefault(shot_id, []).append({
-            "item_id": item_id,
-            "source_file": str(p),
-            "start": float(sel.get("start", 0)),
-            "end": sel.get("end"),  # None = auto
-            "duration_sec": float(sfx_meta.get("duration_sec", 0)),
+            "item_id":       item_id,
+            "source_file":   str(p),
+            "start":         float(sel.get("start", 0)),
+            "end":           sel.get("end"),  # None = auto
+            "duration_sec":  float(sfx_meta.get("duration_sec", 0)),
+            "volume_db":     float(sel.get("volume_db",     0) or 0),   # NEW
+            "duck_db":       float(sel.get("duck_db",       0) or 0),   # NEW
+            "fade_sec":      float(sel.get("fade_sec",      0) or 0),   # NEW
+            "clip_volume_db":float(sel.get("clip_volume_db",0) or 0),   # NEW
+            "is_cut_clip":   bool(sel.get("is_cut_clip", False)),       # NEW
         })
 
     # Timeline data collections
@@ -391,7 +396,19 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
                 max_samples = len(sfx_data)  # no cap — use full clip
 
             sfx_data = sfx_data[:max_samples]
-            sfx_data = sfx_data * (10 ** (SFX_DB / 20.0))
+            _sfx_vol_db  = float(sel.get("volume_db",     0) or 0)
+            _sfx_duck_db = float(sel.get("duck_db",       0) or 0)
+            _sfx_clip_db = float(sel.get("clip_volume_db",0) or 0)
+            sfx_data = sfx_data * (10 ** ((SFX_DB + _sfx_vol_db + _sfx_duck_db + _sfx_clip_db) / 20.0))
+
+            _sfx_fade_sec = float(sel.get("fade_sec", 0) or 0)
+            if _sfx_fade_sec > 0 and len(sfx_data) > 0:
+                fade_n = int(_sfx_fade_sec * SAMPLE_RATE)   # SAMPLE_RATE = 48000 (module constant)
+                if fade_n > 0:
+                    in_n  = min(fade_n, len(sfx_data))
+                    out_n = min(fade_n, len(sfx_data))
+                    sfx_data[:in_n]  *= np.linspace(0.0, 1.0, in_n).reshape(-1, 1) if sfx_data.ndim == 2 else np.linspace(0.0, 1.0, in_n)
+                    sfx_data[-out_n:] *= np.linspace(1.0, 0.0, out_n).reshape(-1, 1) if sfx_data.ndim == 2 else np.linspace(1.0, 0.0, out_n)
 
             s = int(abs_start * SAMPLE_RATE)
             e2 = min(s + len(sfx_data), n_samples)
@@ -401,7 +418,13 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
             tl_sfx_out.append({
                 "item_id": sel["item_id"],
                 "start_sec": round(abs_start, 3),
-                "end_sec": round(abs_start + len(sfx_data) / SAMPLE_RATE, 3),
+                # end_sec represents the user's intended window (from SfxPlan start/end),
+                # not the physical clip length.  If the clip is shorter the audio simply
+                # ends early inside that window; if longer it is capped.  Either way
+                # the bar must span the full intended window so the timeline matches
+                # what the user set — use sfx_end_ep when available.
+                "end_sec": round(float(sfx_end_ep), 3) if sfx_end_ep is not None
+                           else round(abs_start + len(sfx_data) / SAMPLE_RATE, 3),
                 "shot_id": shot_id,
                 "tag": next((x.get("tag","") for x in manifest.get("sfx_items",[]) if x.get("item_id")==sel["item_id"]), ""),
             })

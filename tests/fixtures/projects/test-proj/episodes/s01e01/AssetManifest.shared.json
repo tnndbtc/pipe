@@ -37,13 +37,46 @@
         "nuclear plant operator room analogue gauges dark"
       ],
       "scoring_hints": {
-        "subjects": ["control panel", "instrument gauges", "toggle switches", "indicator lights", "analogue dials"],
-        "environment": ["enclosed interior", "concrete walls", "industrial facility", "no windows", "low ceiling"],
-        "style": ["cinematic photography", "low key lighting", "deep shadows", "cold industrial atmosphere", "high contrast"],
-        "motion": ["completely still", "no movement", "static scene"]
+        "subjects": [
+          "control panel",
+          "instrument gauges",
+          "toggle switches",
+          "indicator lights",
+          "analogue dials"
+        ],
+        "environment": [
+          "enclosed interior",
+          "concrete walls",
+          "industrial facility",
+          "no windows",
+          "low ceiling"
+        ],
+        "style": [
+          "cinematic photography",
+          "low key lighting",
+          "deep shadows",
+          "cold industrial atmosphere",
+          "high contrast"
+        ],
+        "motion": [
+          "completely still",
+          "no movement",
+          "static scene"
+        ]
       },
-      "include_keywords": ["control room", "nuclear", "industrial"],
-      "exclude_keywords": ["people", "person", "daylight", "outdoor", "nature", "modern office"],
+      "include_keywords": [
+        "control room",
+        "nuclear",
+        "industrial"
+      ],
+      "exclude_keywords": [
+        "people",
+        "person",
+        "daylight",
+        "outdoor",
+        "nature",
+        "modern office"
+      ],
       "continuity_hints": {
         "group_id": "chernobyl-facility",
         "palette_target": "desaturated_grey",
@@ -54,7 +87,7 @@
       "lighting": "soft_night"
     },
     {
-      "asset_id": "bg-chernobyl-plant-exterior-dawn",
+      "asset_id": "bg-chernobyl-plant-exterior-overcast",
       "type": "background",
       "license_type": "proprietary_cleared",
       "motion_level": "medium",
@@ -81,13 +114,42 @@
         "nuclear reactor building exterior wide shot overcast"
       ],
       "scoring_hints": {
-        "subjects": ["reactor building", "cooling towers", "chimney stacks", "industrial complex"],
-        "environment": ["flat open plain", "overcast sky", "Ukrainian steppe", "vast landscape"],
-        "style": ["cinematic wide angle", "cold morning light", "industrial documentary", "dramatic scale"],
-        "motion": ["very slight steam drift", "near static", "minimal movement"]
+        "subjects": [
+          "reactor building",
+          "cooling towers",
+          "chimney stacks",
+          "industrial complex"
+        ],
+        "environment": [
+          "flat open plain",
+          "overcast sky",
+          "Ukrainian steppe",
+          "vast landscape"
+        ],
+        "style": [
+          "cinematic wide angle",
+          "cold morning light",
+          "industrial documentary",
+          "dramatic scale"
+        ],
+        "motion": [
+          "very slight steam drift",
+          "near static",
+          "minimal movement"
+        ]
       },
-      "include_keywords": ["nuclear plant", "cooling tower"],
-      "exclude_keywords": ["people", "person", "interior", "modern city", "text", "sign"],
+      "include_keywords": [
+        "nuclear plant",
+        "cooling tower"
+      ],
+      "exclude_keywords": [
+        "people",
+        "person",
+        "interior",
+        "modern city",
+        "text",
+        "sign"
+      ],
       "continuity_hints": {
         "group_id": "chernobyl-facility",
         "palette_target": "desaturated_grey",

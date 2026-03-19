@@ -884,17 +884,35 @@ def render_shot(
     else:
         # No SfxPlan available — fall back to sfx_plan_entries on the shot dict (if any).
         _sfx_entries = shot.get("sfx_plan_entries", [])
-    sfx_plan_amp = 10 ** (SFX_DB / 20.0)
     for sp_i, sp_entry in enumerate(_sfx_entries):
-        sp_path_str = sp_entry.get("source_file", "")
-        if not sp_path_str:
+        sp_vol_db      = float(sp_entry.get("volume_db",     0) or 0)
+        sp_duck_db     = float(sp_entry.get("duck_db",       0) or 0)
+        sp_clip_vol_db = float(sp_entry.get("clip_volume_db",0) or 0)
+        sp_fade_sec    = float(sp_entry.get("fade_sec",      0) or 0)
+        sfx_plan_amp   = 10 ** ((SFX_DB + sp_vol_db + sp_duck_db + sp_clip_vol_db) / 20.0)
+
+        # Resolve source: cut clip path takes priority over source_file + start/end
+        sp_clip_path = sp_entry.get("clip_path")
+        if sp_clip_path:
+            if not os.path.isabs(sp_clip_path):
+                _episode_dir_rv = str(shots_dir.parent.parent.parent)
+                sp_clip_path = os.path.join(_episode_dir_rv, sp_clip_path)
+            sfx_source = sp_clip_path
+            sp_start   = 0.0
+            sp_end     = None
+        else:
+            sfx_source = sp_entry.get("source_file", "")
+            sp_start   = float(sp_entry.get("start_sec") or 0.0)
+            sp_end     = sp_entry.get("end_sec")
+
+        if not sfx_source:
             continue
-        sp_path = Path(sp_path_str)
+        sp_path = Path(sfx_source)
         if not sp_path.exists():
-            print(f"  [WARN] SFX plan entry missing: {sp_path_str}")
+            print(f"  [WARN] SFX plan entry missing: {sfx_source}")
             continue
-        sp_start_ep  = float(sp_entry.get("start_sec") or 0.0)  # episode-absolute
-        sp_end_ep    = sp_entry.get("end_sec")                    # episode-absolute (or None)
+        sp_start_ep  = sp_start   # episode-absolute
+        sp_end_ep    = sp_end     # episode-absolute (or None)
         sp_idx       = add_input([], str(sp_path))
         lbl          = f"sfxp{sp_i}"
         # SfxPlan.json stores episode-absolute timestamps; convert to shot-relative
@@ -906,8 +924,16 @@ def render_shot(
             f"volume={sfx_plan_amp:.6f}"
         )
         if sp_end_ep is not None and float(sp_end_ep) > sp_start_ep:
-            trim_dur = float(sp_end_ep) - sp_start_ep  # duration = ep-abs diff (correct as-is)
+            trim_dur = float(sp_end_ep) - sp_start_ep
             filt += f",atrim=duration={trim_dur:.3f}"
+            if sp_fade_sec > 0:
+                fade_out_st = max(0.0, trim_dur - sp_fade_sec)
+                filt += (
+                    f",afade=t=in:st=0:d={sp_fade_sec:.3f}"
+                    f",afade=t=out:st={fade_out_st:.3f}:d={sp_fade_sec:.3f}"
+                )
+        elif sp_fade_sec > 0:
+            filt += f",afade=t=in:st=0:d={sp_fade_sec:.3f}"   # fade-in only (end unknown)
         filt += f",adelay={delay_ms_sp}|{delay_ms_sp}[{lbl}]"
         filter_parts.append(filt)
         all_audio.append(f"[{lbl}]")
@@ -1379,10 +1405,21 @@ def main() -> None:
     if os.path.isfile(_sfx_plan_path):
         try:
             _sfx_plan_data = json.loads(open(_sfx_plan_path, encoding="utf-8").read())
+            # v1.2+: volume lives on cut_clips[].volume_db; build lookup for render_shot
+            _sfx_clip_vol_map = {
+                cl["clip_id"]: float(cl.get("volume_db", 0) or 0)
+                for cl in _sfx_plan_data.get("cut_clips", [])
+                if cl.get("clip_id")
+            }
             for _se in _sfx_plan_data.get("sfx_entries", []):
                 _sid = _se.get("shot_id", "")
                 if _sid:
-                    _sfx_plan_by_shot.setdefault(_sid, []).append(_se)
+                    # Inject clip_volume_db from cut_clips if absent (new schema v1.2+)
+                    _se_out = dict(_se)
+                    if not _se_out.get("clip_volume_db"):
+                        _se_out["clip_volume_db"] = _sfx_clip_vol_map.get(
+                            _se_out.get("clip_id", ""), 0.0)
+                    _sfx_plan_by_shot.setdefault(_sid, []).append(_se_out)
             _n_sfx = sum(len(v) for v in _sfx_plan_by_shot.values())
             print(f"  [render] SfxPlan.json loaded — {_n_sfx} entr{'y' if _n_sfx == 1 else 'ies'} "
                   f"across {len(_sfx_plan_by_shot)} shot(s)")

@@ -11,6 +11,186 @@
 
 ---
 
+## FRONTEND (UI) TEST PATTERNS — READ THIS BEFORE WRITING ANY PAGE TEST
+
+This section exists because a full day was lost writing Playwright page tests that
+silently passed even when the bug was present.  The mistakes below are easy to repeat
+in a large async single-page app.  Read every rule before touching a `page.*` test.
+
+---
+
+### Rule F-1 — Never use waitForTimeout to wait for JS rendering
+
+```js
+// ❌ WRONG — 500 ms may not be enough; 3000 ms wastes time and is still a guess
+await page.waitForTimeout(3000);
+const count = await page.evaluate(() =>
+  document.querySelectorAll('.music-shot-block').length
+);
+expect(count).toBeGreaterThanOrEqual(2);
+
+// ✅ RIGHT — wait for a DOM condition that is ALWAYS set by the render function
+await page.waitForFunction(
+  () => document.querySelector('#music-body .music-card') !== null,
+  { timeout: 10000 }
+);
+const count = await page.evaluate(() =>
+  document.querySelectorAll('#music-body .music-shot-block').length
+);
+expect(count).toBeGreaterThanOrEqual(2);
+```
+
+**Why this fails silently:** if the render function sets `.music-card` to empty
+innerHTML on error, `waitForTimeout` returns and the query finds 0 elements. The
+test then expects 0 (or asserts `.toBeGreaterThan(0)` and gets a misleading timeout
+failure that says "waited too long" instead of "count was 0").
+
+---
+
+### Rule F-2 — The wait sentinel must be something ALWAYS written, even on failure
+
+The element you `waitForFunction` on must be written by the render function in
+**every** code path — including the empty / placeholder / error path.
+
+```
+_musicRenderBody() always writes at least one .music-card
+  → good sentinel: document.querySelector('#music-body .music-card') !== null
+
+sfxRenderShotOverrides() always sets innerHTML of #sfx-overrides
+  → good sentinel: el && el.innerHTML.trim().length > 0
+
+BAD sentinel: document.querySelector('.music-shot-block') !== null
+  → only written when shots exist; if the bug causes 0 shots, the sentinel
+    never appears and Playwright times out with "Timeout 10000ms exceeded"
+    instead of the real failure "expected 0 to be ≥ 2"
+```
+
+Use the sentinel only to know "rendering is complete". Assert on the RESULT
+element separately after the sentinel fires.
+
+---
+
+### Rule F-3 — The fixture must force the exact code path the bug lives on
+
+A test that uses a valid fixture and succeeds via the happy path does NOT catch bugs
+on the fallback path.
+
+**Example (KW-18 failure):** the first version of the test used a VOPlan with
+`music_items`, so `/api/music_timeline` returned 200 with valid shots. The fallback
+path (`_musicOverrides`) was never hit. The test passed even with a broken fallback.
+
+**Fix:** use a fixture that REMOVES the VOPlan — forcing the timeline API to fail →
+`_musicTimeline = null` → fallback path always runs.
+
+```
+// ✅ resetKW18Music() deletes VOPlan.en.json so the timeline API returns 500.
+// The test then asserts on the fallback path, which is the broken one.
+resetKW18Music();
+```
+
+Rule: **for every code path you want to catch regressions on, write a fixture state
+that makes the happy path unavailable**, so the code is forced through the path
+under test.
+
+---
+
+### Rule F-4 — A test that passes with the bug present is not a regression test
+
+After writing a new frontend test, verify it actually catches the regression:
+
+1. Temporarily revert the fix (or comment out the correct code path).
+2. Run the test — it **must fail**.
+3. Re-apply the fix — the test must pass again.
+
+If the test passes in both states, it is measuring the wrong thing. Discard it and
+re-read Rules F-1 through F-3.
+
+---
+
+### Rule F-5 — Use page.evaluate() to read DOM state, not Playwright locators
+
+For count/text assertions on dynamically-rendered content:
+
+```js
+// ✅ evaluate runs inside the browser — reads live DOM after all microtasks
+const count = await page.evaluate(() =>
+  document.querySelectorAll('#music-body .music-shot-block').length
+);
+
+// ✅ read text from multiple elements
+const shotIds = await page.evaluate(() =>
+  Array.from(document.querySelectorAll('.music-shot-hdr-id'))
+    .map(el => el.textContent.trim())
+);
+```
+
+Playwright locators (`.locator()`, `.getByText()`) add retry logic that can mask
+real failures. Use `evaluate()` + `expect()` for precise DOM state assertions.
+
+---
+
+### Rule F-6 — Check the correct element ID before asserting
+
+This codebase has similar-sounding IDs for different tabs:
+
+| Tab   | Shot overrides container   | Status bar           |
+|-------|---------------------------|----------------------|
+| Music | `#music-body`              | `#music-status-bar`  |
+| SFX   | `#sfx-overrides`           | `#sfx-status-bar`    |
+| Media | `#media-shot-overrides`    | `#media-status-bar`  |
+
+Always grep `test_server.py` for the exact `id=` before writing a selector.
+`document.getElementById('media-overrides')` returns `null` — the real ID is
+`media-shot-overrides`. A null element gives 0 blocks and the test passes silently.
+
+---
+
+### Rule F-7 — Full frontend test template
+
+```js
+// TEST COVERAGE: KW-N
+// Regression: [what breaks and what symptom the user sees]
+//
+// IMPORTANT — this test is designed to FAIL when the bug is present:
+// [Fixture state] forces [code path]. If [broken invariant], [result] → FAILS.
+
+const { test, expect } = require('@playwright/test');
+const { startTestServer, stopTestServer } = require('../helpers/server');
+const { resetKWN } = require('../helpers/fixture_state');
+
+let serverProc;
+test.beforeAll(async () => { serverProc = await startTestServer(); });
+test.afterAll(async ()  => { await stopTestServer(serverProc); });
+
+async function openTabAndSelectEp(page) {
+  await page.goto('/');
+  await page.click('button.tab[data-tab="TABNAME"]');
+  await page.waitForTimeout(400);  // tab animation only — NOT for JS rendering
+  await page.selectOption('#TABNAME-ep-select', 'test-proj|s01e01');
+
+  // Wait for rendering to complete: use an element ALWAYS written by the render fn,
+  // even when result is empty (e.g. placeholder card).
+  await page.waitForFunction(
+    () => document.querySelector('#CONTAINER .SENTINEL-CLASS') !== null,
+    { timeout: 10000 }
+  );
+}
+
+test('KW-N: [what this verifies]', async ({ page }) => {
+  resetKWN();                          // set fixture state to force the code path
+  await openTabAndSelectEp(page);
+
+  // Assert on the RESULT element (separate from the sentinel).
+  const count = await page.evaluate(() =>
+    document.querySelectorAll('#CONTAINER .RESULT-CLASS').length
+  );
+  // 0 here means the broken path dropped all items — the regression is present.
+  expect(count).toBeGreaterThanOrEqual(N);
+});
+```
+
+---
+
 ## PART 1 — SYSTEM ARCHITECTURE
 
 The pipeline converts a plain-text story into a multi-locale rendered video episode.
@@ -3085,3 +3265,61 @@ ends ~3 s before the audio track.  The player shows the full container duration
 - `dur_sec` derivation in `render_shot()` changes to a raw float division
 - `fps` value changes without updating the snapping formula
 - A refactor moves the `-t` flag computation to a different variable
+
+---
+
+## KW-18: Music and SFX Shot Overrides — Reload from Saved Plan
+
+### What this tests
+Verifies that the Music and SFX tab Shot Overrides sections correctly render saved
+plan data (MusicPlan.json / SfxPlan.json) after episode select, even when the
+primary data source (VOPlan timeline) is unavailable or empty.
+
+This test specifically exercises the **fallback code paths** that are bypassed
+during the normal happy-path flow. It would have caught every regression introduced
+to the load/render path during the KW-18 debug session (fallback filter key change,
+`_musicShotMap` population, `_sfxShotTimeline` build from ShotList).
+
+### Files involved
+- `code/http/test_server.py` — `_musicRenderBody()`, `_musicLoadExisting()`,
+  `sfxRenderShotOverrides()`, `_sfxLoadExisting()`
+- `tests/step_outputs/music_review.MusicPlan.json` — MusicPlan 1.1 fixture with `shot_id`
+- `tests/fixtures/projects/test-proj/episodes/s01e01/VOPlan.en.json`
+- `tests/fixtures/projects/test-proj/episodes/s01e01/ShotList.json`
+
+### Fixture states
+
+**KW-18a/c (Music fallback path):**
+`resetKW18Music()` — deletes `VOPlan.en.json`, installs `MusicPlan.json` v1.1.
+With no VOPlan, `/api/music_timeline` returns 500 → `_musicTimeline = null` →
+`_musicRenderBody()` MUST use the `_musicOverrides` fallback path.
+
+**KW-18b/d (SFX shot timeline path):**
+`resetKW18Sfx()` — installs `VOPlan.en.json` (with `sfx_items`), removes
+`MusicPlan.json` and `SfxPlan.json`. SFX tab must build shot timeline purely
+from ShotList.json + VOPlan sfx_items.
+
+### Invariants that must hold
+- KW-18a: `#music-body .music-shot-block` count ≥ 2 via MusicPlan fallback
+- KW-18b: `#sfx-overrides .music-shot-block` count ≥ 2 from shot timeline
+- KW-18c: shot IDs `sc01-sh01` and `sc02-sh02` appear in music overrides
+- KW-18d: shot IDs `sc01-sh01` and `sc02-sh02` appear in SFX overrides
+
+### Most likely to break when
+- `_musicRenderBody()` fallback filter key changes (`shot_id` → `item_id` or vice versa)
+- `_musicShotMap` is not populated before `_musicRenderBody()` is called
+- `_tlShots.length > 0` condition changes so fallback is never triggered
+- `_sfxShotTimeline` build logic changes how it maps `sfx_item_ids` to shots
+- MusicPlan `shot_overrides` entries lose the `shot_id` field (schema downgrade)
+
+### Key frontend test lesson (from KW-18 debug session)
+The first version of this test used a fixture WITH a full VOPlan (including
+`music_items`). The timeline API succeeded, so the fallback path was never hit.
+The test passed even when the fallback filter was broken.
+
+Fix: the fixture must keep a VOPlan that has NO music_items. The timeline API then
+returns 200 but all shots have music_item_id="" → _tlShots is empty → fallback
+triggers. Removing the VOPlan (forcing 500) also triggers the fallback but misses
+the real regression path (200 with empty shots), masking a broken _tlShots.length check.
+
+See the "FRONTEND (UI) TEST PATTERNS" section at the top of this file.

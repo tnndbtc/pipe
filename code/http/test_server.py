@@ -5111,6 +5111,13 @@ placeholder="Enter your story here"></textarea>
   let _sfxBusy     = false;
   let _sfxTimeline = null;
   let _sfxTiming   = {};   // { item_id: { start: Number, end: Number|null } }
+  let _sfxVolumes    = {};   // { item_id: dB_offset }              per-item vol, 0 = default
+  let _sfxDuckFade   = {};   // { item_id: { duck_db, fade_sec } }
+  let _sfxCutClips   = [];   // [{ clip_id, item_id, candidate_idx, start_sec, end_sec, duration_sec, source_file, path }]
+  let _sfxMarks      = {};   // { "${item_id}:${candidate_idx}": { start, end } }
+  let _sfxClipVolumes = {};  // { clip_id: dB_offset }              per cut-clip vol
+  let _sfxCutAssign  = {};   // { item_id: clip_id }                cut clip assigned to shot slot
+  let _sfxAudioCtx   = null; // shared AudioContext for GainNode boost (clip preview)
   let _sfxServerError= null; // set when media server is unreachable
   let _sfxAiState    = {};   // { item_id: { open, prompt, generating, statusText } }
   let _sfxAudioEl    = null;
@@ -5230,47 +5237,316 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  function _sfxShotOvrSelect(itemId, val) {
-    if (val === '') {
-      delete _sfxSelected[itemId];
-      delete _sfxTiming[itemId];
-    } else {
-      _sfxSelected[itemId] = parseInt(val, 10);
+  function _sfxSetVolume(iid, val) {
+    val = parseInt(val, 10);
+    if (isNaN(val) || val === 0) { delete _sfxVolumes[iid]; }
+    else                         { _sfxVolumes[iid] = val; }
+  }
+
+  function _sfxSetDuckFade(iid, field, val) {
+    val = field === 'duck_db' ? parseInt(val, 10) : parseFloat(val);
+    if (!_sfxDuckFade[iid]) _sfxDuckFade[iid] = {};
+    _sfxDuckFade[iid][field] = val;
+  }
+
+  function _sfxMarkPos(itemId, candidateIdx, audioElId, which) {
+    const audio = document.getElementById(audioElId);
+    if (!audio) return;
+    let t = audio.currentTime;
+    // Mark End at position 0 (not played) → snap to natural end of the clip
+    if (which === 'end' && t < 0.05) {
+      t = (isFinite(audio.duration) && audio.duration > 0)
+        ? audio.duration
+        : (((_sfxResults[itemId] || {}).candidates || [])[candidateIdx] || {}).duration_sec || 0;
     }
-    try { sessionStorage.setItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId, JSON.stringify(_sfxSelected)); } catch(e) {}
-    const res = _sfxResults[itemId];
-    if (res) sfxRenderCard(res.item, res.candidates);
-    sfxUpdateCountLabel();
-    sfxUpdatePreviewLabel();
+    const key = itemId + ':' + candidateIdx;
+    if (!_sfxMarks[key]) _sfxMarks[key] = {};
+    _sfxMarks[key][which] = t;
+    const sk   = key.replace(/[^a-z0-9]/gi,'_');
+    const inEl  = document.getElementById('sfx-mark-in-'  + sk);
+    const outEl = document.getElementById('sfx-mark-out-' + sk);
+    const cutEl = document.getElementById('sfx-cut-btn-'  + sk);
+    if (inEl)  inEl.textContent  = 'In: '  + (_sfxMarks[key].start != null ? _sfxMarks[key].start.toFixed(2)+'s' : '\u2014');
+    if (outEl) outEl.textContent = 'Out: ' + (_sfxMarks[key].end   != null ? _sfxMarks[key].end.toFixed(2)+'s'   : '\u2014');
+    const bothSet = _sfxMarks[key].start != null && _sfxMarks[key].end != null && _sfxMarks[key].end > _sfxMarks[key].start;
+    if (cutEl) cutEl.style.background = bothSet ? 'var(--gold)' : '';
+  }
+
+  async function _sfxCutClip(itemId, candidateIdx) {
+    const key  = itemId + ':' + candidateIdx;
+    const mark = _sfxMarks[key] || {};
+    const cand = ((_sfxResults[itemId] || {}).candidates || [])[candidateIdx];
+    if (!cand) { console.warn('[sfxCutClip] candidate not found', key); return; }
+    // If marks not set, duplicate the full clip (start=0, end=natural duration)
+    const startSec = (mark.start != null && mark.start >= 0) ? mark.start : 0;
+    const endSec   = (mark.end   != null && mark.end > startSec)
+                       ? mark.end
+                       : (cand.duration_sec || 30);
+    const r = await fetch('/api/sfx_cut_clip', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        slug: _sfxSlug, ep_id: _sfxEpId,
+        item_id: itemId, candidate_idx: candidateIdx,
+        source_file: cand.source_file || cand.preview_url || '',
+        title: cand.title || '',
+        start_sec: startSec, end_sec: endSec,
+      }),
+    });
+    const d = await r.json();
+    if (!d.ok) { console.error('[sfxCutClip]', d.error); return; }
+    _sfxCutClips.push({
+      clip_id: d.clip_id, item_id: itemId, candidate_idx: candidateIdx,
+      start_sec: startSec, end_sec: endSec, duration_sec: d.duration_sec,
+      source_file: cand.source_file || '', path: d.path,
+    });
     sfxRenderShotOverrides();
+  }
+
+  function _sfxSetClipVolume(clipId, val) {
+    val = parseInt(val, 10);
+    if (isNaN(val) || val === 0) { delete _sfxClipVolumes[clipId]; }
+    else                         { _sfxClipVolumes[clipId] = val; }
+    document.querySelectorAll('audio[data-sfx-clip-vol-key]').forEach(a => {
+      if (a.dataset.sfxClipVolKey === clipId) {
+        a.dataset.volDb = (val || 0);
+        const gainLinear = Math.pow(10, (val || 0) / 20);
+        if (a._sfxGain) {
+          // Web Audio GainNode — supports true boost above 1.0
+          a._sfxGain.gain.value = gainLinear;
+        } else {
+          // Fallback: HTML5 volume (capped at 1.0, attenuation only)
+          a.volume = Math.min(1, Math.max(0, gainLinear));
+        }
+      }
+    });
+  }
+
+  // Called onplay for Generated Clips audio elements.
+  // Creates a Web Audio API GainNode so positive dB values (e.g. +18 dB) actually boost
+  // volume beyond 1.0 — HTML5 audio.volume is capped at 1.0.
+  function _sfxClipOnPlay(el) {
+    if (!el._sfxGain) {
+      if (!_sfxAudioCtx) {
+        _sfxAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const src  = _sfxAudioCtx.createMediaElementSource(el);
+      const gain = _sfxAudioCtx.createGain();
+      src.connect(gain);
+      gain.connect(_sfxAudioCtx.destination);
+      el._sfxGain = gain;
+    }
+    const db = +(el.dataset.volDb) || 0;
+    el._sfxGain.gain.value = Math.pow(10, db / 20);
+  }
+
+  function _sfxSetCutAssign(itemId, clipId) {
+    if (!clipId) { delete _sfxCutAssign[itemId]; }
+    else { _sfxCutAssign[itemId] = clipId; delete _sfxSelected[itemId]; }
+  }
+
+  function _sfxShotOvrSelectOrClip(iid, val) {
+    if (!val) {
+      delete _sfxSelected[iid]; delete _sfxCutAssign[iid];
+    } else if (val.startsWith('cand:')) {
+      _sfxSelected[iid] = parseInt(val.slice(5), 10); delete _sfxCutAssign[iid];
+    } else if (val.startsWith('clip:')) {
+      _sfxCutAssign[iid] = val.slice(5); delete _sfxSelected[iid];
+    }
   }
 
   function sfxRenderShotOverrides() {
     const wrap = document.getElementById('sfx-overrides');
     if (!wrap) return;
+    wrap.style.display = 'block';
     const shotsWithSfx = _sfxShotTimeline.filter(s => s.sfx_items.length > 0);
-    if (!shotsWithSfx.length) { wrap.style.display = 'none'; return; }
+    if (!shotsWithSfx.length) {
+      wrap.innerHTML = '<div class="music-card"><div class="music-card-hdr">Shot Overrides</div>'
+        + '<div class="music-card-sub" style="color:var(--dim);padding:12px 0">Select an episode above to load the shot timeline.</div></div>';
+      return;
+    }
 
     const totalDur = _sfxShotTimeline.reduce((a, s) => Math.max(a, s.epEnd), 0) || 1;
     const shotColors = ['#3b6ea5','#8b5e3c','#5e8c5a','#8b3e6e','#6e6e3e','#3e6e8b','#8b6e3e'];
     const fmtEp = t => t.toFixed(1) + 's';
 
-    let html = '<div class="music-card-hdr">Shot Overrides</div>'
-      + '<div class="music-card-sub">Candidate, timing window (episode-absolute start/end) per SFX item.</div>';
+    let html = '';
 
-    // ── Visual timeline bar (identical to Music tab) ──
-    html += '<div class="music-vtl-bar">';
+    // ── Section 1 (rendered last): Source SFX Library card ──
+    let srcLibHtml = '<div class="music-card">'
+          + '<div class="music-card-hdr">Source SFX Library</div>'
+          + '<div class="music-card-sub">Play a candidate, mark In &amp; Out, '
+          + 'then \u2702\u00a0Cut Clip to create a trimmed clip. '
+          + 'Cut Clip without marks duplicates the full clip.</div>';
+
+    _sfxShotTimeline.forEach((s, si) => {
+      // Only include shots that have at least one item with candidates
+      const shotItems = s.sfx_items.filter(item => {
+        const iid = item.item_id || '';
+        return (_sfxResults[iid] || {}).candidates && (_sfxResults[iid]).candidates.length > 0;
+      });
+      if (!shotItems.length) return;
+
+      const col = shotColors[si % shotColors.length];
+
+      // Shot group header (same style as Shot Overrides)
+      srcLibHtml += '<div class="music-shot-block">'
+        + '<div class="music-shot-hdr" style="border-left:4px solid ' + col + '">'
+        + '<span class="music-shot-hdr-id">' + s.shot_id.replace(/^s\d+e\d+_/, '') + '</span>'
+        + '<span class="music-shot-hdr-ep">episode&nbsp;' + fmtEp(s.epStart)
+        + ' \u2013 ' + fmtEp(s.epEnd) + '&nbsp;(' + s.duration_sec.toFixed(1) + 's)</span>'
+        + '</div>';
+
+      shotItems.forEach(item => {
+        const iid     = item.item_id || '';
+        const safeIid = iid.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        const tag     = item.tag || item.description || '';
+        const cands   = (_sfxResults[iid] || {}).candidates || [];
+
+        // Item sub-header: prompt + AI + Upload buttons
+        const itemObj = (_sfxResults[iid] || {}).item || item;
+        const dur = (itemObj.duration_sec || 0).toFixed(1);
+        const defaultPrompt = tag || (item.search_queries && item.search_queries[0]) || '';
+        srcLibHtml += '<div style="margin-bottom:12px">'
+          + '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;'
+          + 'padding:4px 6px;background:rgba(255,255,255,0.04);border-radius:4px;margin-bottom:4px">'
+          + '<span style="font-size:0.80em;font-weight:600;color:var(--dim)">' + iid + '</span>'
+          + (tag ? '<span style="font-size:0.80em;color:var(--text);opacity:0.75;flex:1;'
+            + 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="'
+            + tag.replace(/"/g,'&quot;') + '">' + tag.replace(/</g,'&lt;').slice(0,80)
+            + (tag.length>80?'\u2026':'') + '</span>' : '')
+          + '<button class="sfx-ai-toggle-btn" onclick="_sfxLibAiToggle(\'' + safeIid + '\')"'
+          + ' title="Generate SFX with AI">\u2728 AI</button>'
+          + '<button class="sfx-upload-btn" onclick="_sfxUpload(\'' + safeIid + '\')"'
+          + ' title="Upload your own SFX file">\ud83d\udcc1 Upload</button>'
+          + '</div>'
+          // Inline AI panel (hidden by default)
+          + '<div id="sfx-lib-ai-panel-' + iid + '" style="display:none;'
+          + 'background:rgba(255,159,67,0.06);border:1px solid rgba(255,159,67,0.2);'
+          + 'border-radius:6px;padding:8px;margin-bottom:6px">'
+          + '<textarea id="sfx-lib-ai-prompt-' + iid + '" rows="2"'
+          + ' style="width:100%;box-sizing:border-box;background:var(--input-bg,#1e1e2e);'
+          + 'color:var(--text);border:1px solid var(--border);border-radius:4px;'
+          + 'padding:4px 6px;font-size:0.85em;resize:vertical"'
+          + ' placeholder="Describe the sound to generate\u2026">'
+          + defaultPrompt.replace(/</g,'&lt;').replace(/>/g,'&gt;')
+          + '</textarea>'
+          + '<div style="display:flex;align-items:center;gap:8px;margin-top:4px">'
+          + '<button id="sfx-lib-ai-btn-' + iid + '"'
+          + ' class="sfx-ai-gen-btn"'
+          + ' onclick="_sfxAiGenStart(\'' + safeIid + '\',\'sfx-lib-ai-\')">\u2728 Generate</button>'
+          + '<span style="font-size:0.78em;color:var(--dim)">Target: ' + dur + 's</span>'
+          + '<span id="sfx-lib-ai-status-' + iid + '" style="font-size:0.85em"></span>'
+          + '</div>'
+          + '</div>';
+
+        cands.forEach((c, ci) => {
+          const audioElId = 'sfx-src-audio-' + iid.replace(/[^a-z0-9]/gi,'_') + '_' + ci;
+          const markKey   = iid + ':' + ci;
+          const sk        = markKey.replace(/[^a-z0-9]/gi,'_');
+          const mark      = _sfxMarks[markKey] || {};
+          const bothSet   = mark.start != null && mark.end != null && mark.end > mark.start;
+
+          srcLibHtml += '<div class="music-src-row">'
+                + '<div class="music-src-top">'
+                + (c.waveform_img
+                    ? '<img class="sfx-cand-waveform" src="' + c.waveform_img.replace(/"/g,'&quot;') + '" alt="waveform">'
+                    : '<div class="sfx-cand-waveform"></div>')
+                + '<span class="music-src-stem" style="flex:1">' + (c.title || '(untitled)') + '</span>'
+                + '<span class="sfx-cand-meta">'
+                + (c.duration_sec||0).toFixed(1) + 's'
+                + (c.rating > 0 ? ' \u2605' + c.rating.toFixed(1) : '')
+                + (c.downloads > 1000 ? ' \u2193' + Math.round(c.downloads/1000) + 'K'
+                    : (c.downloads ? ' \u2193' + c.downloads : ''))
+                + (c.license_summary ? ' ' + c.license_summary : '')
+                + (c.source_site ? ' ' + c.source_site : '')
+                + '</span>'
+                + '<a class="sfx-link-btn" href="' + (c.asset_page_url||'#').replace(/"/g,'&quot;') + '"'
+                + ' target="_blank" title="Open source page" onclick="event.stopPropagation()">\u2197</a>'
+                + '</div>'
+                + '<div class="music-src-player">'
+                + '<audio id="' + audioElId + '" controls preload="none" src="'
+                + (c.preview_url||'').replace(/"/g,'&quot;') + '"></audio>'
+                + '</div>'
+                + '<div class="music-src-controls">'
+                + '<button onclick="_sfxMarkPos(\'' + safeIid + '\','
+                + ci + ',\'' + audioElId + '\',\'start\')">Mark Start</button>'
+                + '<span id="sfx-mark-in-' + sk + '" class="mark-label">In: '
+                + (mark.start!=null ? mark.start.toFixed(2)+'s' : '\u2014') + '</span>'
+                + '<button onclick="_sfxMarkPos(\'' + safeIid + '\','
+                + ci + ',\'' + audioElId + '\',\'end\')" title="Click without playing to mark natural end">Mark End</button>'
+                + '<span id="sfx-mark-out-' + sk + '" class="mark-label">Out: '
+                + (mark.end!=null ? mark.end.toFixed(2)+'s' : '\u2014') + '</span>'
+                + '<button id="sfx-cut-btn-' + sk + '"'
+                + (bothSet ? ' style="background:var(--gold)"' : '')
+                + ' onclick="_sfxCutClip(\'' + safeIid + '\',' + ci + ')"'
+                + ' title="' + (bothSet ? 'Cut clip from mark to mark'
+                                        : 'No marks set — will duplicate full clip') + '"'
+                + '>\u2702 Cut Clip</button>'
+                + '</div>'
+                + '</div>';
+        });
+        srcLibHtml += '</div>';  // item container
+      });
+
+      srcLibHtml += '</div>';  // music-shot-block
+    });
+    srcLibHtml += '</div>';   // Source SFX Library card
+
+    // ── Section 2: Generated Clips card (only when _sfxCutClips.length > 0) ──
+    let genClipsHtml = '';
+    if (_sfxCutClips.length) {
+      genClipsHtml += '<div class="music-card">'
+            + '<div class="music-card-hdr">Generated Clips</div>'
+            + '<table class="music-cand-table"><thead><tr>'
+            + '<th style="max-width:160px">Clip</th><th>Duration</th>'
+            + '<th style="width:60px" title="Volume offset in dB">Vol</th>'
+            + '<th style="width:360px">Preview</th>'
+            + '</tr></thead><tbody>';
+
+      _sfxCutClips.forEach(cl => {
+        const safeClipId = cl.clip_id.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        const volVal     = _sfxClipVolumes[cl.clip_id] || 0;
+        const volColor   = volVal !== 0 ? 'var(--gold)' : 'var(--text)';
+        const wavUrl     = cl.path ? '/serve_media?path=' + encodeURIComponent('projects/' + _sfxSlug + '/episodes/' + _sfxEpId + '/' + cl.path) : '';
+
+        genClipsHtml += '<tr>'
+              + '<td style="font-family:var(--mono);font-size:0.82em;color:var(--gold);'
+              + 'max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"'
+              + ' title="' + cl.clip_id.replace(/"/g,'&quot;') + '">' + cl.clip_id + '</td>'
+              + '<td>' + (cl.duration_sec||0).toFixed(1) + 's</td>'
+              + '<td><input type="number" step="1" min="-18" max="18" value="' + volVal + '"'
+              + ' title="Volume offset in dB (0 = default SFX_DB -3 dB; negative = quieter, positive = louder)"'
+              + ' style="width:52px;background:var(--input-bg,#1e1e2e);color:' + volColor + ';'
+              + 'border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.90em"'
+              + ' onchange="_sfxSetClipVolume(\'' + safeClipId + '\',this.value);'
+              + 'this.style.color=parseInt(this.value)!==0?\'var(--gold)\':\'var(--text)\'"></td>'
+              + '<td><audio controls preload="none"'
+              + ' data-sfx-clip-vol-key="' + cl.clip_id.replace(/"/g,'&quot;') + '"'
+              + ' data-vol-db="' + volVal + '"'
+              + ' onplay="_sfxClipOnPlay(this)"'
+              + ' src="' + wavUrl + '"></audio></td>'
+              + '</tr>';
+      });
+      genClipsHtml += '</tbody></table></div>';
+    }
+
+    // ── Section 3: Shot Overrides card ──
+    let shotOverridesHtml = '<div class="music-card-hdr">Shot Overrides</div>'
+      + '<div class="music-card-sub">Assign a candidate or cut clip per SFX item. Duck / fade params per row. Clip volume set in Generated Clips table.</div>';
+
+    // Visual timeline bar
+    shotOverridesHtml += '<div class="music-vtl-bar">';
     _sfxShotTimeline.forEach((s, i) => {
       const pct = (s.duration_sec / totalDur * 100).toFixed(2);
       const col = shotColors[i % shotColors.length];
-      html += '<div class="music-vtl-shot" style="width:' + pct + '%;background:' + col + '"'
+      shotOverridesHtml += '<div class="music-vtl-shot" style="width:' + pct + '%;background:' + col + '"'
         + ' title="' + s.shot_id + '  ' + fmtEp(s.epStart) + '\u2013' + fmtEp(s.epEnd)
         + '  (' + s.duration_sec.toFixed(1) + 's)">'
         + s.shot_id.replace(/^s\d+e\d+_/, '') + '</div>';
     });
-    html += '</div>';
+    shotOverridesHtml += '</div>';
 
-    // ── Per-shot stacked blocks (only shots with SFX items) ──
+    // Per-shot stacked blocks
     _sfxShotTimeline.forEach((s, i) => {
       if (!s.sfx_items.length) return;
       const col     = shotColors[i % shotColors.length];
@@ -5278,8 +5554,7 @@ placeholder="Enter your story here"></textarea>
       const epEnd   = s.epEnd;
       const shotDur = s.duration_sec;
 
-      html += '<div class="music-shot-block">'
-        // header: shot id + episode time range
+      shotOverridesHtml += '<div class="music-shot-block">'
         + '<div class="music-shot-hdr" style="border-left:4px solid ' + col + '">'
         + '<span class="music-shot-hdr-id">' + s.shot_id.replace(/^s\d+e\d+_/, '') + '</span>'
         + '<span class="music-shot-hdr-ep">episode&nbsp;' + fmtEp(epStart) + ' \u2013 ' + fmtEp(epEnd)
@@ -5287,50 +5562,99 @@ placeholder="Enter your story here"></textarea>
         + '</div>';
 
       s.sfx_items.forEach(item => {
-        const iid      = item.item_id || '';
-        const safeIid  = iid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        const selIdx   = _sfxSelected[iid];          // undefined = no selection
-        const t        = _sfxTiming[iid] || {};
-        // _sfxTiming stores episode-absolute times (same unit as sfx_preview_pack
-        // abs_start).  Default to the shot's own episode window when not yet set.
-        const startWithin = t.start != null ? t.start : epStart;
-        const endWithin   = t.end   != null ? t.end   : epEnd;
-        const dispStart   = startWithin.toFixed(1);
-        const dispEnd     = endWithin.toFixed(1);
-        const candidates  = (_sfxResults[iid] || {}).candidates || [];
+        const iid          = item.item_id || '';
+        const safeIid      = iid.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        const candidates   = (_sfxResults[iid] || {}).candidates || [];
+        const assignedClip = _sfxCutAssign[iid];
+        const selCandidate = assignedClip ? undefined : _sfxSelected[iid];
 
-        // ── Candidate dropdown (mirrors music-shot-clip select) ──
-        html += '<div class="music-shot-clip">'
-          + '<select style="width:100%" onchange="_sfxShotOvrSelect(\'' + safeIid + '\',this.value)">'
-          + '<option value=""' + (selIdx === undefined ? ' selected' : '') + '>\u2014 no sfx \u2014 (' + iid + ')</option>';
+        // Unified dropdown: uncut candidates then cut clips for this item
+        shotOverridesHtml += '<div class="music-shot-clip">'
+              + '<select style="width:100%"'
+              + ' onchange="_sfxShotOvrSelectOrClip(\'' + safeIid + '\',this.value)">'
+              + '<option value=""'
+              + (!assignedClip && selCandidate === undefined ? ' selected' : '')
+              + '>\u2014 no sfx \u2014 (' + iid + ')</option>';
+
         candidates.forEach((c, idx) => {
-          const label = (c.title || '(untitled)') + '  ' + (c.duration_sec || 0).toFixed(1) + 's'
-            + (c.source_site ? '  [' + c.source_site + ']' : '');
-          html += '<option value="' + idx + '"' + (selIdx === idx ? ' selected' : '') + '>'
-            + label.replace(/"/g, '&quot;') + '</option>';
+          const label = (c.title || '(untitled)') + '  Duration: '
+                      + (c.duration_sec||0).toFixed(1) + 's'
+                      + (c.source_site ? '  [' + c.source_site + ']' : '');
+          shotOverridesHtml += '<option value="cand:' + idx + '"'
+                + (selCandidate === idx ? ' selected' : '') + '>'
+                + label.replace(/"/g,'&quot;') + '</option>';
         });
-        if (!candidates.length) {
-          html += '<option disabled>\u2014 run Search All SFX first \u2014</option>';
-        }
-        html += '</select></div>'
 
-        // ── Params: start / end (episode-absolute, identical layout to Music tab) ──
-          + '<div class="music-shot-params">'
-          + '<label title="Episode time when SFX begins (seconds)">\u25b6 start</label>'
-          + '<input type="number" step="0.1" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispStart + '"'
-          + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'start\',parseFloat(this.value))"'
-          + ' style="width:64px">'
-          + '<label title="Episode time when SFX stops (seconds)">\u23f9 end</label>'
-          + '<input type="number" step="0.1" min="' + epStart.toFixed(1) + '" max="' + epEnd.toFixed(1) + '" value="' + dispEnd + '"'
-          + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'end\',parseFloat(this.value))"'
-          + ' style="width:64px">'
-          + '</div>';
+        const itemCutClips = _sfxCutClips.filter(cl => cl.item_id === iid);
+        if (itemCutClips.length) {
+          shotOverridesHtml += '<option disabled>\u2500\u2500 cut clips \u2500\u2500</option>';
+          itemCutClips.forEach(cl => {
+            shotOverridesHtml += '<option value="clip:' + cl.clip_id.replace(/"/g,'&quot;') + '"'
+                  + (assignedClip === cl.clip_id ? ' selected' : '') + '>'
+                  + '\u2702 ' + cl.clip_id + '  Duration: ' + (cl.duration_sec||0).toFixed(1) + 's'
+                  + '</option>';
+          });
+        }
+        shotOverridesHtml += '</select></div>';
+
+        // Duration badge
+        const selDurSrc = assignedClip
+          ? (_sfxCutClips.find(cl=>cl.clip_id===assignedClip)||{}).duration_sec
+          : (selCandidate !== undefined && candidates[selCandidate])
+            ? candidates[selCandidate].duration_sec : null;
+        shotOverridesHtml += '<div style="font-size:0.78em;color:var(--dim);padding:2px 6px;align-self:center">'
+              + '<span style="opacity:0.6">Duration:</span> '
+              + (selDurSrc != null ? selDurSrc.toFixed(1)+'s' : '\u2014') + '</div>';
+
+        // start / end / duck / fade params
+        const df        = _sfxDuckFade[iid] || {};
+        const duckVal   = df.duck_db  != null ? df.duck_db  : 0;
+        const fadeVal   = df.fade_sec != null ? df.fade_sec : 0.0;
+        const duckColor = duckVal !== 0 ? 'var(--gold)' : 'var(--text)';
+        const fadeColor = fadeVal !== 0 ? 'var(--gold)' : 'var(--text)';
+        const tm        = _sfxTiming[iid] || {};
+        const startVal  = tm.start != null ? tm.start : 0;
+        const endVal    = tm.end   != null ? tm.end   : shotDur;
+        const startColor = startVal !== 0        ? 'var(--gold)' : 'var(--text)';
+        const endColor   = endVal   !== shotDur  ? 'var(--gold)' : 'var(--text)';
+
+        shotOverridesHtml += '<div class="music-shot-params">'
+              + '<label title="Shot-relative start time in seconds (0 = shot begins)">&#9654; start</label>'
+              + '<input type="number" step="0.1" min="0" max="' + shotDur.toFixed(1) + '" value="' + startVal.toFixed(1) + '"'
+              + ' style="width:60px;background:var(--input-bg,#1e1e2e);color:' + startColor + ';'
+              + 'border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.90em"'
+              + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'start\',parseFloat(this.value));'
+              + 'this.style.color=parseFloat(this.value)!==0?\'var(--gold)\':\'var(--text)\'">'
+              + '<label title="Shot-relative end time in seconds">&#9632; end</label>'
+              + '<input type="number" step="0.1" min="0" max="' + shotDur.toFixed(1) + '" value="' + endVal.toFixed(1) + '"'
+              + ' style="width:60px;background:var(--input-bg,#1e1e2e);color:' + endColor + ';'
+              + 'border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.90em"'
+              + ' onchange="sfxSetTiming(\'' + safeIid + '\',\'end\',parseFloat(this.value));'
+              + 'this.style.color=parseFloat(this.value)!==' + shotDur.toFixed(1) + '?\'var(--gold)\':\'var(--text)\'">'
+              + '<label title="Attenuation in dB (0 = full volume)">\uD83D\uDD09 duck</label>'
+              + '<input type="number" step="1" min="-30" max="0" value="' + duckVal + '"'
+              + ' style="width:50px;background:var(--input-bg,#1e1e2e);color:' + duckColor + ';'
+              + 'border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.90em"'
+              + ' onchange="_sfxSetDuckFade(\'' + safeIid + '\',\'duck_db\',this.value);'
+              + 'this.style.color=parseInt(this.value)!==0?\'var(--gold)\':\'var(--text)\'">'
+              + '<label title="Fade-in and fade-out in seconds">\u23f1 fade</label>'
+              + '<input type="number" step="0.05" min="0" max="3" value="' + fadeVal.toFixed(2) + '"'
+              + ' style="width:50px;background:var(--input-bg,#1e1e2e);color:' + fadeColor + ';'
+              + 'border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.90em"'
+              + ' onchange="_sfxSetDuckFade(\'' + safeIid + '\',\'fade_sec\',this.value);'
+              + 'this.style.color=parseFloat(this.value)!==0?\'var(--gold)\':\'var(--text)\'">'
+              + '</div>';
       });
 
-      html += '</div>';  // music-shot-block
+      shotOverridesHtml += '</div>';  // music-shot-block
     });
 
-    wrap.innerHTML = '<div class="music-card">' + html + '</div>';
+    // Order: Shot Overrides → Source SFX Library → Generated Clips
+    html += '<div class="music-card">' + shotOverridesHtml + '</div>';
+    html += srcLibHtml;
+    html += genClipsHtml;
+
+    wrap.innerHTML = html;
     wrap.style.display = 'block';
   }
 
@@ -5346,6 +5670,8 @@ placeholder="Enter your story here"></textarea>
     sfxRenderShotOverrides();
     // Try to load previously saved search results from disk
     await _sfxLoadExisting();
+    // Always load cut clips (independent of search results — written on every Cut Clip action)
+    await _sfxLoadCutClips();
     // Show empty cards for any manifest items not yet covered by search results
     _sfxRenderManifestItems();
     // Restore preview player if a previous generate was saved
@@ -5377,6 +5703,8 @@ placeholder="Enter your story here"></textarea>
       _sfxResults  = saved.results;
       _sfxSelected = {};
       _sfxTiming   = {};
+      _sfxVolumes = {}; _sfxDuckFade = {}; _sfxCutClips = [];
+      _sfxMarks = {}; _sfxClipVolumes = {}; _sfxCutAssign = {};
       _sfxItems    = Object.values(_sfxResults).map(r => r.item);
 
       // Load confirmed selections + timing from SfxPlan.json (written by Save button)
@@ -5386,11 +5714,36 @@ placeholder="Enter your story here"></textarea>
                              + '&file=SfxPlan.json');
         if (rp.ok) {
           const plan = await rp.json();
+          _sfxVolumes = {}; _sfxDuckFade = {}; _sfxMarks = {};
           (plan.sfx_entries || []).forEach(e => {
             if (e.item_id && e.candidate_idx != null)
               _sfxSelected[e.item_id] = e.candidate_idx;
             if (e.item_id)
               _sfxTiming[e.item_id] = { start: e.start_sec || 0, end: e.end_sec ?? null };
+            if (e.item_id && e.volume_db != null && e.volume_db !== 0)
+              _sfxVolumes[e.item_id] = e.volume_db;
+            if (e.item_id && (e.duck_db != null || e.fade_sec != null)) {
+              _sfxDuckFade[e.item_id] = {
+                duck_db:  e.duck_db  != null ? e.duck_db  : 0,
+                fade_sec: e.fade_sec != null ? e.fade_sec : 0.0,
+              };
+            }
+          });
+          _sfxVolumes    = _sfxVolumes    || {};
+          _sfxDuckFade   = _sfxDuckFade   || {};
+          _sfxCutClips   = plan.cut_clips    || [];
+          _sfxCutAssign  = plan.cut_assign   || {};
+          // v1.2+: volume lives on each cut_clip entry; fall back to root clip_volumes for old files
+          _sfxClipVolumes = {};
+          (_sfxCutClips).forEach(cl => {
+            if (cl.volume_db != null && cl.volume_db !== 0)
+              _sfxClipVolumes[cl.clip_id] = cl.volume_db;
+          });
+          if (plan.clip_volumes) Object.assign(_sfxClipVolumes, plan.clip_volumes);
+          // Rebuild marks from cut clips so labels display on reload
+          _sfxCutClips.forEach(cl => {
+            const key = cl.item_id + ':' + cl.candidate_idx;
+            _sfxMarks[key] = { start: cl.start_sec, end: cl.end_sec };
           });
         }
       } catch(_) {}
@@ -5418,6 +5771,29 @@ placeholder="Enter your story here"></textarea>
       statusBar.textContent = 'No previous results found. Run a search to get started.';
       document.getElementById('sfx-btn-search').disabled = false;
     }
+  }
+
+  // Load sfx_cut_clips.json — always called on episode load, independent of search results.
+  // Written on every cut, so it's always more up-to-date than SfxPlan.json.
+  async function _sfxLoadCutClips() {
+    if (!_sfxSlug || !_sfxEpId) return;
+    try {
+      const rcc = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
+                            + '&ep_id=' + encodeURIComponent(_sfxEpId)
+                            + '&file=assets/sfx/sfx_cut_clips.json');
+      if (!rcc.ok) return;
+      const data = await rcc.json();
+      if (!Array.isArray(data) || !data.length) return;
+      _sfxCutClips = data;
+      // Rebuild marks so In/Out labels display correctly in Source SFX Library
+      _sfxCutClips.forEach(cl => {
+        const key = cl.item_id + ':' + cl.candidate_idx;
+        if (!_sfxMarks[key]) _sfxMarks[key] = {};
+        _sfxMarks[key].start = cl.start_sec;
+        _sfxMarks[key].end   = cl.end_sec;
+      });
+      sfxRenderShotOverrides();  // show Generated Clips section
+    } catch(_) {}
   }
 
   function _sfxRenderManifestItems() {
@@ -5529,13 +5905,17 @@ placeholder="Enter your story here"></textarea>
           })
         });
         const data = r.ok ? await r.json() : { candidates: [] };
-        const candidates = data.candidates || [];
+        // Preserve AI-generated and uploaded clips — search must not erase them
+        const existing = (_sfxResults[item.item_id] || {}).candidates || [];
+        const preserved = existing.filter(c => c.source_site === 'ai_gen' || c.source_site === 'upload');
+        const candidates = [...preserved, ...(data.candidates || [])];
         _sfxResults[item.item_id] = { item, candidates };
         try {
           sessionStorage.setItem(cacheKey, JSON.stringify({ candidates, fetched_at: Date.now() }));
         } catch(e) {}
       } catch(e) {
-        _sfxResults[item.item_id] = { item, candidates: [] };
+        // On error, keep whatever we had (don't wipe AI/upload clips)
+        if (!_sfxResults[item.item_id]) _sfxResults[item.item_id] = { item, candidates: [] };
       }
       done++;
       sfxRenderCard(item, (_sfxResults[item.item_id] || {}).candidates || []);
@@ -5713,10 +6093,18 @@ placeholder="Enter your story here"></textarea>
     if (panel) panel.style.display = _sfxAiState[itemId].open ? 'block' : 'none';
   }
 
-  async function _sfxAiGenStart(itemId) {
-    const ta     = document.getElementById('sfx-ai-prompt-' + itemId);
-    const btn    = document.getElementById('sfx-ai-btn-' + itemId);
-    const status = document.getElementById('sfx-ai-status-' + itemId);
+  // Toggle the AI panel embedded inline in Source SFX Library (separate DOM from sfx-body)
+  function _sfxLibAiToggle(itemId) {
+    const panel = document.getElementById('sfx-lib-ai-panel-' + itemId);
+    if (!panel) return;
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  }
+
+  async function _sfxAiGenStart(itemId, elPrefix) {
+    elPrefix = elPrefix || 'sfx-ai-';
+    const ta     = document.getElementById(elPrefix + 'prompt-' + itemId);
+    const btn    = document.getElementById(elPrefix + 'btn-' + itemId);
+    const status = document.getElementById(elPrefix + 'status-' + itemId);
     const prompt = ta ? ta.value.trim() : '';
     if (!prompt) { if (status) status.textContent = 'Prompt is empty.'; return; }
     _sfxAiStateSet(itemId, 'generating', true);
@@ -5741,7 +6129,7 @@ placeholder="Enter your story here"></textarea>
       const st = '\u23f3 Generating\u2026 (job ' + job_id.slice(0,8) + ')';
       _sfxAiStateSet(itemId, 'statusText', st);
       if (status) status.textContent = st;
-      _sfxAiGenPoll(itemId, job_id, asset_id, prompt, timestamp_ms, 0);
+      _sfxAiGenPoll(itemId, job_id, asset_id, prompt, timestamp_ms, 0, elPrefix);
     } catch(err) {
       _sfxAiStateSet(itemId, 'generating', false);
       _sfxAiStateSet(itemId, 'statusText', '\u274c ' + err.message);
@@ -5751,9 +6139,10 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  async function _sfxAiGenPoll(itemId, jobId, assetId, prompt, tMs, elapsed) {
-    const btn    = document.getElementById('sfx-ai-btn-' + itemId);
-    const status = document.getElementById('sfx-ai-status-' + itemId);
+  async function _sfxAiGenPoll(itemId, jobId, assetId, prompt, tMs, elapsed, elPrefix) {
+    elPrefix = elPrefix || 'sfx-ai-';
+    const btn    = document.getElementById(elPrefix + 'btn-' + itemId);
+    const status = document.getElementById(elPrefix + 'status-' + itemId);
     const MAX_S  = 300;
     if (elapsed > MAX_S) {
       _sfxAiStateSet(itemId, 'generating', false);
@@ -5807,7 +6196,7 @@ placeholder="Enter your story here"></textarea>
         const st = '\u23f3 Generating\u2026 ' + secs + 's';
         _sfxAiStateSet(itemId, 'statusText', st);
         if (status) status.textContent = st;
-        setTimeout(function() { _sfxAiGenPoll(itemId, jobId, assetId, prompt, tMs, secs); }, 2000);
+        setTimeout(function() { _sfxAiGenPoll(itemId, jobId, assetId, prompt, tMs, secs, elPrefix); }, 2000);
       }
     } catch(err) {
       _sfxAiStateSet(itemId, 'generating', false);
@@ -5984,6 +6373,11 @@ placeholder="Enter your story here"></textarea>
           selected: _sfxSelected,
           include_music: includeMusic,
           timing: _sfxTiming,
+          volumes: _sfxVolumes,
+          duck_fade: _sfxDuckFade,
+          cut_clips: _sfxCutClips,
+          cut_assign: _sfxCutAssign,
+          clip_volumes: _sfxClipVolumes,
         }),
       });
       const d = await r.json();
@@ -6127,7 +6521,20 @@ placeholder="Enter your story here"></textarea>
 
   function sfxRenderTimeline() {
     if (_sfxCursorRaf) { cancelAnimationFrame(_sfxCursorRaf); _sfxCursorRaf = null; }
-    _tlRender('sfx', _sfxTimeline, 'sfx-preview-audio');
+    let tl = _sfxTimeline;
+    if (tl && tl.sfx_items && Object.keys(_sfxCutAssign || {}).length) {
+      tl = Object.assign({}, tl, {
+        sfx_items: tl.sfx_items.map(s => {
+          const clipId = _sfxCutAssign[s.item_id];
+          if (!clipId) return s;
+          const cl = (_sfxCutClips || []).find(c => c.clip_id === clipId);
+          return Object.assign({}, s, {
+            tag: '\u2702 ' + clipId + (cl ? '  ' + cl.duration_sec.toFixed(1)+'s' : ''),
+          });
+        }),
+      });
+    }
+    _tlRender('sfx', tl, 'sfx-preview-audio');
   }
 
   function sfxSetTiming(itemId, field, value) {
@@ -6160,6 +6567,11 @@ placeholder="Enter your story here"></textarea>
           slug: _sfxSlug, ep_id: _sfxEpId,
           selected: _sfxSelected,
           timing: _sfxTiming,
+          volumes: _sfxVolumes,
+          duck_fade: _sfxDuckFade,
+          cut_clips: _sfxCutClips,
+          cut_assign: _sfxCutAssign,
+          clip_volumes: _sfxClipVolumes,
         })
       });
       const d = await r.json();
@@ -6174,6 +6586,8 @@ placeholder="Enter your story here"></textarea>
 
   function sfxReset() {
     _sfxSelected = {};
+    _sfxVolumes = {}; _sfxDuckFade = {}; _sfxCutClips = [];
+    _sfxMarks = {}; _sfxClipVolumes = {}; _sfxCutAssign = {};
     try { sessionStorage.removeItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId); } catch(e) {}
     Object.keys(_sfxResults).forEach(id => {
       const res = _sfxResults[id];
@@ -8734,7 +9148,8 @@ placeholder="Enter your story here"></textarea>
     }
 
     if (orderedShots.length === 0 && Object.keys(shotBlocks).length === 0) {
-      container.innerHTML = '';
+      container.innerHTML = '<div class="music-card"><div class="music-card-hdr">Shot Overrides</div>'
+        + '<div class="music-card-sub" style="color:var(--dim);padding:12px 0">Select an episode above to load the shot timeline.</div></div>';
       return;
     }
 
@@ -11106,6 +11521,7 @@ placeholder="Enter your story here"></textarea>
   let _musicClipLookup = {};   // clip_id → { wavStem, path, item_id } — built by _musicRenderBody
   let _musicMarks     = {};     // per-stem marks: { stem: {start: N, end: N} }
   let _musicOverrides = {};       // { item_id: {duck_db, fade_sec, ...} }
+  let _musicShotMap   = {};       // { shot_id: {offset_sec, duration_sec} } — from ShotList.json
   let _musicTrackVolumes = {};    // { stem: dB_offset } — persists across regenerations
   let _musicClipVolumes  = {};    // { item_id|clip_id: dB_offset }
                                   // auto clips  → keyed by item_id  (e.g. "music-s01e01_sh01")
@@ -11157,6 +11573,7 @@ placeholder="Enter your story here"></textarea>
     [_musicSlug, _musicEpId] = v.split('|');
     _musicClipVolumes = {};
     _musicCutClips    = [];   // reset on episode change; repopulated from disk by _musicLoadExisting
+    _musicShotMap     = {};   // reset; repopulated from ShotList.json by _musicLoadExisting
     document.getElementById('music-btn-review').disabled  = false;
     _musicSetStatus('Episode selected. Click Generate Preview to begin.');
     // Try to load existing data
@@ -11194,14 +11611,17 @@ placeholder="Enter your story here"></textarea>
           slMap[s.shot_id] = { offset_sec: cum, duration_sec: s.duration_sec || 0 };
           cum += s.duration_sec || 0;
         }
-        (_musicTimeline.shots || []).forEach(s => {
-          const sl = slMap[s.shot_id];
-          if (sl) {
-            s.offset_sec   = sl.offset_sec;
-            s.duration_sec = sl.duration_sec;
-          }
-        });
-        _musicTimeline.total_duration_sec = cum;
+        _musicShotMap = slMap;   // store for fallback path in _musicRenderBody
+        if (_musicTimeline) {
+          (_musicTimeline.shots || []).forEach(s => {
+            const sl = slMap[s.shot_id];
+            if (sl) {
+              s.offset_sec   = sl.offset_sec;
+              s.duration_sec = sl.duration_sec;
+            }
+          });
+          _musicTimeline.total_duration_sec = cum;
+        }
       } else {
         console.warn('[Music] ShotList fetch failed, using MusicReviewPack timing as fallback');
       }
@@ -11467,6 +11887,17 @@ placeholder="Enter your story here"></textarea>
           ? shStart + sh.music_end_sec
           : shStart + (sh.duration_sec || 0);
         musicItems.push({ item_id: sh.music_item_id, start_sec: musicStart, end_sec: musicEnd, music_mood: sh.music_mood || '' });
+      } else {
+        // Fallback: VOPlan has no music_items, but MusicPlan overrides exist.
+        // Use saved start_sec/end_sec from _musicOverrides to draw the green bar.
+        const ovr = Object.values(_musicOverrides).find(o => o.shot_id === sh.shot_id);
+        if (ovr && ovr.item_id) {
+          // ovr.start_sec / ovr.end_sec are episode-absolute (MusicPlan stores
+          // them that way).  Do NOT add shStart — it is already baked in.
+          const musicStart = ovr.start_sec != null ? ovr.start_sec : shStart;
+          const musicEnd   = ovr.end_sec   != null ? ovr.end_sec   : shEnd;
+          musicItems.push({ item_id: ovr.item_id, start_sec: musicStart, end_sec: musicEnd });
+        }
       }
     }
 
@@ -11477,7 +11908,7 @@ placeholder="Enter your story here"></textarea>
       return { shot_id: sh.shot_id, scene_id, offset_sec: sh.offset_sec || 0 };
     });
 
-    _tlRender('music', { total_dur_sec: totalDur, shots, vo_items: voItems, sfx_items: [], music_items: musicItems }, 'music-preview-audio');
+    _tlRender('music', { total_dur_sec: totalDur, shots, vo_items: voItems, sfx_items: tl.sfx_items || [], music_items: musicItems }, 'music-preview-audio');
   }
 
   function _musicRenderBody() {
@@ -11541,9 +11972,30 @@ placeholder="Enter your story here"></textarea>
       _musicClipLookup[c.clip_id] = { wavStem: wavStem, path: c.path, item_id: null };
     });
 
-    // ── Shot Overrides: visual timeline bar + clip dropdown + start/end/duck/fade ──
-    if (_musicTimeline && _musicTimeline.shots) {
-      const musicShots = _musicTimeline.shots.filter(s => s.music_item_id);
+    // ── Shot Overrides: always shown — visual timeline bar + clip dropdown + start/end/duck/fade ──
+    {
+      // Primary: derive shots from timeline. Fallback: reconstruct from saved MusicPlan overrides
+      // so previously-confirmed data is always visible even if the timeline endpoint fails.
+      // Primary: shots from timeline that have music assigned.
+      // If the timeline is available but has NO shots with music (e.g. VOPlan lacks
+      // music_items), fall through to the MusicPlan override fallback so previously-
+      // saved shot overrides are always visible.
+      const _tlShots = (_musicTimeline && _musicTimeline.shots)
+        ? _musicTimeline.shots.filter(s => s.music_item_id)
+        : [];
+      const musicShots = _tlShots.length > 0
+        ? _tlShots
+        : Object.values(_musicOverrides).filter(o => o.shot_id).map(o => {
+            // shot_id is the canonical key (required since MusicPlan schema 1.1)
+            const sid = o.shot_id;
+            const sl  = _musicShotMap[sid] || {};
+            return {
+              music_item_id: o.item_id,
+              shot_id:       sid,
+              offset_sec:    sl.offset_sec    != null ? sl.offset_sec    : 0,
+              duration_sec:  sl.duration_sec  != null ? sl.duration_sec  : 0,
+            };
+          });
       // Map item_ids to their current clip_id label
       const itemToClipId = {};
       (_musicClipResults || []).forEach(c => {
@@ -11552,8 +12004,9 @@ placeholder="Enter your story here"></textarea>
         const endSec = (c.start_sec || 0) + (c.duration_sec || 0);
         itemToClipId[c.item_id] = src + ':' + (c.start_sec || 0).toFixed(1) + 's-' + endSec.toFixed(1) + 's';
       });
-      if (musicShots.length > 0) {
-        const totalDur = _musicTimeline.total_duration_sec || 1;
+      {
+        const totalDur = (_musicTimeline && _musicTimeline.total_duration_sec)
+          || musicShots.reduce((a, s) => a + (s.duration_sec || 0), 0) || 1;
         const ovrCard = document.createElement('div');
         ovrCard.className = 'music-card';
 
@@ -11562,8 +12015,12 @@ placeholder="Enter your story here"></textarea>
         let ovrHtml = '<div class="music-card-hdr">Shot Overrides</div>'
           + '<div class="music-card-sub">Clip, music window (start/end within shot), duck &amp; fade per shot.</div>';
 
+        if (!musicShots.length) {
+          ovrHtml += '<div style="color:var(--dim);padding:12px 0">Select an episode and generate a Review Pack to see shot overrides.</div>';
+        }
+
         // ── Visual timeline bar ──
-        ovrHtml += '<div class="music-vtl-bar">';
+        ovrHtml += musicShots.length ? '<div class="music-vtl-bar">' : '';
         musicShots.forEach((s, i) => {
           const pct = ((s.duration_sec || 0) / totalDur * 100);
           const col = shotColors[i % shotColors.length];
@@ -11574,7 +12031,7 @@ placeholder="Enter your story here"></textarea>
             + '" title="' + s.shot_id + '  ' + fmtT(t0) + '–' + fmtT(t1) + '  (' + (s.duration_sec||0).toFixed(1) + 's)">'
             + s.shot_id.replace(/^s\d+e\d+_/, '') + '</div>';
         });
-        ovrHtml += '</div>';
+        if (musicShots.length) ovrHtml += '</div>';
 
         // ── Per-shot blocks (full width, stacked) ──
         const fmtEp = (t) => t.toFixed(1) + 's';
@@ -11927,11 +12384,22 @@ placeholder="Enter your story here"></textarea>
         const { source_stem: _dropped, ...rest } = v;
         loopSelClean[k] = rest;
       }
+      // Build item_id → shot_id lookup from timeline (authoritative) or _musicShotMap keys
+      const _shotIdLookup = {};
+      (_musicTimeline && _musicTimeline.shots || []).forEach(s => {
+        if (s.music_item_id && s.shot_id) _shotIdLookup[s.music_item_id] = s.shot_id;
+      });
       const plan = {
         schema_id: 'MusicPlan',
-        schema_version: '1.0',
+        schema_version: '1.1',
         loop_selections: loopSelClean,
-        shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id),
+        shot_overrides: Object.values(_musicOverrides).filter(o => o.item_id).map(o => {
+          if (o.shot_id) return o;   // already set (all 1.1 overrides have it)
+          // For any override set interactively this session (not yet saved), derive
+          // shot_id from the timeline lookup — the backend will also stamp it on write.
+          const sid = _shotIdLookup[o.item_id] || '';
+          return sid ? Object.assign({}, o, { shot_id: sid }) : o;
+        }),
       };
       if (Object.keys(_musicTrackVolumes).length)
         plan.track_volumes = _musicTrackVolumes;
@@ -14710,17 +15178,21 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
 def _fake_subprocess(cmd, step_name, ep_dir, locale):
     """In --test-mode: copy pre-baked fixture outputs, return fake process."""
     import shutil as _shutil
-    # step_outputs lives at <repo>/tests/step_outputs/ — always relative to the
-    # script location regardless of how PIPE_DIR was overridden.
-    _step_dir   = os.path.join(
+    # Fixture episode dir — hard truth lives here (tests/fixtures/projects/test-proj/episodes/s01e01)
+    _fixture_ep = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "tests", "step_outputs"
+        "tests", "fixtures", "projects", "test-proj", "episodes", "s01e01"
     )
 
     def _copy_merged_voplan():
-        src = os.path.join(_step_dir, "manifest_merge.VOPlan.en.json")
-        dst = os.path.join(ep_dir, f"VOPlan.{locale or 'en'}.json")
-        _shutil.copy(src, dst)
+        # Run the real manifest_merge.py on the ep_dir fixture inputs so the
+        # merged output is produced from hard truth (no pre-baked step_outputs needed).
+        import subprocess as _sp
+        _mm_py  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifest_merge.py")
+        _loc    = locale or "en"
+        _shared = os.path.join(ep_dir, "AssetManifest.shared.json")
+        _loc_in = os.path.join(ep_dir, f"VOPlan.{_loc}.json")
+        _sp.run(["python3", _mm_py, "--shared", _shared, "--locale", _loc_in, "--out", _loc_in], check=True)
 
     def _stub_render():
         out = os.path.join(ep_dir, "renders", locale or "en")
@@ -16699,6 +17171,21 @@ class Handler(BaseHTTPRequestHandler):
                         mi["shot_id"]: mi
                         for mi in _mf.get("music_items", []) if mi.get("shot_id")
                     }
+                    # Fallback: VOPlan has no music_items → seed from MusicPlan
+                    # shot_overrides so build_timeline() sets music_item_id on
+                    # each shot; apply_music_plan_overrides() below fills detail.
+                    if not _midx:
+                        _mp_fb = os.path.join(_ep_dir_mtl, "MusicPlan.json")
+                        if os.path.isfile(_mp_fb):
+                            try:
+                                _mp_fb_d = json.load(open(_mp_fb, encoding="utf-8"))
+                                _midx = {
+                                    o["shot_id"]: {"item_id": o["item_id"], "shot_id": o["shot_id"]}
+                                    for o in _mp_fb_d.get("shot_overrides", [])
+                                    if o.get("shot_id") and o.get("item_id")
+                                }
+                            except Exception as _e_fb_mtl:
+                                print(f"  [WARN] music_timeline: MusicPlan fallback: {_e_fb_mtl}")
                     _tls, _tdur = _mrp_build_mtl(
                         _shots_mtl, _mf, _vsm, _midx, _mrp_loop_mtl(Path(_ep_dir_mtl)))
                     # Apply MusicPlan overrides
@@ -16965,6 +17452,7 @@ class Handler(BaseHTTPRequestHandler):
                                        "assets/music/user_cut_clips.json",
                                        "assets/meta/gen_music_clip_results.json",
                                        "assets/sfx/sfx_search_results.json",
+                                       "assets/sfx/sfx_cut_clips.json",
                                        "SfxPlan.json",
                                        "AssetManifest.shared.json"}
             params   = parse_qs(parsed.query)
@@ -19101,6 +19589,11 @@ class Handler(BaseHTTPRequestHandler):
                 ep_id    = payload.get("ep_id", "").strip()
                 selected = payload.get("selected", {})   # {item_id: candidate_idx}
                 timing   = payload.get("timing", {})     # {item_id: {start, end}}
+                volumes      = payload.get("volumes",      {})   # {item_id: dB}
+                duck_fade    = payload.get("duck_fade",    {})   # {item_id: {duck_db, fade_sec}}
+                cut_clips    = payload.get("cut_clips",    [])
+                cut_assign   = payload.get("cut_assign",   {})   # {item_id: clip_id}
+                clip_volumes = payload.get("clip_volumes", {})   # {clip_id: dB}
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
 
@@ -19115,7 +19608,9 @@ class Handler(BaseHTTPRequestHandler):
                     _sr = json.load(_f)
                 all_results = _sr.get("results", {})
 
-                # Load manifest to get shot_id per item
+                # Build item_id → shot_id map.
+                # Primary: VOPlan sfx_items (has both item_id and shot_id).
+                # Fallback: ShotList.json audio_intent.sfx_item_ids (always present).
                 import glob as _gl2
                 _manifests = [p for p in _gl2.glob(os.path.join(ep_dir, "VOPlan.*.json"))
                               if os.path.basename(p) != "AssetManifest.shared.json"]
@@ -19124,7 +19619,18 @@ class Handler(BaseHTTPRequestHandler):
                     with open(sorted(_manifests)[0], encoding="utf-8") as _mf:
                         _manifest = json.load(_mf)
                     for _si in _manifest.get("sfx_items", []):
-                        _sfx_shot_map[_si.get("item_id", "")] = _si.get("shot_id", "")
+                        if _si.get("item_id") and _si.get("shot_id"):
+                            _sfx_shot_map[_si["item_id"]] = _si["shot_id"]
+                if not _sfx_shot_map:
+                    _sl_path = os.path.join(ep_dir, "ShotList.json")
+                    if os.path.isfile(_sl_path):
+                        _sl = json.load(open(_sl_path, encoding="utf-8"))
+                        for _sh in _sl.get("shots", []):
+                            _sid = _sh.get("shot_id", "")
+                            for _iid in _sh.get("audio_intent", {}).get("sfx_item_ids", []):
+                                if _iid:
+                                    _sfx_shot_map[_iid] = _sid
+                        print(f"  [SFX] shot_id map from ShotList: {len(_sfx_shot_map)} entries")
 
                 import urllib.request as _ul_req3
                 from urllib.parse import urlparse as _urlparse3
@@ -19156,6 +19662,12 @@ class Handler(BaseHTTPRequestHandler):
                                 "candidate_idx": idx,
                                 "start_sec":    float(t.get("start", 0) or 0),
                                 "end_sec":      t.get("end"),
+                                "volume_db":      float(volumes.get(item_id, 0) or 0),
+                                "duck_db":        float((duck_fade.get(item_id) or {}).get("duck_db",  0) or 0),
+                                "fade_sec":       float((duck_fade.get(item_id) or {}).get("fade_sec", 0) or 0),
+                                "clip_id":        cut_assign.get(item_id),
+                                "clip_path":      next((cl["path"] for cl in cut_clips
+                                                        if cl["clip_id"] == cut_assign.get(item_id)), None),
                             })
                             saved += 1
                         else:
@@ -19188,19 +19700,61 @@ class Handler(BaseHTTPRequestHandler):
                             "candidate_idx": idx,
                             "start_sec":    float(t.get("start", 0) or 0),
                             "end_sec":      t.get("end"),
+                            "volume_db":      float(volumes.get(item_id, 0) or 0),
+                            "duck_db":        float((duck_fade.get(item_id) or {}).get("duck_db",  0) or 0),
+                            "fade_sec":       float((duck_fade.get(item_id) or {}).get("fade_sec", 0) or 0),
+                            "clip_id":        cut_assign.get(item_id),
+                            "clip_path":      next((cl["path"] for cl in cut_clips
+                                                    if cl["clip_id"] == cut_assign.get(item_id)), None),
                         })
                         saved += 1
                     except Exception as _dl_err:
                         print(f"  [SFX] Download FAILED {item_id}: {_dl_err}")
                         failed += 1
 
+                # ── Second loop: cut-clip-only items (not in selected) ──
+                for item_id, clip_id_val in cut_assign.items():
+                    if item_id in selected:
+                        continue  # already written above
+                    _shot_id   = _sfx_shot_map.get(item_id, "")
+                    _clip_info = next((cl for cl in cut_clips if cl["clip_id"] == clip_id_val), None)
+                    if not _clip_info:
+                        print(f"  [SFX] cut_assign {item_id} → {clip_id_val} not in cut_clips — skipped")
+                        continue
+                    _clip_path = _clip_info["path"]   # ep_dir-relative
+                    _clip_abs  = _clip_path if os.path.isabs(_clip_path) else os.path.join(ep_dir, _clip_path)
+                    _ct = timing.get(item_id, {})
+                    sfx_plan_entries.append({
+                        "item_id":        item_id,
+                        "shot_id":        _shot_id,
+                        "source_file":    _clip_abs,
+                        "candidate_idx":  _clip_info.get("candidate_idx"),
+                        "start_sec":      float(_ct.get("start", 0) or 0),
+                        "end_sec":        _ct.get("end"),
+                        "volume_db":      float(volumes.get(item_id, 0) or 0),
+                        "duck_db":        float((duck_fade.get(item_id) or {}).get("duck_db",  0) or 0),
+                        "fade_sec":       float((duck_fade.get(item_id) or {}).get("fade_sec", 0) or 0),
+                        "clip_id":        clip_id_val,
+                        "clip_path":      _clip_path,
+                    })
+                    saved += 1
+
+                # Embed volume_db into each cut_clip entry (volume belongs to the clip, not the item)
+                cut_clips_with_vol = []
+                for _cl in cut_clips:
+                    _cl_out = dict(_cl)
+                    _cl_out["volume_db"] = float(clip_volumes.get(_cl["clip_id"], 0) or 0)
+                    cut_clips_with_vol.append(_cl_out)
+
                 # Write SfxPlan.json
                 sfx_plan = {
                     "schema_id": "SfxPlan",
-                    "schema_version": "1.0",
+                    "schema_version": "1.2",
                     "timing_format": "episode_absolute",
                     "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "sfx_entries": sfx_plan_entries,
+                    "cut_clips":    cut_clips_with_vol,
+                    "cut_assign":   cut_assign,
                 }
                 plan_path = os.path.join(ep_dir, "SfxPlan.json")
                 with open(plan_path, "w", encoding="utf-8") as _pf:
@@ -19222,6 +19776,11 @@ class Handler(BaseHTTPRequestHandler):
                 selected      = payload.get("selected", {})       # { item_id: candidate_idx }
                 include_music = payload.get("include_music", False)
                 timing        = payload.get("timing", {})          # { item_id: {start, end} }
+                volumes      = payload.get("volumes",      {})
+                duck_fade    = payload.get("duck_fade",    {})
+                cut_clips    = payload.get("cut_clips",    [])
+                cut_assign   = payload.get("cut_assign",   {})
+                clip_volumes = payload.get("clip_volumes", {})
 
                 ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
 
@@ -19251,14 +19810,45 @@ class Handler(BaseHTTPRequestHandler):
                     print(f"[WARN] Primary manifest for locale '{_primary_locale}' not found, "
                           f"falling back to {os.path.basename(manifest_path)}")
 
-                # ── Build sfx_selections dict from selected + sfx_search_results.json ──
+                # ── Build sfx_selections dict from cut_assign + selected ──────────────
+                # cut_assign entries carry their WAV path in cut_clips[] — they
+                # do NOT need sfx_search_results.json and must be processed first.
+                # selected (candidate-index) entries DO need the results file.
                 sfx_results_path = os.path.join(ep_dir, "assets", "sfx", "sfx_search_results.json")
                 sfx_sel = {}
+
+                # Pass 1 — cut clips (no results file needed)
+                for item_id, assigned_clip_id in cut_assign.items():
+                    cut_info = next((cl for cl in cut_clips if cl["clip_id"] == assigned_clip_id), None)
+                    if not cut_info:
+                        print(f"  [SFX PREVIEW] clip {assigned_clip_id} not found for {item_id} — skipped")
+                        continue
+                    _raw_path = cut_info["path"]
+                    _abs_path = _raw_path if os.path.isabs(_raw_path) else os.path.join(ep_dir, _raw_path)
+                    _cut_timing = timing.get(item_id, {})
+                    sfx_sel[item_id] = {
+                        "preview_url":    "",
+                        "source_file":    _abs_path,
+                        "start":          _cut_timing.get("start", 0.0),
+                        "end":            _cut_timing.get("end", None),
+                        "volume_db":      float(volumes.get(item_id, 0) or 0),
+                        "clip_volume_db": float(clip_volumes.get(assigned_clip_id, 0) or 0),
+                        "duck_db":        float((duck_fade.get(item_id) or {}).get("duck_db",  0) or 0),
+                        "fade_sec":       float((duck_fade.get(item_id) or {}).get("fade_sec", 0) or 0),
+                        "is_cut_clip":    True,
+                    }
+
+                # Pass 2 — library candidates (require sfx_search_results.json)
                 if os.path.isfile(sfx_results_path):
                     with open(sfx_results_path, encoding="utf-8") as f:
                         saved = json.load(f)
                     results = saved.get("results", {})
-                    for item_id, idx in selected.items():
+                    for item_id in selected:
+                        if item_id in sfx_sel:
+                            continue   # cut clip already assigned — takes precedence
+                        idx = selected.get(item_id)
+                        if idx is None:
+                            continue
                         # Coerce idx to int (JSON may deliver strings)
                         try:
                             idx = int(idx)
@@ -19269,10 +19859,15 @@ class Handler(BaseHTTPRequestHandler):
                             continue
                         _item_timing = timing.get(item_id, {})
                         sfx_sel[item_id] = {
-                            "preview_url": cands[idx].get("preview_url", ""),
-                            "source_file": _resolve_sfx_local_path(ep_dir, item_id, cands[idx]),
-                            "start": _item_timing.get("start", 0),
-                            "end":   _item_timing.get("end", None),
+                            "preview_url":    cands[idx].get("preview_url", ""),
+                            "source_file":    _resolve_sfx_local_path(ep_dir, item_id, cands[idx]),
+                            "start":          _item_timing.get("start", 0),
+                            "end":            _item_timing.get("end", None),
+                            "volume_db":      float(volumes.get(item_id, 0) or 0),
+                            "duck_db":        float((duck_fade.get(item_id) or {}).get("duck_db",  0) or 0),
+                            "fade_sec":       float((duck_fade.get(item_id) or {}).get("fade_sec", 0) or 0),
+                            "clip_volume_db": 0.0,
+                            "is_cut_clip":    False,
                         }
 
                 # ── Fallback: direct-download files that _resolve_sfx_local_path missed ──
@@ -19341,14 +19936,33 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
                 # ── Direct in-process render ─────────────────────────────────
+                import sfx_preview_pack as _sfx_pack_mod
                 from sfx_preview_pack import (
                     load_shotlist as _sfx_load_sl,
                     build_shot_timeline as _sfx_build_tl,
                     render_sfx_preview as _sfx_render,
                 )
+                # sfx_preview_pack.PIPE_DIR is set at module-load time from __file__
+                # (always the repo root).  In test mode PIPE_DIR here is overridden
+                # to the tmp fixture dir, so we must sync it before the path-security
+                # check inside render_sfx_preview() rejects every test-dir path.
+                _sfx_pack_mod.PIPE_DIR = Path(PIPE_DIR)
 
                 _sfx_manifest = json.loads(
                     open(manifest_path, encoding="utf-8").read())
+                # When the VOPlan is pre-merge (locale_scope != "merged") it does
+                # not carry sfx_items — those live in AssetManifest.shared.json.
+                # Augment the manifest so render_sfx_preview can map item_id → shot_id.
+                if not _sfx_manifest.get("sfx_items"):
+                    _shared_ref = _sfx_manifest.get("shared_ref", "AssetManifest.shared.json")
+                    _shared_path = os.path.join(ep_dir, _shared_ref)
+                    if os.path.isfile(_shared_path):
+                        try:
+                            _shared = json.loads(open(_shared_path, encoding="utf-8").read())
+                            if _shared.get("sfx_items"):
+                                _sfx_manifest["sfx_items"] = _shared["sfx_items"]
+                        except Exception as _e_shared:
+                            print(f"  [WARN] sfx_preview: could not load shared sfx_items: {_e_shared}")
                 _sfx_locale = (_sfx_manifest.get("locale", "")
                                or os.path.basename(manifest_path).split(".")[-2])
                 _sfx_shots = _sfx_load_sl(_sfx_manifest, Path(manifest_path))
@@ -19368,6 +19982,19 @@ class Handler(BaseHTTPRequestHandler):
                     for mi in _sfx_manifest.get("music_items", [])
                     if mi.get("shot_id")
                 }
+                # Fallback: VOPlan has no music_items → seed from MusicPlan
+                if not _sfx_midx:
+                    _sfx_mp_fb = os.path.join(ep_dir, "MusicPlan.json")
+                    if os.path.isfile(_sfx_mp_fb):
+                        try:
+                            _sfx_mp_fb_d = json.load(open(_sfx_mp_fb, encoding="utf-8"))
+                            _sfx_midx = {
+                                o["shot_id"]: {"item_id": o["item_id"], "shot_id": o["shot_id"]}
+                                for o in _sfx_mp_fb_d.get("shot_overrides", [])
+                                if o.get("shot_id") and o.get("item_id")
+                            }
+                        except Exception as _e_fb_sfx:
+                            print(f"  [WARN] sfx_preview: MusicPlan fallback: {_e_fb_sfx}")
 
                 # RenderPlan is eliminated — ShotList.duration_sec is the authoritative floor.
                 # _sfx_shots already uses ShotList durations; no patching needed.
@@ -19398,6 +20025,118 @@ class Handler(BaseHTTPRequestHandler):
 
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 400)
+
+        # ── SFX Cut Clip: trim a candidate audio to In/Out marks ─────────────
+        elif self.path == "/api/sfx_cut_clip":
+            try:
+                length       = int(self.headers.get("Content-Length", 0))
+                payload      = json.loads(self.rfile.read(length))
+                slug         = payload.get("slug", "").strip()
+                ep_id        = payload.get("ep_id", "").strip()
+                item_id      = payload.get("item_id", "").strip()
+                candidate_idx = int(payload.get("candidate_idx", 0))
+                source_file  = payload.get("source_file", "").strip()
+                title        = payload.get("title", "").strip()
+                start_sec    = float(payload.get("start_sec", 0))
+                end_sec      = float(payload.get("end_sec", 0))
+                if not all([slug, ep_id, item_id, source_file]) or end_sec <= start_sec:
+                    raise ValueError("slug, ep_id, item_id, source_file, start_sec<end_sec required")
+
+                ep_dir   = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                out_dir  = os.path.join(ep_dir, "assets", "sfx", item_id)
+                os.makedirs(out_dir, exist_ok=True)
+
+                # Build clip name: "{title}_{start}s-{end}s" — same convention as music clips
+                # ({stem}_{start:.1f}s-{end:.1f}s.wav, natural decimal notation with dots).
+                # Use title (the library sound name) so the file tells you what the sound is.
+                # Fall back to item_id if title is empty.
+                import re as _re_sfx_title
+                _safe_name = _re_sfx_title.sub(r'[^A-Za-z0-9\-]', '_', title).strip('_')[:40] if title else item_id
+                if not _safe_name:
+                    _safe_name = item_id
+                out_filename = f"{_safe_name}_{start_sec:.1f}s-{end_sec:.1f}s.wav"
+                out_path     = os.path.join(out_dir, out_filename)
+
+                # Resolve source_file — handle serve_media paths and external URLs
+                _sfx_src = source_file
+                _sfx_tmp = None
+                # Resolve /serve_media?path=... to a real local path
+                if _sfx_src.startswith("/serve_media"):
+                    from urllib.parse import urlparse as _up_sm, parse_qs as _pqs_sm, unquote_plus as _uq_sm
+                    _sm_qs  = _pqs_sm(_up_sm(_sfx_src).query)
+                    _sm_rel = _uq_sm((_sm_qs.get("path", [""])[0]).strip())
+                    if _sm_rel:
+                        _sfx_src = os.path.realpath(
+                            _sm_rel if os.path.isabs(_sm_rel)
+                            else os.path.join(PIPE_DIR, _sm_rel)
+                        )
+                if _sfx_src.startswith("http://") or _sfx_src.startswith("https://"):
+                    import urllib.request as _ul_cut
+                    from urllib.parse import urlparse as _up_cut
+                    _ext_cut = os.path.splitext(_up_cut(_sfx_src).path)[1] or ".mp3"
+                    import tempfile as _tf_cut
+                    _fd_cut, _sfx_tmp = _tf_cut.mkstemp(suffix=_ext_cut,
+                                                         prefix=f"sfx_cut_{item_id}_",
+                                                         dir=out_dir)
+                    os.close(_fd_cut)
+                    _req_cut = _ul_cut.Request(_sfx_src)
+                    _req_cut.add_header("User-Agent", "Mozilla/5.0")
+                    with _ul_cut.urlopen(_req_cut, timeout=60) as _resp_cut:
+                        with open(_sfx_tmp, "wb") as _fo_cut:
+                            _fo_cut.write(_resp_cut.read())
+                    _sfx_src = _sfx_tmp
+
+                try:
+                    # Extract with ffmpeg — 48000 Hz REQUIRED (matches sfx_preview_pack.py SAMPLE_RATE)
+                    subprocess.run([
+                        "ffmpeg", "-i", _sfx_src,
+                        "-ss", str(start_sec), "-to", str(end_sec),
+                        "-ar", "48000", "-ac", "2", "-y", out_path
+                    ], check=True, capture_output=True)
+                finally:
+                    if _sfx_tmp and os.path.exists(_sfx_tmp):
+                        os.unlink(_sfx_tmp)
+
+                clip_id      = out_filename[:-4]   # strip ".wav" — same derivation as music clips
+                duration_sec = end_sec - start_sec
+                rel_path     = os.path.relpath(out_path, ep_dir)   # ep_dir-relative for storage
+
+                # Persist cut clip metadata immediately so reloads don't lose it
+                _cc_file = os.path.join(ep_dir, "assets", "sfx", "sfx_cut_clips.json")
+                try:
+                    _existing_cc = []
+                    if os.path.isfile(_cc_file):
+                        with open(_cc_file, encoding="utf-8") as _ccf:
+                            _existing_cc = json.load(_ccf)
+                    # Replace any prior entry with the same clip_id (idempotent)
+                    _existing_cc = [c for c in _existing_cc if c.get("clip_id") != clip_id]
+                    _existing_cc.append({
+                        "clip_id":       clip_id,
+                        "item_id":       item_id,
+                        "candidate_idx": candidate_idx,
+                        "start_sec":     start_sec,
+                        "end_sec":       end_sec,
+                        "duration_sec":  duration_sec,
+                        "source_file":   source_file,
+                        "path":          rel_path,
+                    })
+                    with open(_cc_file, "w", encoding="utf-8") as _ccf:
+                        json.dump(_existing_cc, _ccf, indent=2, ensure_ascii=False)
+                    print(f"  [SFX CUT] sfx_cut_clips.json updated: {len(_existing_cc)} clip(s)")
+                except Exception as _cc_err:
+                    print(f"  [SFX CUT] WARNING: could not update sfx_cut_clips.json: {_cc_err}")
+
+                print(f"  [SFX CUT] {clip_id} → {out_path} ({duration_sec:.2f}s)")
+                _json_resp(self, {
+                    "ok": True,
+                    "clip_id": clip_id,
+                    "path": rel_path,
+                    "duration_sec": duration_sec,
+                })
+            except subprocess.CalledProcessError as _ffmpeg_err:
+                _json_resp(self, {"ok": False, "error": f"ffmpeg failed: {_ffmpeg_err.stderr.decode(errors='replace')}"}, 500)
+            except Exception as exc:
+                _json_resp(self, {"ok": False, "error": str(exc)}, 500)
 
         # ── AI SFX Generate: submit generation job to AI server ──────────────
         elif self.path == "/api/ai_sfx_generate":
@@ -20075,6 +20814,19 @@ class Handler(BaseHTTPRequestHandler):
                     for mi in _manifest.get("music_items", [])
                     if mi.get("shot_id")
                 }
+                # Fallback: VOPlan has no music_items → seed from MusicPlan
+                if not _music_index:
+                    _mp_fb3 = os.path.join(ep_dir, "MusicPlan.json")
+                    if os.path.isfile(_mp_fb3):
+                        try:
+                            _mp_fb3_d = json.load(open(_mp_fb3, encoding="utf-8"))
+                            _music_index = {
+                                o["shot_id"]: {"item_id": o["item_id"], "shot_id": o["shot_id"]}
+                                for o in _mp_fb3_d.get("shot_overrides", [])
+                                if o.get("shot_id") and o.get("item_id")
+                            }
+                        except Exception as _e_fb_mrp:
+                            print(f"  [WARN] music_review_pack: MusicPlan fallback: {_e_fb_mrp}")
                 _loop_info = _mrp_load_loop(Path(ep_dir))
                 _tl_shots, _total_dur = _mrp_build(
                     _shots, _manifest, _vo_shot_map, _music_index, _loop_info)
@@ -20193,10 +20945,20 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     print("  [WARN] music_plan_save: VOPlan not found — shot_id enrichment skipped")
 
+                import re as _re_music
                 for _ovr in plan.get("shot_overrides", []):
                     _iid = _ovr.get("item_id", "")
-                    if _iid and _iid in _item_to_shot and "shot_id" not in _ovr:
+                    if not _iid or "shot_id" in _ovr:
+                        continue
+                    if _iid in _item_to_shot:
+                        # Authoritative: from VOPlan music_items
                         _ovr["shot_id"] = _item_to_shot[_iid]
+                    else:
+                        # Fallback: strip "music-" prefix to derive shot_id
+                        _ovr["shot_id"] = _re_music.sub(r'^music-', '', _iid)
+
+                # Stamp schema_version 1.1 now that shot_id is guaranteed on all overrides
+                plan["schema_version"] = "1.1"
 
                 plan_path = os.path.join(ep_dir, "MusicPlan.json")
                 with open(plan_path, "w", encoding="utf-8") as _pf:
@@ -20951,7 +21713,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/media_batch", "/api/media_batch_resume", "/api/media_confirm",
                   "/api/media_preview",
                   "/api/sfx_search", "/api/sfx_save", "/api/sfx_results_save",
-                  "/api/sfx_save_all", "/api/sfx_preview",
+                  "/api/sfx_save_all", "/api/sfx_preview", "/api/sfx_cut_clip",
                   "/api/ai_sfx_generate", "/api/ai_sfx_save",
                   "/api/ai_images", "/api/ai_job_status",
                   "/api/serve_media_file",

@@ -1,0 +1,150 @@
+{
+  "schema_id": "SfxPlan",
+  "schema_version": "1.2",
+  "timing_format": "episode_absolute",
+  "saved_at": "2026-03-19T00:40:05Z",
+  "sfx_entries": [
+    {
+      "item_id": "sfx-sc02-sh02-001",
+      "shot_id": "sc02-sh02",
+      "source_file": "/home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/sfx/sfx-sc02-sh02-001/sfx-sc02-sh02-001.mp3",
+      "candidate_idx": 0,
+      "start_sec": 35.0,
+      "end_sec": 40,
+      "volume_db": 0.0,
+      "duck_db": 0.0,
+      "fade_sec": 0.0,
+      "clip_id": "Hydroelectric_Turbines_-_Hoover_Dam_0.0s-52.9s",
+      "clip_path": "assets/sfx/sfx-sc02-sh02-001/Hydroelectric_Turbines_-_Hoover_Dam_0.0s-52.9s.wav"
+    },
+    {
+      "item_id": "sfx-sc01-sh01-001",
+      "shot_id": "sc01-sh01",
+      "source_file": "/home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/sfx/sfx-sc01-sh01-001/ai_1773848083082.mp3",
+      "candidate_idx": 0,
+      "start_sec": 5.0,
+      "end_sec": 10,
+      "volume_db": 0.0,
+      "duck_db": 0.0,
+      "fade_sec": 0.0,
+      "clip_id": "AI__A_sharp_mechanical_button_click_in_a_0.5s-2.0s",
+      "clip_path": "assets/sfx/sfx-sc01-sh01-001/AI__A_sharp_mechanical_button_click_in_a_0.5s-2.0s.wav"
+    }
+  ],
+  "cut_clips": [
+    {
+      "clip_id": "sfx-sc01-sh01-001:0.00s-0.98s",
+      "item_id": "sfx-sc01-sh01-001",
+      "candidate_idx": 0,
+      "start_sec": 0,
+      "end_sec": 0.975635,
+      "duration_sec": 0.975635,
+      "source_file": "https://cdn.freesound.org/previews/278/278205_4965320-hq.mp3",
+      "path": "assets/sfx/sfx-sc01-sh01-001/sfx-sc01-sh01-001_0_00s-0_98s.wav",
+      "volume_db": 0.0
+    },
+    {
+      "clip_id": "AI__A_sharp_mechanical_button_click_in_a:0.00s-28.08s",
+      "item_id": "sfx-sc01-sh01-001",
+      "candidate_idx": 0,
+      "start_sec": 0,
+      "end_sec": 28.08,
+      "duration_sec": 28.08,
+      "source_file": "/serve_media?path=projects/test-proj/episodes/s01e01/assets/sfx/sfx-sc01-sh01-001/ai_1773848083082.mp3",
+      "path": "assets/sfx/sfx-sc01-sh01-001/AI__A_sharp_mechanical_button_click_in_a_0_00s-28_08s.wav",
+      "volume_db": 0.0
+    },
+    {
+      "clip_id": "sfx-sc01-sh01-001_0.0s-1.0s",
+      "item_id": "sfx-sc01-sh01-001",
+      "candidate_idx": 1,
+      "start_sec": 0,
+      "end_sec": 0.975635,
+      "duration_sec": 0.975635,
+      "source_file": "https://cdn.freesound.org/previews/278/278205_4965320-hq.mp3",
+      "path": "assets/sfx/sfx-sc01-sh01-001/sfx-sc01-sh01-001_0.0s-1.0s.wav",
+      "volume_db": 0.0
+    },
+    {
+      "clip_id": "sfx-sc01-sh01-001_1.0s-3.5s",
+      "item_id": "sfx-sc01-sh01-001",
+      "candidate_idx": 0,
+      "start_sec": 1,
+      "end_sec": 3.5,
+      "duration_sec": 2.5,
+      "source_file": "/home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/sfx/sfx-sc01-sh01-001/AI__A_sharp_mechanical_button_click_in_a_0_00s-28_08s.wav",
+      "path": "assets/sfx/sfx-sc01-sh01-001/sfx-sc01-sh01-001_1.0s-3.5s.wav",
+      "volume_db": 0.0
+    },
+    {
+      "clip_id": "AI_-_A_sharp_mechanical_button_click_1.0s-3.5s",
+      "item_id": "sfx-sc01-sh01-001",
+      "candidate_idx": 0,
+      "start_sec": 1,
+      "end_sec": 3.5,
+      "duration_sec": 2.5,
+      "source_file": "/home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/sfx/sfx-sc01-sh01-001/AI__A_sharp_mechanical_button_click_in_a_0_00s-28_08s.wav",
+      "path": "assets/sfx/sfx-sc01-sh01-001/AI_-_A_sharp_mechanical_button_click_1.0s-3.5s.wav",
+      "volume_db": 0.0
+    },
+    {
+      "clip_id": "Switch_Flip__1_0.0s-1.0s",
+      "item_id": "sfx-sc01-sh01-001",
+      "candidate_idx": 1,
+      "start_sec": 0,
+      "end_sec": 0.975635,
+      "duration_sec": 0.975635,
+      "source_file": "https://cdn.freesound.org/previews/278/278205_4965320-hq.mp3",
+      "path": "assets/sfx/sfx-sc01-sh01-001/Switch_Flip__1_0.0s-1.0s.wav",
+      "volume_db": 0.0
+    },
+    {
+      "clip_id": "Switch_Flip__2_0.0s-0.5s",
+      "item_id": "sfx-sc01-sh01-001",
+      "candidate_idx": 2,
+      "start_sec": 0,
+      "end_sec": 0.477823,
+      "duration_sec": 0.477823,
+      "source_file": "https://cdn.freesound.org/previews/278/278204_4965320-hq.mp3",
+      "path": "assets/sfx/sfx-sc01-sh01-001/Switch_Flip__2_0.0s-0.5s.wav",
+      "volume_db": 0.0
+    },
+    {
+      "clip_id": "Hydroelectric_Turbines_-_Hoover_Dam_0.0s-52.9s",
+      "item_id": "sfx-sc02-sh02-001",
+      "candidate_idx": 0,
+      "start_sec": 0,
+      "end_sec": 52.8893,
+      "duration_sec": 52.8893,
+      "source_file": "https://cdn.freesound.org/previews/514/514214_2409224-hq.mp3",
+      "path": "assets/sfx/sfx-sc02-sh02-001/Hydroelectric_Turbines_-_Hoover_Dam_0.0s-52.9s.wav",
+      "volume_db": 0.0
+    },
+    {
+      "clip_id": "Hydroelectric_Turbines_-_Hoover_Dam_0.0s-2.1s",
+      "item_id": "sfx-sc02-sh02-001",
+      "candidate_idx": 0,
+      "start_sec": 0,
+      "end_sec": 2.1,
+      "duration_sec": 2.1,
+      "source_file": "https://cdn.freesound.org/previews/514/514214_2409224-hq.mp3",
+      "path": "assets/sfx/sfx-sc02-sh02-001/Hydroelectric_Turbines_-_Hoover_Dam_0.0s-2.1s.wav",
+      "volume_db": 0.0
+    },
+    {
+      "clip_id": "AI__A_sharp_mechanical_button_click_in_a_0.5s-2.0s",
+      "item_id": "sfx-sc01-sh01-001",
+      "candidate_idx": 0,
+      "start_sec": 0.5,
+      "end_sec": 2,
+      "duration_sec": 1.5,
+      "source_file": "/serve_media?path=projects/test-proj/episodes/s01e01/assets/sfx/sfx-sc01-sh01-001/ai_1773848083082.mp3",
+      "path": "assets/sfx/sfx-sc01-sh01-001/AI__A_sharp_mechanical_button_click_in_a_0.5s-2.0s.wav",
+      "volume_db": 12.0
+    }
+  ],
+  "cut_assign": {
+    "sfx-sc02-sh02-001": "Hydroelectric_Turbines_-_Hoover_Dam_0.0s-52.9s",
+    "sfx-sc01-sh01-001": "AI__A_sharp_mechanical_button_click_in_a_0.5s-2.0s"
+  }
+}

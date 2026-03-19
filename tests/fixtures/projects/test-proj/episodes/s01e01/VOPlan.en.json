@@ -4,8 +4,9 @@
   "manifest_id": "test-proj-s01e01-en-manifest",
   "project_id": "test-proj",
   "episode_id": "s01e01",
-  "locale_scope": "merged",
   "locale": "en",
+  "locale_scope": "locale",
+  "shared_ref": "AssetManifest.shared.json",
   "shotlist_ref": "ShotList.json",
   "character_packs": [],
   "backgrounds": [
@@ -87,7 +88,7 @@
       "lighting": "soft_night"
     },
     {
-      "asset_id": "bg-chernobyl-plant-exterior-dawn",
+      "asset_id": "bg-chernobyl-plant-exterior-overcast",
       "type": "background",
       "license_type": "proprietary_cleared",
       "motion_level": "medium",
@@ -160,73 +161,7 @@
       "lighting": "warm_dawn"
     }
   ],
-  "sfx_items": [
-    {
-      "item_id": "sfx-sc01-sh01-001",
-      "type": "sfx",
-      "shot_id": "sc01-sh01",
-      "duration_sec": 28.089,
-      "license_type": "proprietary_cleared",
-      "tag": "A sharp mechanical button click in a dimly lit Soviet nuclear control room, isolated and close, with a brief metallic resonance decaying into near-silence — precise, deliberate, and final.",
-      "search_queries": [
-        "mechanical button click industrial control panel",
-        "Soviet control room switch press sound effect",
-        "hard button click metallic resonance"
-      ]
-    },
-    {
-      "item_id": "sfx-sc01-sh01-002",
-      "type": "sfx",
-      "shot_id": "sc01-sh01",
-      "duration_sec": 28.089,
-      "license_type": "proprietary_cleared",
-      "tag": "A deep distant explosion heard from inside a nuclear facility, a muffled low-frequency concussion wave rolling outward with heavy bass rumble, the sound muted by thick concrete walls and fading slowly into reverberant industrial silence.",
-      "search_queries": [
-        "distant explosion muffled low frequency rumble",
-        "nuclear explosion distant indoor reverb",
-        "far away blast concussion wave sound effect"
-      ]
-    },
-    {
-      "item_id": "sfx-sc01-sh01-003",
-      "type": "sfx",
-      "shot_id": "sc01-sh01",
-      "duration_sec": 28.089,
-      "license_type": "proprietary_cleared",
-      "tag": "Urgent Soviet nuclear emergency alarm blaring continuously inside a concrete industrial facility, a harsh electronic klaxon with metallic overtones bouncing off hard walls, loud and unrelenting — the sound of critical failure.",
-      "search_queries": [
-        "nuclear emergency alarm klaxon industrial",
-        "Soviet facility alert alarm blaring continuous",
-        "emergency warning siren indoor concrete reverb"
-      ]
-    },
-    {
-      "item_id": "sfx-sc02-sh02-001",
-      "type": "sfx",
-      "shot_id": "sc02-sh02",
-      "duration_sec": 29.559,
-      "license_type": "proprietary_cleared",
-      "tag": "Steady low-frequency machinery hum of nuclear plant turbines running at full operational load, a constant industrial drone with subtle vibration that permeates the entire facility structure — powerful, rhythmic, and relentless.",
-      "search_queries": [
-        "industrial turbine machinery hum low frequency drone",
-        "nuclear power plant machinery ambient sound",
-        "generator hum industrial facility constant background"
-      ]
-    },
-    {
-      "item_id": "sfx-sc02-sh02-002",
-      "type": "sfx",
-      "shot_id": "sc02-sh02",
-      "duration_sec": 29.559,
-      "license_type": "proprietary_cleared",
-      "tag": "Wind moving across the exterior of a large industrial nuclear facility at dawn, gusting between massive concrete structures and metal ductwork, carrying a faint mechanical undertone from running plant equipment — cold, open-air, and vast.",
-      "search_queries": [
-        "wind industrial complex exterior concrete ambient",
-        "cold wind nuclear plant outdoor morning sound",
-        "gusty wind large building exterior atmospheric"
-      ]
-    }
-  ],
+  "background_overrides": [],
   "vo_items": [
     {
       "item_id": "vo-sc01-001",
@@ -373,56 +308,363 @@
       "end_sec": 55.348
     }
   ],
-  "background_overrides": [],
-  "resolved_assets": [],
-  "render_plan": null,
-  "music_items": [
+  "resolved_assets": [
     {
-      "item_id": "music-sc01-sh01",
-      "type": "music",
+      "asset_id": "bg-reactor-control-room-night",
+      "asset_type": "background",
+      "uri": "file:///data/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-reactor-control-room-night/videos/pexels/pexels_vid_12191466.mp4",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_licensed",
+        "attribution": "file:///mnt/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-reactor-control-room-night/videos/pexels/pexels_vid_12191466.mp4",
+        "purchase_record": "",
+        "provider_or_model": "pexels",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "stock",
+        "provider": "pexels",
+        "url": "file:///mnt/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-reactor-control-room-night/videos/pexels/pexels_vid_12191466.mp4"
+      },
+      "license": {
+        "spdx_id": "LicenseRef-commercial-licensed",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py",
       "shot_id": "sc01-sh01",
-      "music_mood": "dark orchestral, low rumble building to tension",
-      "duration_sec": 28.089,
-      "start_sec": 0.0,
-      "duck_db": -12.0,
-      "fade_sec": 0.15,
-      "license_type": "proprietary_cleared",
-      "duck_intervals": [
-        [
-          0.0,
-          19.246
-        ],
-        [
-          19.246,
-          25.94
-        ]
-      ]
+      "segment_index": 0,
+      "duration_sec": 5.161667,
+      "hold_sec": null,
+      "start_sec": 0,
+      "end_sec": 0
     },
     {
-      "item_id": "music-sc02-sh02",
-      "type": "music",
+      "asset_id": "bg-reactor-control-room-night",
+      "asset_type": "background",
+      "uri": "file:///data/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-reactor-control-room-night/videos/pexels/pexels_vid_31554971.mp4",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_licensed",
+        "attribution": "file:///mnt/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-reactor-control-room-night/videos/pexels/pexels_vid_31554971.mp4",
+        "purchase_record": "",
+        "provider_or_model": "pexels",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "stock",
+        "provider": "pexels",
+        "url": "file:///mnt/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-reactor-control-room-night/videos/pexels/pexels_vid_31554971.mp4"
+      },
+      "license": {
+        "spdx_id": "LicenseRef-commercial-licensed",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py",
+      "shot_id": "sc01-sh01",
+      "segment_index": 1,
+      "duration_sec": 8.074733,
+      "hold_sec": null,
+      "start_sec": 0,
+      "end_sec": 0
+    },
+    {
+      "asset_id": "bg-reactor-control-room-night",
+      "asset_type": "background",
+      "uri": "file:///data/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-reactor-control-room-night/images/europeana/hires/europeana_img__472_https___www_esbirky_cz_detail_6347652.jpg",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_licensed",
+        "attribution": "file:///mnt/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-reactor-control-room-night/images/europeana/europeana_img__472_https___www_esbirky_cz_detail_6347652.jpg",
+        "purchase_record": "",
+        "provider_or_model": "stock",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "stock",
+        "provider": "stock",
+        "url": "file:///mnt/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-reactor-control-room-night/images/europeana/europeana_img__472_https___www_esbirky_cz_detail_6347652.jpg"
+      },
+      "license": {
+        "spdx_id": "LicenseRef-commercial-licensed",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py",
+      "shot_id": "sc01-sh01",
+      "segment_index": 2,
+      "duration_sec": null,
+      "hold_sec": 14.852599999999999,
+      "start_sec": 0,
+      "end_sec": 14.852599999999999
+    },
+    {
+      "asset_id": "bg-chernobyl-plant-exterior-overcast",
+      "asset_type": "background",
+      "uri": "file:///data/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-chernobyl-plant-exterior-overcast/images/pixabay/pixabay_img_3545244.jpg",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "CC0",
+        "attribution": "file:///mnt/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-chernobyl-plant-exterior-overcast/images/pixabay/pixabay_img_3545244.jpg",
+        "purchase_record": "",
+        "provider_or_model": "pixabay",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "stock",
+        "provider": "pixabay",
+        "url": "file:///mnt/shared/test-proj/episodes/s01e01/assets/media/b_82bacb08/bg-chernobyl-plant-exterior-overcast/images/pixabay/pixabay_img_3545244.jpg"
+      },
+      "license": {
+        "spdx_id": "CC0-1.0",
+        "attribution_required": true,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py",
       "shot_id": "sc02-sh02",
-      "music_mood": "sparse strings, contemplative and foreboding",
-      "duration_sec": 29.559,
-      "start_sec": 0.0,
-      "duck_db": -12.0,
-      "fade_sec": 0.15,
-      "license_type": "proprietary_cleared",
-      "duck_intervals": [
-        [
-          25.94,
-          30.164
-        ],
-        [
-          30.164,
-          34.501
-        ],
-        [
-          34.501,
-          53.499
-        ]
-      ]
+      "segment_index": 0,
+      "duration_sec": null,
+      "hold_sec": null,
+      "start_sec": 0,
+      "end_sec": 0
+    },
+    {
+      "asset_id": "vo-sc01-001",
+      "asset_type": "vo",
+      "uri": "file:///home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/en/audio/vo/vo-sc01-001.wav",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_reusable",
+        "attribution": "",
+        "purchase_record": "",
+        "provider_or_model": "local_library",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "local"
+      },
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py"
+    },
+    {
+      "asset_id": "vo-sc01-002",
+      "asset_type": "vo",
+      "uri": "file:///home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/en/audio/vo/vo-sc01-002.wav",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_reusable",
+        "attribution": "",
+        "purchase_record": "",
+        "provider_or_model": "local_library",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "local"
+      },
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py"
+    },
+    {
+      "asset_id": "vo-sc01-003",
+      "asset_type": "vo",
+      "uri": "file:///home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/en/audio/vo/vo-sc01-003.wav",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_reusable",
+        "attribution": "",
+        "purchase_record": "",
+        "provider_or_model": "local_library",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "local"
+      },
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py"
+    },
+    {
+      "asset_id": "vo-sc01-004",
+      "asset_type": "vo",
+      "uri": "file:///home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/en/audio/vo/vo-sc01-004.wav",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_reusable",
+        "attribution": "",
+        "purchase_record": "",
+        "provider_or_model": "local_library",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "local"
+      },
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py"
+    },
+    {
+      "asset_id": "vo-sc02-001",
+      "asset_type": "vo",
+      "uri": "file:///home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/en/audio/vo/vo-sc02-001.wav",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_reusable",
+        "attribution": "",
+        "purchase_record": "",
+        "provider_or_model": "local_library",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "local"
+      },
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py"
+    },
+    {
+      "asset_id": "vo-sc02-002",
+      "asset_type": "vo",
+      "uri": "file:///home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/en/audio/vo/vo-sc02-002.wav",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_reusable",
+        "attribution": "",
+        "purchase_record": "",
+        "provider_or_model": "local_library",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "local"
+      },
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py"
+    },
+    {
+      "asset_id": "vo-sc02-003",
+      "asset_type": "vo",
+      "uri": "file:///home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/en/audio/vo/vo-sc02-003.wav",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_reusable",
+        "attribution": "",
+        "purchase_record": "",
+        "provider_or_model": "local_library",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "local"
+      },
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py"
+    },
+    {
+      "asset_id": "vo-sc02-004",
+      "asset_type": "vo",
+      "uri": "file:///home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/en/audio/vo/vo-sc02-004.wav",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_reusable",
+        "attribution": "",
+        "purchase_record": "",
+        "provider_or_model": "local_library",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "local"
+      },
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py"
+    },
+    {
+      "asset_id": "vo-sc02-005",
+      "asset_type": "vo",
+      "uri": "file:///home/tnnd/data/code/pipe/projects/test-proj/episodes/s01e01/assets/en/audio/vo/vo-sc02-005.wav",
+      "is_placeholder": false,
+      "metadata": {
+        "license_type": "commercial_reusable",
+        "attribution": "",
+        "purchase_record": "",
+        "provider_or_model": "local_library",
+        "retrieval_date": "1970-01-01T00:00:00Z"
+      },
+      "rights_warning": "",
+      "source": {
+        "type": "local"
+      },
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "attribution_required": false,
+        "text": ""
+      },
+      "schema_id": "urn:media:resolved-asset",
+      "schema_version": "1.0.0",
+      "producer": "resolve_assets.py"
     }
-  ],
-  "timing_lock_hash": "1e60e5b64953c13d9f01fde407082fbe5b2428c85d4cc405b1a260a584c4c8ae"
+  ]
 }

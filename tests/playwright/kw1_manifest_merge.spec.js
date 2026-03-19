@@ -2,15 +2,15 @@
 // Source: prompts/regression.txt § "KW-1: Stage 9 Step 5 — Manifest Merge"
 const { test, expect } = require('@playwright/test');
 const { startTestServer, stopTestServer } = require('../helpers/server');
-const { resetKW1, getEpDir } = require('../helpers/fixture_state');
+const { resetKW1, resetKW1a, getEpDir } = require('../helpers/fixture_state');
 const fs = require('fs'), path = require('path');
 
 let serverProc;
 test.beforeAll(async () => { serverProc = await startTestServer(); });
 test.afterAll(async ()  => { await stopTestServer(serverProc); });
-test.beforeEach(()      => { resetKW1(); });
 
 test('KW-1b: music_review_pack returns 400 before step 5 runs', async ({ request }) => {
+  resetKW1();  // no VOPlan — music_review_pack must reject
   const resp = await request.post('/api/music_review_pack', {
     data: { slug: 'test-proj', ep_id: 's01e01' },
   });
@@ -20,6 +20,7 @@ test('KW-1b: music_review_pack returns 400 before step 5 runs', async ({ request
 });
 
 test('KW-1a: Run 5 button writes VOPlan with locale_scope=merged', async ({ page }) => {
+  resetKW1a();  // fixture VOPlan in place so manifest_merge has its --locale input
   await page.goto('/');
 
   // Switch to Pipeline tab

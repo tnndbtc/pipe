@@ -2,12 +2,12 @@
 // Regression for: green bar ignores end_sec override and extends to full shot duration
 const { test, expect } = require('@playwright/test');
 const { startTestServer, stopTestServer } = require('../helpers/server');
-const { resetKW2 } = require('../helpers/fixture_state');
+const { resetKW13 } = require('../helpers/fixture_state');
 
 let serverProc;
 test.beforeAll(async () => { serverProc = await startTestServer(); });
 test.afterAll(async ()  => { await stopTestServer(serverProc); });
-test.beforeEach(()      => { resetKW2(); });
+test.beforeEach(()      => { resetKW13(); });
 
 async function openMusicTabAndGenerate(page) {
   await page.goto('/');

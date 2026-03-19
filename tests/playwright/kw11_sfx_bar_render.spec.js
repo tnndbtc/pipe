@@ -2,11 +2,19 @@
 // Regression: SFX tab PREVIEW AUDIO section shows no VO/SFX/Music bars after
 // Generate Preview because /api/sfx_preview never writes timeline.json to disk,
 // so sfxLoadTimeline() fetches a 404 and returns early without rendering bars.
+//
+// KW-11d: sfx_preview with include_music=true must return music_items in the
+//         timeline response. Catches: music stripped from SFX preview when
+//         include_music flag is sent (regression or missing MusicPlan loading).
+//
+// KW-11e: music bars must render in sfx-tl-music after Generate Preview when
+//         include_music checkbox is checked. Catches: frontend sfxRenderTimeline
+//         ignoring music_items from the timeline JSON.
 const { test, expect } = require('@playwright/test');
 const fs   = require('fs');
 const path = require('path');
 const { startTestServer, stopTestServer } = require('../helpers/server');
-const { resetKW2, getEpDir } = require('../helpers/fixture_state');
+const { resetKW2, resetKW13, getEpDir } = require('../helpers/fixture_state');
 
 let serverProc;
 test.beforeAll(async () => { serverProc = await startTestServer(); });
@@ -94,4 +102,97 @@ test('KW-11c: timeline.json is written to disk by /api/sfx_preview', async ({ pa
   const tl = JSON.parse(fs.readFileSync(tlPath, 'utf8'));
   expect(tl.total_dur_sec).toBeGreaterThan(0);
   expect(tl.vo_items.length).toBeGreaterThan(0);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KW-11d: sfx_preview with include_music=true returns music_items in timeline.
+//
+// Requires MusicPlan.json (resetKW13) so sfx_preview_pack can load music stems.
+// If the backend strips music (wrong include_music handling, missing MusicPlan
+// load, or PIPE_DIR path-security blocking music WAVs), music_items is empty.
+// ─────────────────────────────────────────────────────────────────────────────
+test('KW-11d: sfx_preview with include_music=true returns music_items in timeline', async ({ request }) => {
+  resetKW13();
+  // Remove any leftover SfxPreviewPack from a previous run
+  const packDir = path.join(getEpDir(), 'assets', 'sfx', 'SfxPreviewPack');
+  if (fs.existsSync(packDir)) fs.rmSync(packDir, { recursive: true, force: true });
+
+  const resp = await request.post('http://localhost:19999/api/sfx_preview', {
+    data: {
+      slug:          'test-proj',
+      ep_id:         's01e01',
+      selected:      {},
+      include_music: true,   // ← the flag under test
+      timing:        {},
+      volumes:       {},
+      duck_fade:     {},
+      cut_clips:     [],
+      cut_assign:    {},
+      clip_volumes:  {},
+    },
+  });
+
+  expect(resp.status()).toBe(200);
+  const body = await resp.json();
+  expect(body.ok).toBe(true);
+
+  // The timeline must contain music_items — one per shot that has a music track.
+  // Fixture VOPlan has music_items for sc01-sh01 and sc02-sh02.
+  expect(body.timeline).toBeDefined();
+  expect(Array.isArray(body.timeline.music_items)).toBe(true);
+  expect(body.timeline.music_items.length).toBeGreaterThan(0);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KW-11e: music bars render in sfx-tl-music after Generate Preview when
+//         include_music checkbox is checked.
+//
+// Catches: sfxRenderTimeline() ignoring music_items in the timeline JSON so
+// the DOM div stays empty even though the API returned music_items correctly.
+// ─────────────────────────────────────────────────────────────────────────────
+test('KW-11e: music bars render in sfx-tl-music when include_music is checked', async ({ page }) => {
+  resetKW13();
+  const packDir = path.join(getEpDir(), 'assets', 'sfx', 'SfxPreviewPack');
+  if (fs.existsSync(packDir)) fs.rmSync(packDir, { recursive: true, force: true });
+
+  // Open SFX tab and select episode
+  await page.goto('/');
+  await page.click('button.tab[data-tab="sfx"]');
+  await page.waitForTimeout(400);
+  await page.selectOption('#sfx-ep-select', 'test-proj|s01e01');
+  await page.waitForFunction(
+    () => document.getElementById('sfx-status-bar').textContent !== 'Select an episode to begin.',
+    { timeout: 12000 }
+  );
+
+  // Check the include_music checkbox and force-enable the preview button
+  await page.evaluate(() => {
+    const cb = document.getElementById('sfx-include-music');
+    if (cb) cb.checked = true;
+    document.getElementById('sfx-btn-preview').disabled = false;
+  });
+
+  const [resp] = await Promise.all([
+    page.waitForResponse(r => r.url().includes('/api/sfx_preview'), { timeout: 30000 }),
+    page.click('#sfx-btn-preview'),
+  ]);
+  expect(resp.status()).toBe(200);
+  const body = await resp.json();
+  expect(body.ok).toBe(true);
+
+  // Wait for sfxRenderTimeline() to process music_items and render music bars
+  await page.waitForFunction(
+    () => {
+      const musicDiv = document.getElementById('sfx-tl-music');
+      return musicDiv && musicDiv.children.length > 0;
+    },
+    { timeout: 8000 }
+  );
+
+  const musicBarCount = await page.evaluate(() => {
+    const musicDiv = document.getElementById('sfx-tl-music');
+    return musicDiv ? musicDiv.children.length : 0;
+  });
+  // Fixture has 2 shots, each with a music track → expect ≥ 1 music bar
+  expect(musicBarCount).toBeGreaterThan(0);
 });

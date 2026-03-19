@@ -84,7 +84,10 @@ function isFrameAligned(t, fps) {
  * From a logged ffmpeg args array, return the value after `-t` if present, else null.
  */
 function extractT(args) {
-  const idx = args.indexOf('-t');
+  // Use lastIndexOf: the output -t is always the LAST -t in the arg list.
+  // Earlier -t flags are input loop budgets (e.g. -loop 1 -t X for image segments)
+  // and do not represent the encoded video duration.
+  const idx = args.lastIndexOf('-t');
   if (idx === -1 || idx + 1 >= args.length) return null;
   return parseFloat(args[idx + 1]);
 }

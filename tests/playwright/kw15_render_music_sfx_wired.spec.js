@@ -26,7 +26,6 @@ const os   = require('os');
 const FIXTURE_EP = path.join(
   __dirname, '..', 'fixtures', 'projects', 'test-proj', 'episodes', 's01e01'
 );
-const STEP_OUT  = path.join(__dirname, '..', 'step_outputs');
 const RENDER_PY = path.join(__dirname, '..', '..', 'code', 'http', 'render_video.py');
 
 // ── Fake ffmpeg source ─────────────────────────────────────────────────────────
@@ -68,12 +67,8 @@ function setupEpDir(epDir, sfxWavSrc) {
     path.join(FIXTURE_EP, 'ShotList.json'), path.join(epDir, 'ShotList.json')
   );
 
-  // MusicPlan.json — intentionally uses the step_outputs version which has NO
-  // "shot_id" in shot_overrides.  This replicates the production bug: the dict
-  // comprehension {o["shot_id"]: o ...} throws KeyError, is swallowed by
-  // try/except, and _music_plan_overrides stays {}.
   fs.copyFileSync(
-    path.join(STEP_OUT, 'music_review.MusicPlan.json'),
+    path.join(FIXTURE_EP, 'MusicPlan.json'),
     path.join(epDir, 'MusicPlan.json')
   );
 

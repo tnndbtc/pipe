@@ -12,7 +12,8 @@
     },
     "schema_version": {
       "type": "string",
-      "const": "1.0"
+      "enum": ["1.0", "1.1"],
+      "description": "1.0 = original. 1.1 = shot_id required in shot_overrides items."
     },
     "loop_selections": {
       "type": "object",
@@ -72,17 +73,17 @@
       "description": "Per-shot overrides for ducking, continuity, and track assignment. Only include shots that need changes — omitted shots keep their original values.",
       "items": {
         "type": "object",
-        "required": [],
+        "required": ["item_id", "shot_id"],
         "additionalProperties": false,
         "properties": {
           "shot_id": {
             "type": "string",
-            "description": "Shot ID from ShotList (e.g. 's01e01_sc01_sh01'). Canonical lookup key. Added at save time by /api/music_plan_save."
+            "description": "Shot ID from ShotList.json (e.g. 'sc01-sh01'). Direct lookup key — no prefix stripping needed. Written by /api/music_plan_save (from VOPlan music_items, or by stripping 'music-' prefix as fallback). Required since schema_version 1.1."
           },
           "item_id": {
             "type": "string",
             "pattern": "^music-",
-            "description": "Music item ID from AssetManifest (e.g. 'music-s01e01_sh01'). Preserved alongside shot_id for backwards compatibility."
+            "description": "Music asset item ID from VOPlan music_items (e.g. 'music-sc01-sh01'). Follows the convention item_id = 'music-' + shot_id."
           },
           "music_asset_id": {
             "type": "string",
