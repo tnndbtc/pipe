@@ -265,12 +265,20 @@ def cmd_search_for_shot(args):
 
 def cmd_delete_batch_images(args):
     """
-    Prune images from an existing batch that do not match a filter.
+    Prune images and/or videos from an existing batch that do not match a filter.
 
     Sends a FilterSpec to the pipeline proxy → media server, which permanently
-    deletes non-matching image files from disk and updates batch_state.json.
+    deletes non-matching files from disk and updates batch_state.json.
 
-    Output: JSON { batch_id, deleted, kept, items: { item_id: { deleted, kept } } }
+    Output: JSON {
+      batch_id,
+      items: {
+        item_id: {
+          images: {deleted: N, kept: N},
+          videos: {deleted: N, kept: N}
+        }
+      }
+    }
     """
     if not MEDIA_KEY:
         _err("MEDIA_API_KEY env var is not set — required for media server auth")
@@ -297,7 +305,18 @@ def cmd_delete_batch_images(args):
     except RuntimeError as e:
         _err(f"media_batch_prune failed: {e}")
 
+    # Print full JSON (Claude reads this), then a human-readable summary line
     print(json.dumps(result, indent=2))
+
+    items = result.get("items", {})
+    total_img_del = sum(v.get("images", {}).get("deleted", 0) for v in items.values())
+    total_img_kpt = sum(v.get("images", {}).get("kept",    0) for v in items.values())
+    total_vid_del = sum(v.get("videos", {}).get("deleted", 0) for v in items.values())
+    total_vid_kpt = sum(v.get("videos", {}).get("kept",    0) for v in items.values())
+    print(
+        f"# summary: images deleted={total_img_del} kept={total_img_kpt}"
+        f"  |  videos deleted={total_vid_del} kept={total_vid_kpt}"
+    )
 
 
 # ── CLI dispatcher ────────────────────────────────────────────────────────────

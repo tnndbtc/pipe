@@ -878,7 +878,7 @@ async def select_asset(
 
 
 # ---------------------------------------------------------------------------
-# POST /batches/{batch_id}/prune — delete images not matching a filter
+# POST /batches/{batch_id}/prune — delete media not matching a filter
 # ---------------------------------------------------------------------------
 
 class FilterSpec(BaseModel):
@@ -887,11 +887,79 @@ class FilterSpec(BaseModel):
     keep_sources:    list[str] | None = None
     exclude_sources: list[str] | None = None
     keep_top_n:      int | None       = None
+    title_contains:  str | None       = None  # case-insensitive substring match on title/desc/tags
+    media_types:     list[str] | None = None  # ["images"], ["videos"], or None = both
 
 
 class PruneRequest(BaseModel):
     item_ids:    list[str] | None = None   # if None, prune all items in batch
     filter_spec: FilterSpec
+
+
+def _apply_filter(entries: list[dict], fs: FilterSpec) -> list[dict]:
+    """
+    Apply a FilterSpec to a ranked entry list (images_ranked or videos_ranked).
+    Returns the kept entries. All active fields are ANDed together.
+    """
+    kept = list(entries)
+
+    # Score range
+    if fs.min_score is not None:
+        kept = [e for e in kept if e.get("score", 0.0) >= fs.min_score]
+    if fs.max_score is not None:
+        kept = [e for e in kept if e.get("score", 0.0) <= fs.max_score]
+
+    # Source whitelist / blacklist
+    # source_site == "" means legacy entry with no source info — never drop by source filter
+    if fs.keep_sources is not None:
+        kept = [
+            e for e in kept
+            if (e.get("source") or {}).get("source_site", "") in fs.keep_sources
+            or (e.get("source") or {}).get("source_site", "") == ""
+        ]
+    if fs.exclude_sources is not None:
+        kept = [
+            e for e in kept
+            if (e.get("source") or {}).get("source_site", "") not in fs.exclude_sources
+        ]
+
+    # Keyword filter — case-insensitive substring match against title, description, tags
+    # Unknown/missing source dict → no fields match → entry is dropped (correct behaviour)
+    if fs.title_contains is not None:
+        needle = fs.title_contains.lower()
+
+        def _matches(e: dict) -> bool:
+            src      = (e.get("source") or {})
+            title    = (src.get("title") or "").lower()
+            desc     = (src.get("description") or "").lower()
+            tags     = src.get("tags") or []
+            tags_str = " ".join(tags).lower() if isinstance(tags, list) else str(tags).lower()
+            return needle in title or needle in desc or needle in tags_str
+
+        kept = [e for e in kept if _matches(e)]
+
+    # keep_top_n — always re-sort before slicing (never trust pre-sorted order)
+    if fs.keep_top_n is not None:
+        kept = sorted(kept, key=lambda e: e.get("score", 0.0), reverse=True)
+        kept = kept[:fs.keep_top_n]
+
+    return kept
+
+
+def _delete_entries(entries: list[dict], batch_dir: Path) -> None:
+    """Unlink each entry's file and its .info.json sidecar from disk."""
+    for entry in entries:
+        rel = entry.get("path")
+        if not rel:
+            continue
+        abs_path = (batch_dir / rel).resolve()
+        try:
+            abs_path.relative_to(batch_dir)
+        except ValueError:
+            log.warning("prune_batch: skipping path outside batch_dir: %s", abs_path)
+            continue
+        abs_path.unlink(missing_ok=True)
+        Path(str(abs_path) + ".info.json").unlink(missing_ok=True)
 
 
 @app.post("/batches/{batch_id}/prune")
@@ -901,14 +969,16 @@ async def prune_batch(
     _: None = Depends(require_auth),
 ):
     """
-    Permanently delete image files from a batch that do not match filter_spec.
+    Permanently delete image and/or video files from a batch that do not match
+    filter_spec.
 
     Applies FilterSpec fields (min_score, max_score, keep_sources, exclude_sources,
-    keep_top_n) as an AND-chain, then removes non-matching files from disk and
-    updates batch_state.json.  State is updated before files are deleted so that
-    batch_state is always consistent even if a deletion fails.
+    title_contains, keep_top_n, media_types) as an AND-chain.  media_types scopes
+    the filter to images only, videos only, or both (default).  State is updated
+    before files are deleted so batch_state is always consistent.
 
-    Returns: { batch_id, deleted, kept, items: { item_id: { deleted, kept } } }
+    Returns: { batch_id, items: { item_id: { images: {deleted, kept},
+                                              videos: {deleted, kept} } } }
     """
     # ── Setup ─────────────────────────────────────────────────────────────────
     state = store.get(batch_id)
@@ -919,10 +989,10 @@ async def prune_batch(
         raise HTTPException(status_code=409,
                             detail="Cannot prune a running batch — wait for it to finish")
 
-    batch_dir = store.batch_dir(state["project"], state["episode_id"], batch_id)
+    batch_dir  = store.batch_dir(state["project"], state["episode_id"], batch_id)
 
     target_ids = body.item_ids if body.item_ids is not None else list(state["items"].keys())
-    unknown = [iid for iid in target_ids if iid not in state["items"]]
+    unknown    = [iid for iid in target_ids if iid not in state["items"]]
     if unknown:
         raise HTTPException(status_code=422,
                             detail=f"Unknown item_id(s): {', '.join(unknown)}")
@@ -945,86 +1015,60 @@ async def prune_batch(
     if fs.keep_top_n is not None and fs.keep_top_n < 1:
         raise HTTPException(status_code=422,
                             detail=f"keep_top_n must be >= 1, got {fs.keep_top_n}")
+    if fs.media_types is not None:
+        bad = [m for m in fs.media_types if m not in ("images", "videos")]
+        if bad:
+            raise HTTPException(status_code=422,
+                                detail=f"media_types values must be 'images' or 'videos', got: {bad}")
+
+    # ── Media-type gates ──────────────────────────────────────────────────────
+    do_images = fs.media_types is None or "images" in fs.media_types
+    do_videos = fs.media_types is None or "videos" in fs.media_types
 
     # ── Per-item filter loop ───────────────────────────────────────────────────
-    total_deleted = 0
-    total_kept    = 0
     items_summary: dict[str, dict] = {}
 
     for item_id in target_ids:
-        item_state = state["items"][item_id]
-        original   = list(item_state.get("images_ranked", []))
-        kept       = list(original)
+        item_state  = state["items"][item_id]
 
-        # Steps 1–2: score range filters
-        if fs.min_score is not None:
-            kept = [img for img in kept if img.get("score", 0.0) >= fs.min_score]
-        if fs.max_score is not None:
-            kept = [img for img in kept if img.get("score", 0.0) <= fs.max_score]
+        orig_images = list(item_state.get("images_ranked", []))
+        orig_videos = list(item_state.get("videos_ranked", []))
 
-        # Steps 3–4: source whitelist / blacklist
-        # source_site is "" for legacy entries — treat as unknown (never drop by source filter)
-        if fs.keep_sources is not None:
-            kept = [
-                img for img in kept
-                if (img.get("source") or {}).get("source_site", "") in fs.keep_sources
-                or (img.get("source") or {}).get("source_site", "") == ""
-            ]
-        if fs.exclude_sources is not None:
-            kept = [
-                img for img in kept
-                if (img.get("source") or {}).get("source_site", "") not in fs.exclude_sources
-            ]
+        kept_images = _apply_filter(orig_images, fs) if do_images else orig_images
+        kept_videos = _apply_filter(orig_videos, fs) if do_videos else orig_videos
 
-        # Step 5: keep_top_n — always re-sort before slicing (never trust pre-sorted order)
-        if fs.keep_top_n is not None:
-            kept = sorted(kept, key=lambda img: img.get("score", 0.0), reverse=True)
-            kept = kept[:fs.keep_top_n]
+        kept_img_paths = {e.get("path") for e in kept_images}
+        kept_vid_paths = {e.get("path") for e in kept_videos}
+        del_images = [e for e in orig_images if e.get("path") not in kept_img_paths]
+        del_videos = [e for e in orig_videos if e.get("path") not in kept_vid_paths]
 
-        # Step 6: compute deleted set (by path, robust to dict identity)
-        kept_paths = {img.get("path") for img in kept}
-        deleted    = [img for img in original if img.get("path") not in kept_paths]
-
-        # Step 9 first (OPEN D — option a): persist new images_ranked BEFORE touching disk.
-        # State is always consistent; worst case is orphaned files if unlink fails.
+        # Persist updated ranked lists BEFORE touching disk (state always consistent)
         store.update_item(
             batch_id, item_id,
             status=item_state["status"],   # preserve existing per-item status unchanged
-            images_ranked=kept,
+            images_ranked=kept_images,
+            videos_ranked=kept_videos,
         )
 
-        # Step 8: resolve and delete files from disk
-        for img in deleted:
-            rel = img.get("path")
-            if not rel:
-                continue
-            abs_path = (batch_dir / rel).resolve()
-            # Security: resolved path must remain inside batch_dir
-            try:
-                abs_path.relative_to(batch_dir)
-            except ValueError:
-                log.warning("prune_batch: skipping path outside batch_dir: %s", abs_path)
-                continue
-            abs_path.unlink(missing_ok=True)
-            Path(str(abs_path) + ".info.json").unlink(missing_ok=True)
+        # Delete files and sidecars from disk
+        _delete_entries(del_images, batch_dir)
+        _delete_entries(del_videos, batch_dir)
 
-        # Step 10: accumulate counts
-        n_deleted = len(deleted)
-        n_kept    = len(kept)
-        total_deleted += n_deleted
-        total_kept    += n_kept
-        items_summary[item_id] = {"deleted": n_deleted, "kept": n_kept}
+        items_summary[item_id] = {
+            "images": {"deleted": len(del_images), "kept": len(kept_images)},
+            "videos": {"deleted": len(del_videos), "kept": len(kept_videos)},
+        }
 
         log.info(
-            "prune_batch %s item %s: deleted=%d kept=%d filter=%s",
-            batch_id, item_id, n_deleted, n_kept,
-            body.filter_spec.model_dump(exclude_none=True),
+            "prune_batch %s item %s: img_del=%d img_kept=%d vid_del=%d vid_kept=%d filter=%s",
+            batch_id, item_id,
+            len(del_images), len(kept_images),
+            len(del_videos), len(kept_videos),
+            fs.model_dump(exclude_none=True),
         )
 
     return {
         "batch_id": batch_id,
-        "deleted":  total_deleted,
-        "kept":     total_kept,
         "items":    items_summary,
     }
 

@@ -41,20 +41,25 @@ Available tools (each prints JSON to stdout):
       [--n_img N] [--n_vid N]
     Returns: { "batch_id": "...", "item_id": "...", "status": "queued", "poll_url": "..." }
 
-  Delete images from a batch that do not match a filter:
+  Delete images and/or videos from a batch that do not match a filter:
     python {TOOLS_PATH} delete_batch_images \\
       --batch_id BATCH_ID \\
       --filter 'FILTER_JSON' \\
       [--item_id ITEM_ID]
-    Returns: { "batch_id": "...", "deleted": N, "kept": N,
-               "items": { "ITEM_ID": { "deleted": N, "kept": N } } }
+    Returns: { "batch_id": "...",
+               "items": { "ITEM_ID": { "images": {{"deleted": N, "kept": N}},
+                                       "videos": {{"deleted": N, "kept": N}} } } }
 
     FILTER_JSON is a FilterSpec object (all fields optional, ANDed together):
-      min_score       float 0.0–1.0  — drop images with score below this
-      max_score       float 0.0–1.0  — drop images with score above this
+      min_score       float 0.0–1.0  — drop entries with score below this
+      max_score       float 0.0–1.0  — drop entries with score above this
       keep_sources    list[str]      — ONLY keep these sources (whitelist)
-      exclude_sources list[str]      — drop images from these sources (blacklist)
+      exclude_sources list[str]      — drop entries from these sources (blacklist)
       keep_top_n      int            — after filtering, keep only top N by score
+      title_contains  str            — keep only entries whose title, description,
+                                       or tags contain this substring (case-insensitive)
+      media_types     list[str]      — scope filter to ["images"], ["videos"], or
+                                       omit / null to apply to both
 
 Rules:
 1. Always call get_manifest first to understand the shot structure.
@@ -71,8 +76,8 @@ Rules:
      batch_id | item_id | status | poll_url
 6. Tell the user where results will be saved:
      assets/media/<batch_id>/<item_id>/images/  and  videos/
-7. When the user says "delete", "remove", "filter out", or "keep only" images in a
-   batch, call delete_batch_images. Translate the natural-language filter into a
+7. When the user says "delete", "remove", "filter out", or "keep only" images or videos
+   in a batch, call delete_batch_images. Translate the natural-language filter into a
    FilterSpec JSON string passed to --filter.
    Examples:
      "delete pexels images"
@@ -80,12 +85,22 @@ Rules:
      "keep only CC images with score above 0.6"
        → --filter '{{"keep_sources": ["wikimedia", "openverse", "europeana"], "min_score": 0.6}}'
      "keep top 5 images per shot"
-       → --filter '{{"keep_top_n": 5}}'
+       → --filter '{{"keep_top_n": 5, "media_types": ["images"]}}'
      "delete low-scoring pexels and pixabay images"
        → --filter '{{"exclude_sources": ["pexels", "pixabay"], "min_score": 0.5}}'
+     "keep only videos mentioning Pompeii"
+       → --filter '{{"title_contains": "pompeii", "media_types": ["videos"]}}'
+     "delete all videos that don't mention Rome"
+       → --filter '{{"title_contains": "rome", "media_types": ["videos"]}}'
+     "keep only entries about ancient Egypt across all media"
+       → --filter '{{"title_contains": "egypt"}}'
    If the user says "CC only", set keep_sources to ["wikimedia", "openverse", "europeana"].
    keep_sources and exclude_sources are mutually exclusive — never set both.
-   Deletions are permanent. Report the count: "Deleted N images, kept M."
+   If the user targets only videos, set media_types: ["videos"].
+   If the user targets only images, set media_types: ["images"].
+   If both or unspecified, omit media_types entirely.
+   Deletions are permanent. After the call, read result.items and report per-type counts:
+   "images: deleted N kept M  |  videos: deleted N kept M" for each item.
 
 User query: {QUERY}
 """
