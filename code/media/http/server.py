@@ -27,11 +27,12 @@ Configuration
 
 Endpoints
 ---------
-    POST /batches                        start a new batch (authenticated)
-    GET  /batches                        list batches for a project/episode (auth)
-    GET  /batches/{batch_id}             poll status / get results (auth)
-    GET  /files/{path:path}              serve cached media files (no auth)
-    GET  /health                         server status (no auth)
+    POST /batches                              start a new batch (authenticated)
+    GET  /batches                              list batches for a project/episode (auth)
+    GET  /batches/{batch_id}                   poll status / get results (auth)
+    POST /batches/{batch_id}/prune             delete images not matching a filter (auth)
+    GET  /files/{path:path}                    serve cached media files (no auth)
+    GET  /health                               server status (no auth)
 
     Worker endpoints (distributed scoring — no auth):
     POST /register                       worker self-registration
@@ -873,6 +874,158 @@ async def select_asset(
         "status": "selected",
         "license_path": str(license_path),
         "attribution_appended": attribution_appended,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /batches/{batch_id}/prune — delete images not matching a filter
+# ---------------------------------------------------------------------------
+
+class FilterSpec(BaseModel):
+    min_score:       float | None     = None
+    max_score:       float | None     = None
+    keep_sources:    list[str] | None = None
+    exclude_sources: list[str] | None = None
+    keep_top_n:      int | None       = None
+
+
+class PruneRequest(BaseModel):
+    item_ids:    list[str] | None = None   # if None, prune all items in batch
+    filter_spec: FilterSpec
+
+
+@app.post("/batches/{batch_id}/prune")
+async def prune_batch(
+    batch_id: str,
+    body: PruneRequest,
+    _: None = Depends(require_auth),
+):
+    """
+    Permanently delete image files from a batch that do not match filter_spec.
+
+    Applies FilterSpec fields (min_score, max_score, keep_sources, exclude_sources,
+    keep_top_n) as an AND-chain, then removes non-matching files from disk and
+    updates batch_state.json.  State is updated before files are deleted so that
+    batch_state is always consistent even if a deletion fails.
+
+    Returns: { batch_id, deleted, kept, items: { item_id: { deleted, kept } } }
+    """
+    # ── Setup ─────────────────────────────────────────────────────────────────
+    state = store.get(batch_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    if state["status"] == "running":
+        raise HTTPException(status_code=409,
+                            detail="Cannot prune a running batch — wait for it to finish")
+
+    batch_dir = store.batch_dir(state["project"], state["episode_id"], batch_id)
+
+    target_ids = body.item_ids if body.item_ids is not None else list(state["items"].keys())
+    unknown = [iid for iid in target_ids if iid not in state["items"]]
+    if unknown:
+        raise HTTPException(status_code=422,
+                            detail=f"Unknown item_id(s): {', '.join(unknown)}")
+
+    # ── Step 0: Validate FilterSpec before any deletion ───────────────────────
+    fs = body.filter_spec
+
+    if fs.keep_sources and fs.exclude_sources:
+        raise HTTPException(status_code=422,
+                            detail="keep_sources and exclude_sources are mutually exclusive")
+    if fs.min_score is not None and not (0.0 <= fs.min_score <= 1.0):
+        raise HTTPException(status_code=422,
+                            detail=f"min_score must be in [0.0, 1.0], got {fs.min_score}")
+    if fs.max_score is not None and not (0.0 <= fs.max_score <= 1.0):
+        raise HTTPException(status_code=422,
+                            detail=f"max_score must be in [0.0, 1.0], got {fs.max_score}")
+    if fs.min_score is not None and fs.max_score is not None and fs.min_score > fs.max_score:
+        raise HTTPException(status_code=422,
+                            detail=f"min_score ({fs.min_score}) must be <= max_score ({fs.max_score})")
+    if fs.keep_top_n is not None and fs.keep_top_n < 1:
+        raise HTTPException(status_code=422,
+                            detail=f"keep_top_n must be >= 1, got {fs.keep_top_n}")
+
+    # ── Per-item filter loop ───────────────────────────────────────────────────
+    total_deleted = 0
+    total_kept    = 0
+    items_summary: dict[str, dict] = {}
+
+    for item_id in target_ids:
+        item_state = state["items"][item_id]
+        original   = list(item_state.get("images_ranked", []))
+        kept       = list(original)
+
+        # Steps 1–2: score range filters
+        if fs.min_score is not None:
+            kept = [img for img in kept if img.get("score", 0.0) >= fs.min_score]
+        if fs.max_score is not None:
+            kept = [img for img in kept if img.get("score", 0.0) <= fs.max_score]
+
+        # Steps 3–4: source whitelist / blacklist
+        # source_site is "" for legacy entries — treat as unknown (never drop by source filter)
+        if fs.keep_sources is not None:
+            kept = [
+                img for img in kept
+                if (img.get("source") or {}).get("source_site", "") in fs.keep_sources
+                or (img.get("source") or {}).get("source_site", "") == ""
+            ]
+        if fs.exclude_sources is not None:
+            kept = [
+                img for img in kept
+                if (img.get("source") or {}).get("source_site", "") not in fs.exclude_sources
+            ]
+
+        # Step 5: keep_top_n — always re-sort before slicing (never trust pre-sorted order)
+        if fs.keep_top_n is not None:
+            kept = sorted(kept, key=lambda img: img.get("score", 0.0), reverse=True)
+            kept = kept[:fs.keep_top_n]
+
+        # Step 6: compute deleted set (by path, robust to dict identity)
+        kept_paths = {img.get("path") for img in kept}
+        deleted    = [img for img in original if img.get("path") not in kept_paths]
+
+        # Step 9 first (OPEN D — option a): persist new images_ranked BEFORE touching disk.
+        # State is always consistent; worst case is orphaned files if unlink fails.
+        store.update_item(
+            batch_id, item_id,
+            status=item_state["status"],   # preserve existing per-item status unchanged
+            images_ranked=kept,
+        )
+
+        # Step 8: resolve and delete files from disk
+        for img in deleted:
+            rel = img.get("path")
+            if not rel:
+                continue
+            abs_path = (batch_dir / rel).resolve()
+            # Security: resolved path must remain inside batch_dir
+            try:
+                abs_path.relative_to(batch_dir)
+            except ValueError:
+                log.warning("prune_batch: skipping path outside batch_dir: %s", abs_path)
+                continue
+            abs_path.unlink(missing_ok=True)
+            Path(str(abs_path) + ".info.json").unlink(missing_ok=True)
+
+        # Step 10: accumulate counts
+        n_deleted = len(deleted)
+        n_kept    = len(kept)
+        total_deleted += n_deleted
+        total_kept    += n_kept
+        items_summary[item_id] = {"deleted": n_deleted, "kept": n_kept}
+
+        log.info(
+            "prune_batch %s item %s: deleted=%d kept=%d filter=%s",
+            batch_id, item_id, n_deleted, n_kept,
+            body.filter_spec.model_dump(exclude_none=True),
+        )
+
+    return {
+        "batch_id": batch_id,
+        "deleted":  total_deleted,
+        "kept":     total_kept,
+        "items":    items_summary,
     }
 
 

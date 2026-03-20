@@ -3,15 +3,17 @@
 server_tools.py — CLI tool scripts called by Claude via bash during `media ask`.
 
 Subcommands:
-  get_manifest      — fetch AssetManifest.shared.json backgrounds list from pipeline proxy
-  list_batches      — list existing media batches for an episode (newest first)
-  get_batch_results — get downloaded files for a specific batch + item (for dedup)
-  search_for_shot   — trigger a new CC-only media search for a single shot
+  get_manifest        — fetch AssetManifest.shared.json backgrounds list from pipeline proxy
+  list_batches        — list existing media batches for an episode (newest first)
+  get_batch_results   — get downloaded files for a specific batch + item (for dedup)
+  search_for_shot     — trigger a new CC-only media search for a single shot
+  delete_batch_images — prune images from a batch that do not match a filter
 
 All subcommands print JSON to stdout and exit 0 on success, 1 on error.
 
 Read tools (get_manifest, list_batches, get_batch_results) call the pipeline proxy.
-Write tool (search_for_shot) calls the media server directly.
+Write tools (search_for_shot, delete_batch_images) call the media server via the
+pipeline proxy using MEDIA_API_KEY for authentication.
 
 Environment variables:
   PIPELINE_SERVER_URL  — pipeline proxy base URL (default: http://localhost:8000)
@@ -259,6 +261,45 @@ def cmd_search_for_shot(args):
     }, indent=2))
 
 
+# ── Subcommand: delete_batch_images ──────────────────────────────────────────
+
+def cmd_delete_batch_images(args):
+    """
+    Prune images from an existing batch that do not match a filter.
+
+    Sends a FilterSpec to the pipeline proxy → media server, which permanently
+    deletes non-matching image files from disk and updates batch_state.json.
+
+    Output: JSON { batch_id, deleted, kept, items: { item_id: { deleted, kept } } }
+    """
+    if not MEDIA_KEY:
+        _err("MEDIA_API_KEY env var is not set — required for media server auth")
+
+    # Validate and parse --filter
+    try:
+        filter_spec = json.loads(args.filter)
+    except json.JSONDecodeError as e:
+        _err(f"--filter is not valid JSON: {e}")
+
+    # Convert optional --item_id to list form expected by the API
+    item_ids = [args.item_id] if args.item_id else None
+
+    payload = {
+        "batch_id":    args.batch_id,
+        "item_ids":    item_ids,
+        "filter_spec": filter_spec,
+        "server_url":  MEDIA_URL,   # tells proxy which media server to forward to
+    }
+
+    url = f"{PIPELINE_URL}/api/media_batch_prune"
+    try:
+        result = _post(url, payload, MEDIA_KEY)
+    except RuntimeError as e:
+        _err(f"media_batch_prune failed: {e}")
+
+    print(json.dumps(result, indent=2))
+
+
 # ── CLI dispatcher ────────────────────────────────────────────────────────────
 
 def main():
@@ -292,13 +333,25 @@ def main():
     p_sfs.add_argument("--n_img",    type=int, default=15, help="number of images to fetch")
     p_sfs.add_argument("--n_vid",    type=int, default=0,  help="number of videos to fetch")
 
+    # delete_batch_images
+    p_dbi = sub.add_parser("delete_batch_images",
+                           help="prune images from a batch that do not match a filter")
+    p_dbi.add_argument("--batch_id", required=True,
+                       help="batch id (e.g. b_822b661e)")
+    p_dbi.add_argument("--item_id",  required=False, default=None,
+                       help="if given, only prune this item; else all items in the batch")
+    p_dbi.add_argument("--filter",   required=True,
+                       help='FilterSpec as JSON string '
+                            '(e.g. \'{"exclude_sources": ["pexels"], "min_score": 0.5}\')')
+
     args = parser.parse_args()
 
     dispatch = {
-        "get_manifest":      cmd_get_manifest,
-        "list_batches":      cmd_list_batches,
-        "get_batch_results": cmd_get_batch_results,
-        "search_for_shot":   cmd_search_for_shot,
+        "get_manifest":        cmd_get_manifest,
+        "list_batches":        cmd_list_batches,
+        "get_batch_results":   cmd_get_batch_results,
+        "search_for_shot":     cmd_search_for_shot,
+        "delete_batch_images": cmd_delete_batch_images,
     }
     try:
         dispatch[args.subcommand](args)

@@ -567,6 +567,7 @@ def synthesize_vo_item(
             "v": azure_voice, "l": azure_locale, "s": style or "",
             "d": style_degree, "r": rate, "p": pitch or "",
             "b": break_ms, "t": text,
+            "ph": json.dumps(phoneme_overrides, sort_keys=True) if phoneme_overrides else "",
         }
         h = hashlib.sha256(
             json.dumps(cache_key_dict, sort_keys=True).encode()
@@ -1085,7 +1086,7 @@ def _preview_build_ssml(text: str, azure_voice: str, azure_locale: str,
             # then the block is flushed.  Text after the phoneme opens a new block.
             # This matches voice4.ssml: <express-as><prosody>text<phoneme/></prosody></express-as>
             inner_parts.append(
-                f'<phoneme alphabet="sapi" ph="{sapi}">'
+                f'<phoneme alphabet="sapi" ph="{_xml_esc(sapi)}">'
                 f'{_xml_esc(seg["content"])}</phoneme>'
             )
             voice_parts.append(_wrap("".join(inner_parts)))
@@ -18410,6 +18411,19 @@ class Handler(BaseHTTPRequestHandler):
                             "pitch":        req.get("pitch", ""),
                             "break_ms":     int(req.get("break_ms", 0)),
                         }
+                        # Carry phoneme_overrides from the manifest into synthesis.
+                        # They are written there by /api/vo_phoneme and must be
+                        # forwarded here so the SSML is built with the corrections.
+                        _pm_path = os.path.join(full_ep, f"VOPlan.{locale}.json")
+                        with open(_pm_path, encoding="utf-8") as _pm_f:
+                            _pm_data = json.load(_pm_f)
+                        _pm_item = next((v for v in _pm_data.get("vo_items", [])
+                                         if v.get("item_id") == item_id), {})
+                        params["phoneme_overrides"] = (
+                            _pm_item.get("tts_prompt", {}).get("phoneme_overrides", {})
+                        )
+                        _log.debug("[vo_save] phoneme_overrides=%r for %s",
+                                   params["phoneme_overrides"], item_id)
                         result = synthesize_vo_item(
                             item_id, new_text, params, full_ep, locale,
                             write_cache=True,   # INVARIANT F: vo_save writes cache
@@ -19723,6 +19737,46 @@ class Handler(BaseHTTPRequestHandler):
                 with _urllib_req.urlopen(req, timeout=15) as resp:
                     body = resp.read()
                 self.send_response(202)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── Media proxy: prune batch images (POST /api/media_batch_prune) ──────
+        elif self.path == "/api/media_batch_prune":
+            try:
+                length     = int(self.headers.get("Content-Length", 0))
+                payload    = json.loads(self.rfile.read(length))
+                batch_id   = payload.get("batch_id", "").strip()
+                server_url = (payload.get("server_url") or "http://localhost:8200").rstrip("/")
+                api_key    = os.environ.get("MEDIA_API_KEY", "")
+                if not batch_id:
+                    raise ValueError("batch_id is required")
+                if "filter_spec" not in payload:
+                    raise ValueError("filter_spec is required")
+                # Forward only {item_ids, filter_spec} — batch_id goes in the URL path
+                forward: dict = {"filter_spec": payload["filter_spec"]}
+                if payload.get("item_ids") is not None:
+                    forward["item_ids"] = payload["item_ids"]
+                req_body = json.dumps(forward).encode()
+                url = f"{server_url}/batches/{batch_id}/prune"
+                req = _urllib_req.Request(
+                    url, data=req_body,
+                    headers={"X-Api-Key": api_key,
+                             "Content-Type": "application/json",
+                             "Content-Length": str(len(req_body))},
+                    method="POST",
+                )
+                with _urllib_req.urlopen(req, timeout=30) as resp:
+                    body = resp.read()
+                self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -21991,7 +22045,8 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/create_episode", "/api/save_episode_meta",
                   "/api/diagnose_pipeline",
                   "/api/media_batches", "/api/media_batch_status",
-                  "/api/media_batch", "/api/media_batch_resume", "/api/media_confirm",
+                  "/api/media_batch", "/api/media_batch_resume", "/api/media_batch_prune",
+                  "/api/media_confirm",
                   "/api/media_preview",
                   "/api/sfx_search", "/api/sfx_save", "/api/sfx_results_save",
                   "/api/sfx_save_all", "/api/sfx_preview", "/api/sfx_cut_clip",

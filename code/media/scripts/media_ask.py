@@ -41,6 +41,21 @@ Available tools (each prints JSON to stdout):
       [--n_img N] [--n_vid N]
     Returns: { "batch_id": "...", "item_id": "...", "status": "queued", "poll_url": "..." }
 
+  Delete images from a batch that do not match a filter:
+    python {TOOLS_PATH} delete_batch_images \\
+      --batch_id BATCH_ID \\
+      --filter 'FILTER_JSON' \\
+      [--item_id ITEM_ID]
+    Returns: { "batch_id": "...", "deleted": N, "kept": N,
+               "items": { "ITEM_ID": { "deleted": N, "kept": N } } }
+
+    FILTER_JSON is a FilterSpec object (all fields optional, ANDed together):
+      min_score       float 0.0–1.0  — drop images with score below this
+      max_score       float 0.0–1.0  — drop images with score above this
+      keep_sources    list[str]      — ONLY keep these sources (whitelist)
+      exclude_sources list[str]      — drop images from these sources (blacklist)
+      keep_top_n      int            — after filtering, keep only top N by score
+
 Rules:
 1. Always call get_manifest first to understand the shot structure.
 2. Identify the target shot by matching the user's shot reference (e.g. "sc01-sh01")
@@ -56,6 +71,21 @@ Rules:
      batch_id | item_id | status | poll_url
 6. Tell the user where results will be saved:
      assets/media/<batch_id>/<item_id>/images/  and  videos/
+7. When the user says "delete", "remove", "filter out", or "keep only" images in a
+   batch, call delete_batch_images. Translate the natural-language filter into a
+   FilterSpec JSON string passed to --filter.
+   Examples:
+     "delete pexels images"
+       → --filter '{{"exclude_sources": ["pexels"]}}'
+     "keep only CC images with score above 0.6"
+       → --filter '{{"keep_sources": ["wikimedia", "openverse", "europeana"], "min_score": 0.6}}'
+     "keep top 5 images per shot"
+       → --filter '{{"keep_top_n": 5}}'
+     "delete low-scoring pexels and pixabay images"
+       → --filter '{{"exclude_sources": ["pexels", "pixabay"], "min_score": 0.5}}'
+   If the user says "CC only", set keep_sources to ["wikimedia", "openverse", "europeana"].
+   keep_sources and exclude_sources are mutually exclusive — never set both.
+   Deletions are permanent. Report the count: "Deleted N images, kept M."
 
 User query: {QUERY}
 """
