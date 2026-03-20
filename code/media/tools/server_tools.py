@@ -6,7 +6,7 @@ Subcommands:
   get_manifest        — fetch AssetManifest.shared.json backgrounds list from pipeline proxy
   list_batches        — list existing media batches for an episode (newest first)
   get_batch_results   — get downloaded files for a specific batch + item (for dedup)
-  search_for_shot     — trigger a new CC-only media search for a single shot
+  search_for_shot     — trigger a new media search for a single shot
   delete_batch_images — prune images from a batch that do not match a filter
 
 All subcommands print JSON to stdout and exit 0 on success, 1 on error.
@@ -35,10 +35,10 @@ PIPELINE_URL = os.environ.get("PIPELINE_SERVER_URL", "http://localhost:8000").rs
 MEDIA_URL    = os.environ.get("MEDIA_SERVER_URL",    "http://192.168.86.33:8200").rstrip("/")
 MEDIA_KEY    = os.environ.get("MEDIA_API_KEY",       "")
 
-# CC-only source list: excludes Pexels ("Pexels License") and
-# Pixabay ("Pixabay Content License") — both proprietary.
-# Wikimedia, Openverse, and Europeana return CC0 / CC BY assets only.
-CC_SOURCES = ["wikimedia", "openverse", "europeana"]
+# Sources used for media search. Pexels and Pixabay use their own free licenses
+# (not CC) but are free for personal and commercial use without attribution.
+# iStock/Getty sponsored results are web-UI only and never returned by the API.
+CC_SOURCES = ["wikimedia", "openverse", "europeana", "pexels", "pixabay"]
 
 
 # ── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -193,12 +193,11 @@ def cmd_get_batch_results(args):
 
 def cmd_search_for_shot(args):
     """
-    Trigger a new targeted CC-only media search for a single shot item.
+    Trigger a new media search for a single shot item.
     Calls the media server DIRECTLY (bypasses the pipeline proxy).
 
-    License policy is enforced here via sources_override=CC_SOURCES,
-    which excludes Pexels and Pixabay (proprietary) and keeps only
-    Wikimedia, Openverse, and Europeana (CC0 / CC BY).
+    Sources: Wikimedia, Openverse, Europeana (CC0/CC BY) plus Pexels and Pixabay
+    (free for personal and commercial use under their own licenses).
 
     Output: JSON { batch_id, item_id, status, poll_url }
     """
@@ -231,7 +230,6 @@ def cmd_search_for_shot(args):
     }
 
     # Step 3: POST to media server /batches
-    # sources_override enforces CC-only: wikimedia + openverse + europeana only.
     # Do NOT use content_profile for license filtering — it is a CLIP scoring
     # profile only (valid: "default", "sleep_story", "documentary", "action").
     payload = {
@@ -344,7 +342,7 @@ def main():
     p_gbr.add_argument("--item_id",  required=True, help="asset_id of the background item")
 
     # search_for_shot
-    p_sfs = sub.add_parser("search_for_shot", help="trigger a new CC-only search for a shot")
+    p_sfs = sub.add_parser("search_for_shot", help="trigger a new media search for a shot")
     p_sfs.add_argument("--project",  required=True)
     p_sfs.add_argument("--episode",  required=True)
     p_sfs.add_argument("--item_id",  required=True, help="asset_id from get_manifest output")

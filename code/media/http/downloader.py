@@ -126,7 +126,11 @@ def _get_host_limiter(hostname: str, cfg: dict) -> _HostRateLimiter | None:
 # License gate — RULE 1 + RULE 2
 # ---------------------------------------------------------------------------
 
-ACCEPTED_LICENSES: frozenset = frozenset({"CC0", "Public Domain", "CC BY", "PDM", "AI Generated"})
+ACCEPTED_LICENSES: frozenset = frozenset({
+    "CC0", "Public Domain", "CC BY", "PDM", "AI Generated",
+    "Pexels License",         # free for personal + commercial use, no attribution required
+    "Pixabay Content License", # free for personal + commercial use, no attribution required
+})
 ACCEPTED_PREFIXES: tuple = (
     "CC0", "Public Domain",
     "CC BY 1", "CC BY 2", "CC BY 3", "CC BY 4",
