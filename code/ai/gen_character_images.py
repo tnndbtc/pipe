@@ -193,7 +193,7 @@ def parse_args():
     parser.add_argument(
         "--model",
         choices=ALL_MODEL_KEYS + ["auto", "all"],
-        default="auto",
+        default="flux-schnell",
         help=(
             "Model to use. "
             "'auto' tries flux-schnell, falls back to sdxl. "
