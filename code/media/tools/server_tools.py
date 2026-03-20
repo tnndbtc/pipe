@@ -7,13 +7,15 @@ Subcommands:
   list_batches        — list existing media batches for an episode (newest first)
   get_batch_results   — get downloaded files for a specific batch + item (for dedup)
   search_for_shot     — trigger a new media search for a single shot
+  append_to_batch     — add more images/videos to an existing batch item
+  poll_append         — poll an append operation until done or failed
   delete_batch_images — prune images from a batch that do not match a filter
 
 All subcommands print JSON to stdout and exit 0 on success, 1 on error.
 
 Read tools (get_manifest, list_batches, get_batch_results) call the pipeline proxy.
-Write tools (search_for_shot, delete_batch_images) call the media server via the
-pipeline proxy using MEDIA_API_KEY for authentication.
+Write tools (search_for_shot, append_to_batch, poll_append, delete_batch_images)
+call the media server directly using MEDIA_API_KEY for authentication.
 
 Environment variables:
   PIPELINE_SERVER_URL  — pipeline proxy base URL (default: http://localhost:8000)
@@ -259,6 +261,68 @@ def cmd_search_for_shot(args):
     }, indent=2))
 
 
+# ── Subcommand: append_to_batch ──────────────────────────────────────────────
+
+def cmd_append_to_batch(args):
+    """
+    Add more images/videos to an existing batch item by triggering an
+    additional search without replacing current results.
+
+    Calls POST MEDIA_URL/batches/{batch_id}/items/{item_id}/append.
+
+    Output: JSON { "status": "appending", "tmp_batch_id": "...", "poll_url": "..." }
+    """
+    if not MEDIA_KEY:
+        _err("MEDIA_API_KEY env var is not set — required for media server auth")
+
+    url     = f"{MEDIA_URL}/batches/{args.batch_id}/items/{args.item_id}/append"
+    payload = {
+        "ai_prompt": args.prompt,
+        "n_img":     args.n_img,
+        "n_vid":     args.n_vid,
+    }
+    try:
+        result = _post(url, payload, MEDIA_KEY)
+    except RuntimeError as e:
+        _err(f"append_to_batch POST failed: {e}")
+
+    print(json.dumps(result, indent=2))
+
+
+# ── Subcommand: poll_append ───────────────────────────────────────────────────
+
+def cmd_poll_append(args):
+    """
+    Poll the status of an append operation.
+    When the mini-batch is done the server merges results and returns counts.
+
+    Calls GET MEDIA_URL/batches/{batch_id}/items/{item_id}/append/{tmp_batch_id}
+    with X-Api-Key authentication.
+
+    Output: JSON { "status": "pending"|"done"|"failed", ... }
+    """
+    if not MEDIA_KEY:
+        _err("MEDIA_API_KEY env var is not set — required for media server auth")
+
+    url = (
+        f"{MEDIA_URL}/batches/{args.batch_id}"
+        f"/items/{args.item_id}"
+        f"/append/{args.tmp_batch_id}"
+    )
+    # GET with auth header — use urllib.request.Request directly
+    req = urllib.request.Request(url, headers={"X-Api-Key": MEDIA_KEY}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        _err(f"HTTP {e.code} GET {url}: {body}")
+    except urllib.error.URLError as e:
+        _err(f"connection error GET {url}: {e.reason}")
+
+    print(json.dumps(result, indent=2))
+
+
 # ── Subcommand: delete_batch_images ──────────────────────────────────────────
 
 def cmd_delete_batch_images(args):
@@ -350,6 +414,23 @@ def main():
     p_sfs.add_argument("--n_img",    type=int, default=15, help="number of images to fetch")
     p_sfs.add_argument("--n_vid",    type=int, default=0,  help="number of videos to fetch")
 
+    # append_to_batch
+    p_atb = sub.add_parser("append_to_batch",
+                           help="add more images/videos to an existing batch item")
+    p_atb.add_argument("--batch_id", required=True, help="target batch id (e.g. b_822b661e)")
+    p_atb.add_argument("--item_id",  required=True, help="asset_id of the background item")
+    p_atb.add_argument("--prompt",   required=True, help="search terms for this append run")
+    p_atb.add_argument("--n_img",    type=int, default=10, help="number of images to fetch")
+    p_atb.add_argument("--n_vid",    type=int, default=0,  help="number of videos to fetch")
+
+    # poll_append
+    p_pa = sub.add_parser("poll_append",
+                          help="poll an append operation until done or failed")
+    p_pa.add_argument("--batch_id",     required=True, help="target batch id")
+    p_pa.add_argument("--item_id",      required=True, help="asset_id of the background item")
+    p_pa.add_argument("--tmp_batch_id", required=True,
+                      help="tmp_batch_id returned by append_to_batch")
+
     # delete_batch_images
     p_dbi = sub.add_parser("delete_batch_images",
                            help="prune images from a batch that do not match a filter")
@@ -368,6 +449,8 @@ def main():
         "list_batches":        cmd_list_batches,
         "get_batch_results":   cmd_get_batch_results,
         "search_for_shot":     cmd_search_for_shot,
+        "append_to_batch":     cmd_append_to_batch,
+        "poll_append":         cmd_poll_append,
         "delete_batch_images": cmd_delete_batch_images,
     }
     try:

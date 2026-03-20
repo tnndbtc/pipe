@@ -3,7 +3,7 @@
 media_ask.py — builds the claude -p prompt for `media ask`.
 
 Exports:
-  build_prompt(query, project, episode_id) -> str
+  build_prompt(query, project, episode_id, batch_id=None) -> str
 """
 
 from pathlib import Path
@@ -19,7 +19,7 @@ a search for media assets for a specific shot in the episode.
 
 Project:  {PROJECT}
 Episode:  {EPISODE_ID}
-
+{BATCH_HINT}
 Available tools (each prints JSON to stdout):
 
   Get the list of shots and their current search prompts:
@@ -40,6 +40,23 @@ Available tools (each prints JSON to stdout):
       --item_id ITEM_ID --query "SEARCH TERMS" \\
       [--n_img N] [--n_vid N]
     Returns: { "batch_id": "...", "item_id": "...", "status": "queued", "poll_url": "..." }
+
+  Add more images/videos to an existing batch item (without creating a new batch):
+    python {TOOLS_PATH} append_to_batch \\
+      --batch_id BATCH_ID \\
+      --item_id  ITEM_ID \\
+      --prompt   "SEARCH TERMS" \\
+      [--n_img N] [--n_vid N]
+    Returns: {{ "status": "appending", "tmp_batch_id": "...", "poll_url": "..." }}
+
+  Poll the status of an append operation (call in a loop until done or failed):
+    python {TOOLS_PATH} poll_append \\
+      --batch_id     BATCH_ID \\
+      --item_id      ITEM_ID \\
+      --tmp_batch_id TMP_BATCH_ID
+    Returns: {{ "status": "pending"|"done"|"failed", ... }}
+    When done: {{ "status": "done", "images_appended": N, "videos_appended": N,
+                  "images_total": N, "videos_total": N }}
 
   Delete images and/or videos from a batch that do not match a filter:
     python {TOOLS_PATH} delete_batch_images \\
@@ -67,8 +84,12 @@ Rules:
    against the shot_id field (e.g. "s01e01_sc01_sh01") in the get_manifest output.
    IMPORTANT: the --item_id argument must be the asset_id field of the matched item,
    NOT the shot_id. These are two different fields with different values.
-3. Call list_batches to find the most recent batch, then call get_batch_results
-   to see what is already downloaded — do not re-request files already present.
+3. Decide whether to search or append:
+   - If the user asks to search for images/videos for a shot with NO existing done batch,
+     use search_for_shot (creates a new top-level batch).
+   - If the user asks to ADD MORE images/videos to a shot that ALREADY HAS a done batch,
+     use append_to_batch (adds to the existing batch, preserves current results).
+   Call list_batches to check whether a done batch exists before deciding.
 4. Call search_for_shot with the user's search terms as --query.
    License filtering (CC0 / CC BY only via wikimedia, openverse, europeana) is
    applied automatically by the tool — do NOT add any license flags manually.
@@ -101,17 +122,29 @@ Rules:
    If both or unspecified, omit media_types entirely.
    Deletions are permanent. After the call, read result.items and report per-type counts:
    "images: deleted N kept M  |  videos: deleted N kept M" for each item.
+8. After calling append_to_batch, call poll_append in a loop (sleep 5 seconds between
+   calls) until status is "done" or "failed".
+   When done, report to the user: "Added N images and N videos to batch BATCH_ID shot ITEM_ID.
+   Total: N images, N videos."
+   If failed, report the error from the response.
 
 User query: {QUERY}
 """
 
 
-def build_prompt(query: str, project: str, episode_id: str) -> str:
+def build_prompt(query: str, project: str, episode_id: str,
+                 batch_id: str | None = None) -> str:
     """Return the filled-in prompt string to pipe into claude -p."""
+    batch_hint = (
+        f"\nCurrent batch: {batch_id}  "
+        "(use this batch_id unless the user specifies another)\n"
+        if batch_id else ""
+    )
     return (
         TEMPLATE
         .replace("{TOOLS_PATH}",  TOOLS_PATH)
         .replace("{PROJECT}",     project)
         .replace("{EPISODE_ID}",  episode_id)
         .replace("{QUERY}",       query)
+        .replace("{BATCH_HINT}",  batch_hint)
     )

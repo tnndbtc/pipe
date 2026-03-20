@@ -232,6 +232,21 @@ class BatchStore:
         self._write_atomic(self._state_path(batch_id), state)
         return reset
 
+    def delete(self, batch_id: str) -> None:
+        """Remove batch from memory and delete its state file from disk.
+        Does NOT delete downloaded media files — caller handles rmtree if needed."""
+        state = self._batches.pop(batch_id, None)
+        if state is None:
+            return
+        try:
+            path = (
+                self.batch_dir(state["project"], state["episode_id"], batch_id)
+                / "batch_state.json"
+            )
+            path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------

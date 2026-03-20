@@ -31,6 +31,9 @@ Endpoints
     GET  /batches                              list batches for a project/episode (auth)
     GET  /batches/{batch_id}                   poll status / get results (auth)
     POST /batches/{batch_id}/prune             delete images not matching a filter (auth)
+    POST /batches/{batch_id}/items/{item_id}/append      append search results (auth)
+    GET  /batches/{batch_id}/items/{item_id}/append/{tmp} poll append status (auth)
+    POST /ai_ask                               natural-language media operation (auth)
     GET  /files/{path:path}                    serve cached media files (no auth)
     GET  /health                               server status (no auth)
 
@@ -49,11 +52,13 @@ Authentication
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import logging.handlers
 import os
 import shutil
+import subprocess
 import sys
 import time
 import uuid
@@ -106,6 +111,19 @@ _cfg_path = Path(__file__).parent / "config.json"
 config: dict = json.loads(_cfg_path.read_text(encoding="utf-8"))
 
 PROJECTS_ROOT = (Path(__file__).parent / config["projects_root"]).resolve()
+
+
+# ---------------------------------------------------------------------------
+# Load media_ask.build_prompt at module startup (fails fast if file is missing)
+# ---------------------------------------------------------------------------
+
+_ask_spec = importlib.util.spec_from_file_location(
+    "media_ask",
+    Path(__file__).parent.parent / "scripts" / "media_ask.py",
+)
+_ask_module = importlib.util.module_from_spec(_ask_spec)
+_ask_spec.loader.exec_module(_ask_module)
+build_prompt = _ask_module.build_prompt  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +914,20 @@ class PruneRequest(BaseModel):
     filter_spec: FilterSpec
 
 
+class AiAskRequest(BaseModel):
+    prompt:     str
+    project:    str
+    episode_id: str
+    batch_id:   Optional[str] = None      # hints Claude which batch to operate on
+
+
+class AppendRequest(BaseModel):
+    ai_prompt:        str                  # search query for this item
+    n_img:            int = 10             # number of new image candidates to fetch
+    n_vid:            int = 0              # number of new video candidates to fetch
+    sources_override: Optional[list] = None
+
+
 def _apply_filter(entries: list[dict], fs: FilterSpec) -> list[dict]:
     """
     Apply a FilterSpec to a ranked entry list (images_ranked or videos_ranked).
@@ -1070,6 +1102,237 @@ async def prune_batch(
     return {
         "batch_id": batch_id,
         "items":    items_summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /batches/{batch_id}/items/{item_id}/append — add more results to a batch item
+# ---------------------------------------------------------------------------
+
+@app.post("/batches/{batch_id}/items/{item_id}/append", status_code=202)
+async def append_to_batch(
+    batch_id: str,
+    item_id:  str,
+    body: AppendRequest,
+    _: None = Depends(require_auth),
+):
+    """
+    Trigger an additional media search and append the new results into an
+    existing batch item — without replacing current results.
+
+    Creates a temporary mini-batch, runs the normal search+score pipeline on
+    it, then merges into the target item when the caller polls the status URL.
+
+    Returns 202 immediately with a poll_url.
+    """
+    state = store.get(batch_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if state["status"] == "running":
+        raise HTTPException(status_code=409,
+                            detail="Cannot append to a running batch — wait for it to finish")
+    if item_id not in state["items"]:
+        raise HTTPException(status_code=422, detail=f"Unknown item_id: {item_id}")
+
+    # Build a minimal single-item manifest.  Must use "asset_id" key (NOT "item_id")
+    # so that create_batch's list→dict conversion in server.py line 352 picks it up.
+    tmp_batch_id = "b_" + uuid.uuid4().hex[:8]
+    store.create(
+        tmp_batch_id,
+        state["project"],
+        state["episode_id"],
+        top_n            = state.get("top_n", 5),
+        backgrounds      = {item_id: {"asset_id": item_id, "ai_prompt": body.ai_prompt}},
+        content_profile  = state.get("content_profile", "default"),
+        n_img            = body.n_img,
+        n_vid            = body.n_vid,
+        sources_override = body.sources_override,
+    )
+    await batch_queue.put(tmp_batch_id)
+
+    log.info("append_to_batch: created tmp batch %s for %s/%s", tmp_batch_id, batch_id, item_id)
+
+    return {
+        "status":       "appending",
+        "tmp_batch_id": tmp_batch_id,
+        "poll_url":     f"/batches/{batch_id}/items/{item_id}/append/{tmp_batch_id}",
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /batches/{batch_id}/items/{item_id}/append/{tmp_batch_id} — poll + merge
+# ---------------------------------------------------------------------------
+
+@app.get("/batches/{batch_id}/items/{item_id}/append/{tmp_batch_id}")
+async def poll_append(
+    batch_id:     str,
+    item_id:      str,
+    tmp_batch_id: str,
+    _:            None = Depends(require_auth),
+):
+    """
+    Poll an append operation.  When the mini-batch is done, merges new results
+    into the target batch item, moves files, and cleans up the tmp batch.
+    """
+    state = store.get(batch_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if item_id not in state["items"]:
+        raise HTTPException(status_code=422, detail=f"Unknown item_id: {item_id}")
+
+    tmp_state = store.get(tmp_batch_id)
+    if tmp_state is None:
+        # Already merged and cleaned up on a previous poll — return last known state
+        raise HTTPException(status_code=404,
+                            detail="Tmp batch not found — may have already been merged")
+
+    tmp_status = tmp_state.get("status")
+
+    if tmp_status in ("failed", "interrupted"):
+        err = tmp_state.get("error", "unknown error")
+        raise HTTPException(status_code=500, detail=f"Append batch failed: {err}")
+
+    if tmp_status != "done":
+        return {"status": "pending", "tmp_batch_status": tmp_status}
+
+    # ── Merge ──────────────────────────────────────────────────────────────────
+    target_item = state["items"][item_id]
+    tmp_item    = tmp_state["items"].get(item_id, {})
+
+    existing_images = list(target_item.get("images_ranked", []))
+    existing_videos = list(target_item.get("videos_ranked", []))
+    new_images      = list(tmp_item.get("images_ranked", []))
+    new_videos      = list(tmp_item.get("videos_ranked", []))
+
+    # Deduplicate by path
+    existing_img_paths = {e.get("path") for e in existing_images}
+    existing_vid_paths = {e.get("path") for e in existing_videos}
+    new_images_deduped = [e for e in new_images if e.get("path") not in existing_img_paths]
+    new_videos_deduped = [e for e in new_videos if e.get("path") not in existing_vid_paths]
+
+    # Move files from tmp batch dir to target batch dir (same relative structure)
+    target_batch_dir = store.batch_dir(state["project"], state["episode_id"], batch_id)
+    tmp_batch_dir    = store.batch_dir(tmp_state["project"], tmp_state["episode_id"], tmp_batch_id)
+
+    def _move_entries(entries: list[dict]) -> list[dict]:
+        """Move each entry's file (and .info.json sidecar) into target_batch_dir.
+        Paths are relative to batch_dir in both tmp and target, so the relative
+        path is preserved verbatim — only the parent directory changes."""
+        updated = []
+        for entry in entries:
+            e2  = dict(entry)
+            rel = e2.get("path", "")
+            if not rel:
+                updated.append(e2)
+                continue
+            src_abs = (tmp_batch_dir / rel).resolve()
+            dst_abs = (target_batch_dir / rel).resolve()
+            # Path-traversal guard (mirrors _delete_entries)
+            try:
+                src_abs.relative_to(tmp_batch_dir)
+                dst_abs.relative_to(target_batch_dir)
+            except ValueError:
+                log.warning("append merge: skipping path outside batch dir: rel=%s", rel)
+                continue
+            dst_abs.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.move(str(src_abs), str(dst_abs))
+                src_sidecar = Path(str(src_abs) + ".info.json")
+                if src_sidecar.exists():
+                    shutil.move(str(src_sidecar), str(Path(str(dst_abs) + ".info.json")))
+            except Exception as exc:
+                log.warning("append merge: move failed %s → %s: %s", src_abs, dst_abs, exc)
+                # path stays valid (file may already be at dst from a previous partial run)
+            updated.append(e2)
+        return updated
+
+    new_images_moved = _move_entries(new_images_deduped)
+    new_videos_moved = _move_entries(new_videos_deduped)
+
+    # Merge and re-sort by score descending
+    merged_images = sorted(
+        existing_images + new_images_moved,
+        key=lambda e: e.get("score", 0.0), reverse=True,
+    )
+    merged_videos = sorted(
+        existing_videos + new_videos_moved,
+        key=lambda e: e.get("score", 0.0), reverse=True,
+    )
+
+    # Persist state BEFORE cleanup (batch_state is always consistent)
+    store.update_item(
+        batch_id, item_id,
+        status        = target_item.get("status", "done"),
+        images_ranked = merged_images,
+        videos_ranked = merged_videos,
+    )
+
+    # Remove tmp batch from memory + disk (media files already moved)
+    store.delete(tmp_batch_id)
+    shutil.rmtree(str(tmp_batch_dir), ignore_errors=True)
+
+    log.info(
+        "poll_append: merged tmp=%s into %s/%s  +%d imgs +%d vids",
+        tmp_batch_id, batch_id, item_id,
+        len(new_images_moved), len(new_videos_moved),
+    )
+
+    return {
+        "status":          "done",
+        "images_appended": len(new_images_moved),
+        "videos_appended": len(new_videos_moved),
+        "images_total":    len(merged_images),
+        "videos_total":    len(merged_videos),
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /ai_ask — natural-language media operation via Claude subprocess
+# ---------------------------------------------------------------------------
+
+@app.post("/ai_ask")
+async def ai_ask(body: AiAskRequest, _: None = Depends(require_auth)):
+    """
+    Accept a natural-language prompt from a client, build a system prompt
+    via media_ask.build_prompt(), and spawn a `claude -p` subprocess to
+    execute the appropriate media tool operations.
+
+    Claude calls bash → python server_tools.py <subcommand> → media server REST
+    endpoints.  The client never calls Claude directly.
+
+    Returns: { "response": "<Claude's final text>", "error": null | "<stderr>" }
+    """
+    full_prompt = build_prompt(
+        query      = body.prompt,
+        project    = body.project,
+        episode_id = body.episode_id,
+        batch_id   = body.batch_id,
+    )
+
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            ["claude", "-p", "--allowedTools", "Bash", "--output-format", "text"],
+            input          = full_prompt,
+            capture_output = True,
+            text           = True,
+            timeout        = 300,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Claude subprocess timed out after 300s")
+    except FileNotFoundError:
+        raise HTTPException(status_code=500,
+                            detail="claude binary not found — ensure it is on PATH")
+    except Exception as exc:
+        log.exception("ai_ask: subprocess failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    log.info("ai_ask: claude returned rc=%d  stdout_len=%d",
+             proc.returncode, len(proc.stdout))
+
+    return {
+        "response": proc.stdout.strip(),
+        "error":    proc.stderr.strip() if proc.returncode != 0 else None,
     }
 
 
