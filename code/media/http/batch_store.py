@@ -244,8 +244,9 @@ class BatchStore:
                 / "batch_state.json"
             )
             path.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _del_exc:  # noqa: BLE001
+            log.warning("batch_store.delete: could not remove state file for %s: %s",
+                        batch_id, _del_exc)
 
     # ------------------------------------------------------------------
     # Read

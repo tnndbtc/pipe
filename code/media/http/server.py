@@ -1142,7 +1142,11 @@ async def append_to_batch(
         state["project"],
         state["episode_id"],
         top_n            = state.get("top_n", 5),
-        backgrounds      = {item_id: {"asset_id": item_id, "ai_prompt": body.ai_prompt}},
+        backgrounds      = {item_id: {
+            "asset_id":     item_id,
+            "ai_prompt":    body.ai_prompt,
+            "search_prompt": body.ai_prompt,   # worker reads search_prompt for API queries
+        }},
         content_profile  = state.get("content_profile", "default"),
         n_img            = body.n_img,
         n_vid            = body.n_vid,
