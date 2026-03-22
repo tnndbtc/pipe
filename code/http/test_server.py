@@ -3012,7 +3012,7 @@ placeholder="Enter your story here"></textarea>
         <span class="vo-tl-label" id="vo-tl-label">—</span>
         <button class="vo-tl-close" onclick="_voTlClose()" title="Close timeline">✕</button>
       </div>
-      <div class="vo-tl-track" id="vo-tl-track">
+      <div class="vo-tl-track" id="vo-tl-track" style="display:none">
         <div  class="vo-tl-scenes"  id="vo-tl-scenes"></div>
         <div  class="vo-tl-progress" id="vo-tl-progress" style="width:0"></div>
         <input class="vo-tl-scrubber" id="vo-tl-scrubber" type="range" min="0" max="1000"
