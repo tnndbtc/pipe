@@ -35,6 +35,30 @@ def url_to_path(url: str) -> str:
     return url
 
 
+def resolve_media_path(seg: dict, ep_dir: Path) -> str:
+    """Resolve the actual filesystem path for ffmpeg from a segment dict.
+
+    Priority:
+    1. seg["path"] if it is an absolute path that exists on disk
+    2. ep_dir / seg["path"] if the relative path resolves under the episode dir
+    3. PIPE_DIR / seg["path"] for relative paths stored from the project root
+    4. Fall back to url_to_path(seg["url"]) for legacy or http segments
+    """
+    p = seg.get("path", "")
+    if p:
+        if os.path.isabs(p):
+            if os.path.exists(p):
+                return p
+        else:
+            candidate = ep_dir / p
+            if candidate.exists():
+                return str(candidate)
+            candidate2 = PIPE_DIR / p
+            if candidate2.exists():
+                return str(candidate2)
+    return url_to_path(seg.get("url", ""))
+
+
 def load_json(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -126,16 +150,16 @@ def _seg_display_dur(seg: dict) -> float:
     Return how long this segment should play, exactly as the user set it.
     Returns 0.0 if no duration is specified — caller must skip or warn.
 
-    - images: start_sec/end_sec are shot-timeline markers, NOT trim bounds.
-              Use hold_sec (user-set display duration) first.
-    - videos: start_sec/end_sec ARE trim bounds; use end-start first.
+    - images: clip_in/clip_out are not used; use hold_sec (user-set display duration) first.
+    - videos: clip_in/clip_out ARE trim bounds; use out-in first.
+              Falls back to start_sec/end_sec for backward compat.
     """
     media_type = seg.get("media_type", "image")
 
     if media_type != "image":
-        # Video: in/out trim range takes priority
-        start = float(seg.get("start_sec") or 0)
-        end   = float(seg.get("end_sec")   or 0)
+        # Video: in/out trim range takes priority (clip_in/clip_out, fall back to start_sec/end_sec)
+        start = float(seg.get("clip_in")  if seg.get("clip_in")  is not None else (seg.get("start_sec") or 0))
+        end   = float(seg.get("clip_out") if seg.get("clip_out") is not None else (seg.get("end_sec")   or 0))
         if end > start:
             return end - start
 
@@ -310,14 +334,14 @@ def main():
                 segs_rendered = 0   # counts segments that actually produced a clip
 
                 for seg_idx, seg in enumerate(segs):
-                    media_path = url_to_path(seg.get("url", ""))
+                    media_path = resolve_media_path(seg, ep_dir)
                     media_type = seg.get("media_type", "image")
-                    seg_start  = float(seg.get("start_sec") or 0)
+                    seg_start  = float(seg.get("clip_in") if seg.get("clip_in") is not None else (seg.get("start_sec") or 0))
                     anim_type  = (seg.get("animation_type") or "none").lower()
                     seg_dur    = _seg_display_dur(seg)
                     print(f"  [seg] {shot_id} seg{seg_idx} type={media_type} "
-                          f"hold_sec={seg.get('hold_sec')} start_sec={seg.get('start_sec')} "
-                          f"end_sec={seg.get('end_sec')} duration_sec={seg.get('duration_sec')} "
+                          f"hold_sec={seg.get('hold_sec')} clip_in={seg.get('clip_in')} "
+                          f"clip_out={seg.get('clip_out')} duration_sec={seg.get('duration_sec')} "
                           f"→ seg_dur={seg_dur:.3f}s")
 
                     if seg_dur <= 0:

@@ -4,42 +4,36 @@
   "title": "MediaPlan",
   "description": "Confirmed media clip selections per shot, written by the VC editor Media tab and read by render_video.py and media_preview_pack.py.",
   "type": "object",
-  "required": ["batch_id", "slug", "episode_id", "version", "selections"],
+  "required": ["slug", "episode_id", "shot_overrides"],
   "properties": {
     "batch_id":         { "type": "string" },
     "slug":             { "type": "string" },
     "episode_id":       { "type": "string" },
     "version":          { "type": "integer", "minimum": 1 },
     "confirmed_locale": { "type": "string" },
-    "selections": {
+    "shot_overrides": {
       "type": "object",
-      "description": "Keys are background_id. Values contain per_shot segment lists.",
+      "description": "Keys are shot_id. Values are override objects with optional clip_id and segments list.",
       "additionalProperties": {
         "type": "object",
         "properties": {
-          "per_shot": {
-            "type": "object",
-            "description": "Keys are shot_id. Values contain segment arrays.",
-            "additionalProperties": {
+          "clip_id": { "type": ["string", "null"] },
+          "clip_in": { "type": ["number", "null"], "description": "Video trim in-point (seconds). Video only." },
+          "clip_out": { "type": ["number", "null"], "description": "Video trim out-point (seconds). Video only." },
+          "segments": {
+            "type": "array",
+            "items": {
               "type": "object",
+              "required": ["type", "url"],
               "properties": {
-                "segments": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "required": ["media_type", "url"],
-                    "properties": {
-                      "media_type":   { "type": "string", "enum": ["image", "video"] },
-                      "url":          { "type": "string" },
-                      "path":         { "type": "string" },
-                      "score":        { "type": ["number", "null"] },
-                      "duration_sec": { "type": ["number", "null"] },
-                      "hold_sec":     { "type": ["number", "null"] },
-                      "start_sec":    { "type": ["number", "null"] },
-                      "end_sec":      { "type": ["number", "null"] }
-                    }
-                  }
-                }
+                "type":         { "type": "string", "enum": ["image", "video"] },
+                "url":          { "type": "string" },
+                "path":         { "type": "string" },
+                "clip_id":      { "type": ["string", "null"] },
+                "duration_sec": { "type": ["number", "null"] },
+                "hold_sec":     { "type": ["number", "null"] },
+                "clip_in":      { "type": ["number", "null"], "description": "Video trim in-point (seconds). Video segments only." },
+                "clip_out":     { "type": ["number", "null"], "description": "Video trim out-point (seconds). Video segments only." }
               }
             }
           }

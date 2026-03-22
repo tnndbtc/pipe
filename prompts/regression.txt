@@ -3474,3 +3474,68 @@ de-duplicate.  Any locale that appears in either source is included in `locales`
   `AssetManifest.zh-Hans.json`
 - Sorting locales in a way that drops duplicates but also drops the zh-Hans
   entry added by the AssetManifest scan
+
+---
+
+## KW-23: render_video.py — Media v2 shot_overrides + media_cut_clips.json
+
+### What this tests
+When `MediaPlan.json` uses the v2 schema (`"shot_overrides"` key present), `render_video.py`
+must read `assets/media_library/media_cut_clips.json`, resolve each shot's `clip_id` to an
+absolute filesystem path, and pass that path to ffmpeg as a `-i` input. If the branch is
+missing or broken, the confirmed cut clips are silently skipped and the final video falls
+back to default background images — the Media Tab confirm workflow produces no effect.
+
+### Files involved
+- `code/http/render_video.py` — v2 branch triggered by `"shot_overrides"` key in MediaPlan
+- `code/http/resolve_assets.py` — parallel v2 branch in `_load_selections()`
+- `tests/playwright/kw23_media_v2_shot_overrides.spec.js`
+
+### Invariants that must hold
+1. When `MediaPlan.json` contains `shot_overrides: {"sc01-sh01": {clip_id, start_sec, end_sec}}`,
+   the resolved clip file path appears as a `-i` input in the fake-ffmpeg log for sc01-sh01.
+2. A shot with no override (sc02-sh02) does NOT receive the clip — clip count == 1.
+3. `render_video.py` exits 0 (no crash) when the v2 schema is present.
+
+### Most likely to break when
+- The `"shot_overrides"` key detection is removed or renamed (falls back to v1 branch, clips ignored)
+- `media_cut_clips.json` path is wrong (file not found → clip_map empty → all shots skipped)
+- `episode_dir / clip["path"]` join is wrong (path resolves to non-existent file → skipped)
+- `file://` URI construction or `_url_to_path()` conversion produces an incorrect path
+- `start_sec`/`end_sec` from `shot_overrides` are not passed to the segment dict
+
+---
+
+## KW-24: MediaPlan segment schema uses clip_in/clip_out for video trim
+
+### What this tests
+When a video clip is selected in the Media tab and in/out trim points are set,
+`MediaPlan.json` must save `clip_in`/`clip_out` (not `start_sec`/`end_sec`).
+Image segments must save only `duration_sec` (no in/out fields).
+
+### Files involved
+- `contracts/schemas/MediaPlan.v1.json` — schema updated to use `clip_in`/`clip_out`
+- `projects/test-proj/episodes/s01e01/MediaPlan.json` — fixture updated
+- `code/http/test_server.py` — UI and `mediaSaveAll()` write `clip_in`/`clip_out`
+- `code/http/resolve_assets.py` — reads `clip_in`/`clip_out`, falls back to `start_sec`/`end_sec`
+- `code/http/render_video.py` — reads `clip_in`/`clip_out`, falls back to `start_sec`/`end_sec`
+- `code/http/media_preview_pack.py` — reads `clip_in`/`clip_out`, falls back to `start_sec`/`end_sec`
+
+### Invariants that must hold
+1. Shot Overrides: selecting a video clip and setting in/out points saves `clip_in`/`clip_out`
+   in `MediaPlan.json` (not `start_sec`/`end_sec`).
+2. Image segments in `shot_overrides.segments` save only `duration_sec` (no in/out fields).
+3. `resolve_assets.py` and `render_video.py` fall back to `start_sec`/`end_sec` if
+   `clip_in`/`clip_out` absent (backward compat with older MediaPlan files).
+4. The in/out trimmer inputs in the Shot Overrides UI write `clip_in`/`clip_out` to the
+   segment object (via `mediaOvrSetSegTiming`).
+5. Loading an existing `MediaPlan.json` populates `_mediaOvrTiming` with `clip_in`/`clip_out`,
+   falling back to `start_sec`/`end_sec` if present.
+
+### Most likely to break when
+- `mediaSaveAll()` reverts to writing `start_sec`/`end_sec` instead of `clip_in`/`clip_out`
+- The trimmer `onchange` handlers pass `'start_sec'` / `'end_sec'` as the field name instead
+  of `'clip_in'` / `'clip_out'`
+- `resolve_assets.py` v2 branch (`shot_overrides`) stops reading `clip_in`/`clip_out`
+- `media_preview_pack.py` `_seg_display_dur()` stops checking `clip_in`/`clip_out` for videos
+- Image segments accidentally include `clip_in`/`clip_out` fields in the saved JSON

@@ -424,6 +424,39 @@ def _load_selections(selections_path: Path) -> dict[str, dict]:
     batch_dir = selections_path.parent / batch_id if batch_id else None
 
     out: dict[str, dict] = {}
+
+    if "shot_overrides" in data:
+        ep_dir     = selections_path.parent   # MediaPlan.json lives at ep_dir/MediaPlan.json
+        clips_path = ep_dir / "assets" / "media_library" / "media_cut_clips.json"
+        clip_map: dict[str, dict] = {}
+        if clips_path.exists():
+            try:
+                clip_map = {c["clip_id"]: c
+                            for c in json.loads(clips_path.read_text(encoding="utf-8"))
+                            if "clip_id" in c}
+            except Exception as e:
+                print(f"  [WARN] Could not load media_cut_clips.json: {e}", file=sys.stderr)
+
+        for shot_id, ovr in data.get("shot_overrides", {}).items():
+            clip_id = ovr.get("clip_id")
+            if not clip_id or clip_id not in clip_map:
+                continue
+            abs_path = (ep_dir / clip_map[clip_id]["path"]).resolve()
+            seg: dict = {
+                "url":        abs_path.as_uri(),
+                "media_type": "video",
+                "start_sec":  float(ovr.get("clip_in") if ovr.get("clip_in") is not None else (ovr.get("start_sec") or 0.0)),
+            }
+            _clip_out = ovr.get("clip_out") if ovr.get("clip_out") is not None else ovr.get("end_sec")
+            if _clip_out is not None:
+                seg["end_sec"] = float(_clip_out)
+            # Use clip_id as synthetic asset_id; per_shot segments format matches v1 reader
+            if clip_id not in out:
+                out[clip_id] = {"per_shot": {}}
+            out[clip_id]["per_shot"][shot_id] = {"segments": [seg]}
+
+        return out   # early return — skip v1 parse loop entirely
+
     for asset_id, entry in data.get("selections", {}).items():
         if "per_shot" in entry:
             # Per-shot format (version 2 or 3)
@@ -439,11 +472,14 @@ def _load_selections(selections_path: Path) -> dict[str, dict]:
                             resolved["hold_sec"]     = seg.get("hold_sec")
                             resolved["duration_override_sec"] = seg.get("duration_override_sec")
                             resolved["natural_duration_sec"]  = seg.get("natural_duration_sec")
-                            # Clip trim range (start_sec / end_sec) for video segments
-                            if seg.get("start_sec") is not None:
-                                resolved["start_sec"] = seg["start_sec"]
-                            if seg.get("end_sec") is not None:
-                                resolved["end_sec"] = seg["end_sec"]
+                            # Clip trim range (clip_in / clip_out) for video segments
+                            # Fall back to legacy start_sec/end_sec for backward compat
+                            _in = seg.get("clip_in") if seg.get("clip_in") is not None else seg.get("start_sec")
+                            _out = seg.get("clip_out") if seg.get("clip_out") is not None else seg.get("end_sec")
+                            if _in is not None:
+                                resolved["start_sec"] = _in
+                            if _out is not None:
+                                resolved["end_sec"] = _out
                             resolved_segs.append(resolved)
                     if resolved_segs:
                         per_shot_resolved[shot_id] = {"segments": resolved_segs}
@@ -548,11 +584,13 @@ def resolve_all(
                                 item["hold_sec"]      = seg.get("hold_sec")
                                 if seg.get("animation_type"):
                                     item["animation_type"] = seg["animation_type"]
-                                # Clip trim range for video segments
-                                if seg.get("start_sec") is not None:
-                                    item["start_sec"] = seg["start_sec"]
-                                if seg.get("end_sec") is not None:
-                                    item["end_sec"] = seg["end_sec"]
+                                # Clip trim range for video segments (clip_in/clip_out, fall back to start_sec/end_sec)
+                                _in = seg.get("clip_in") if seg.get("clip_in") is not None else seg.get("start_sec")
+                                _out = seg.get("clip_out") if seg.get("clip_out") is not None else seg.get("end_sec")
+                                if _in is not None:
+                                    item["start_sec"] = _in
+                                if _out is not None:
+                                    item["end_sec"] = _out
                                 items.append(item)
                                 n_found += 1
                             else:

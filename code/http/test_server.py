@@ -2681,28 +2681,12 @@ placeholder="Enter your story here"></textarea>
     <select id="media-ep-select" onchange="onMediaEpChange()">
       <option value="">— select episode —</option>
     </select>
+    <button id="media-btn-search" onclick="mediaStartSearch()" disabled>🔍 Search Media</button>
     <input  id="media-server-url" class="media-cfg-input" type="text"
             placeholder="Media server URL  e.g. http://localhost:8200"
             value="{{MEDIA_SERVER_URL}}" />
-    <button id="media-btn-search" onclick="mediaStartSearch()" disabled>🔍 Search Media</button>
-    <select id="media-gen-all-type"
-            style="font-size:0.82em;border-radius:6px;padding:4px 8px;
-                   border:1px solid var(--border,#555);background:var(--bg2,#2a2a2a);
-                   color:var(--fg,#ccc);cursor:pointer;flex-shrink:0"
-            onchange="_mediaUpdateGenAllBtn()">
-      <option value="backgrounds">Backgrounds</option>
-      <option value="elements">Elements</option>
-    </select>
-    <button id="media-btn-gen-all" onclick="mediaGenAll()" disabled
-            style="background:var(--purple,#7c3aed);color:#fff;border:none;
-                   border-radius:6px;font-size:0.82em;font-weight:700;
-                   padding:6px 14px;cursor:pointer;transition:opacity .15s;flex-shrink:0">
-      ✨ Gen All BGs
-    </button>
-    <span id="media-gen-all-status"
-          style="font-size:0.78em;color:var(--dim);flex-shrink:0"></span>
     <button id="media-btn-preview" onclick="mediaGeneratePreview()"
-            style="margin-left:8px;margin-right:4px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.80em;padding:5px 14px;cursor:pointer">🎬 Generate Preview (VO)</button>
+            style="margin-left:8px;margin-right:4px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.80em;padding:5px 14px;cursor:pointer">🎬 Generate Preview</button>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-music" checked onchange="mediaUpdatePreviewLabel()"> Include Music</label>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-sfx" checked onchange="mediaUpdatePreviewLabel()"> Include SFX</label>
   </div>
@@ -2758,8 +2742,7 @@ placeholder="Enter your story here"></textarea>
   <div class="media-footer" id="media-footer" style="display:none">
     <span id="media-confirm-msg"></span>
     <button id="media-btn-reset"     onclick="mediaReset()">↺ Reset</button>
-    <button id="media-btn-apply-seq" onclick="mediaApplyRecommended()" style="display:none">⚡ Apply Recommended Sequence</button>
-    <button id="media-btn-confirm"   onclick="mediaConfirm()">✔ Confirm Plan</button>
+    <button id="media-btn-confirm"   onclick="mediaSaveAll()">✔ Confirm Plan</button>
   </div>
 </div>
 
@@ -4289,6 +4272,38 @@ placeholder="Enter your story here"></textarea>
     });
   }
 
+  // ── Shared timeline merger ───────────────────────────────────────────────────
+  // Calls all three authoritative endpoints in parallel and merges their data
+  // into a single object suitable for _tlRender().
+  //   vo_timeline   → shots (timing anchor) + vo_items  (from VOPlan)
+  //   sfx_timeline  → sfx_items                         (from SfxPlan)
+  //   music_timeline→ music_items                       (from MusicPlan)
+  async function _loadAndMergeTl(slug, epId) {
+    const _qs = '?slug=' + encodeURIComponent(slug)
+              + '&ep_id=' + encodeURIComponent(epId)
+              + '&t=' + Date.now();
+    const [voR, sfxR, musR] = await Promise.all([
+      fetch('/api/vo_timeline'    + _qs),
+      fetch('/api/sfx_timeline'   + _qs),
+      fetch('/api/music_timeline' + _qs),
+    ]);
+    const vo  = voR.ok  ? await voR.json()  : {};
+    const sfx = sfxR.ok ? await sfxR.json() : {};
+    const mus = musR.ok ? await musR.json() : {};
+    // vo_timeline returns start_sec on shots; _tlRender expects offset_sec
+    const shots = (vo.shots || []).map(s => ({
+      ...s, offset_sec: s.start_sec ?? s.offset_sec ?? 0,
+    }));
+    return {
+      total_dur_sec: vo.total_sec || sfx.total_dur_sec || mus.total_dur_sec || 0,
+      shots,
+      vo_items:    vo.vo_items    || [],
+      sfx_items:   sfx.sfx_items  || [],
+      music_items: mus.music_items || [],
+      has_wav:     sfx.has_wav    || false,
+    };
+  }
+
   // ── VO visual timeline ───────────────────────────────────────────────────────
 
   let _voVisTlData = null;
@@ -4296,10 +4311,7 @@ placeholder="Enter your story here"></textarea>
     const slug = window._voSlug, epId = window._voEpId;
     if (!slug || !epId) return;
     try {
-      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(slug)
-        + '&ep_id=' + encodeURIComponent(epId) + '&t=' + Date.now());
-      if (!r.ok) return;
-      _voVisTlData = await r.json();
+      _voVisTlData = await _loadAndMergeTl(slug, epId);
       _tlRender('vo-vis', _voVisTlData, 'vo-tl-audio');
     } catch (e) { console.warn('[VO] timeline load failed', e); }
   }
@@ -5608,9 +5620,9 @@ placeholder="Enter your story here"></textarea>
 
     let html = '';
 
-    // ── Section 1 (rendered last): Source SFX Library card ──
+    // ── Section 1: SFX Library card ──
     let srcLibHtml = '<div class="music-card">'
-          + '<div class="music-card-hdr">Source SFX Library</div>'
+          + '<div class="music-card-hdr">SFX Library</div>'
           + '<div class="music-card-sub">Play a candidate, mark In &amp; Out, '
           + 'then \u2702\u00a0Cut Clip to create a trimmed clip. '
           + 'Cut Clip without marks duplicates the full clip.</div>';
@@ -5886,7 +5898,7 @@ placeholder="Enter your story here"></textarea>
       shotOverridesHtml += '</div>';  // music-shot-block
     });
 
-    // Order: Shot Overrides → Source SFX Library → Generated Clips
+    // Order: Shot Overrides → SFX Library → Generated Clips
     html += '<div class="music-card">' + shotOverridesHtml + '</div>';
     html += srcLibHtml;
     html += genClipsHtml;
@@ -6034,26 +6046,7 @@ placeholder="Enter your story here"></textarea>
   }
 
   function _sfxRenderManifestItems() {
-    // Render empty cards for sfx_items from the manifest that have no search results yet.
-    // This lets users AI-generate or upload audio without running a search first.
-    const items = (_sfxManifest && (_sfxManifest.sfx_items || _sfxManifest.sfx)) || [];
-    if (!items.length) return;
-    let addedAny = false;
-    items.forEach(item => {
-      const id = item.item_id || item.asset_id || '';
-      if (!id) return;
-      if (_sfxResults[id]) return;  // already has search results — card already rendered
-      if (!_sfxItems.find(i => (i.item_id || i.asset_id) === id)) {
-        _sfxItems.push(item);
-        _sfxItems.sort((a, b) => (a.item_id || a.asset_id || '').localeCompare(b.item_id || b.asset_id || ''));
-        addedAny = true;
-      }
-      sfxRenderCard(item, []);
-    });
-    if (addedAny) {
-      document.getElementById('sfx-footer').style.display = 'flex';
-      sfxUpdateCountLabel();
-    }
+    // Individual item cards removed — candidates are shown in the SFX Library section.
   }
 
   async function _sfxSaveResults() {
@@ -6180,97 +6173,11 @@ placeholder="Enter your story here"></textarea>
   }
 
   function _sfxClearCards() {
-    // Remove sfx-card-* elements from sfx-body while preserving sfx-overrides
-    const body = document.getElementById('sfx-body');
-    if (!body) return;
-    Array.from(body.children).forEach(el => {
-      if (el.id !== 'sfx-overrides' && el.id !== 'sfx-preview-wrap') el.remove();
-    });
+    // No-op — individual item cards removed; candidates shown in SFX Library section.
   }
 
   function sfxRenderCard(item, candidates) {
-    const body = document.getElementById('sfx-body');
-    const itemId = item.item_id || item.asset_id || '';
-    let card = document.getElementById('sfx-card-' + itemId);
-    if (!card) {
-      card = document.createElement('div');
-      card.className = 'sfx-card';
-      card.id = 'sfx-card-' + itemId;
-      body.appendChild(card);
-    }
-    const selIdx = _sfxSelected[itemId];
-    const tag = item.tag || item.description || itemId;
-    const dur = (item.duration_sec || 0).toFixed(1);
-
-    let rows = '';
-    if (!candidates.length) {
-      rows = '<div class="sfx-empty">No candidates yet \u2014 use \u2728\u00a0AI or \ud83d\udcc1\u00a0Upload to add audio, or click \ud83d\udd0d\u00a0Search All SFX.</div>';
-    } else {
-      candidates.forEach((c, idx) => {
-        const isSel = selIdx === idx;
-        const stars = c.rating > 0 ? '\u2605' + c.rating.toFixed(1) : '';
-        const dls   = c.downloads > 1000 ? '\u2193' + Math.round(c.downloads/1000) + 'K' : (c.downloads ? '\u2193' + c.downloads : '');
-        const lic   = c.license_summary || '';
-        const src   = c.source_site || '';
-        const dur2  = (c.duration_sec || 0).toFixed(1) + 's';
-        const waveUrl = c.waveform_img || '';
-        const waveHtml = waveUrl
-          ? '<img class="sfx-cand-waveform" src="' + waveUrl + '" alt="waveform">'
-          : '<div class="sfx-cand-waveform"></div>';
-        const linkUrl = c.asset_page_url || '#';
-        rows += `<div class="sfx-cand-row${isSel ? ' selected' : ''}"
-                      onclick="sfxSelectCandidate('${itemId}', ${idx})"
-                      title="${(c.attribution_text||'').replace(/"/g,'&quot;')}">
-          ${waveHtml}
-          <button class="sfx-play-btn" onclick="sfxPlay(event, '${c.preview_url||''}', this)" title="Preview">\u25b6</button>
-          <span class="sfx-cand-title">${c.title || '(untitled)'}</span>
-          <span class="sfx-cand-meta">${dur2}${stars?' '+stars:''}${dls?' '+dls:''}${lic?' '+lic:''}${src?' '+src:''}</span>
-          <a class="sfx-link-btn" href="${linkUrl}" target="_blank" title="Open source page" onclick="event.stopPropagation()">\u2197</a>
-        </div>`;
-        if (isSel) {
-          const t = _sfxTiming[itemId] || {};
-          const startVal = (t.start != null) ? t.start : 0;
-          const endVal = (t.end != null) ? t.end : '';
-          const safeItemId = itemId.replace(/'/g, "\\'");
-          rows += '<div class="sfx-timing-row" style="display:flex;align-items:center;gap:8px;'
-            + 'padding:4px 8px;font-size:0.78em;color:var(--dim);background:rgba(255,159,67,0.08)">'
-            + '<span>\u23f1</span>'
-            + '<label>Start: <input type="number" min="0" step="0.1" value="' + startVal + '"'
-            + ' data-sfx-timing-field="start" style="width:60px;padding:2px 4px"'
-            + ' onchange="sfxSetTiming(\'' + safeItemId + '\',\'start\',this.value)"> s</label>'
-            + '<label>End: <input type="number" min="0" step="0.1" value="' + endVal + '"'
-            + ' placeholder="auto" data-sfx-timing-field="end" style="width:60px;padding:2px 4px"'
-            + ' onchange="sfxSetTiming(\'' + safeItemId + '\',\'end\',this.value)"> s</label>'
-            + '<span style="opacity:0.6">(from shot start)</span></div>';
-        }
-      });
-    }
-
-    card.innerHTML = `
-      <div class="sfx-card-header">
-        <span class="sfx-card-id">\ud83d\udd0a ${itemId}</span>
-        <span class="sfx-card-tag">${tag}</span>
-        <span class="sfx-card-dur">Target: ${dur}s</span>
-        <button class="sfx-ai-toggle-btn" onclick="event.stopPropagation();_sfxAiToggle('${itemId}')" title="Generate SFX with AI">\u2728 AI</button>
-        <button class="sfx-upload-btn" onclick="event.stopPropagation();_sfxUpload('${itemId}')" title="Upload your own SFX file">\ud83d\udcc1 Upload</button>
-        <span class="sfx-upload-status" id="sfx-upload-status-${itemId}"></span>
-        <input type="file" id="sfx-upload-input-${itemId}" accept="audio/*" style="display:none"
-               onchange="_sfxUploadFile('${itemId}',this)">
-      </div>
-      <div class="sfx-ai-panel" id="sfx-ai-panel-${itemId}">
-        <textarea id="sfx-ai-prompt-${itemId}" rows="3" placeholder="Describe the sound to generate\u2026"
-                  oninput="_sfxAiStateSet('${itemId}','prompt',this.value)"></textarea>
-        <div class="sfx-ai-hint">Target duration: ${dur}s</div>
-        <div class="sfx-ai-row">
-          <button class="sfx-ai-gen-btn" id="sfx-ai-btn-${itemId}"
-                  onclick="_sfxAiGenStart('${itemId}')">\u2728 Generate</button>
-          <span class="sfx-ai-status" id="sfx-ai-status-${itemId}"></span>
-        </div>
-      </div>
-      <div class="sfx-cand-list">${rows}</div>
-    `;
-    // Restore AI panel state (survives re-renders when user selects a candidate)
-    _sfxAiRestorePanel(itemId, item);
+    // No-op — individual item cards removed; candidates shown in SFX Library section.
   }
 
   function sfxSelectCandidate(itemId, idx) {
@@ -6580,14 +6487,10 @@ placeholder="Enter your story here"></textarea>
       + '/assets/sfx/SfxPreviewPack/preview_audio.wav';
     try {
       // Check preview_audio.wav exists — that is the authoritative signal that a
-      // previous Generate Preview completed.  Then fetch the timeline in-memory
-      // from /api/sfx_timeline (no timeline.json file needed on disk).
+      // previous Generate Preview completed.  Then merge all three timelines.
       const audioCheck = await fetch('/serve_media?path=' + encodeURIComponent(audioPath), { method: 'HEAD' });
       if (!audioCheck.ok) return;
-      const tlR = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_sfxSlug)
-        + '&ep_id=' + encodeURIComponent(_sfxEpId));
-      if (!tlR.ok) return;
-      _sfxTimeline = await tlR.json();
+      _sfxTimeline = await _loadAndMergeTl(_sfxSlug, _sfxEpId);
       const audio = document.getElementById('sfx-preview-audio');
       audio.src = '/serve_media?path=' + encodeURIComponent(audioPath);
       document.getElementById('sfx-preview-wrap').style.display = '';
@@ -6844,37 +6747,46 @@ placeholder="Enter your story here"></textarea>
 
   let _mediaSlug           = null;
   let _mediaEpId           = null;
+  // Legacy batch state (kept for backward compat with any remaining refs)
   let _mediaBatchId        = null;
   let _mediaPollTimer      = null;
-  let _mediaExpandedRows   = new Set();   // item IDs whose detail row is open
-  let _mediaLastProgress   = null;        // last batch-status data received while running
-  let _mediaResults        = null;   // full items dict from last completed batch
-  let _mediaItemIds        = [];     // ordered item IDs for confirm iteration
-  // ── Batch AI generation state ──────────────────────────────────────────────
-  let _aiBatchRunning = false;   // true while the queue is being processed
-  let _aiBatchQueue   = [];      // [{bgId, prompt, label}, ...] remaining in current run
-  let _aiBatchDone    = [];      // [label, ...] labels of completed items this run
-  let _aiBatchFailed  = {};      // { bg_id: error_message } this run
-  let _aiBatchTotal   = 0;       // total items queued at run start (for progress display)
-  let _mediaRecommendedSeq = null;   // recommended_sequence from batch response
-  // selections: { item_id: { type:'image'|'video', url, path, score } }
-  //   Per-shot:  { item_id: { per_shot: { shot_id: { media_type, url, path, score } } } }
+  let _mediaExpandedRows   = new Set();
+  let _mediaLastProgress   = null;
+  let _mediaResults        = null;
+  let _mediaItemIds        = [];
+  let _aiBatchRunning = false;
+  let _aiBatchQueue   = [];
+  let _aiBatchDone    = [];
+  let _aiBatchFailed  = {};
+  let _aiBatchTotal   = 0;
+  let _mediaRecommendedSeq = null;
   let _mediaSelections = {};
-  let _mediaDragSrc   = null;  // { cardId, bgId, shotId, idx } — active drag source
-  let _mediaShotMap   = null; // { bg_id: [shot_id, ...] } or null if ShotList unavailable
-  let _mediaShotDur   = null; // { shot_id: duration_sec } — flat lookup for shot durations
-  let _mediaShotStart = null; // { shot_id: start_sec }    — absolute start time within episode
-  let _mediaActiveShot = {}; // { cardId: shot_id } — which shot row is active (target) per card
-  // Scene-based grouping (built alongside _mediaShotMap):
-  let _mediaSceneMap  = null; // { scene_id: [shot_id, ...] } ordered by appearance
-  let _mediaShotToBg  = null; // { shot_id: bg_id } reverse lookup
-  let _mediaSceneBgs  = null; // { scene_id: [bg_id, ...] } unique bg_ids per scene, ordered
-  let _mediaBgToScene = null; // { bg_id: scene_id } reverse lookup
-  let _mediaSceneOrder = null; // [scene_id, ...] ordered by first shot appearance
-  let _mediaBgRemap   = null; // { old_bg_id: new_bg_id } — loaded from bg_id_remap.json if present
-  var _mediaPlayingVid = null; // currently playing video element (limit 1 active stream)
-  let _bgManifestData = {};    // { itemId: { ai_prompt, ai_prompt_variations, search_prompt, include_keywords, media_type, motion_level } }
-  let _elManifestData = {};    // { item_id: { ai_prompt, ai_prompt_variations, label, shot_id } }
+  let _mediaDragSrc   = null;
+  let _mediaShotMap   = null;
+  let _mediaShotDur   = null;
+  let _mediaShotStart = null;
+  let _mediaActiveShot = {};
+  let _mediaSceneMap  = null;
+  let _mediaShotToBg  = null;
+  let _mediaSceneBgs  = null;
+  let _mediaBgToScene = null;
+  let _mediaSceneOrder = null;
+  let _mediaBgRemap   = null;
+  var _mediaPlayingVid = null;
+  let _bgManifestData = {};
+  let _elManifestData = {};
+  // New shared-library state (Media Tab Redesign)
+  let _mediaLibVideos    = [];   // [{ id, filename, path, url, duration_sec, size_bytes }]
+  let _mediaLibImages    = [];   // [{ id, filename, path, url, width, height, size_bytes }]
+  let _mediaCutClips     = [];   // [{ clip_id, source_video_id, filename, path, url, start_sec, end_sec, duration_sec }]
+  let _mediaMarks        = {};   // { "vidIdx": { start: float, end: float } }
+  let _mediaOvrClip      = {};   // { shot_id: clip_id | null }
+  let _mediaOvrTiming    = {};   // { shot_id: { clip_in: float, clip_out: float|null } }
+  let _mediaOvrSegments  = {};   // { shot_id: [{type:'video'|'image', url, path, clip_id?, clip_in?, clip_out?, duration_sec?, filename?}] }
+  let _mediaOvrPickerShot  = null; // shot_id whose inline picker is open
+  let _mediaOvrPreviewShot = null; // shot_id whose inline preview is open
+  let _mediaOvrPreviews    = {};   // { safe: { timeline, shotDurSec, currentTime, playing, … } }
+  let _mediaShotTimeline = [];   // [{ shot_id, epStart, epEnd, duration_sec }]
 
   // Stop a video and release its HTTP connection (pause alone doesn't close it).
   function _mediaStopVid(vid) {
@@ -7012,18 +6924,29 @@ placeholder="Enter your story here"></textarea>
     if (!v) { _mediaSlug = null; _mediaEpId = null; return; }
     [_mediaSlug, _mediaEpId] = v.split('|');
     try { localStorage.setItem('media_last_ep', v); } catch(_) {}
-    document.getElementById('media-btn-search').disabled = false;
+    _mediaSearchBtnSet(false);
     _mediaSetStatus('Episode selected. Click Search Media to begin.');
     // Load saved per-source config from meta.json, then render the table
     await _loadMediaSourceConfig();
     _renderMediaSourcesTable();
     // Try to load an existing completed batch
     mediaLoadExisting();
+    // Reload library when episode changes
+    _mediaLibVideos = []; _mediaLibImages = []; _mediaCutClips = [];
+    _mediaMarks = {}; _mediaOvrClip = {}; _mediaOvrTiming = {}; _mediaOvrSegments = {}; _mediaOvrPickerShot = null; _mediaOvrPreviewShot = null; _mediaShotTimeline = [];
+    mediaLoadLibrary();
+    mediaLoadShotTimeline();
   }
 
   function _mediaServerUrl() {
     return (document.getElementById('media-server-url').value || 'http://localhost:8200').replace(/\/+$/, '');
   }
+  // Null-safe helper: media-btn-search may be absent when the toolbar is hidden.
+  function _mediaSearchBtnSet(disabled) {
+    const b = document.getElementById('media-btn-search');
+    if (b) b.disabled = disabled;
+  }
+
   function _mediaSetStatus(msg, spinning) {
     document.getElementById('media-status-text').textContent = msg;
     document.getElementById('media-spinner').style.display = spinning ? 'inline-block' : 'none';
@@ -7521,7 +7444,7 @@ placeholder="Enter your story here"></textarea>
         const running = batches.find(b => b.status === 'running');
         if (running) {
           _mediaBatchId = running.batch_id;
-          document.getElementById('media-btn-search').disabled = true;
+          _mediaSearchBtnSet(true);
           _mediaSetStatus('Reconnecting to running batch…', true);
           _mediaStartPolling();
           return;
@@ -7540,7 +7463,7 @@ placeholder="Enter your story here"></textarea>
           }
 
           if (choice === 'resume') {
-            document.getElementById('media-btn-search').disabled = true;
+            _mediaSearchBtnSet(true);
             _mediaSetStatus('Resuming batch…', true);
             try {
               const enabledSrcs = Object.entries(_mediaSourceConfig).filter(([, v]) => v.enabled).map(([k]) => k);
@@ -7567,7 +7490,7 @@ placeholder="Enter your story here"></textarea>
               _mediaStartPolling();
             } catch (err) {
               _mediaSetStatus('Resume error: ' + err.message, false);
-              document.getElementById('media-btn-search').disabled = false;
+              _mediaSearchBtnSet(false);
             }
             return;
           }
@@ -7578,13 +7501,14 @@ placeholder="Enter your story here"></textarea>
     } catch (_) {}
 
     _mediaSetStatus('Submitting batch …', true);
-    document.getElementById('media-btn-search').disabled = true;
+    _mediaSearchBtnSet(true);
     document.getElementById('media-footer').style.display = 'none';
     const _mbPreviewWrap = document.getElementById('media-preview-wrap');
     if (_mbPreviewWrap) _mbPreviewWrap.style.display = 'none';
     const _mbBody = document.getElementById('media-body');
     _mbBody.innerHTML = '<div id="media-shot-overrides"></div>';
     if (_mbPreviewWrap) _mbBody.insertBefore(_mbPreviewWrap, _mbBody.firstChild);
+    mediaRenderAll();
     _mediaSelections   = {};
     _mediaBatchId      = null;
     _mediaResults      = null;
@@ -7624,7 +7548,7 @@ placeholder="Enter your story here"></textarea>
       _mediaStartPolling();
     } catch (err) {
       _mediaSetStatus('Error: ' + err.message, false);
-      document.getElementById('media-btn-search').disabled = false;
+      _mediaSearchBtnSet(false);
     }
   }
 
@@ -7794,7 +7718,7 @@ placeholder="Enter your story here"></textarea>
         _mediaSetStatus('Done — ' + nItems + ' backgrounds, '
           + totalImg + ' images + ' + totalVid + ' videos found'
           + elapsed + '.', false);
-        document.getElementById('media-btn-search').disabled = false;
+        _mediaSearchBtnSet(false);
         _mediaResults        = d.items || {};
         _mediaResults._topN  = d.top_n || 5;
         _mediaRecommendedSeq = d.recommended_sequence || null;
@@ -7806,7 +7730,7 @@ placeholder="Enter your story here"></textarea>
         clearInterval(_mediaPollTimer); _mediaPollTimer = null;
         _mediaSetStatus((d.status === 'interrupted' ? 'Batch interrupted' : 'Batch failed')
           + ': ' + (d.error || 'unknown') + ' — click Search Media to resume.', false);
-        document.getElementById('media-btn-search').disabled = false;
+        _mediaSearchBtnSet(false);
       } else {
         // Running — show progress string in status bar + per-shot table in body
         const doneCount  = Object.values(d.items || {}).filter(it => it.status === 'done').length;
@@ -8041,6 +7965,7 @@ placeholder="Enter your story here"></textarea>
     if (_pw) _pw.style.display = 'none';
     body.innerHTML = '<div id="media-shot-overrides"></div>';
     if (_pw) body.insertBefore(_pw, body.firstChild);
+    mediaRenderAll();
     const d_topN = _mediaResults?._topN || 5;
     _mediaItemIds = Object.keys(items);
     _mediaSelections = {};
@@ -8198,7 +8123,7 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('media-confirm-msg').textContent = '';
     // Show "Apply Recommended Sequence" button only if server computed one
     const applyBtn = document.getElementById('media-btn-apply-seq');
-    applyBtn.style.display = _mediaRecommendedSeq ? 'inline-block' : 'none';
+    if (applyBtn) applyBtn.style.display = _mediaRecommendedSeq ? 'inline-block' : 'none';
 
     // Restore any preview videos that were generated in a previous session
     _mediaRestorePreviewIfExists();
@@ -8244,10 +8169,7 @@ placeholder="Enter your story here"></textarea>
   async function _mediaLoadTimeline() {
     if (!_mediaSlug || !_mediaEpId) return;
     try {
-      const r = await fetch('/api/sfx_timeline?slug=' + encodeURIComponent(_mediaSlug)
-        + '&ep_id=' + encodeURIComponent(_mediaEpId) + '&t=' + Date.now());
-      if (!r.ok) return;
-      _mediaTlData = await r.json();
+      _mediaTlData = await _loadAndMergeTl(_mediaSlug, _mediaEpId);
       _tlRender('media', _mediaTlData, 'media-preview-video');
     } catch (e) { console.warn('[Media] timeline load failed', e); }
   }
@@ -9361,145 +9283,1060 @@ placeholder="Enter your story here"></textarea>
     _mediaRenderShotRow(cardId, shotId);
   }
 
-  // ── Shot Overrides section — Music-tab style (music-card / music-vtl-bar / music-shot-block) ──
   function mediaRenderShotOverrides() {
     const container = document.getElementById('media-shot-overrides');
     if (!container) return;
-
-    // Collect all shots with selections across all bg_ids
-    const shotBlocks = {};  // { shotId: { segments, duration_sec } }
-    for (const [bgId, bgData] of Object.entries(_mediaSelections || {})) {
-      if (!bgData.per_shot) continue;
-      for (const [shotId, shotData] of Object.entries(bgData.per_shot)) {
-        const dur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
-        const segs = (shotData.segments || []).map(seg => {
-          const s = { ...seg };  // shallow copy — do NOT mutate live _mediaSelections objects
-          if (s.start_sec === null || s.start_sec === undefined) s.start_sec = 0;
-          if (s.end_sec === null || s.end_sec === undefined) s.end_sec = dur;
-          return s;
-        });
-        shotBlocks[shotId] = { segments: segs, duration_sec: dur };
-      }
-    }
-
-    // Ordered shot list from _mediaShotDur, plus any extras from selections
-    let orderedShots = _mediaShotDur ? Object.keys(_mediaShotDur) : [];
-    for (const sid of Object.keys(shotBlocks)) {
-      if (!orderedShots.includes(sid)) orderedShots.push(sid);
-    }
-
-    if (orderedShots.length === 0 && Object.keys(shotBlocks).length === 0) {
-      container.innerHTML = '<div class="music-card"><div class="music-card-hdr">Shot Overrides</div>'
-        + '<div class="music-card-sub" style="color:var(--dim);padding:12px 0">Select an episode above to load the shot timeline.</div></div>';
+    if (!_mediaShotTimeline || _mediaShotTimeline.length === 0) {
+      container.innerHTML = '<div style="padding:12px;color:var(--dim);font-size:0.85em">No shots loaded.</div>';
       return;
     }
 
-    const shotColors = ['#3b6ea5','#8b5e3c','#5e8c5a','#8b3e6e','#6e6e3e','#3e6e8b','#8b6e3e'];
-    const totalDur = orderedShots.reduce((a, sid) => a + ((_mediaShotDur && _mediaShotDur[sid]) || 0), 0) || 1;
-    const fmtT = t => t.toFixed(1) + 's';
+    // Build safe shot ID (replace non-alphanumeric with _)
+    function safeId(s) { return s.replace(/[^a-zA-Z0-9]/g, '_'); }
 
-    let html = '<div class="music-card-hdr">Shot Overrides</div>'
-      + '<div class="music-card-sub">Selected media and start/end trim per shot.</div>';
 
-    // ── Visual timeline bar ──
-    html += '<div class="music-vtl-bar">';
-    orderedShots.forEach((sid, i) => {
-      const dur    = (_mediaShotDur && _mediaShotDur[sid]) || 0;
-      const pct    = (dur / totalDur * 100).toFixed(2);
-      const col    = shotColors[i % shotColors.length];
-      const epStart = (_mediaShotStart && _mediaShotStart[sid]) || 0;
-      const hasMedia = shotBlocks[sid] && shotBlocks[sid].segments.length > 0;
-      html += '<div class="music-vtl-shot" style="width:' + pct + '%;background:' + col
-        + (hasMedia ? '' : ';opacity:0.35') + '"'
-        + ' title="' + sid + '  ' + fmtT(epStart) + '–' + fmtT(epStart + dur) + '  (' + dur.toFixed(1) + 's)">'
-        + sid.replace(/^s\d+e\d+_/, '') + '</div>';
-    });
-    html += '</div>';
+    // Per-shot rows
+    let rowsHtml = '';
+    for (const sh of _mediaShotTimeline) {
+      const sid = sh.shot_id;
+      const safe = safeId(sid);
+      const dur = sh.duration_sec ? sh.duration_sec.toFixed(1) + 's' : '?s';
+      const start = sh.epStart !== undefined ? sh.epStart.toFixed(1) : '?';
+      const end   = sh.epEnd   !== undefined ? sh.epEnd.toFixed(1)   : '?';
+      const segs = _mediaOvrSegments[sid] || [];
+      const pickerOpen  = _mediaOvrPickerShot  === sid;
+      const previewOpen = _mediaOvrPreviewShot === sid;
+      const inputStyle = 'width:60px;font-size:0.78em;padding:2px 5px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--fg)';
+      const dimStyle   = 'font-size:0.75em;color:var(--dim)';
 
-    // ── Per-shot stacked blocks (only shots with media assigned) ──
-    orderedShots.forEach((sid, i) => {
-      const block = shotBlocks[sid];
-      if (!block || !block.segments.length) return;
-      const col     = shotColors[i % shotColors.length];
-      const dur     = block.duration_sec;
-      const epStart = (_mediaShotStart && _mediaShotStart[sid]) || 0;
-      const epEnd   = epStart + dur;
-
-      html += '<div class="music-shot-block">'
-        + '<div class="music-shot-hdr" style="border-left:4px solid ' + col + '">'
-        + '<span class="music-shot-hdr-id">' + sid.replace(/^s\d+e\d+_/, '') + '</span>'
-        + '<span class="music-shot-hdr-ep">episode&nbsp;' + fmtT(epStart) + ' – ' + fmtT(epEnd)
-        + '&nbsp;(' + dur.toFixed(1) + 's)</span>'
-        + '</div>';
-
-      block.segments.forEach((seg, segIdx) => {
-        const label   = seg.url ? seg.url.split('/').pop() : '(unknown)';
-        const isVideo = seg.media_type === 'video';
-        const natDur  = seg.natural_duration_sec || seg.duration_sec || dur || 0;
-        const curStart = seg.start_sec ?? 0;
-        const curEnd   = seg.end_sec   ?? (isVideo ? natDur : dur);
-        const safeId  = sid.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        const fillId  = 'mof-' + sid.replace(/[^a-z0-9]/gi, '_') + '_' + segIdx;
-
-        // ── thumbnail ──
-        const thumbUrl = _mediaSegThumbUrl(seg.url || '');
-        const safeThumb = thumbUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-        const thumbHtml = isVideo
-          ? '<video class="seg-thumb" src="' + safeThumb + '#t=' + curStart.toFixed(3) + '"'
-            + ' muted preload="metadata" playsinline title="' + escHtml(label) + '"'
-            + ' data-start="' + curStart.toFixed(3) + '" data-end="' + curEnd.toFixed(3) + '"'
-            + ' onclick="_mediaSegThumbClick(this)" ontimeupdate="_mediaSegThumbTimeUpdate(this)">'
-            + '</video>'
-          : '<img class="seg-thumb" src="' + safeThumb + '" loading="lazy" alt="' + escHtml(label) + '" title="' + escHtml(label) + '">';
-
-        // ── filename span: duration embedded next to name for both image and video ──
-        const holdSec    = !isVideo ? (seg.hold_sec || 0) : 0;
-        const durLblId   = 'mofd-' + sid.replace(/[^a-z0-9]/gi, '_') + '_' + segIdx;
-        const clipDurSec = isVideo ? Math.max(0, curEnd - curStart) : 0;
-        const durInline  = isVideo
-          ? '<span id="' + durLblId + '" style="color:var(--dim);margin-left:4px;font-size:0.95em">' + clipDurSec.toFixed(1) + 's</span>'
-          : (holdSec > 0 ? '<span style="color:var(--dim);margin-left:4px;font-size:0.95em">' + holdSec.toFixed(1) + 's</span>' : '');
-        html += '<div class="music-shot-clip" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
-          + thumbHtml
-          + '<span style="font-size:0.82em;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)" title="' + (seg.url || '') + '">' + label + durInline + '</span>';
-
-        // ── in/out inputs + range bar (video only) ──
-        if (isVideo) {
-          const leftPct  = natDur > 0 ? (curStart / natDur * 100).toFixed(1) : '0';
-          const widthPct = natDur > 0 ? (Math.max(0, curEnd - curStart) / natDur * 100).toFixed(1) : '100';
-          html += '<div class="seg-trim-row" style="flex-shrink:0;margin:0">'
-            + '<span class="trim-label">in:</span>'
-            + '<input type="number" min="0" step="0.1" placeholder="0"'
-            + ' value="' + (curStart > 0 ? curStart.toFixed(1) : '') + '"'
-            + ' onchange="_mediaOvrTrim(\'' + safeId + '\',' + segIdx + ',\'start_sec\',this.value,' + natDur + ',\'' + fillId + '\',\'' + durLblId + '\')">'
-            + '<div class="trim-range-bar" style="min-width:60px">'
-            + '<div class="trim-range-fill" id="' + fillId + '" style="left:' + leftPct + '%;width:' + widthPct + '%"></div>'
-            + '</div>'
-            + '<span class="trim-label">out:</span>'
-            + '<input type="number" min="0" step="0.1"'
-            + ' placeholder="' + (natDur > 0 ? natDur.toFixed(1) : '') + '"'
-            + ' value="' + (seg.end_sec != null ? curEnd.toFixed(1) : '') + '"'
-            + ' onchange="_mediaOvrTrim(\'' + safeId + '\',' + segIdx + ',\'end_sec\',this.value,' + natDur + ',\'' + fillId + '\',\'' + durLblId + '\')">'
-            + '</div>';
+      // ── Coverage badge ────────────────────────────────────────────────────
+      let coveredSec = 0;
+      segs.forEach(seg => {
+        if (seg.type === 'video') {
+          const segOut = seg.clip_out != null ? seg.clip_out : (seg.duration_sec || 0);
+          const segIn  = seg.clip_in  != null ? seg.clip_in  : 0;
+          coveredSec += Math.max(0, segOut - segIn);
         } else {
-          // ── image: editable hold_sec input (duration already shown in filename span above) ──
-          html += '<input type="number" min="0.1" step="0.1"'
-            + (dur > 0 ? ' max="' + dur.toFixed(1) + '"' : '')
-            + ' style="width:48px;font-size:11px;background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:3px;padding:1px 3px;flex-shrink:0"'
-            + ' value="' + (holdSec > 0 ? holdSec.toFixed(1) : '') + '"'
-            + ' placeholder="' + (holdSec > 0 ? holdSec.toFixed(1) : 'auto') + '"'
-            + ' title="Display duration (s). Max: ' + (dur > 0 ? dur.toFixed(1) + 's (shot duration)' : 'shot duration') + '. Blank = auto-distribute."'
-            + ' onchange="_mediaOvrHoldSec(\'' + safeId + '\',' + segIdx + ',this.value)">';
+          // image: hold_sec, or fall back to full shot duration
+          coveredSec += seg.hold_sec != null ? seg.hold_sec : (sh.duration_sec || 0);
         }
-
-        html += '<button onclick="mediaClearSegment(\'' + safeId + '\',' + segIdx + ')" style="font-size:11px;flex-shrink:0">✕</button>'
-          + '</div>';
       });
+      const shotDurSec = sh.duration_sec || 0;
+      let coverageBadge = '';
+      if (segs.length > 0) {
+        if (coveredSec >= shotDurSec - 0.05) {
+          coverageBadge = `<span style="margin-left:auto;font-size:0.73em;font-weight:700;` +
+            `background:#1a4d2e;color:#4ade80;padding:2px 9px;border-radius:10px;` +
+            `white-space:nowrap;border:1px solid #2d7a4a">Filled</span>`;
+        } else {
+          const need = (shotDurSec - coveredSec).toFixed(1);
+          coverageBadge = `<span style="margin-left:auto;font-size:0.73em;font-weight:700;` +
+            `background:#4a2800;color:#fbbf24;padding:2px 9px;border-radius:10px;` +
+            `white-space:nowrap;border:1px solid #92600a">Needs ${need}s more</span>`;
+        }
+      }
 
-      html += '</div>';  // music-shot-block
+      // ── Segments list (items added via "+") ─────────────────────────────────
+      let segsHtml = '';
+      if (segs.length > 0) {
+        segsHtml = '<div style="display:flex;flex-direction:column;gap:6px;margin-top:8px">';
+        segs.forEach((seg, idx) => {
+          if (seg.type === 'video') {
+            const durStr  = seg.duration_sec != null ? seg.duration_sec.toFixed(1) + 's' : '';
+            const inVal   = seg.clip_in  != null ? seg.clip_in  : 0;
+            const outVal  = seg.clip_out != null ? seg.clip_out : (seg.duration_sec || '');
+            const vidId   = 'msegv-' + safe + '-' + idx;
+            const inId    = 'mseg-in-'  + safe + '-' + idx;
+            const outId   = 'mseg-out-' + safe + '-' + idx;
+            const durId   = 'mseg-dur-' + safe + '-' + idx;
+            const clipDurSec = Math.max(0, (seg.clip_out != null ? seg.clip_out : (seg.duration_sec || 0)) - inVal);
+            const clipDurStr = '= ' + clipDurSec.toFixed(1) + 's';
+            segsHtml += `
+            <div style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--border);border-radius:4px;padding:6px">
+              <div style="position:relative;flex-shrink:0">
+                <video id="${vidId}" src="${seg.url}" muted
+                       style="width:80px;height:45px;object-fit:cover;border-radius:3px;display:block;background:#111"
+                       onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"></video>
+                ${durStr ? `<span style="position:absolute;bottom:1px;left:2px;font-size:0.65em;background:#000a;color:#eee;padding:1px 3px;border-radius:2px">${durStr}</span>` : ''}
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:0.75em;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:4px"
+                     title="${seg.filename || seg.clip_id || ''}">${seg.filename || seg.clip_id || ''}</div>
+                <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+                  <span style="${dimStyle}">in</span>
+                  <input id="${inId}" type="number" step="0.1" min="0" value="${inVal}"
+                         oninput="(function(){var i=parseFloat(this.value)||0,o=parseFloat(document.getElementById('${outId}').value)||0,d=document.getElementById('${durId}');if(d)d.textContent='= '+Math.max(0,o-i).toFixed(1)+'s'}).call(this)"
+                         onchange="mediaOvrSetSegTiming('${sid}',${idx},'clip_in',parseFloat(this.value))"
+                         style="${inputStyle}">
+                  <span style="${dimStyle}">out</span>
+                  <input id="${outId}" type="number" step="0.1" min="0" value="${outVal}" placeholder="──"
+                         oninput="(function(){var i=parseFloat(document.getElementById('${inId}').value)||0,o=parseFloat(this.value)||0,d=document.getElementById('${durId}');if(d)d.textContent='= '+Math.max(0,o-i).toFixed(1)+'s'}).call(this)"
+                         onchange="mediaOvrSetSegTiming('${sid}',${idx},'clip_out',this.value===''?null:parseFloat(this.value))"
+                         style="${inputStyle}">
+                  <span id="${durId}" style="${dimStyle}">${clipDurStr}</span>
+                  <button onclick="(function(){var v=document.getElementById('${vidId}');v.paused?v.play():v.pause()})()"
+                          title="Play/pause" style="padding:1px 7px;font-size:0.8em;border-radius:3px;border:1px solid var(--border);background:var(--active-bg);color:var(--fg);cursor:pointer">▶</button>
+                </div>
+              </div>
+              <button onclick="mediaOvrRemoveSeg('${sid}',${idx})" title="Remove"
+                      style="padding:0 5px;font-size:0.75em;line-height:18px;border-radius:3px;border:none;background:#c0392bcc;color:#fff;cursor:pointer;flex-shrink:0">✕</button>
+            </div>`;
+          } else {
+            // image segment — default to remaining shot time (shot_dur - sum of other segs)
+            // Round every term to 1 decimal so math is consistent with displayed values
+            const shotDurR1 = Math.round((sh.duration_sec || 0) * 10) / 10;
+            let usedByCurrent = 0;
+            segs.forEach((s, i) => {
+              if (i === idx) return;
+              if (s.type === 'video') {
+                const segOut = s.clip_out != null ? s.clip_out : (s.duration_sec || 0);
+                const segIn  = s.clip_in  != null ? s.clip_in  : 0;
+                usedByCurrent += Math.round(Math.max(0, segOut - segIn) * 10) / 10;
+              } else {
+                usedByCurrent += s.hold_sec != null ? Math.round(s.hold_sec * 10) / 10 : shotDurR1;
+              }
+            });
+            const remainingSec = Math.max(0, Math.round((shotDurR1 - usedByCurrent) * 10) / 10);
+            const holdVal = seg.hold_sec != null ? seg.hold_sec : remainingSec.toFixed(1);
+            const animOpts = _ANIM_OPTIONS.map(a =>
+              `<option value="${a.key}"${seg.animation === a.key ? ' selected' : ''}>${a.label}</option>`
+            ).join('');
+            const imgThumbId = 'mseg-img-' + safe + '-' + idx;
+            segsHtml += `
+            <div style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--border);border-radius:4px;padding:6px">
+              <div style="width:80px;height:45px;border-radius:3px;flex-shrink:0;overflow:hidden;position:relative">
+                <img id="${imgThumbId}" src="${seg.url}" loading="lazy"
+                     style="width:100%;height:100%;object-fit:cover;display:block"></div>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:0.75em;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:4px"
+                     title="${seg.filename || ''}">${seg.filename || ''}</div>
+                <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+                  <span style="${dimStyle}">hold</span>
+                  <input type="number" step="0.1" min="0.1" max="${remainingSec.toFixed(1)}" value="${holdVal}"
+                         onchange="mediaOvrSetSegHoldSec('${sid}',${idx},parseFloat(this.value))"
+                         style="${inputStyle}">
+                  <span style="${dimStyle}">s</span>
+                  <span style="font-size:0.72em;color:var(--dim)">(max ${remainingSec.toFixed(1)}s)</span>
+                </div>
+                <select onchange="mediaOvrSetSegAnim('${sid}',${idx},this.value)"
+                        style="margin-top:4px;font-size:0.75em;padding:2px 5px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--fg)">
+                  ${animOpts}
+                </select>
+              </div>
+              <button onclick="mediaOvrRemoveSeg('${sid}',${idx})" title="Remove"
+                      style="padding:0 5px;font-size:0.75em;line-height:18px;border-radius:3px;border:none;background:#c0392bcc;color:#fff;cursor:pointer;flex-shrink:0">✕</button>
+            </div>`;
+          }
+        });
+        segsHtml += '</div>';
+      }
+
+      // ── Inline picker ────────────────────────────────────────────────────────
+      let pickerHtml = '';
+      if (pickerOpen) {
+        // Videos row (library videos + cut clips)
+        let vidThumbsHtml = '';
+        _mediaLibVideos.forEach(v => {
+          const d = v.duration_sec ? v.duration_sec.toFixed(1) + 's' : '';
+          vidThumbsHtml += `
+            <div onclick="mediaOvrPickItem('${sid}','video','${v.url}','${v.path || ''}','',${v.duration_sec || 0},'${v.filename.replace(/'/g,"\\'")}')"
+                 title="${v.filename}${d ? ' (' + d + ')' : ''}"
+                 style="position:relative;width:80px;flex-shrink:0;border:1px solid var(--border);border-radius:4px;overflow:hidden;cursor:pointer">
+              <video src="${v.url}" muted style="width:80px;height:45px;object-fit:cover;display:block;background:#111"
+                     onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"></video>
+              ${d ? `<span style="position:absolute;bottom:1px;left:2px;font-size:0.65em;background:#000a;color:#eee;padding:1px 3px;border-radius:2px">${d}</span>` : ''}
+            </div>`;
+        });
+        _mediaCutClips.forEach(cl => {
+          const d = cl.duration_sec ? cl.duration_sec.toFixed(1) + 's' : '';
+          vidThumbsHtml += `
+            <div onclick="mediaOvrPickItem('${sid}','video','${cl.url}','${cl.path || ''}','${cl.clip_id}',${cl.duration_sec || 0},'${cl.clip_id}')"
+                 title="${cl.clip_id}${d ? ' (' + d + ')' : ''}"
+                 style="position:relative;width:80px;flex-shrink:0;border:1px solid var(--border);border-radius:4px;overflow:hidden;cursor:pointer">
+              <video src="${cl.url}" muted style="width:80px;height:45px;object-fit:cover;display:block;background:#111"
+                     onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"></video>
+              ${d ? `<span style="position:absolute;bottom:1px;left:2px;font-size:0.65em;background:#000a;color:#eee;padding:1px 3px;border-radius:2px">${d}</span>` : ''}
+            </div>`;
+        });
+        const videosSection = (_mediaLibVideos.length || _mediaCutClips.length)
+          ? `<div style="margin-bottom:6px">
+               <div style="font-size:0.75em;color:var(--dim);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Videos</div>
+               <div style="display:flex;flex-wrap:wrap;gap:5px">${vidThumbsHtml}</div>
+             </div>`
+          : '';
+
+        // Images row
+        let imgThumbsHtml = '';
+        _mediaLibImages.forEach(img => {
+          imgThumbsHtml += `
+            <div onclick="mediaOvrPickItem('${sid}','image','${img.url}','${img.path || ''}','',0,'${img.filename.replace(/'/g,"\\'")}')"
+                 title="${img.filename}"
+                 style="width:80px;flex-shrink:0;border:1px solid var(--border);border-radius:4px;overflow:hidden;cursor:pointer">
+              <img src="${img.url}" loading="lazy" style="width:80px;height:45px;object-fit:cover;display:block">
+            </div>`;
+        });
+        const imagesSection = _mediaLibImages.length
+          ? `<div>
+               <div style="font-size:0.75em;color:var(--dim);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:.04em">Images</div>
+               <div style="display:flex;flex-wrap:wrap;gap:5px">${imgThumbsHtml}</div>
+             </div>`
+          : '';
+
+        const empty = !_mediaLibVideos.length && !_mediaCutClips.length && !_mediaLibImages.length
+          ? '<div style="font-size:0.82em;color:var(--dim)">No media in library yet.</div>'
+          : '';
+
+        pickerHtml = `
+          <div style="margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--bg2)">
+            ${videosSection}${imagesSection}${empty}
+          </div>`;
+      }
+
+      // ── Inline preview panel ──────────────────────────────────────────────
+      let previewHtml = '';
+      if (previewOpen) {
+        if (segs.length > 0) {
+          // Build timeline summary badges
+          let tlSummary = '';
+          let tlT = 0;
+          segs.forEach(seg => {
+            if (seg.type === 'video') {
+              const inSec  = seg.clip_in  != null ? seg.clip_in  : 0;
+              const outSec = seg.clip_out != null ? seg.clip_out : (seg.duration_sec || 0);
+              const dur = Math.max(0, outSec - inSec);
+              if (dur > 0.01) {
+                tlSummary += `<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:#1a3a6e;color:#7ab0ff;margin:1px 2px 1px 0;font-size:0.72em">▶ ${dur.toFixed(1)}s</span>`;
+                tlT += dur;
+              }
+            } else {
+              const dur = seg.hold_sec != null ? seg.hold_sec : (sh.duration_sec || 0);
+              if (dur > 0.01) {
+                tlSummary += `<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:#1a3a2a;color:#7adf9a;margin:1px 2px 1px 0;font-size:0.72em">🖼 ${dur.toFixed(1)}s</span>`;
+                tlT += dur;
+              }
+            }
+          });
+          const gapDur = (sh.duration_sec || 0) - tlT;
+          if (gapDur > 0.05) {
+            tlSummary += `<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:#222;color:#666;margin:1px 2px 1px 0;font-size:0.72em">⬛ ${gapDur.toFixed(1)}s</span>`;
+          }
+          previewHtml = `
+            <div style="margin-top:8px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);padding:8px">
+              <div style="position:relative;background:#000;border-radius:4px;overflow:hidden;min-height:90px">
+                <video id="mpv-vid-${safe}" muted playsinline style="width:100%;max-height:180px;display:none;vertical-align:top"></video>
+                <img   id="mpv-img-${safe}" style="width:100%;max-height:180px;object-fit:contain;display:none;vertical-align:top">
+                <div   id="mpv-blk-${safe}" style="width:100%;height:180px;background:#000;display:none"></div>
+                <div   id="mpv-idle-${safe}" style="width:100%;height:90px;background:#000;display:flex;align-items:center;justify-content:center">
+                  <span style="color:#555;font-size:0.8em">Press ▶ to preview</span>
+                </div>
+                <div id="mpv-lbl-${safe}" style="display:none;position:absolute;bottom:4px;left:6px;
+                     font-size:0.65em;color:#eee;background:#0009;padding:1px 5px;border-radius:3px;
+                     max-width:80%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+              </div>
+              <div style="margin-top:5px;display:flex;gap:6px;align-items:center">
+                <button id="mpv-btn-${safe}" onclick="_mediaOvrPreviewToggle('${safe}')"
+                        style="padding:2px 10px;font-size:0.85em;border-radius:4px;border:1px solid var(--border);background:var(--active-bg);color:var(--fg);cursor:pointer">▶</button>
+                <button onclick="_mediaOvrPreviewRestart('${safe}')"
+                        style="padding:2px 8px;font-size:0.85em;border-radius:4px;border:1px solid var(--border);background:var(--active-bg);color:var(--fg);cursor:pointer">↺</button>
+                <div id="mpv-bar-${safe}" onclick="_mediaOvrPreviewSeek('${safe}',event)"
+                     style="flex:1;height:6px;background:var(--border);border-radius:3px;cursor:pointer;position:relative">
+                  <div id="mpv-fill-${safe}" style="height:100%;width:0%;background:var(--gold,#f0a500);border-radius:3px;pointer-events:none"></div>
+                </div>
+                <span id="mpv-time-${safe}" style="font-size:0.72em;color:var(--dim);min-width:80px;text-align:right">0.0 / ${(sh.duration_sec || 0).toFixed(1)}s</span>
+              </div>
+              <div style="margin-top:5px;line-height:1.8">${tlSummary}</div>
+            </div>`;
+        } else {
+          previewHtml = `
+            <div style="margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:4px;
+                        background:var(--bg2);font-size:0.82em;color:var(--dim)">
+              No media assigned to this shot yet.
+            </div>`;
+        }
+      }
+
+      // Show Preview button only when there are segments (or preview is already open)
+      const showPreviewBtn = segs.length > 0 || previewOpen;
+      const previewBtnHtml = showPreviewBtn
+        ? `<button onclick="mediaOvrTogglePreview('${sid}')"
+                   title="Preview assigned media"
+                   style="padding:1px 9px;font-size:0.82em;border-radius:4px;
+                          border:1px solid var(--border);cursor:pointer;
+                          background:${previewOpen ? 'var(--gold,#f0a500)' : 'var(--active-bg)'};
+                          color:${previewOpen ? '#000' : 'var(--fg)'}">Preview</button>`
+        : '';
+
+      rowsHtml += `
+      <div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:6px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <span style="font-weight:600;font-size:0.85em;color:var(--fg)">${sid}</span>
+          <span style="color:var(--dim);font-size:0.82em">${start}s–${end}s (${dur})</span>
+          ${coverageBadge}
+          ${previewBtnHtml}
+          <button onclick="mediaOvrTogglePicker('${sid}')"
+                  title="Add image or video to this shot"
+                  style="${(coverageBadge || previewBtnHtml) ? '' : 'margin-left:auto;'}padding:1px 10px;font-size:0.85em;border-radius:4px;
+                         border:1px solid var(--border);cursor:pointer;
+                         background:${pickerOpen ? 'var(--gold,#f0a500)' : 'var(--active-bg)'};
+                         color:${pickerOpen ? '#000' : 'var(--fg)'}">＋</button>
+        </div>
+        ${segsHtml}
+        ${previewHtml}
+        ${pickerHtml}
+      </div>`;
+    }
+
+    container.innerHTML = `
+      <div style="padding:10px 14px">
+        <div style="font-weight:700;font-size:0.9em;margin-bottom:8px;color:var(--fg)">🎬 Shot Overrides</div>
+        ${rowsHtml}
+      </div>`;
+    // Re-init the preview player after DOM rebuild (innerHTML wipes the elements)
+    if (_mediaOvrPreviewShot) {
+      const _openShotId = _mediaOvrPreviewShot;
+      setTimeout(() => _mediaOvrPreviewInit(_openShotId), 0);
+    }
+  }
+
+  function mediaOvrTogglePicker(shotId) {
+    _mediaOvrPickerShot = (_mediaOvrPickerShot === shotId) ? null : shotId;
+    mediaRenderShotOverrides();
+  }
+
+  function mediaOvrTogglePreview(shotId) {
+    _mediaOvrPreviewShot = (_mediaOvrPreviewShot === shotId) ? null : shotId;
+    mediaRenderShotOverrides();
+  }
+
+  function mediaOvrPickItem(shotId, type, url, path, clipId, durationSec, filename) {
+    if (!_mediaOvrSegments[shotId]) _mediaOvrSegments[shotId] = [];
+    const dur = durationSec || null;
+
+    // For images: default hold_sec = shot_duration - sum of all already-added segments
+    let defaultHoldSec = null;
+    if (type === 'image') {
+      const sh = _mediaShotTimeline.find(s => s.shot_id === shotId);
+      if (sh) {
+        const shotDurR1 = Math.round((sh.duration_sec || 0) * 10) / 10;
+        let usedSec = 0;
+        (_mediaOvrSegments[shotId] || []).forEach(s => {
+          if (s.type === 'video') {
+            const segOut = s.clip_out != null ? s.clip_out : (s.duration_sec || 0);
+            const segIn  = s.clip_in  != null ? s.clip_in  : 0;
+            usedSec += Math.round(Math.max(0, segOut - segIn) * 10) / 10;
+          } else {
+            usedSec += s.hold_sec != null ? Math.round(s.hold_sec * 10) / 10 : shotDurR1;
+          }
+        });
+        defaultHoldSec = Math.max(0, Math.round((shotDurR1 - usedSec) * 10) / 10);
+      }
+    }
+
+    _mediaOvrSegments[shotId].push({
+      type,
+      url,
+      path,
+      clip_id:      clipId || null,
+      duration_sec: dur,
+      filename:     filename || clipId || '',
+      // video: in/out default to 0 and full duration
+      clip_in:      type === 'video' ? 0 : null,
+      clip_out:     type === 'video' ? dur : null,
+      // image: hold duration defaulted to remaining shot time
+      hold_sec:     type === 'image' ? defaultHoldSec : null,
+      animation:    type === 'image' ? 'none' : null,
     });
+    // Keep picker open so user can add more items
+    mediaRenderShotOverrides();
+  }
 
-    container.innerHTML = '<div class="music-card">' + html + '</div>';
+  function mediaOvrRemoveSeg(shotId, idx) {
+    if (!_mediaOvrSegments[shotId]) return;
+    _mediaOvrSegments[shotId].splice(idx, 1);
+    if (_mediaOvrSegments[shotId].length === 0) delete _mediaOvrSegments[shotId];
+    mediaRenderShotOverrides();
+  }
+
+  // ── Media Library: state helpers ──────────────────────────────────────────
+
+  function mediaOvrSetClip(shotId, clipId) {
+    _mediaOvrClip[shotId] = clipId || null;
+    if (clipId && !_mediaOvrTiming[shotId]) {
+      _mediaOvrTiming[shotId] = { clip_in: 0.0, clip_out: null };
+    }
+    mediaRenderShotOverrides();  // re-render to update timeline bar colors
+  }
+
+  function mediaOvrSetTiming(shotId, field, value) {
+    if (!_mediaOvrTiming[shotId]) _mediaOvrTiming[shotId] = { clip_in: 0.0, clip_out: null };
+    _mediaOvrTiming[shotId][field] = value;
+  }
+
+  function mediaOvrSetSegTiming(shotId, segIdx, field, value) {
+    const seg = (_mediaOvrSegments[shotId] || [])[segIdx];
+    if (!seg) return;
+    seg[field] = value;
+    mediaRenderShotOverrides();  // refresh coverage badge
+  }
+
+  function mediaOvrSetSegHoldSec(shotId, segIdx, value) {
+    const seg = (_mediaOvrSegments[shotId] || [])[segIdx];
+    if (!seg) return;
+    const v = parseFloat(value);
+    if (isNaN(v) || v <= 0) { seg.hold_sec = null; mediaRenderShotOverrides(); return; }
+    // Clamp to remaining shot time (shot_duration - sum of all other segments)
+    const sh = _mediaShotTimeline.find(s => s.shot_id === shotId);
+    if (sh) {
+      const shotDurR1 = Math.round((sh.duration_sec || 0) * 10) / 10;
+      let usedSec = 0;
+      (_mediaOvrSegments[shotId] || []).forEach((s, i) => {
+        if (i === segIdx) return;
+        if (s.type === 'video') {
+          const segOut = s.clip_out != null ? s.clip_out : (s.duration_sec || 0);
+          const segIn  = s.clip_in  != null ? s.clip_in  : 0;
+          usedSec += Math.round(Math.max(0, segOut - segIn) * 10) / 10;
+        } else {
+          usedSec += s.hold_sec != null ? Math.round(s.hold_sec * 10) / 10 : shotDurR1;
+        }
+      });
+      const maxSec = Math.max(0, Math.round((shotDurR1 - usedSec) * 10) / 10);
+      seg.hold_sec = Math.min(Math.round(v * 10) / 10, maxSec);
+    } else {
+      seg.hold_sec = Math.round(v * 10) / 10;
+    }
+    mediaRenderShotOverrides();  // refresh coverage badge and max hint
+  }
+
+  function mediaOvrSetSegAnim(shotId, segIdx, value) {
+    const seg = (_mediaOvrSegments[shotId] || [])[segIdx];
+    if (!seg) return;
+    seg.animation = value || 'none';
+    // Animate the thumbnail once so the user can preview the motion
+    const safe   = shotId.replace(/[^a-zA-Z0-9]/g, '_');
+    const imgEl  = document.getElementById('mseg-img-' + safe + '-' + segIdx);
+    const cssAnim = _ANIM_CSS[value];
+    if (imgEl) {
+      // Reset first (force reflow so restart works)
+      imgEl.style.animation = 'none';
+      void imgEl.offsetWidth;
+      if (cssAnim) {
+        imgEl.style.animation = cssAnim + ' 2s ease-in-out 1 both';
+      }
+    }
+  }
+
+  // ── Shot Override Preview Player ──────────────────────────────────────────
+  // Plays all segments for a shot sequentially: video clips (clip_in→clip_out),
+  // images (hold_sec), and fills any remaining time with black.
+
+  function _mediaOvrPreviewInit(shotId) {
+    const safe = shotId.replace(/[^a-zA-Z0-9]/g, '_');
+    const segs = _mediaOvrSegments[shotId] || [];
+    const sh   = _mediaShotTimeline.find(s => s.shot_id === shotId);
+    if (!sh) return;
+    const shotDurSec = sh.duration_sec;
+
+    // Stop any existing player
+    _mediaOvrPreviewStop(safe);
+
+    // Build flat segment timeline with absolute start times
+    const timeline = [];
+    let t = 0;
+    segs.forEach(seg => {
+      if (seg.type === 'video') {
+        const inSec  = seg.clip_in  != null ? seg.clip_in  : 0;
+        const outSec = seg.clip_out != null ? seg.clip_out : (seg.duration_sec || 0);
+        const dur = Math.max(0, outSec - inSec);
+        if (dur > 0.01) {
+          timeline.push({ type: 'video', url: seg.url, inSec, outSec, dur, start: t,
+                          label: seg.filename || seg.clip_id || '' });
+          t += dur;
+        }
+      } else {
+        const shotDurR1 = Math.round(shotDurSec * 10) / 10;
+        const dur = seg.hold_sec != null ? seg.hold_sec : shotDurR1;
+        if (dur > 0.01) {
+          timeline.push({ type: 'image', url: seg.url, dur, start: t, label: seg.filename || '' });
+          t += dur;
+        }
+      }
+    });
+    const gap = shotDurSec - t;
+    if (gap > 0.05) timeline.push({ type: 'black', start: t, dur: gap, label: 'gap' });
+
+    _mediaOvrPreviews[safe] = {
+      shotId, safe, timeline, shotDurSec,
+      currentTime: 0, playing: false,
+      currentSegIdx: -1,
+      advanceTimer: null, progressTimer: null,
+      segStartWallTime: null, segStartCurrentTime: null,
+    };
+    _mediaOvrPreviewUpdateBar(safe);
+  }
+
+  function _mediaOvrPreviewStop(safe) {
+    const st = _mediaOvrPreviews[safe];
+    if (!st) return;
+    if (st.advanceTimer)  { clearTimeout(st.advanceTimer);   st.advanceTimer  = null; }
+    if (st.progressTimer) { clearInterval(st.progressTimer); st.progressTimer = null; }
+    const vid = document.getElementById('mpv-vid-' + safe);
+    if (vid) { vid.pause(); vid.ontimeupdate = null; }
+    st.playing = false;
+  }
+
+  function _mediaOvrPreviewToggle(safe) {
+    const st = _mediaOvrPreviews[safe];
+    if (!st) return;
+    st.playing ? _mediaOvrPreviewPause(safe) : _mediaOvrPreviewPlay(safe);
+  }
+
+  function _mediaOvrPreviewPlay(safe) {
+    const st = _mediaOvrPreviews[safe];
+    if (!st) return;
+    if (st.currentTime >= st.shotDurSec - 0.05) st.currentTime = 0;
+    st.playing = true;
+    const btn = document.getElementById('mpv-btn-' + safe);
+    if (btn) btn.textContent = '⏸';
+    const idle = document.getElementById('mpv-idle-' + safe);
+    if (idle) idle.style.display = 'none';
+    if (st.progressTimer) clearInterval(st.progressTimer);
+    st.progressTimer = setInterval(() => _mediaOvrPreviewUpdateBar(safe), 80);
+    _mediaOvrPreviewAdvanceTo(safe, st.currentTime);
+  }
+
+  function _mediaOvrPreviewPause(safe) {
+    const st = _mediaOvrPreviews[safe];
+    if (!st) return;
+    st.playing = false;
+    if (st.advanceTimer)  { clearTimeout(st.advanceTimer);   st.advanceTimer  = null; }
+    if (st.progressTimer) { clearInterval(st.progressTimer); st.progressTimer = null; }
+    const vid = document.getElementById('mpv-vid-' + safe);
+    if (vid) { vid.pause(); vid.ontimeupdate = null; }
+    const btn = document.getElementById('mpv-btn-' + safe);
+    if (btn) btn.textContent = '▶';
+    _mediaOvrPreviewUpdateBar(safe);
+  }
+
+  function _mediaOvrPreviewRestart(safe) {
+    const st = _mediaOvrPreviews[safe];
+    if (!st) return;
+    _mediaOvrPreviewPause(safe);
+    st.currentTime = 0;
+    st.currentSegIdx = -1;
+    _mediaOvrPreviewPlay(safe);
+  }
+
+  function _mediaOvrPreviewAdvanceTo(safe, time) {
+    const st = _mediaOvrPreviews[safe];
+    if (!st || !st.playing) return;
+
+    // Find which segment owns this time
+    let segIdx = -1;
+    for (let i = 0; i < st.timeline.length; i++) {
+      const s = st.timeline[i];
+      if (time >= s.start && time < s.start + s.dur) { segIdx = i; break; }
+    }
+    if (segIdx === -1) { _mediaOvrPreviewFinish(safe); return; }
+
+    const seg = st.timeline[segIdx];
+    const offsetWithinSeg  = time - seg.start;
+    const remainingInSeg   = seg.dur - offsetWithinSeg;
+
+    st.currentSegIdx         = segIdx;
+    st.segStartWallTime      = Date.now();
+    st.segStartCurrentTime   = time;
+
+    const vid  = document.getElementById('mpv-vid-'  + safe);
+    const img  = document.getElementById('mpv-img-'  + safe);
+    const blk  = document.getElementById('mpv-blk-'  + safe);
+    const idle = document.getElementById('mpv-idle-' + safe);
+    const lbl  = document.getElementById('mpv-lbl-'  + safe);
+
+    if (idle) idle.style.display = 'none';
+
+    if (seg.type === 'video') {
+      if (img) img.style.display = 'none';
+      if (blk) blk.style.display = 'none';
+      if (vid) {
+        if (vid.getAttribute('data-mpv-src') !== seg.url) {
+          vid.src = seg.url;
+          vid.setAttribute('data-mpv-src', seg.url);
+        }
+        vid.style.display = 'block';
+        vid.currentTime = seg.inSec + offsetWithinSeg;
+        vid.play().catch(() => {});
+        vid.ontimeupdate = () => {
+          if (vid.currentTime >= seg.outSec - 0.05) {
+            vid.pause(); vid.ontimeupdate = null;
+            if (st.playing) {
+              const nextTime = seg.start + seg.dur;
+              st.currentTime = nextTime;
+              if (st.advanceTimer) clearTimeout(st.advanceTimer);
+              st.advanceTimer = setTimeout(() => _mediaOvrPreviewAdvanceTo(safe, nextTime), 0);
+            }
+          }
+        };
+      }
+      if (lbl) { lbl.textContent = seg.label; lbl.style.display = 'block'; }
+
+    } else if (seg.type === 'image') {
+      if (vid) { vid.pause(); vid.ontimeupdate = null; vid.style.display = 'none'; }
+      if (blk) blk.style.display = 'none';
+      if (img) { img.src = seg.url; img.style.display = 'block'; }
+      if (lbl) { lbl.textContent = seg.label; lbl.style.display = 'block'; }
+      if (st.advanceTimer) clearTimeout(st.advanceTimer);
+      st.advanceTimer = setTimeout(() => {
+        if (st.playing) {
+          const nextTime = seg.start + seg.dur;
+          st.currentTime = nextTime;
+          _mediaOvrPreviewAdvanceTo(safe, nextTime);
+        }
+      }, remainingInSeg * 1000);
+
+    } else {
+      // black gap
+      if (vid) { vid.pause(); vid.ontimeupdate = null; vid.style.display = 'none'; }
+      if (img) img.style.display = 'none';
+      if (blk) blk.style.display = 'block';
+      if (lbl) { lbl.textContent = 'gap'; lbl.style.display = 'block'; }
+      if (st.advanceTimer) clearTimeout(st.advanceTimer);
+      st.advanceTimer = setTimeout(() => {
+        if (st.playing) _mediaOvrPreviewFinish(safe);
+      }, remainingInSeg * 1000);
+    }
+  }
+
+  function _mediaOvrPreviewFinish(safe) {
+    const st = _mediaOvrPreviews[safe];
+    if (!st) return;
+    st.currentTime = st.shotDurSec;
+    st.playing = false;
+    if (st.advanceTimer)  { clearTimeout(st.advanceTimer);   st.advanceTimer  = null; }
+    if (st.progressTimer) { clearInterval(st.progressTimer); st.progressTimer = null; }
+    const btn = document.getElementById('mpv-btn-' + safe);
+    if (btn) btn.textContent = '▶';
+    _mediaOvrPreviewUpdateBar(safe);
+  }
+
+  function _mediaOvrPreviewUpdateBar(safe) {
+    const st = _mediaOvrPreviews[safe];
+    if (!st) return;
+
+    // Estimate current time from wall clock for smooth bar during image/gap segments
+    let t = st.currentTime;
+    if (st.playing && st.segStartWallTime !== null) {
+      const seg = st.timeline[st.currentSegIdx];
+      if (seg) {
+        if (seg.type === 'video') {
+          const vid = document.getElementById('mpv-vid-' + safe);
+          if (vid) t = seg.start + (vid.currentTime - seg.inSec);
+        } else {
+          t = st.segStartCurrentTime + (Date.now() - st.segStartWallTime) / 1000;
+        }
+        t = Math.min(Math.max(0, t), st.shotDurSec);
+      }
+    }
+
+    const fill   = document.getElementById('mpv-fill-' + safe);
+    const timeEl = document.getElementById('mpv-time-' + safe);
+    if (fill)   fill.style.width = (Math.max(0, Math.min(1, t / st.shotDurSec)) * 100).toFixed(1) + '%';
+    if (timeEl) timeEl.textContent = t.toFixed(1) + ' / ' + st.shotDurSec.toFixed(1) + 's';
+  }
+
+  function _mediaOvrPreviewSeek(safe, event) {
+    const st = _mediaOvrPreviews[safe];
+    if (!st) return;
+    const bar = document.getElementById('mpv-bar-' + safe);
+    if (!bar) return;
+    const rect = bar.getBoundingClientRect();
+    const pct  = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const wasPlaying = st.playing;
+    if (wasPlaying) {
+      if (st.advanceTimer) { clearTimeout(st.advanceTimer); st.advanceTimer = null; }
+      const vid = document.getElementById('mpv-vid-' + safe);
+      if (vid) { vid.pause(); vid.ontimeupdate = null; }
+    }
+    st.currentTime = pct * st.shotDurSec;
+    _mediaOvrPreviewUpdateBar(safe);
+    if (wasPlaying) _mediaOvrPreviewAdvanceTo(safe, st.currentTime);
+  }
+
+  // ── Media Library: async load ──────────────────────────────────────────────
+
+  async function mediaLoadLibrary() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    try {
+      const serverUrl = (document.getElementById('media-server-url') || {}).value || '';
+      const r = await fetch(`/api/media_library?slug=${encodeURIComponent(_mediaSlug)}&ep_id=${encodeURIComponent(_mediaEpId)}&server_url=${encodeURIComponent(serverUrl)}`);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      _mediaLibVideos  = d.videos || [];
+      _mediaLibImages  = d.images || [];
+      _mediaCutClips   = d.clips  || [];
+      mediaRenderAll();
+    } catch (err) {
+      console.warn('[media] mediaLoadLibrary failed:', err);
+    }
+  }
+
+  async function mediaLoadShotTimeline() {
+    if (!_mediaSlug || !_mediaEpId) return;
+    try {
+      const base = `/api/episode_file?slug=${encodeURIComponent(_mediaSlug)}&ep_id=${encodeURIComponent(_mediaEpId)}`;
+      const [amR, slR, mpR] = await Promise.all([
+        fetch(base + '&file=AssetManifest.shared.json'),
+        fetch(base + '&file=ShotList.json'),
+        fetch(base + '&file=MediaPlan.json'),
+      ]);
+      if (!amR.ok || !slR.ok) throw new Error('fetch failed');
+      const am = await amR.json();
+      const sl = await slR.json();
+
+      // Restore shot overrides from MediaPlan.json (only if not already edited)
+      if (mpR.ok) {
+        try {
+          const mp = await mpR.json();
+          const savedOvr = mp.shot_overrides || {};
+          // Only populate if _mediaOvrSegments is completely empty (fresh load)
+          const alreadyHasEdits = Object.keys(_mediaOvrSegments).length > 0
+                                || Object.keys(_mediaOvrClip).length > 0;
+          if (!alreadyHasEdits) {
+            for (const [sid, ovr] of Object.entries(savedOvr)) {
+              if (ovr.clip_id) {
+                _mediaOvrClip[sid] = ovr.clip_id;
+                _mediaOvrTiming[sid] = { clip_in: ovr.clip_in ?? ovr.start_sec ?? 0, clip_out: ovr.clip_out ?? ovr.end_sec ?? null };
+              }
+              if (ovr.segments && ovr.segments.length > 0) {
+                _mediaOvrSegments[sid] = ovr.segments.map(s => {
+                  // mediaSaveAll writes "media_type"; legacy data may use "type"
+                  const t_stored = s.media_type || s.type || 'video';
+                  // Ground-truth override: if URL/path has an image extension it IS an image,
+                  // even if media_type was corrupted (e.g. saved as "video" by the old loader bug).
+                  const _imgExt = /\.(jpg|jpeg|png|webp|gif|svg)([?#]|$)/i;
+                  const t = _imgExt.test(s.url || s.path || '') ? 'image' : t_stored;
+                  return {
+                    type:         t,
+                    url:          s.url          || '',
+                    path:         s.path         || null,
+                    clip_id:      s.clip_id      || null,
+                    duration_sec: s.duration_sec || null,
+                    filename:     s.filename     || s.clip_id || (s.path ? s.path.split('/').pop() : '') || '',
+                    clip_in:      t === 'video' ? (s.clip_in  ?? s.start_sec ?? 0)    : null,
+                    clip_out:     t === 'video' ? (s.clip_out ?? s.end_sec   ?? null) : null,
+                    hold_sec:     t === 'image' ? (s.hold_sec  ?? null) : null,
+                    // mediaSaveAll writes "animation_type"; legacy data may use "animation"
+                    animation:    t === 'image' ? (s.animation_type || s.animation || 'none') : null,
+                  };
+                });
+              }
+            }
+          }
+        } catch (_) { /* MediaPlan.json missing or malformed — silently skip */ }
+      }
+
+      // Build shot timing map from ShotList
+      const shotDur = {};
+      const shotStart = {};
+      let cursor = 0;
+      const shots = sl.shots || sl;
+      for (const sh of shots) {
+        const sid = sh.shot_id || sh.id;
+        const dur = sh.duration_sec || sh.duration || 0;
+        shotDur[sid]   = dur;
+        shotStart[sid] = cursor;
+        cursor += dur;
+      }
+
+      // Build timeline from manifest shots order
+      const manifestShots = (am.shots || []);
+      _mediaShotTimeline = manifestShots.map(sh => {
+        const sid = sh.shot_id || sh.id;
+        const dur = shotDur[sid] || 0;
+        return {
+          shot_id:      sid,
+          epStart:      shotStart[sid] || 0,
+          epEnd:        (shotStart[sid] || 0) + dur,
+          duration_sec: dur,
+        };
+      }).filter(s => s.shot_id);
+
+      if (_mediaShotTimeline.length === 0) {
+        // Fallback: use ShotList order directly
+        _mediaShotTimeline = shots.map(sh => {
+          const sid = sh.shot_id || sh.id;
+          const dur = shotDur[sid] || 0;
+          return { shot_id: sid, epStart: shotStart[sid] || 0, epEnd: (shotStart[sid] || 0) + dur, duration_sec: dur };
+        });
+      }
+    } catch (err) {
+      console.warn('[media] mediaLoadShotTimeline failed:', err);
+      _mediaShotTimeline = [];
+    }
+    mediaRenderShotOverrides();
+  }
+
+  // ── Media Library: render ─────────────────────────────────────────────────
+
+  function mediaRenderAll() {
+    mediaRenderShotOverrides();
+
+    // Ensure library container exists inside media-body
+    const body = document.getElementById('media-body');
+    if (!body) return;
+    if (!document.getElementById('media-library-wrap')) {
+      const libDiv = document.createElement('div');
+      libDiv.id = 'media-library-wrap';
+      body.appendChild(libDiv);
+    }
+    mediaRenderLibrary();
+  }
+
+  function mediaRenderLibrary() {
+    const wrap = document.getElementById('media-library-wrap');
+    if (!wrap) return;
+
+    // Helper: badge for batch-sourced items
+    function _batchBadge(v) {
+      if (!v.from_batch) return '';
+      const score = v.score ? (v.score * 100).toFixed(0) + '%' : '';
+      const site  = v.source_site || 'batch';
+      const title = v.title ? `title="${v.title.replace(/"/g,'&quot;')}"` : '';
+      return `<span ${title} style="font-size:0.75em;padding:1px 5px;border-radius:3px;
+              background:var(--purple,#7c3aed);color:#fff;margin-left:4px;cursor:default">
+              ${site}${score ? ' · ' + score : ''}</span>`;
+    }
+
+    // Video sub-section — thumbnail grid matching image size (160×90, multiple per row)
+    let vidItems = '';
+    _mediaLibVideos.forEach((v, idx) => {
+      const dur = v.duration_sec ? v.duration_sec.toFixed(1) + 's' : '?s';
+      const safeFilename = (v.filename || '').replace(/"/g, '&quot;');
+      vidItems += `
+        <div style="position:relative;width:160px;flex-shrink:0;
+                    border:2px solid var(--border);border-radius:6px;overflow:hidden;
+                    background:var(--bg2)">
+          <div style="position:relative">
+            <video src="${v.url}" muted
+                   style="width:160px;height:90px;object-fit:cover;display:block;background:#111"
+                   onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"></video>
+            <span style="position:absolute;bottom:4px;left:4px;font-size:0.68em;
+                         background:#000000cc;color:#eee;padding:2px 5px;border-radius:4px">${dur}</span>
+            <a href="${v.url}" target="_blank" title="Open original"
+               style="position:absolute;bottom:4px;right:4px;font-size:0.68em;line-height:1;
+                      background:#000000cc;color:#eee;padding:2px 5px;border-radius:4px;
+                      text-decoration:none">🔗</a>
+          </div>
+          <div style="padding:4px 5px">
+            <div style="font-size:0.70em;color:var(--fg);overflow:hidden;text-overflow:ellipsis;
+                        white-space:nowrap" title="${safeFilename}">${v.filename}</div>
+            ${_batchBadge(v)}
+          </div>
+        </div>`;
+    });
+    const vidRows = vidItems
+      ? `<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px">${vidItems}</div>`
+      : '';
+
+    // Image sub-section — thumbnail grid, ~7 per row (same style as scene/shot section)
+    let imgThumbs = '';
+    _mediaLibImages.forEach((img, idx) => {
+      const dims  = (img.width && img.height) ? `${img.width}×${img.height}` : '';
+      const title = [img.filename, dims].filter(Boolean).join(' · ').replace(/"/g, '&quot;');
+      imgThumbs += `
+        <div class="media-thumb" title="${title}">
+          <img src="${img.url}" loading="lazy" alt="${img.filename.replace(/"/g,'&quot;')}">
+          <a href="${img.url}" target="_blank" rel="noopener noreferrer" title="Open original"
+             class="media-src-link" onclick="event.stopPropagation()">🔗</a>
+          ${_batchBadge(img)}
+        </div>`;
+    });
+    const imgRows = imgThumbs
+      ? `<div class="media-thumb-row">${imgThumbs}</div>`
+      : '';
+
+    wrap.innerHTML = `
+      <div style="padding:10px 14px">
+        <div style="font-weight:700;font-size:0.9em;margin-bottom:10px;color:var(--fg)">📁 Media Library</div>
+
+        <div id="media-library-videos-wrap">
+          <div style="font-size:0.82em;font-weight:600;color:var(--dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">── Videos ──</div>
+          <label style="display:inline-block;margin-bottom:8px;padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--active-bg);color:var(--fg);font-size:0.82em;cursor:pointer">
+            📤 Upload Video
+            <input type="file" id="mlib-vid-upload" accept="video/*" hidden onchange="mediaUpload('video')">
+          </label>
+          ${vidRows || '<div style="font-size:0.82em;color:var(--dim);margin-bottom:8px">No videos uploaded yet.</div>'}
+        </div>
+
+        <div id="media-library-images-wrap" style="margin-top:12px">
+          <div style="font-size:0.82em;font-weight:600;color:var(--dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">── Images ──</div>
+          <label style="display:inline-block;margin-bottom:8px;padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--active-bg);color:var(--fg);font-size:0.82em;cursor:pointer">
+            📤 Upload Image
+            <input type="file" id="mlib-img-upload" accept="image/*" hidden onchange="mediaUpload('image')">
+          </label>
+          ${imgRows || '<div style="font-size:0.82em;color:var(--dim)">No images uploaded yet.</div>'}
+        </div>
+      </div>`;
+  }
+
+  // mediaRenderClips removed — Generated Clips section replaced by per-segment
+  // cards inside Shot Overrides (clips are now added via the ＋ picker).
+
+  // ── Media Library: user actions ───────────────────────────────────────────
+
+  function mediaMarkPos(vidIdx, which) {
+    const vid = document.getElementById('mlib-vid-' + vidIdx);
+    if (!vid) return;
+    const t = vid.currentTime;
+    if (!_mediaMarks[String(vidIdx)]) _mediaMarks[String(vidIdx)] = {};
+    if (which === 'start') {
+      _mediaMarks[String(vidIdx)].start = t;
+      const lbl = document.getElementById('mlib-mark-in-' + vidIdx);
+      if (lbl) lbl.textContent = t.toFixed(2);
+    } else {
+      _mediaMarks[String(vidIdx)].end = t;
+      const lbl = document.getElementById('mlib-mark-out-' + vidIdx);
+      if (lbl) lbl.textContent = t.toFixed(2);
+    }
+    // Color cut button gold whenever any mark is set
+    const btn = document.getElementById('mlib-cut-btn-' + vidIdx);
+    if (btn) {
+      btn.style.background = '#d4a017';
+      btn.style.color = '#000';
+    }
+  }
+
+  async function mediaCutClip(vidIdx) {
+    const video = _mediaLibVideos[vidIdx];
+    if (!video) return;
+    const marks = _mediaMarks[String(vidIdx)] || {};
+    let start_sec = marks.start !== undefined ? marks.start : 0.0;
+    let end_sec   = marks.end   !== undefined ? marks.end   : video.duration_sec;
+    // If duration unknown and no end mark, ffmpeg will get end_sec=0 — abort only that case
+    if (!end_sec && marks.end === undefined) {
+      alert('Cannot cut: video duration unknown. Please click Mark End first to set the end point.');
+      return;
+    }
+    _mediaSetStatus('Cutting clip…');
+    try {
+      const r = await fetch('/api/media_cut_clip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slug:            _mediaSlug,
+          ep_id:           _mediaEpId,
+          source_video_id: video.id,
+          source_path:     video.path,
+          start_sec,
+          end_sec,
+        }),
+      });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'cut failed');
+      const clip = {
+        clip_id:         d.clip_id,
+        source_video_id: video.id,
+        filename:        d.clip_id + '.mp4',
+        path:            d.path,
+        url:             d.url,
+        start_sec,
+        end_sec,
+        duration_sec:    d.duration_sec,
+      };
+      _mediaCutClips.push(clip);
+      mediaRenderShotOverrides();
+      _mediaSetStatus('Clip created: ' + d.clip_id);
+    } catch (err) {
+      console.error('[media] mediaCutClip error:', err);
+      _mediaSetStatus('Cut failed: ' + err.message);
+    }
+  }
+
+  async function mediaUpload(mediaType) {
+    const inputId = mediaType === 'video' ? 'mlib-vid-upload' : 'mlib-img-upload';
+    const input = document.getElementById(inputId);
+    if (!input || !input.files || !input.files[0]) return;
+    const file = input.files[0];
+    _mediaSetStatus('Uploading…');
+    const fd = new FormData();
+    fd.append('slug',       _mediaSlug);
+    fd.append('ep_id',      _mediaEpId);
+    fd.append('media_type', mediaType);
+    fd.append('file',       file);
+    try {
+      const r = await fetch('/api/media_upload', { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'upload failed');
+      const item = { ...d.item, url: d.url };
+      if (mediaType === 'video') {
+        _mediaLibVideos.push(item);
+      } else {
+        _mediaLibImages.push(item);
+      }
+      mediaRenderLibrary();
+      _mediaSetStatus('Uploaded: ' + item.filename);
+    } catch (err) {
+      console.error('[media] mediaUpload error:', err);
+      _mediaSetStatus('Upload failed: ' + err.message);
+    }
+    // Reset file input so same file can be re-uploaded
+    input.value = '';
+  }
+
+  async function mediaSaveAll() {
+    const overrides = {};
+    // Primary clip overrides (from dropdown)
+    for (const [shotId, clipId] of Object.entries(_mediaOvrClip)) {
+      if (!clipId) continue;
+      const timing = _mediaOvrTiming[shotId] || { clip_in: 0.0, clip_out: null };
+      overrides[shotId] = { clip_id: clipId, clip_in: timing.clip_in ?? 0.0, clip_out: timing.clip_out ?? null };
+    }
+    // Extra segments added via "+" button
+    for (const [shotId, segs] of Object.entries(_mediaOvrSegments)) {
+      if (!segs || segs.length === 0) continue;
+      if (!overrides[shotId]) overrides[shotId] = {};
+      overrides[shotId].segments = segs.map(s => {
+        // Derive authoritative type from URL extension so image files are never saved as "video"
+        const _imgExtSave = /\.(jpg|jpeg|png|webp|gif|svg)([?#]|$)/i;
+        const _saveType = _imgExtSave.test(s.url || s.path || '') ? 'image' : (s.type || 'video');
+        const base = {
+          media_type:   _saveType,       // render_video.py expects media_type
+          url:          s.url,
+          path:         s.path     || null,
+          clip_id:      s.clip_id  || null,
+          duration_sec: s.duration_sec || null,
+        };
+        if (_saveType === 'video') {
+          const inSec  = s.clip_in  ?? 0;
+          const outSec = s.clip_out ?? (s.duration_sec || 0);
+          base.clip_in         = inSec;
+          base.clip_out        = s.clip_out ?? null;
+          base.start_sec       = inSec;                    // alias for render compat
+          base.end_sec         = s.clip_out ?? null;       // alias for render compat
+          base.duration_sec    = Math.max(0, Math.round((outSec - inSec) * 10) / 10);
+        } else {
+          base.hold_sec        = s.hold_sec  ?? null;
+          base.animation_type  = s.animation || 'none';   // render_video.py expects animation_type
+        }
+        return base;
+      });
+    }
+    const btn = document.getElementById('media-btn-confirm');
+    if (btn) btn.disabled = true;
+    _mediaSetStatus('Saving…');
+    try {
+      const r = await fetch('/api/media_confirm', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ slug: _mediaSlug, ep_id: _mediaEpId, overrides }),
+      });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'save failed');
+      _mediaSetStatus('Saved ' + (d.saved || Object.keys(overrides).length) + ' shot assignments');
+    } catch (err) {
+      _mediaSetStatus('Save failed: ' + err.message);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
 
   function mediaSetTiming(shotId, segIdx, field, value) {
@@ -9592,11 +10429,9 @@ placeholder="Enter your story here"></textarea>
     const music = document.getElementById('media-include-music').checked;
     const sfx   = document.getElementById('media-include-sfx').checked;
     const btn   = document.getElementById('media-btn-preview');
-    let label = '🎬 Generate Preview (VO';
-    if (music && sfx) label += ' + Music + SFX';
-    else if (music)   label += ' + Music';
-    else if (sfx)     label += ' + SFX';
-    label += ')';
+    let label = '🎬 Generate Preview';
+    const extras = [music && 'Music', sfx && 'SFX'].filter(Boolean);
+    if (extras.length) label += ' (' + extras.join(' + ') + ')';
     btn.textContent = label;
   }
 
@@ -9963,7 +10798,7 @@ placeholder="Enter your story here"></textarea>
     // Free all video HTTP connections before the POST to guarantee a free slot
     _mediaReleaseAllConnections();
 
-    // Invert _mediaSelections to flat perShot dict with null-coalescing
+    // Build perShot from scene-card selections, then overlay with Shot Overrides
     const perShot = {};
     for (const [bgId, bgData] of Object.entries(_mediaSelections || {})) {
       if (!bgData.per_shot) continue;
@@ -9974,6 +10809,22 @@ placeholder="Enter your story here"></textarea>
           end_sec:   seg.end_sec   ?? seg.hold_sec ?? 0,
         }));
       }
+    }
+    // Shot Overrides take priority — overwrite any scene-card entry for the same shot
+    for (const [shotId, segs] of Object.entries(_mediaOvrSegments || {})) {
+      if (!segs || segs.length === 0) continue;
+      perShot[shotId] = segs.map(s => ({
+        media_type:     s.type,
+        url:            s.url,
+        path:           s.path || '',
+        clip_in:        s.type === 'video' ? (s.clip_in  ?? 0)    : null,
+        clip_out:       s.type === 'video' ? (s.clip_out ?? null)  : null,
+        start_sec:      s.type === 'video' ? (s.clip_in  ?? 0)    : 0,
+        end_sec:        s.type === 'video' ? (s.clip_out ?? (s.duration_sec ?? 0)) : (s.hold_sec ?? 0),
+        hold_sec:       s.type === 'image' ? (s.hold_sec ?? null)  : null,
+        animation_type: s.type === 'image' ? (s.animation || 'none') : null,
+        duration_sec:   s.duration_sec || null,
+      }));
     }
 
     const includeMusic = document.getElementById('media-include-music').checked;
@@ -10041,6 +10892,22 @@ placeholder="Enter your story here"></textarea>
           end_sec:   seg.end_sec   ?? seg.hold_sec ?? 0,
         }));
       }
+    }
+    // Shot Overrides take priority — overwrite for any shots in this scene
+    for (const [shotId, segs] of Object.entries(_mediaOvrSegments || {})) {
+      if (!segs || segs.length === 0 || !shotIds.includes(shotId)) continue;
+      perShot[shotId] = segs.map(s => ({
+        media_type:     s.type,
+        url:            s.url,
+        path:           s.path || '',
+        clip_in:        s.type === 'video' ? (s.clip_in  ?? 0)    : null,
+        clip_out:       s.type === 'video' ? (s.clip_out ?? null)  : null,
+        start_sec:      s.type === 'video' ? (s.clip_in  ?? 0)    : 0,
+        end_sec:        s.type === 'video' ? (s.clip_out ?? (s.duration_sec ?? 0)) : (s.hold_sec ?? 0),
+        hold_sec:       s.type === 'image' ? (s.hold_sec ?? null)  : null,
+        animation_type: s.type === 'image' ? (s.animation || 'none') : null,
+        duration_sec:   s.duration_sec || null,
+      }));
     }
 
     const includeMusic = document.getElementById('media-include-music').checked;
@@ -10496,7 +11363,7 @@ placeholder="Enter your story here"></textarea>
         const running = batches.find(b => b.status === 'running');
         if (running) {
           _mediaBatchId = running.batch_id;
-          document.getElementById('media-btn-search').disabled = true;
+          _mediaSearchBtnSet(true);
           _mediaSetStatus('Reconnecting to running batch…', true);
           _mediaStartPolling();
           return;
@@ -10578,6 +11445,7 @@ placeholder="Enter your story here"></textarea>
     const _pw = document.getElementById('media-preview-wrap');
     body.innerHTML = '<div id="media-shot-overrides"></div>';
     if (_pw) body.insertBefore(_pw, body.firstChild);
+    mediaRenderAll();
 
     const shotDur = _mediaShotDur || {};
     const shotMap = _mediaShotMap || {};
@@ -11838,6 +12706,14 @@ placeholder="Enter your story here"></textarea>
         _musicTimeline = await tr.json();
       }
     } catch (_) {}
+    try {
+      const voTlResp = await fetch('/api/vo_timeline?slug=' + encodeURIComponent(_musicSlug)
+        + '&ep_id=' + encodeURIComponent(_musicEpId));
+      if (voTlResp.ok && _musicTimeline) {
+        const voTl = await voTlResp.json();
+        _musicTimeline.vo_items = voTl.vo_items || [];
+      }
+    } catch (_) {}
     // Fetch ShotList.json for authoritative shot timing (same source as SFX and Media tabs)
     try {
       const slResp = await fetch(`/api/episode_file?slug=${encodeURIComponent(_musicSlug)}&ep_id=${encodeURIComponent(_musicEpId)}&file=ShotList.json`);
@@ -12108,7 +12984,9 @@ placeholder="Enter your story here"></textarea>
     if (!totalDur) return;
 
     // Normalize into _tlRender format
-    const voItems = [];
+    // Seed from tl.vo_items (populated by fetching /api/vo_timeline in _musicLoadExisting).
+    // sh.vo_lines is always empty because music_timeline does not consult VOPlan.
+    const voItems = [...(tl.vo_items || [])];
     const musicItems = [];
     for (const sh of (tl.shots || [])) {
       const shStart = sh.offset_sec || 0;
@@ -12351,7 +13229,7 @@ placeholder="Enter your story here"></textarea>
     if (_musicSources && _musicSources.length > 0) {
       const srcCard = document.createElement('div');
       srcCard.className = 'music-card';
-      let srcHtml = '<div class="music-card-hdr">Source Music Library</div>'
+      let srcHtml = '<div class="music-card-hdr">Music Library</div>'
         + '<div class="music-card-sub">Play a source track, mark Start &amp; End positions, '
         + 'then Cut Clip to create a candidate for shot assignment.</div>';
       _musicSources.forEach((s, si) => {
@@ -13944,26 +14822,28 @@ placeholder="Enter your story here"></textarea>
         }
       }
 
-      // ── Content tab buttons ─────────────────────────────────────────────────
-      const tabDefs = [];
-      if (hasVideo) tabDefs.push({ pane: 'video', label: 'Video' });
-      if (hasAudio) tabDefs.push({ pane: 'audio', label: 'Soundtrack' });
-
-      tabDefs.forEach(({ pane, label }, i) => {
+      // ── Content tab buttons (Video is default — no tab needed for it) ──────
+      // Soundtrack tab only shown when dubbed audio is ready alongside video.
+      if (hasAudio) {
         const btn = document.createElement('button');
-        btn.className = 'btn-review-tab' + (i === 0 ? ' active' : '');
-        btn.textContent = label;
+        btn.className = 'btn-review-tab';
+        btn.textContent = 'Soundtrack';
         btn.onclick = () => {
           reviewContentTabs.querySelectorAll('.btn-review-tab')
             .forEach(b => b.classList.remove('active'));
           btn.classList.add('active');
-          switchPane(pane);
+          switchPane('audio');
         };
         reviewContentTabs.appendChild(btn);
-      });
+      }
 
-      // Show first available pane on initial render
-      switchPane(tabDefs[0].pane);
+      // Show video pane by default (locale tabs = "en" etc. are the primary controls).
+      // Fall back to audio if no video.
+      if (hasVideo) {
+        switchPane('video');
+      } else {
+        switchPane('audio');
+      }
     }
   }
   // Keep Next Step banner in sync whenever Pipeline tab refreshes
@@ -14555,6 +15435,13 @@ placeholder="Enter your story here"></textarea>
           pipeSel.value = tv;
         }
         switchTab('pipeline');
+        // Force-refresh the video player so the latest output.mp4 is shown
+        // without requiring the user to click the locale tab.  The fingerprint
+        // check in renderPipelineStatus() would skip playLocaleVideo() on a
+        // re-render because ready_videos = ["en"] is stable (file still exists).
+        if (params.locale) {
+          playLocaleVideo(params.locale);
+        }
       } else {
         appendLine(`[ Exited with code ${code} ]`, 'err');
         setStatus('error');
@@ -17228,6 +18115,160 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        # ── Media: load shared library state (GET /api/media_library) ────────
+        elif self.path.startswith("/api/media_library"):
+            try:
+                from urllib.parse import urlparse as _urlparse_ml, parse_qs as _pqs_ml
+                import urllib.request as _urllib_req_ml
+                _qs_ml = _pqs_ml(_urlparse_ml(self.path).query)
+                slug       = (_qs_ml.get("slug",       [""])[0]).strip()
+                ep_id      = (_qs_ml.get("ep_id",      [""])[0]).strip()
+                server_url = (_qs_ml.get("server_url", [""])[0]).strip() \
+                             or os.environ.get("MEDIA_SERVER_URL", "")
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                ep_dir  = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                api_key = os.environ.get("MEDIA_API_KEY", "")
+
+                # ── 1. Manually-uploaded library ─────────────────────────────
+                lib_path   = os.path.join(ep_dir, "assets", "media_library", "media_library.json")
+                clips_path = os.path.join(ep_dir, "assets", "media_library", "media_cut_clips.json")
+
+                if os.path.isfile(lib_path):
+                    with open(lib_path, encoding="utf-8") as _lf:
+                        lib_data = json.load(_lf)
+                else:
+                    lib_data = {"videos": [], "images": []}
+
+                if os.path.isfile(clips_path):
+                    with open(clips_path, encoding="utf-8") as _cf:
+                        clips_list = json.load(_cf)
+                else:
+                    clips_list = []
+
+                def _media_url(item_path):
+                    return f"/serve_media?path=projects/{slug}/episodes/{ep_id}/{item_path}"
+
+                videos = [dict(v, url=_media_url(v["path"])) for v in lib_data.get("videos", [])]
+                images = [dict(i, url=_media_url(i["path"])) for i in lib_data.get("images", [])]
+                clips  = [dict(c, url=_media_url(c["path"])) for c in clips_list]
+
+                # ── 2. Assets from done search batches on the media server ────
+                # The media server stores batches and their ranked assets.
+                # We ask it for all done batches for this episode, then fetch
+                # full item data (images/videos with URLs) for each done batch.
+                try:
+                    _batches_url = (server_url.rstrip("/")
+                                    + f"/batches?project={slug}&episode_id={ep_id}")
+                    _req = _urllib_req_ml.Request(
+                        _batches_url, headers={"X-Api-Key": api_key})
+                    with _urllib_req_ml.urlopen(_req, timeout=10) as _resp:
+                        _batch_list = json.loads(_resp.read())
+
+                    # _batch_list: [{batch_id, status, item_count, items_done, ...}]
+                    # newest-first ordering is preserved from the media server response
+                    for _bs in _batch_list:
+                        if _bs.get("status") != "done":
+                            continue
+                        _bid = _bs.get("batch_id", "")
+                        if not _bid:
+                            continue
+                        try:
+                            _batch_url = server_url.rstrip("/") + f"/batches/{_bid}"
+                            _req2 = _urllib_req_ml.Request(
+                                _batch_url, headers={"X-Api-Key": api_key})
+                            with _urllib_req_ml.urlopen(_req2, timeout=15) as _resp2:
+                                _batch_data = json.loads(_resp2.read())
+
+                            for _iid, _item in _batch_data.get("items", {}).items():
+                                if _item.get("status") != "done":
+                                    continue
+
+                                def _to_serve_url(raw_url):
+                                    """Convert file:// or http://media-server/files/... URL
+                                    to a browser-loadable /serve_media?path=<abs_path> URL."""
+                                    if not raw_url:
+                                        return ""
+                                    if raw_url.startswith("file://"):
+                                        # file:///mnt/shared/... → /serve_media?path=/mnt/shared/...
+                                        from urllib.parse import unquote as _uq_srv
+                                        abs_path = _uq_srv(raw_url[len("file://"):])
+                                        return f"/serve_media?path={abs_path}"
+                                    # http(s) URL from media server — use as-is (browser can reach it)
+                                    return raw_url
+
+                                def _abs_path_from_url(raw_url, fallback_path):
+                                    """Extract absolute filesystem path from file:// URL.
+                                    Used so ffmpeg in /api/media_cut_clip can open batch assets."""
+                                    if raw_url.startswith("file://"):
+                                        from urllib.parse import unquote as _uq_abs
+                                        return _uq_abs(raw_url[len("file://"):])
+                                    return fallback_path
+
+                                # Videos — field is "videos" (URLs already computed by media server)
+                                for _vr in _item.get("videos", []):
+                                    _raw_url = _vr.get("url", "")
+                                    _path = _vr.get("path", "")
+                                    if not _raw_url:
+                                        continue
+                                    _src = _vr.get("source") or {}
+                                    _abs = _abs_path_from_url(_raw_url, _path)
+                                    videos.append({
+                                        "id":           f"batch_{_bid}_{_iid}_{os.path.basename(_path)}",
+                                        "filename":     os.path.basename(_path),
+                                        "path":         _abs,
+                                        "duration_sec": float(_vr.get("duration_sec") or 0.0),
+                                        "size_bytes":   0,
+                                        "from_batch":   True,
+                                        "batch_id":     _bid,
+                                        "score":        float(_vr.get("score") or 0.0),
+                                        "title":        _src.get("title", ""),
+                                        "source_site":  _src.get("source_site", ""),
+                                        "url":          _to_serve_url(_raw_url),
+                                    })
+                                # Images — field is "images"
+                                for _ir in _item.get("images", []):
+                                    _raw_url = _ir.get("url", "")
+                                    _path = _ir.get("path", "")
+                                    if not _raw_url:
+                                        continue
+                                    _src = _ir.get("source") or {}
+                                    _abs = _abs_path_from_url(_raw_url, _path)
+                                    images.append({
+                                        "id":          f"batch_{_bid}_{_iid}_{os.path.basename(_path)}",
+                                        "filename":    os.path.basename(_path),
+                                        "path":        _abs,
+                                        "width":       int(_src.get("width") or 0),
+                                        "height":      int(_src.get("height") or 0),
+                                        "size_bytes":  0,
+                                        "from_batch":  True,
+                                        "batch_id":    _bid,
+                                        "score":       float(_ir.get("score") or 0.0),
+                                        "title":       _src.get("title", ""),
+                                        "source_site": _src.get("source_site", ""),
+                                        "url":         _to_serve_url(_raw_url),
+                                    })
+                        except Exception as _be:
+                            print(f"  [media_library] error fetching batch {_bid}: {_be}")
+
+                except Exception as _me:
+                    # Media server unreachable — return only manually-uploaded assets
+                    print(f"  [media_library] media server unreachable ({server_url}): {_me}")
+
+                body = json.dumps({"videos": videos, "images": images, "clips": clips}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # ── Media proxy: list batches for episode (GET /api/media_batches) ──────
         elif parsed.path == "/api/media_batches":
             params     = parse_qs(parsed.query)
@@ -17366,279 +18407,178 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         # ── Music: return timeline JSON (GET /api/music_timeline) ────────────
-        # Built in-memory from VOPlan + MusicPlan — no timeline.json on disk
+        # Authoritative sources: ShotList.json (timing) + MusicPlan.json (content).
+        # VOPlan is NOT consulted — music data lives exclusively in MusicPlan.
         elif parsed.path == "/api/music_timeline":
             params = parse_qs(parsed.query)
             slug   = params.get("slug", [""])[0].strip()
             ep_id  = params.get("ep_id", [""])[0].strip()
-            if not slug or not ep_id:
-                body = json.dumps({"error": "slug and ep_id required"}).encode()
-                self.send_response(400)
-            else:
-                try:
-                    import glob as _glob_mtl
-                    import re as _re_mtl
-                    _ep_dir_mtl = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
-                    _manifests = [p for p in _glob_mtl.glob(
-                        os.path.join(_ep_dir_mtl, "VOPlan.*.json"))
-                        if os.path.basename(p) != "AssetManifest.shared.json"]
-                    if not _manifests:
-                        raise FileNotFoundError("No VOPlan found")
-                    _locale_mtl = "en"
-                    _vars_mtl = os.path.join(_ep_dir_mtl, "pipeline_vars.sh")
-                    if os.path.isfile(_vars_mtl):
-                        _vm = _re_mtl.search(
-                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
-                            open(_vars_mtl).read())
-                        if _vm:
-                            _locale_mtl = _vm.group(1).strip()
-                    _pm = os.path.join(_ep_dir_mtl, f"VOPlan.{_locale_mtl}.json")
-                    _mpath = _pm if os.path.isfile(_pm) else sorted(_manifests)[0]
+            try:
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id required")
+                import re as _re_vol_mtl
+                from music_review_pack import (
+                    build_timeline as _mrp_build_mtl,
+                    apply_music_plan_overrides as _mrp_apply_mtl,
+                    load_loop_candidates as _mrp_loop_mtl,
+                    BASE_MUSIC_DB as _MRP_BASE_DB_MTL,
+                )
+                _ep_dir_mtl = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
 
-                    from music_review_pack import (
-                        build_timeline as _mrp_build_mtl,
-                        apply_music_plan_overrides as _mrp_apply_mtl,
-                        load_shotlist as _mrp_sl_mtl,
-                        load_loop_candidates as _mrp_loop_mtl,
-                        BASE_MUSIC_DB as _MRP_BASE_DB_MTL,
-                    )
-                    import re as _re_vol_mtl
-                    _mf = json.load(open(_mpath, encoding="utf-8"))
-                    _shots_mtl = _mrp_sl_mtl(_mf, Path(_mpath))
-                    _vo_id_to_shot_mtl = {
-                        vid: s["shot_id"]
-                        for s in _shots_mtl
-                        for vid in s.get("audio_intent", {}).get("vo_item_ids", [])
+                # ── ShotList → shot list with timing (timing anchor) ──────────
+                _sl_path_mtl = os.path.join(_ep_dir_mtl, "ShotList.json")
+                if not os.path.isfile(_sl_path_mtl):
+                    raise FileNotFoundError("ShotList.json not found")
+                _sl_mtl = json.load(open(_sl_path_mtl, encoding="utf-8"))
+                _shots_from_sl = [
+                    {
+                        "shot_id":      _sh.get("shot_id", ""),
+                        "scene_id":     _sh.get("scene_id", ""),
+                        "duration_sec": float(_sh.get("duration_sec") or 0.0),
+                        "audio_intent": _sh.get("audio_intent", {}),
                     }
-                    _vsm = {}
-                    for _vo in _mf.get("vo_items", []):
-                        _sid = (_vo_id_to_shot_mtl.get(_vo.get("item_id", ""))
-                                or _vo.get("shot_id", ""))
-                        if _sid:
-                            _vsm.setdefault(_sid, []).append(_vo)
-                    _midx = {
-                        mi["shot_id"]: mi
-                        for mi in _mf.get("music_items", []) if mi.get("shot_id")
-                    }
-                    # Fallback: VOPlan has no music_items → seed from MusicPlan
-                    # shot_overrides so build_timeline() sets music_item_id on
-                    # each shot; apply_music_plan_overrides() below fills detail.
-                    if not _midx:
-                        _mp_fb = os.path.join(_ep_dir_mtl, "MusicPlan.json")
-                        if os.path.isfile(_mp_fb):
-                            try:
-                                _mp_fb_d = json.load(open(_mp_fb, encoding="utf-8"))
-                                _midx = {
-                                    o["shot_id"]: {"item_id": o["item_id"], "shot_id": o["shot_id"]}
-                                    for o in _mp_fb_d.get("shot_overrides", [])
-                                    if o.get("shot_id") and o.get("item_id")
-                                }
-                            except Exception as _e_fb_mtl:
-                                print(f"  [WARN] music_timeline: MusicPlan fallback: {_e_fb_mtl}")
-                    _tls, _tdur = _mrp_build_mtl(
-                        _shots_mtl, _mf, _vsm, _midx, _mrp_loop_mtl(Path(_ep_dir_mtl)))
-                    # Apply MusicPlan overrides
-                    _mp2 = os.path.join(_ep_dir_mtl, "MusicPlan.json")
-                    _lmp2 = None
-                    if os.path.isfile(_mp2):
-                        try:
-                            _lmp2 = json.load(open(_mp2, encoding="utf-8"))
-                            _po2 = _lmp2.get("shot_overrides", [])
-                            if _po2:
-                                _mrp_apply_mtl(_tls, _po2, "MusicPlan.json", _vsm)
-                        except Exception as _e2:
-                            print(f"  [WARN] music_timeline: MusicPlan.json: {_e2}")
-                    # Apply volume offsets
-                    _tv2 = (_lmp2 or {}).get("track_volumes", {})
-                    _cv2 = (_lmp2 or {}).get("clip_volumes", {})
-                    if _tv2 or _cv2:
-                        for _ent in _tls:
-                            _rid2 = (_ent.get("music_item_id_override")
-                                     or _ent.get("music_item_id") or "")
-                            if not _rid2:
+                    for _sh in _sl_mtl.get("shots", [])
+                    if _sh.get("shot_id")
+                ]
+
+                # ── MusicPlan → music index (authoritative source) ────────────
+                _mp_path_mtl = os.path.join(_ep_dir_mtl, "MusicPlan.json")
+                _lmp_mtl = None
+                _midx_mtl: dict = {}
+                if os.path.isfile(_mp_path_mtl):
+                    try:
+                        _lmp_mtl = json.load(open(_mp_path_mtl, encoding="utf-8"))
+                        _midx_mtl = {
+                            o["shot_id"]: {"item_id": o["item_id"], "shot_id": o["shot_id"]}
+                            for o in _lmp_mtl.get("shot_overrides", [])
+                            if o.get("shot_id") and o.get("item_id")
+                        }
+                    except Exception as _mp_err_mtl:
+                        print(f"  [WARN] music_timeline: MusicPlan.json: {_mp_err_mtl}")
+
+                # build_timeline receives no VOPlan manifest (empty dict) and no
+                # VO shot map (empty dict) — VO data is not music_timeline's concern.
+                _tls_mtl, _tdur_mtl = _mrp_build_mtl(
+                    _shots_from_sl, {}, {}, _midx_mtl,
+                    _mrp_loop_mtl(Path(_ep_dir_mtl)))
+
+                # Apply MusicPlan overrides (timing, end_sec, duck_db, etc.)
+                if _lmp_mtl:
+                    _po_mtl = _lmp_mtl.get("shot_overrides", [])
+                    if _po_mtl:
+                        _mrp_apply_mtl(_tls_mtl, _po_mtl, "MusicPlan.json", {})
+                    # Apply volume offsets from MusicPlan track_volumes / clip_volumes
+                    _tv_mtl = _lmp_mtl.get("track_volumes", {})
+                    _cv_mtl = _lmp_mtl.get("clip_volumes",  {})
+                    if _tv_mtl or _cv_mtl:
+                        for _ent_mtl in _tls_mtl:
+                            _rid_mtl = (_ent_mtl.get("music_item_id_override")
+                                        or _ent_mtl.get("music_item_id") or "")
+                            if not _rid_mtl:
                                 continue
-                            _db2 = 0.0
-                            _s2 = _re_vol_mtl.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _rid2)
-                            _db2 += float(_tv2.get(_s2, 0))
-                            _db2 += float(_cv2.get(_rid2, 0))
-                            if _db2 == 0.0:
-                                _mx2 = _re_vol_mtl.match(
-                                    r'^(.+?)_(\d+)_(\d+)s-(\d+)_(\d+)s$', _rid2)
-                                if _mx2:
-                                    _cid2 = (f"{_mx2.group(1)}:{_mx2.group(2)}."
-                                             f"{_mx2.group(3)}s-{_mx2.group(4)}.{_mx2.group(5)}s")
-                                    _db2 += float(_cv2.get(_cid2, 0))
-                            if _db2 != 0.0:
-                                _ent["base_db"] = (
-                                    _ent.get("base_db", _MRP_BASE_DB_MTL) + _db2)
-                    body = json.dumps({
-                        "episode_id": ep_id,
-                        "total_duration_sec": _tdur,
-                        "shots": _tls,
-                    }).encode()
-                    self.send_response(200)
-                except Exception as _etl:
-                    body = json.dumps({"error": str(_etl)}).encode()
-                    self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+                            _db_mtl = 0.0
+                            _s_mtl  = _re_vol_mtl.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _rid_mtl)
+                            _db_mtl += float(_tv_mtl.get(_s_mtl, 0))
+                            _db_mtl += float(_cv_mtl.get(_rid_mtl, 0))
+                            if _db_mtl == 0.0:
+                                _mx_mtl = _re_vol_mtl.match(
+                                    r'^(.+?)_(\d+)_(\d+)s-(\d+)_(\d+)s$', _rid_mtl)
+                                if _mx_mtl:
+                                    _cid_mtl = (f"{_mx_mtl.group(1)}:{_mx_mtl.group(2)}."
+                                                f"{_mx_mtl.group(3)}s-{_mx_mtl.group(4)}.{_mx_mtl.group(5)}s")
+                                    _db_mtl += float(_cv_mtl.get(_cid_mtl, 0))
+                            if _db_mtl != 0.0:
+                                _ent_mtl["base_db"] = (
+                                    _ent_mtl.get("base_db", _MRP_BASE_DB_MTL) + _db_mtl)
+
+                # Derive flat music_items list from processed shots for the
+                # _loadAndMergeTl() merger (and for the KW-24 API assertion).
+                # sh.start_sec / sh.music_end_sec are shot-relative after
+                # apply_music_plan_overrides; add offset_sec for episode-absolute.
+                _music_items_flat: list = []
+                for _ent_flat in _tls_mtl:
+                    _mid_flat = (_ent_flat.get("music_item_id_override")
+                                 or _ent_flat.get("music_item_id"))
+                    if not _mid_flat:
+                        continue
+                    _shoff_flat = float(_ent_flat.get("offset_sec", 0))
+                    _ms_flat    = _shoff_flat + float(_ent_flat.get("start_sec", 0))
+                    _me_raw     = _ent_flat.get("music_end_sec")
+                    _me_flat    = (_shoff_flat + float(_me_raw)) if _me_raw is not None \
+                                  else (_shoff_flat + float(_ent_flat.get("duration_sec", 0)))
+                    _music_items_flat.append({
+                        "item_id":    _mid_flat,
+                        "start_sec":  round(_ms_flat, 3),
+                        "end_sec":    round(_me_flat, 3),
+                        "shot_id":    _ent_flat.get("shot_id", ""),
+                        "music_mood": _ent_flat.get("music_mood", ""),
+                    })
+
+                _json_resp(self, {
+                    "episode_id":         ep_id,
+                    "total_duration_sec": round(_tdur_mtl, 3),
+                    "total_dur_sec":      round(_tdur_mtl, 3),  # normalised key
+                    "shots":              _tls_mtl,
+                    "music_items":        _music_items_flat,
+                })
+            except Exception as _etl_m:
+                _json_resp(self, {"error": str(_etl_m)}, 400)
 
         # ── SFX: return timeline JSON in-memory (GET /api/sfx_timeline) ─────
-        # Replaces /serve_media?path=.../SfxPreviewPack/timeline.json
+        # Authoritative sources: ShotList.json (timing) + SfxPlan.json (content).
+        # VOPlan and MusicPlan are NOT consulted — SFX data lives in SfxPlan only.
         elif parsed.path == "/api/sfx_timeline":
             params = parse_qs(parsed.query)
             slug  = params.get("slug", [""])[0].strip()
             ep_id = params.get("ep_id", [""])[0].strip()
-            if not slug or not ep_id:
-                body = json.dumps({"error": "slug and ep_id required"}).encode()
-                self.send_response(400)
-            else:
-                try:
-                    import glob as _glob_stl
-                    import re as _re_stl
-                    _ep_dir_stl = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
-                    _mf_list = [p for p in _glob_stl.glob(
-                        os.path.join(_ep_dir_stl, "VOPlan.*.json"))
-                        if os.path.basename(p) != "AssetManifest.shared.json"]
-                    if not _mf_list:
-                        raise FileNotFoundError("No VOPlan found")
-                    _loc_stl = "en"
-                    _vars_stl = os.path.join(_ep_dir_stl, "pipeline_vars.sh")
-                    if os.path.isfile(_vars_stl):
-                        _vm_s = _re_stl.search(
-                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
-                            open(_vars_stl).read())
-                        if _vm_s:
-                            _loc_stl = _vm_s.group(1).strip()
-                    _pm_stl = os.path.join(_ep_dir_stl, f"VOPlan.{_loc_stl}.json")
-                    _mpath_stl = _pm_stl if os.path.isfile(_pm_stl) else sorted(_mf_list)[0]
+            try:
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id required")
+                _ep_dir_stl = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
 
-                    from sfx_preview_pack import (
-                        load_shotlist as _sfx_sl_stl,
-                        build_shot_timeline as _sfx_bld_stl,
-                    )
-                    _mf_stl = json.load(open(_mpath_stl, encoding="utf-8"))
-                    _shots_stl = _sfx_sl_stl(_mf_stl, Path(_mpath_stl))
-                    _vid2s_stl = {}
-                    for _sh in _shots_stl:
-                        for _v in _sh.get("audio_intent", {}).get("vo_item_ids", []):
-                            _vid2s_stl[_v] = _sh["shot_id"]
-                    _vsm_stl = {}
-                    for _vo in _mf_stl.get("vo_items", []):
-                        _sid = (_vid2s_stl.get(_vo.get("item_id", ""))
-                                or _vo.get("shot_id", ""))
-                        if _sid:
-                            _vsm_stl.setdefault(_sid, []).append(_vo)
-                    _midx_stl = {
-                        mi["shot_id"]: mi
-                        for mi in _mf_stl.get("music_items", []) if mi.get("shot_id")
-                    }
-                    # RenderPlan is eliminated — ShotList.duration_sec is authoritative.
-                    # No patching needed; _shots_stl already contains ShotList durations.
-                    _tl_stl, _dur_stl = _sfx_bld_stl(
-                        _shots_stl, _mf_stl, _vsm_stl, _midx_stl, {})
-                    # Build tl_doc matching SFX timeline format (no audio rendered).
-                    # entry["offset_sec"] from build_shot_timeline is ShotList-based
-                    # cumulative — already episode-absolute including scene tails.
-                    # Do NOT add any extra scene-tail shift.
-                    _shots_out = [{
-                        "shot_id": _en["shot_id"],
-                        "scene_id": _en.get("scene_id", ""),
-                        "offset_sec": round(_en["offset_sec"], 3),
-                        "duration_sec": round(_en["duration_sec"], 3),
-                    } for _en in _tl_stl]
-                    _vo_out = []
-                    for _en in _tl_stl:
-                        for _v in _en.get("vo_lines", []):
-                            _vs = _v.get("start_sec")
-                            _ve = _v.get("end_sec")
-                            if _vs is not None:
-                                _vo_out.append({
-                                    "item_id": _v["item_id"],
-                                    "start_sec": round(_vs, 3),
-                                    "end_sec": round((_ve or _vs), 3),
-                                    "speaker_id": _v.get("speaker_id", ""),
-                                    "shot_id": _en["shot_id"],
-                                })
-                    # Load SfxPlan for sfx_items entries
-                    _sfx_plan_path = os.path.join(_ep_dir_stl, "SfxPlan.json")
-                    _sfx_items_out = []
-                    if os.path.isfile(_sfx_plan_path):
-                        try:
-                            _sfx_plan = json.load(open(_sfx_plan_path, encoding="utf-8"))
-                            for _sfx_en in _sfx_plan.get("sfx_entries", []):
-                                _shot_id_sfx = _sfx_en.get("shot_id", "")
-                                _sfx_items_out.append({
-                                    "item_id": _sfx_en.get("item_id", ""),
-                                    "start_sec": round(float(_sfx_en.get("start_sec", 0)), 3),
-                                    "end_sec": round(float(_sfx_en.get("end_sec", 0)), 3),
-                                    "shot_id": _shot_id_sfx,
-                                    "tag": _sfx_en.get("tag", ""),
-                                })
-                        except Exception as _spe:
-                            print(f"  [WARN] sfx_timeline: SfxPlan: {_spe}")
-                    # Build music_items from MusicPlan.json so the music bar
-                    # renders in both the SFX tab and Media tab timelines.
-                    _music_items_out = []
+                # ── ShotList → episode-absolute shot offsets (timing anchor) ──
+                _sl_path_stl = os.path.join(_ep_dir_stl, "ShotList.json")
+                if not os.path.isfile(_sl_path_stl):
+                    raise FileNotFoundError("ShotList.json not found")
+                _sl_stl = json.load(open(_sl_path_stl, encoding="utf-8"))
+                _shot_offset_stl: dict = {}   # shot_id → cumulative episode offset
+                _cum_stl = 0.0
+                for _sh_stl in _sl_stl.get("shots", []):
+                    _sid_stl = _sh_stl.get("shot_id", "")
+                    if _sid_stl:
+                        _shot_offset_stl[_sid_stl] = _cum_stl
+                    _cum_stl += float(_sh_stl.get("duration_sec") or 0.0)
+
+                # ── SfxPlan → sfx_items (authoritative source) ───────────────
+                # SfxPlan uses timing_format:"episode_absolute" — start/end_sec
+                # are already episode-absolute; pass through directly without
+                # adding the shot offset (doing so would double-count the offset).
+                _sfx_items_out_stl = []
+                _sfx_plan_path_stl = os.path.join(_ep_dir_stl, "SfxPlan.json")
+                if os.path.isfile(_sfx_plan_path_stl):
                     try:
-                        _mp_path = os.path.join(_ep_dir_stl, "MusicPlan.json")
-                        if not os.path.isfile(_mp_path):
-                            _mp_path = os.path.join(_ep_dir_stl, "assets", "music", "MusicPlan.json")
-                        _mp_overrides = {}
-                        if os.path.isfile(_mp_path):
-                            _mp = json.loads(open(_mp_path, encoding="utf-8").read())
-                            for _ovr in _mp.get("shot_overrides", []):
-                                if _ovr.get("item_id"):
-                                    _mp_overrides[_ovr["item_id"]] = _ovr
-                        for _en in _tl_stl:
-                            _mid = _en.get("music_item_id", "")
-                            if not _mid:
-                                continue
-                            _ovr = _mp_overrides.get(_mid)
-                            if _ovr and "start_sec" in _ovr:
-                                # MusicPlan start_sec is episode-absolute — no scene_shift added.
-                                # The audio renderer places music at ovr["start_sec"] directly;
-                                # adding scene_shift here would shift the bar ahead of the audio.
-                                _ms = float(_ovr["start_sec"])
-                                if "end_sec" in _ovr:
-                                    _me = float(_ovr["end_sec"])
-                                else:
-                                    _me = float(_ovr["start_sec"]) + float(_ovr.get("duration_sec", _en["duration_sec"]))
-                            else:
-                                _shot_abs = _en["offset_sec"]
-                                _ms = _shot_abs + float(_en.get("start_sec", 0.0))
-                                _me = _shot_abs + float(_en["duration_sec"])
-                            _music_items_out.append({
-                                "item_id": _mid,
-                                "start_sec": round(_ms, 3),
-                                "end_sec": round(_me, 3),
-                                "shot_id": _en["shot_id"],
-                                "music_mood": _en.get("music_mood", ""),
+                        _sfx_plan_stl = json.load(open(_sfx_plan_path_stl, encoding="utf-8"))
+                        for _en_stl in _sfx_plan_stl.get("sfx_entries", []):
+                            _shot_id_stl = _en_stl.get("shot_id", "")
+                            _sfx_items_out_stl.append({
+                                "item_id":   _en_stl.get("item_id", ""),
+                                "start_sec": round(float(_en_stl.get("start_sec", 0)), 3),
+                                "end_sec":   round(float(_en_stl.get("end_sec",   0)), 3),
+                                "shot_id":   _shot_id_stl,
+                                "tag":       _en_stl.get("tag", ""),
                             })
-                    except Exception as _mpe:
-                        print(f"  [WARN] sfx_timeline: music_items: {_mpe}")
-                    _wav_stl = os.path.join(_ep_dir_stl, "assets", "sfx",
-                                            "SfxPreviewPack", "preview_audio.wav")
-                    _tl_doc_stl = {
-                        "total_dur_sec": round(_dur_stl, 3),
-                        "timing_source": "manifest",
-                        "shots": _shots_out,
-                        "vo_items": _vo_out,
-                        "sfx_items": _sfx_items_out,
-                        "music_items": _music_items_out,
-                        "has_wav": os.path.isfile(_wav_stl),
-                    }
-                    body = json.dumps(_tl_doc_stl).encode()
-                    self.send_response(200)
-                except Exception as _e_stl:
-                    body = json.dumps({"error": str(_e_stl)}).encode()
-                    self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+                    except Exception as _spe_stl:
+                        print(f"  [WARN] sfx_timeline: SfxPlan: {_spe_stl}")
+
+                _wav_stl = os.path.join(_ep_dir_stl, "assets", "sfx",
+                                        "SfxPreviewPack", "preview_audio.wav")
+                _json_resp(self, {
+                    "total_dur_sec": round(_cum_stl, 3),
+                    "sfx_items":     _sfx_items_out_stl,
+                    "has_wav":       os.path.isfile(_wav_stl),
+                })
+            except Exception as _e_stl:
+                _json_resp(self, {"error": str(_e_stl)}, 400)
 
         # ── Music: list source music files (GET /api/music_sources) ──────────
         elif parsed.path == "/api/music_sources":
@@ -17703,7 +18643,9 @@ class Handler(BaseHTTPRequestHandler):
                                        "assets/sfx/sfx_search_results.json",
                                        "assets/sfx/sfx_cut_clips.json",
                                        "SfxPlan.json",
-                                       "AssetManifest.shared.json"}
+                                       "AssetManifest.shared.json",
+                                       "assets/media_library/media_library.json",
+                                       "assets/media_library/media_cut_clips.json"}
             params   = parse_qs(parsed.query)
             slug     = params.get("slug", [""])[0].strip()
             ep_id    = params.get("ep_id", [""])[0].strip()
@@ -17814,10 +18756,53 @@ class Handler(BaseHTTPRequestHandler):
                             else:
                                 _scene_map[_scid]["end_sec"] = _t1
                         _cum = _t1
+                    # ── VOPlan → vo_items (authoritative source) ─────────────
+                    # Build vid→shot_id from ShotList audio_intent (not from VOPlan)
+                    # so the mapping is grounded in the timing-locked shot structure.
+                    _vid2shot_vot: dict = {}
+                    for _rs2 in _sl.get("shots", []):
+                        for _vid in _rs2.get("audio_intent", {}).get("vo_item_ids", []):
+                            _vid2shot_vot[_vid] = _rs2.get("shot_id", "")
+                    _vo_items_vot: list = []
+                    try:
+                        import glob as _glob_vot
+                        import re as _re_vot
+                        _vp_list = [p for p in _glob_vot.glob(
+                            os.path.join(ep_dir, "VOPlan.*.json"))
+                            if os.path.basename(p) != "AssetManifest.shared.json"]
+                        if _vp_list:
+                            _loc_vot = "en"
+                            _vars_vot = os.path.join(ep_dir, "pipeline_vars.sh")
+                            if os.path.isfile(_vars_vot):
+                                _vm_v = _re_vot.search(
+                                    r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                                    open(_vars_vot).read())
+                                if _vm_v:
+                                    _loc_vot = _vm_v.group(1).strip()
+                            _vp_path = os.path.join(ep_dir, f"VOPlan.{_loc_vot}.json")
+                            if not os.path.isfile(_vp_path):
+                                _vp_path = sorted(_vp_list)[0]
+                            _vp = json.load(open(_vp_path, encoding="utf-8"))
+                            for _vo in _vp.get("vo_items", []):
+                                _vs = _vo.get("start_sec")
+                                _ve = _vo.get("end_sec")
+                                if _vs is not None:
+                                    _shot_id_vot = (_vid2shot_vot.get(_vo.get("item_id", ""))
+                                                    or _vo.get("shot_id", ""))
+                                    _vo_items_vot.append({
+                                        "item_id":    _vo.get("item_id", ""),
+                                        "start_sec":  round(float(_vs), 3),
+                                        "end_sec":    round(float(_ve or _vs), 3),
+                                        "speaker_id": _vo.get("speaker_id", ""),
+                                        "shot_id":    _shot_id_vot,
+                                    })
+                    except Exception as _vot_err:
+                        print(f"  [WARN] vo_timeline: VOPlan: {_vot_err}")
                     _vot_result = {
                         "shots":     _shot_entries,
                         "scenes":    list(_scene_map.values()),
                         "total_sec": round(_cum, 4),
+                        "vo_items":  _vo_items_vot,
                     }
                     _json_resp(self, _vot_result)
             except Exception as exc:
@@ -18109,6 +19094,10 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    # HEAD requests use the same logic as GET — /serve_media returns 200/404
+    # based on file existence; the client ignores the body.
+    do_HEAD = do_GET
 
     # ── POST ──────────────────────────────────────────────────────────────────
     def do_POST(self):
@@ -20744,6 +21733,235 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 500)
 
+        # ── Media: upload file to shared library (POST /api/media_upload) ──
+        elif self.path == "/api/media_upload":
+            import uuid as _uuid_mu
+            import subprocess as _sp_mu
+            try:
+                content_type = self.headers.get("Content-Type", "")
+                length = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+
+                # Parse multipart form data using cgi module
+                import cgi as _cgi_mu
+                import io as _io_mu
+                environ = {
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE":   content_type,
+                    "CONTENT_LENGTH": str(length),
+                }
+                form = _cgi_mu.FieldStorage(
+                    fp=_io_mu.BytesIO(raw_body),
+                    environ=environ,
+                    keep_blank_values=True,
+                )
+                slug       = (form.getvalue("slug") or "").strip()
+                ep_id      = (form.getvalue("ep_id") or "").strip()
+                media_type = (form.getvalue("media_type") or "").strip()
+                file_item  = form["file"] if "file" in form else None
+
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                if media_type not in ("video", "image"):
+                    raise ValueError("media_type must be 'video' or 'image'")
+                if file_item is None or not file_item.filename:
+                    raise ValueError("file is required")
+
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                os.makedirs(ep_dir, exist_ok=True)
+
+                # Sanitise filename
+                orig_name = os.path.basename(file_item.filename.replace("\\", "/"))
+                orig_name = "".join(c for c in orig_name if c.isalnum() or c in "._- ")[:128]
+                if not orig_name:
+                    orig_name = "upload"
+
+                subdir = "videos" if media_type == "video" else "images"
+                dest_dir = os.path.join(ep_dir, "assets", "media_library", subdir)
+                os.makedirs(dest_dir, exist_ok=True)
+                dest_path = os.path.join(dest_dir, orig_name)
+                file_data = file_item.file.read()
+                with open(dest_path, "wb") as _f:
+                    _f.write(file_data)
+
+                rel_path = os.path.relpath(dest_path, ep_dir)
+                size_bytes = len(file_data)
+                item_id = _uuid_mu.uuid4().hex[:8]
+
+                if media_type == "video":
+                    duration_sec = 0.0
+                    try:
+                        _ffp = _sp_mu.run(
+                            ["ffprobe", "-v", "error", "-show_entries",
+                             "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+                             dest_path],
+                            capture_output=True, text=True, timeout=30, check=True)
+                        duration_sec = float(_ffp.stdout.strip())
+                    except Exception as _fe:
+                        print(f"  [media_upload] ffprobe failed: {_fe}")
+                    record = {
+                        "id": item_id, "filename": orig_name,
+                        "path": rel_path, "duration_sec": duration_sec,
+                        "size_bytes": size_bytes,
+                    }
+                else:
+                    width, height = 0, 0
+                    try:
+                        from PIL import Image as _PIL_Image
+                        with _PIL_Image.open(dest_path) as _img:
+                            width, height = _img.size
+                    except Exception as _pe:
+                        try:
+                            _idr = _sp_mu.run(
+                                ["identify", "-format", "%w %h", dest_path],
+                                capture_output=True, text=True, timeout=10, check=True)
+                            _wh = _idr.stdout.strip().split()
+                            if len(_wh) == 2:
+                                width, height = int(_wh[0]), int(_wh[1])
+                        except Exception:
+                            pass
+                    record = {
+                        "id": item_id, "filename": orig_name,
+                        "path": rel_path, "width": width, "height": height,
+                        "size_bytes": size_bytes,
+                    }
+
+                # Append to media_library.json atomically
+                lib_path = os.path.join(ep_dir, "assets", "media_library", "media_library.json")
+                if os.path.isfile(lib_path):
+                    with open(lib_path, encoding="utf-8") as _lf:
+                        lib_data = json.load(_lf)
+                else:
+                    lib_data = {"videos": [], "images": []}
+                lib_data.setdefault("videos", [])
+                lib_data.setdefault("images", [])
+                if media_type == "video":
+                    lib_data["videos"].append(record)
+                else:
+                    lib_data["images"].append(record)
+                lib_tmp = lib_path + ".tmp"
+                with open(lib_tmp, "w", encoding="utf-8") as _lf:
+                    json.dump(lib_data, _lf, indent=2, ensure_ascii=False)
+                os.replace(lib_tmp, lib_path)
+
+                serve_url = f"/serve_media?path=projects/{slug}/episodes/{ep_id}/{rel_path}"
+                print(f"  [media_upload] {media_type} saved: {orig_name}  id={item_id}")
+                body = json.dumps({"ok": True, "item": record, "url": serve_url}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # ── Media: cut clip from library video (POST /api/media_cut_clip) ────
+        elif self.path == "/api/media_cut_clip":
+            import uuid as _uuid_cc
+            import subprocess as _sp_cc
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+
+                slug            = payload.get("slug", "").strip()
+                ep_id           = payload.get("ep_id", "").strip()
+                source_video_id = payload.get("source_video_id", "").strip()
+                source_path     = payload.get("source_path", "").strip()
+                start_sec       = float(payload.get("start_sec") or 0)
+                end_sec         = float(payload.get("end_sec") or 0)
+
+                if not slug or not ep_id or not source_path:
+                    raise ValueError("slug, ep_id, and source_path are required")
+
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+
+                # Path-traversal guard.
+                # Batch assets have absolute paths (extracted from file:// URLs by
+                # /api/media_library); locally-uploaded assets use relative paths.
+                if os.path.isabs(source_path):
+                    abs_src = os.path.realpath(source_path)
+                    if not os.path.isfile(abs_src):
+                        raise ValueError(f"source_path does not exist: {abs_src}")
+                else:
+                    abs_src = os.path.realpath(os.path.join(ep_dir, source_path))
+                    if not abs_src.startswith(os.path.realpath(ep_dir)):
+                        raise ValueError("source_path outside episode directory")
+
+                clip_id   = "mclip_" + _uuid_cc.uuid4().hex[:8]
+                clips_dir = os.path.join(ep_dir, "assets", "media_library", "clips")
+                os.makedirs(clips_dir, exist_ok=True)
+                dest_path = os.path.join(clips_dir, clip_id + ".mp4")
+
+                # Run ffmpeg (stream copy, no re-encode)
+                _sp_cc.run(
+                    ["ffmpeg", "-y", "-ss", str(start_sec), "-to", str(end_sec),
+                     "-i", abs_src, "-c", "copy", dest_path],
+                    capture_output=True, check=True, timeout=120,
+                )
+
+                # Get output duration via ffprobe
+                duration_sec = end_sec - start_sec
+                try:
+                    _ffp = _sp_cc.run(
+                        ["ffprobe", "-v", "error", "-show_entries",
+                         "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+                         dest_path],
+                        capture_output=True, text=True, timeout=30, check=True)
+                    duration_sec = float(_ffp.stdout.strip())
+                except Exception as _fe:
+                    print(f"  [media_cut_clip] ffprobe on output failed: {_fe}")
+
+                rel_path = os.path.relpath(dest_path, ep_dir)
+                clip_record = {
+                    "clip_id":         clip_id,
+                    "source_video_id": source_video_id,
+                    "filename":        clip_id + ".mp4",
+                    "path":            rel_path,
+                    "start_sec":       start_sec,
+                    "end_sec":         end_sec,
+                    "duration_sec":    duration_sec,
+                }
+
+                # Append to media_cut_clips.json atomically
+                clips_json = os.path.join(ep_dir, "assets", "media_library", "media_cut_clips.json")
+                if os.path.isfile(clips_json):
+                    with open(clips_json, encoding="utf-8") as _cf:
+                        clips_list = json.load(_cf)
+                    # Replace if clip_id already exists
+                    clips_list = [c for c in clips_list if c.get("clip_id") != clip_id]
+                else:
+                    clips_list = []
+                clips_list.append(clip_record)
+                clips_tmp = clips_json + ".tmp"
+                with open(clips_tmp, "w", encoding="utf-8") as _cf:
+                    json.dump(clips_list, _cf, indent=2, ensure_ascii=False)
+                os.replace(clips_tmp, clips_json)
+
+                serve_url = f"/serve_media?path=projects/{slug}/episodes/{ep_id}/{rel_path}"
+                print(f"  [media_cut_clip] clip={clip_id}  {start_sec:.2f}s–{end_sec:.2f}s  dur={duration_sec:.2f}s")
+                body = json.dumps({
+                    "ok": True, "clip_id": clip_id,
+                    "path": rel_path, "duration_sec": duration_sec, "url": serve_url,
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # ── Media: write MediaPlan.json (POST /api/media_confirm) ────────────
         elif self.path == "/api/media_confirm":
             try:
@@ -20751,18 +21969,23 @@ class Handler(BaseHTTPRequestHandler):
                 raw_body = self.rfile.read(length)
                 payload  = json.loads(raw_body)
 
-                slug       = payload.get("slug", "").strip()
-                ep_id      = payload.get("ep_id", "").strip()
-                batch_id   = payload.get("batch_id", "").strip()
-                selections = payload.get("selections", {})
+                slug     = payload.get("slug", "").strip()
+                ep_id    = payload.get("ep_id", "").strip()
+                overrides = payload.get("overrides", {})
 
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
-                if not isinstance(selections, dict):
-                    raise ValueError("selections must be a dict")
+                if not isinstance(overrides, dict):
+                    raise ValueError("overrides must be a dict")
 
                 ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
                 os.makedirs(ep_dir, exist_ok=True)
+
+                # Filter: keep shots that have a clip_id OR at least one extra segment
+                shot_overrides = {
+                    sid: ovr for sid, ovr in overrides.items()
+                    if ovr.get("clip_id") or ovr.get("segments")
+                }
 
                 # Detect primary locale from pipeline_vars.sh
                 import re as _re_mc
@@ -20778,22 +22001,18 @@ class Handler(BaseHTTPRequestHandler):
 
                 sel_path = os.path.join(ep_dir, "MediaPlan.json")
                 out = {
-                    "batch_id":         batch_id,
                     "slug":             slug,
                     "episode_id":       ep_id,
-                    "version":          payload.get("version", 1),
                     "confirmed_locale": _confirmed_locale,
-                    "selections":       selections,
+                    "shot_overrides":   shot_overrides,
                 }
-                with open(sel_path, "w", encoding="utf-8") as _sf:
+                tmp_path = sel_path + ".tmp"
+                with open(tmp_path, "w", encoding="utf-8") as _sf:
                     json.dump(out, _sf, indent=2, ensure_ascii=False)
+                os.replace(tmp_path, sel_path)
 
-                rel_path = os.path.relpath(sel_path, PIPE_DIR)
-                print(f"  Saved media selections  slug={slug}  ep={ep_id}  "
-                      f"n={len(selections)}")
-                body = json.dumps({"ok": True,
-                                   "path": rel_path,
-                                   "n": len(selections)}).encode()
+                print(f"  Saved media plan  slug={slug}  ep={ep_id}  shots={len(shot_overrides)}")
+                body = json.dumps({"ok": True, "saved": len(shot_overrides)}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))

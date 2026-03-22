@@ -62,6 +62,11 @@ import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+# resolve_assets lives alongside this file; insert its directory so it imports cleanly
+# whether render_video is invoked directly or via subprocess from test_server.py.
+sys.path.insert(0, str(Path(__file__).parent))
+from resolve_assets import resolve_all as _ra_resolve_all  # noqa: E402
+
 PRODUCER = "render_video.py"
 
 # ── Frame geometry ─────────────────────────────────────────────────────────────
@@ -225,11 +230,13 @@ def build_shots_for_render(
                         "hold_sec":       si.get("hold_sec"),
                         "animation_type": si.get("animation_type"),
                     }
-                    if si.get("start_sec") is not None:
-                        se["start_sec"] = si["start_sec"]
-                    if si.get("end_sec") is not None:
-                        se["end_sec"]       = si["end_sec"]
-                        se["duration_sec"]  = si["end_sec"] - se.get("start_sec", 0.0)
+                    _si_in  = si.get("clip_in")  if si.get("clip_in")  is not None else si.get("start_sec")
+                    _si_out = si.get("clip_out") if si.get("clip_out") is not None else si.get("end_sec")
+                    if _si_in is not None:
+                        se["start_sec"] = _si_in
+                    if _si_out is not None:
+                        se["end_sec"]       = _si_out
+                        se["duration_sec"]  = _si_out - se.get("start_sec", 0.0)
                     bg_segments.append(se)
                 bg_media = seg_list[0]
             else:
@@ -618,8 +625,8 @@ def render_shot(
     bg_path = uri_to_path(bg_uri)
     bg_is_video = bg_path and bg_path.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov", ".avi")
 
-    if bg_segments and len(bg_segments) > 1:
-        # ── Multi-segment background (v3): concat filter, no looping ──
+    if bg_segments and len(bg_segments) >= 1:
+        # ── Confirmed background segments (single clip v2, or multi-segment v3) ──
         seg_labels: list[str] = []
         for si, seg in enumerate(bg_segments):
             seg_uri  = seg.get("uri", "")
@@ -630,9 +637,10 @@ def render_shot(
                 # duration_override_sec: user-specified trim (play first N seconds).
                 # Falls back to natural duration_sec, then full shot dur_sec.
                 seg_dur = seg.get("duration_override_sec") or seg.get("duration_sec") or dur_sec
-                # Clip trim range: start_sec / end_sec allow sub-clip selection.
+                # Clip trim range: clip_in / clip_out allow sub-clip selection.
+                # Falls back to start_sec / end_sec for backward compat.
                 # Uses ffmpeg trim filter (frame-accurate) rather than input-level -ss.
-                seg_start = float(seg.get("start_sec") or 0)
+                seg_start = float(seg.get("clip_in") if seg.get("clip_in") is not None else (seg.get("start_sec") or 0))
                 # Don't loop — use natural duration, trim if needed
                 seg_idx = add_input([], str(seg_path))
                 if seg_start > 0:
@@ -1323,11 +1331,6 @@ def main() -> None:
     profile_name = args.profile or DEFAULT_PROFILE
     profile      = PROFILES.get(profile_name, PROFILES[DEFAULT_PROFILE])
 
-    # ── Build media_map + asset_map from VOPlan.resolved_assets[] ───────────
-    _media_shim = {"items": voplan.get("resolved_assets", [])}
-    media_map   = build_media_map(_media_shim)
-    asset_map   = build_asset_map(voplan)
-
     # ── EN locale reference floor (--reference-approval) ────────────────────
     _ref_dur_map: dict = {}
     if args.reference_approval:
@@ -1372,6 +1375,7 @@ def main() -> None:
     # (MusicPlan is loaded first so music_asset_id is available per shot)
 
     # --- Load MusicPlan.json (replaces MusicApprovalSnapshot.json) ---
+    _mp_doc               = {}   # pre-init so resolve block below can always reference it
     _music_plan_overrides = {}
     _music_clip_volumes   = {}
     _music_track_volumes  = {}
@@ -1401,6 +1405,7 @@ def main() -> None:
     # ── Load SfxPlan.json (once) — live user selections from SFX tab ────────
     # Read directly at render time so edits made in the SFX tab are honoured
     # without requiring a gen_render_plan re-run (mirrors MusicPlan override logic).
+    _sfx_plan_data: dict = {}   # pre-init so resolve block below can always reference it
     _sfx_plan_path = os.path.join(episode_dir, "SfxPlan.json")
     _sfx_plan_by_shot: dict = {}   # shot_id -> list[sfx_entry]
     if os.path.isfile(_sfx_plan_path):
@@ -1427,6 +1432,45 @@ def main() -> None:
         except Exception as _sfx_err:
             print(f"  [render] WARNING: Could not load SfxPlan.json: {_sfx_err}")
     # If SfxPlan.json is absent, _sfx_plan_by_shot stays {} and no SFX is mixed.
+
+    # ── Build media_map + asset_map via in-memory asset resolution ───────────
+    # Source of truth: AssetManifest.shared.json (characters, backgrounds, sfx/music
+    # asset IDs) + VOPlan (vo_items, locale) + MusicPlan / SfxPlan already loaded above.
+    # This replaces reading the pre-computed resolved_assets[] field from VOPlan so that
+    # render_video never depends on a stale pipeline-time snapshot baked into VOPlan.
+    _am_shared_path = episode_dir / "AssetManifest.shared.json"
+    _am_shared: dict = {}
+    if _am_shared_path.exists():
+        try:
+            _am_shared = load_json(_am_shared_path)
+            print(f"  [render] AssetManifest.shared.json loaded (project_id={_am_shared.get('project_id','')})")
+        except Exception as _am_err:
+            print(f"  [render] WARNING: AssetManifest.shared.json load failed: {_am_err}")
+    else:
+        print("  [render] WARNING: AssetManifest.shared.json not found — "
+              "falling back to VOPlan character/background lists")
+
+    # Assemble a minimal merged manifest for resolve_all() — only the fields it reads.
+    # character_packs / backgrounds / sfx_items / music_items come from the shared manifest
+    # (authoritative, locale-independent).  vo_items come from the locale-specific VOPlan.
+    # Falls back to VOPlan fields when shared manifest is absent (older project layouts).
+    _virtual_merged: dict = {
+        "locale":          locale,
+        "project_id":      _am_shared.get("project_id",      voplan.get("project_id", "")),
+        "character_packs": _am_shared.get("character_packs", voplan.get("character_packs", [])),
+        "backgrounds":     _am_shared.get("backgrounds",     voplan.get("backgrounds", [])),
+        "vo_items":        voplan.get("vo_items", []),
+        # sfx_items: AssetManifest is authoritative; SfxPlan has entries but not the full list
+        "sfx_items":       _am_shared.get("sfx_items",  voplan.get("sfx_items", [])),
+        # music_items: AssetManifest is authoritative; MusicPlan has shot_overrides, not items
+        "music_items":     _am_shared.get("music_items", voplan.get("music_items", [])),
+    }
+    _assets_root = episode_dir / "assets"
+    print(f"  [render] resolve_all() — in-memory resolution from authoritative sources")
+    _ra_items  = _ra_resolve_all(_virtual_merged, _assets_root, selections=None, no_hires=True)
+    media_map  = build_media_map({"items": _ra_items})
+    asset_map  = build_asset_map({"resolved_assets": _ra_items})
+    print(f"  [render] resolve_all() → {len(_ra_items)} items")
 
     # ── Load VO timing from VOPlan + ShotList (for render_shot subtitle track) ─
     _manifest_path = episode_dir / f"VOPlan.{locale}.json"
@@ -1467,11 +1511,47 @@ def main() -> None:
         try:
             _sel_data = json.loads(_sel_path.read_text(encoding="utf-8"))
             _shot_to_segments = {}
-            for _bg_id, _bg_data in _sel_data.get("selections", {}).items():
-                if not isinstance(_bg_data, dict):
-                    continue
-                for _shot_id, _shot_data in _bg_data.get("per_shot", {}).items():
-                    _shot_to_segments[_shot_id] = _shot_data.get("segments", [])
+            if "shot_overrides" in _sel_data:
+                # New format: shot_overrides {shot_id: {clip_id, clip_in, clip_out}}
+                # (MediaPlan.v1.json schema: clip_in/clip_out are trim bounds in seconds)
+                # Detected by key presence — no schema_version bump.
+                # Resolve clip_id → absolute file path via media_cut_clips.json
+                _clips_path = episode_dir / "assets" / "media_library" / "media_cut_clips.json"
+                _clip_map = {}   # clip_id → clip record
+                if _clips_path.exists():
+                    try:
+                        _clip_map = {c["clip_id"]: c
+                                     for c in json.loads(_clips_path.read_text(encoding="utf-8"))
+                                     if "clip_id" in c}
+                    except Exception as _ce:
+                        print(f"  [media] WARNING: Failed to load media_cut_clips.json: {_ce}")
+
+                for _shot_id, _ovr in _sel_data.get("shot_overrides", {}).items():
+                    # New path: Shot Overrides UI saves a segments array directly
+                    if _ovr.get("segments"):
+                        _shot_to_segments[_shot_id] = _ovr["segments"]
+                        continue
+                    # Legacy path: single clip_id entry (primary clip dropdown)
+                    _clip_id = _ovr.get("clip_id")
+                    if not _clip_id or _clip_id not in _clip_map:
+                        continue
+                    _abs = (episode_dir / _clip_map[_clip_id]["path"]).resolve()
+                    _seg = {
+                        "url":        _abs.as_uri(),       # file:// URI — required by _url_to_path()
+                        "media_type": "video",
+                        # Prefer clip_in/clip_out (MediaPlan.v1 schema); fall back to
+                        # start_sec/end_sec for backward compat with older saved plans.
+                        "start_sec":  float(_ovr.get("clip_in")  if _ovr.get("clip_in")  is not None else (_ovr.get("start_sec") or 0.0)),
+                        "end_sec":    _ovr.get("clip_out") if _ovr.get("clip_out") is not None else _ovr.get("end_sec"),
+                    }
+                    _shot_to_segments[_shot_id] = [_seg]
+            else:
+                # Old format: selections {bg_id: {per_shot: {shot_id: {segments: [...]}}}}
+                for _bg_id, _bg_data in _sel_data.get("selections", {}).items():
+                    if not isinstance(_bg_data, dict):
+                        continue
+                    for _shot_id, _shot_data in _bg_data.get("per_shot", {}).items():
+                        _shot_to_segments[_shot_id] = _shot_data.get("segments", [])
             # Locale mismatch warning
             _confirmed_locale = _sel_data.get("confirmed_locale")
             if _confirmed_locale and _confirmed_locale != locale:
@@ -1536,15 +1616,42 @@ def main() -> None:
             if _shot_id_cur in _shot_to_segments:
                 _confirmed_segs = _shot_to_segments[_shot_id_cur]
                 shot = dict(shot)  # shallow copy — do not mutate shots list
+                def _seg_uri(seg):
+                    # Prefer filesystem path (avoids /serve_media proxy URL)
+                    p = seg.get("path") or ""
+                    if p:
+                        return _url_to_path(p)
+                    return _url_to_path(seg.get("url", ""))
+
+                def _seg_start(seg):
+                    # clip_in (new schema) takes priority over start_sec (old schema)
+                    v = seg.get("clip_in") if seg.get("clip_in") is not None else seg.get("start_sec")
+                    return float(v or 0.0)
+
+                def _seg_dur(seg):
+                    start = _seg_start(seg)
+                    # Video: use clip_out or end_sec
+                    end_raw = seg.get("clip_out") if seg.get("clip_out") is not None else seg.get("end_sec")
+                    if end_raw is not None:
+                        return max(0.0, float(end_raw) - start)
+                    # Image: use hold_sec then duration_sec
+                    hold = seg.get("hold_sec")
+                    if hold:
+                        return float(hold)
+                    dur = seg.get("duration_sec")
+                    if dur:
+                        return float(dur)
+                    return 0.0
+
                 shot["background_segments"] = [
                     {
-                        "uri":                   _url_to_path(seg.get("url", "")),
-                        "media_type":            seg.get("media_type", "image"),
-                        "animation_type":        seg.get("animation_type"),
-                        "start_sec":             float(seg.get("start_sec") or 0.0),
-                        "duration_override_sec": max(0.0,
-                                                     float(seg["end_sec"] if seg.get("end_sec") is not None else (seg.get("hold_sec") or 0))
-                                                     - float(seg["start_sec"] if seg.get("start_sec") is not None else 0.0)),
+                        "uri":                   _seg_uri(seg),
+                        # media_type (new) or type (old) — default image
+                        "media_type":            seg.get("media_type") or seg.get("type") or "image",
+                        # animation_type (new) or animation (old)
+                        "animation_type":        seg.get("animation_type") or seg.get("animation") or None,
+                        "start_sec":             _seg_start(seg),
+                        "duration_override_sec": _seg_dur(seg),
                         "hold_sec":              float(seg.get("hold_sec") or 0.0),
                     }
                     for seg in _confirmed_segs

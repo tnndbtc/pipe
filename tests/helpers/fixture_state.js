@@ -234,6 +234,52 @@ function resetKW22() {
   if (fs.existsSync(zhVoPlan)) fs.unlinkSync(zhVoPlan);
 }
 
+// KW-24: VOPlan + MusicPlan at episode root (correct location) + music WAVs.
+function resetKW24() {
+  const ep = getEpDir();
+  fs.copyFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), path.join(ep, 'VOPlan.en.json'));
+  fs.copyFileSync(path.join(FIXTURE_EP, 'MusicPlan.json'), path.join(ep, 'MusicPlan.json'));
+  const musicDir = path.join(ep, 'assets', 'music');
+  fs.mkdirSync(musicDir, { recursive: true });
+  ['music-sc01-sh01.wav', 'music-sc02-sh02.wav'].forEach(wav => {
+    const src = path.join(FIXTURE_EP, 'assets', 'music', wav);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(musicDir, wav));
+  });
+  const packDir = path.join(ep, 'assets', 'media', 'MediaPreviewPack');
+  if (fs.existsSync(packDir)) fs.rmSync(packDir, { recursive: true, force: true });
+}
+
+// KW-26: VOPlan + MusicPlan + SfxPlan + a stub SfxPreviewPack/preview_audio.wav.
+// The stub WAV simulates a previously generated SFX preview so that
+// _sfxTryRestorePreview() finds the file and should show the preview wrap.
+// SfxPlan.json is required for /api/sfx_timeline to return sfx_items with
+// episode-absolute positions (used by the bar-position assertion in KW-26).
+function resetKW26() {
+  const ep = getEpDir();
+  fs.copyFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), path.join(ep, 'VOPlan.en.json'));
+  fs.copyFileSync(path.join(FIXTURE_EP, 'MusicPlan.json'), path.join(ep, 'MusicPlan.json'));
+  fs.copyFileSync(path.join(FIXTURE_EP, 'SfxPlan.json'),   path.join(ep, 'SfxPlan.json'));
+  // Music WAVs (needed by _loadAndMergeTl → music_timeline)
+  const musicDir = path.join(ep, 'assets', 'music');
+  fs.mkdirSync(musicDir, { recursive: true });
+  ['music-sc01-sh01.wav', 'music-sc02-sh02.wav'].forEach(wav => {
+    const src = path.join(FIXTURE_EP, 'assets', 'music', wav);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(musicDir, wav));
+  });
+  // Plant a minimal valid WAV so /serve_media HEAD returns 200
+  const packDir = path.join(ep, 'assets', 'sfx', 'SfxPreviewPack');
+  fs.mkdirSync(packDir, { recursive: true });
+  const wav = Buffer.alloc(44);
+  wav.write('RIFF', 0, 'ascii');   wav.writeUInt32LE(36, 4);
+  wav.write('WAVE', 8, 'ascii');   wav.write('fmt ', 12, 'ascii');
+  wav.writeUInt32LE(16, 16);       wav.writeUInt16LE(1, 20);   // PCM
+  wav.writeUInt16LE(1, 22);        wav.writeUInt32LE(44100, 24);
+  wav.writeUInt32LE(88200, 28);    wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);       wav.write('data', 36, 'ascii');
+  wav.writeUInt32LE(0, 40);
+  fs.writeFileSync(path.join(packDir, 'preview_audio.wav'), wav);
+}
+
 module.exports = {
   getEpDir,
   setPipeTestDir,
@@ -251,6 +297,8 @@ module.exports = {
   resetKW18Sfx,
   resetKW19c,
   resetKW22,
+  resetKW24,
+  resetKW26,
   // EP_DIR kept for backward compat — resolves dynamically via getEpDir()
   get EP_DIR() { return getEpDir(); },
 };
