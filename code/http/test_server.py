@@ -2894,8 +2894,8 @@ placeholder="Enter your story here"></textarea>
     .vo-break-label{font-size:0.72em;color:var(--dim);flex:1}
     .vo-break-input{width:60px;font-size:0.8em;padding:2px 4px;background:var(--input-bg,#1e1e1e);color:var(--text);border:1px solid var(--border);border-radius:3px;text-align:right}
     /* ── VO Timeline Player ─────────────────────────────────────── */
-    #vo-timeline-bar{display:none;flex-direction:column;gap:4px;padding:8px 12px;
-      margin:0 0 6px;background:#0e1f2e;border:1px solid #2a4a6a;border-radius:6px}
+    #vo-timeline-bar{display:none;flex-direction:column;gap:4px;padding:14px 18px;
+      margin:0 0 6px;background:var(--surface);border:1px solid var(--border);border-radius:8px}
     #vo-timeline-bar.active{display:flex}
     /* ── Scroll-to-top button ────────────────────────────────────── */
     #vo-scroll-top{display:none;margin-left:auto;font-size:0.72em;padding:3px 10px;
@@ -3004,6 +3004,7 @@ placeholder="Enter your story here"></textarea>
   <div id="vo-scroll-wrap">
     <!-- VO Timeline Player — shown after Generate Preview -->
     <div id="vo-timeline-bar">
+      <div class="music-section-label">Preview Audio</div>
       <audio id="vo-tl-audio" preload="auto" style="display:none"></audio>
       <div class="vo-tl-top">
         <button class="vo-tl-playbtn" id="vo-tl-playbtn" onclick="_voTlToggle()" title="Play / Pause">▶</button>
@@ -4485,7 +4486,6 @@ placeholder="Enter your story here"></textarea>
       label.textContent = `${clip.scene_id || ''}: ${clip.text.slice(0, 80)}${clip.text.length > 80 ? '…' : ''}`;
       if (window._voTlLastId !== clip.item_id) {
         window._voTlLastId = clip.item_id;
-        _voTlHighlightRow(clip.item_id);
       }
     }
     window._voTlRaf = requestAnimationFrame(_voTlTick);
