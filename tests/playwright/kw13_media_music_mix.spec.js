@@ -18,12 +18,12 @@
 //
 // Fix:
 //   1. Use __file__-relative path for the subprocess in test_server.py.
-//   2. Index shot_overrides by "item_id" and resolve each shot's music_item_id
-//      from ShotList audio_intent.music_item_id.
+//   2. Iterate shot_overrides directly by "item_id" (episode-absolute start_sec/end_sec)
+//      — no ShotList lookup needed; MusicPlan start_sec is already episode-absolute.
 //
 // Fixture: MusicPlan.json already committed in tests/fixtures.
-//   sc02-sh02 has music_asset_id="music-sc02-sh02" → music-sc02-sh02.wav present.
-//   After fix: exactly 1 music clip mixed; debug_log shows "Mixed 1 music clip(s)".
+//   Both sc01-sh01 and sc02-sh02 have music WAVs present.
+//   After fix: debug_log shows "Mixed N music clip(s)" (N >= 1).
 const { test, expect } = require('@playwright/test');
 const { startTestServer, stopTestServer } = require('../helpers/server');
 const { resetKW13 } = require('../helpers/fixture_state');

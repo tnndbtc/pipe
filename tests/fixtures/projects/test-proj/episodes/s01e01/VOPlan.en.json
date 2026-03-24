@@ -22,13 +22,13 @@
         "min_width": 1920,
         "min_height": 1080
       },
-      "ai_prompt": "Interior of a Soviet-era nuclear reactor control room at 1:23 a.m., banks of analogue instrument panels casting a dim green and amber glow across the empty chamber. Shadows dominate the frame — only the instrument backlight and faint overhead fluorescents illuminate rows of switches, gauges, and blinking indicators in cold, oppressive stillness.",
+      "ai_prompt": "Interior of a Soviet-era nuclear reactor control room at 1:23 a.m., banks of analogue instrument panels casting a dim green and amber glow across the empty chamber. Shadows dominate the frame \u2014 only the instrument backlight and faint overhead fluorescents illuminate rows of switches, gauges, and blinking indicators in cold, oppressive stillness.",
       "ai_prompt_variations": [
         "Extreme close-up on a single Soviet control panel button in a nuclear reactor room at night, the recessed circular switch lit only by the faint glow of surrounding indicator lights. Metal housing scratched and worn, the button label in Cyrillic partially legible, deep shadow filling the edges of the frame.",
-        "Wide interior shot of a Soviet nuclear reactor control room at night under harsh emergency lighting, red warning lights slicing across the instrument consoles in high-contrast bands. The room appears abandoned mid-shift — gauges reading in abnormal ranges, alarm panels illuminated, absolute stillness.",
+        "Wide interior shot of a Soviet nuclear reactor control room at night under harsh emergency lighting, red warning lights slicing across the instrument consoles in high-contrast bands. The room appears abandoned mid-shift \u2014 gauges reading in abnormal ranges, alarm panels illuminated, absolute stillness.",
         "Overhead angle looking down into the reactor control room at night, the curved rows of instrument panels receding into near-darkness. Soft blue-green instrument glow outlines the workstations in the otherwise black space, no movement, no people.",
         "Tight side-profile of a Soviet control room instrument wall at night, moisture condensation visible on the metal panel surfaces. A single bare incandescent bulb provides harsh directional light from above, throwing deep shadows behind each dial housing.",
-        "Atmospheric wide shot of the reactor control room at night from the doorway, a long perspective down the central aisle between two facing banks of instrumentation. The far end disappears into darkness, the nearest panels feebly lit by their own indicator lights — claustrophobic, silent, and tense."
+        "Atmospheric wide shot of the reactor control room at night from the doorway, a long perspective down the central aisle between two facing banks of instrumentation. The far end disappears into darkness, the nearest panels feebly lit by their own indicator lights \u2014 claustrophobic, silent, and tense."
       ],
       "search_prompt": "nuclear reactor control room night Soviet industrial dark instruments",
       "search_queries": [
@@ -99,12 +99,12 @@
         "min_width": 1920,
         "min_height": 1080
       },
-      "ai_prompt": "Wide exterior view of the Chernobyl Nuclear Power Plant at dawn, the massive reactor building and cooling towers silhouetted against a pale sky washed in cold grey-blue light. The plant stands immense and industrial on the flat Ukrainian steppe, cooling towers venting faint wisps of steam into the still morning air — vast, foreboding, and eerily quiet.",
+      "ai_prompt": "Wide exterior view of the Chernobyl Nuclear Power Plant at dawn, the massive reactor building and cooling towers silhouetted against a pale sky washed in cold grey-blue light. The plant stands immense and industrial on the flat Ukrainian steppe, cooling towers venting faint wisps of steam into the still morning air \u2014 vast, foreboding, and eerily quiet.",
       "ai_prompt_variations": [
         "Extreme-wide aerial perspective of the Chernobyl Nuclear Power Plant complex at early dawn, the entire facility spread across a treeless plain under an overcast sky. The reactor buildings appear small against the enormous grey expanse of sky and flat land, emphasising the isolation of the site.",
         "Ground-level exterior shot of the Chernobyl plant at dawn from across a cooling pond, the reactor building and chimney stacks reflected in the still dark water. Warm first light catching only the tops of the structures while the lower plant remains in cold shadow.",
         "Tight telephoto compression of the Chernobyl cooling tower at dawn under overcast clouds pressing down behind the concrete hyperboloid structure. Steam billowing from the tower top disperses into the grey sky, almost monochromatic, no saturation.",
-        "Misty dawn exterior of the Chernobyl plant, morning fog lying low across the surrounding pine forest and creeping toward the reactor complex. The plant buildings partially obscured by haze, looming shapes visible through the mist — atmospheric, ominous.",
+        "Misty dawn exterior of the Chernobyl plant, morning fog lying low across the surrounding pine forest and creeping toward the reactor complex. The plant buildings partially obscured by haze, looming shapes visible through the mist \u2014 atmospheric, ominous.",
         "High contrast dramatic dawn shot of the Chernobyl Number 4 reactor building exterior, strong directional light from just above the horizon casting long shadows across the concrete facade. The sky behind it is bruised purple and amber at the horizon, the building imposing and severe."
       ],
       "search_prompt": "Chernobyl nuclear plant exterior dawn Ukraine industrial cooling tower",
@@ -668,6 +668,6 @@
     }
   ],
   "scene_heads": {
-    "sc01": 0
+    "sc01": 15
   }
 }

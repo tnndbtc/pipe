@@ -66,7 +66,7 @@ function resetKW2() {
   if (fs.existsSync(mp)) fs.unlinkSync(mp);
 }
 
-// resetKW80: sentinel state used by KW-27 through KW-31.
+// resetKW80: sentinel state used by KW-27 through KW-24.
 // VOPlan present with last vo_item end_sec patched to 80.0 (well above ShotList
 // total of 55.648s) AND pause_after_ms patched to 10000 (10s).
 // MusicPlan + SfxPlan + music WAVs present so all three timeline endpoints

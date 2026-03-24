@@ -103,7 +103,145 @@ function isPerShotCall(args) {
   return outPath.endsWith('.mkv') && !outPath.endsWith('black_frame.mkv');
 }
 
-// ── Test ───────────────────────────────────────────────────────────────────────
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+// KW-17b fixture — minimal two-shot episode where sc01's VO overruns its
+// ShotList boundary, triggering the stale-start_sec duration inflation bug.
+//
+// ShotList:
+//   sc01-sh01  duration_sec=10.0   start_sec=0  (implicit)
+//   sc02-sh02  duration_sec=15.0   start_sec=10.0
+//
+// VOPlan VO items (episode-absolute):
+//   vo-sc01-001  end_sec=18.0  →  overruns sc01 (10.0 s boundary) by 8 s
+//   vo-sc02-001  end_sec=28.0
+//
+// Expected durations (correct):
+//   sc01: last_ms=(18.0−0.0)×1000=18000, tail=2000  → max(20000,10000) = 20000 ms
+//         _cumulative_shot_sec after sc01 = round(20000×24/1000)/24 = 480/24 = 20.0 s
+//   sc02: last_ms=(28.0−20.0)×1000= 8000, derived_tail=15000−8000=7000
+//                                          → max(8000+7000,15000) = 15000 ms  (base wins)
+//   boundary (sc01→sc02, different scene_id): round(1000/24) = 42 ms
+//   CORRECT total: 20000 + 42 + 15000 = 35042 ms  (≈ 0:35)
+//
+// Bug path (what render_video.py actually does):
+//   sc02: last_ms=(28.0−10.0)×1000=18000  ← stale ShotList.start_sec used as origin
+//         tail=2000  → max(18000+2000,15000) = 20000 ms  (floor wrongly fires)
+//   BUGGY  total: 20000 + 42 + 20000 = 40042 ms  (≈ 0:40)
+//   Excess: 5000 ms
+const KW17B_SHOTLIST = {
+  schema_id: 'ShotList', schema_version: '1.0.0',
+  shotlist_id: 'kw17b-test',
+  shots: [
+    {
+      shot_id: 'sc01-sh01', scene_id: 'sc01',
+      duration_sec: 10.0, characters: [],
+      background_id: 'bg-placeholder',
+      audio_intent: { vo_item_ids: ['vo-sc01-001'] },
+    },
+    {
+      shot_id: 'sc02-sh02', scene_id: 'sc02',
+      duration_sec: 15.0, start_sec: 10.0, characters: [],
+      background_id: 'bg-placeholder',
+      audio_intent: { vo_item_ids: ['vo-sc02-001'] },
+    },
+  ],
+};
+
+const KW17B_VOPLAN = {
+  schema_id: 'VOPlan', schema_version: '1.0.0',
+  manifest_id: 'kw17b-test-en', locale: 'en',
+  shotlist_ref: 'ShotList.json',
+  vo_items: [
+    // sc01 VO ends at 18.0 s — 8 s past sc01's 10.0 s ShotList boundary.
+    // This forces sc01 to be floor-extended to 20 000 ms, shifting sc02's
+    // actual render start from 10.0 s to 20.0 s.
+    { item_id: 'vo-sc01-001', speaker_id: 'narrator', text: 'Line one.',
+      start_sec: 0.0, end_sec: 18.0 },
+    // sc02 VO ends at 28.0 s (episode-absolute).
+    // Relative to ShotList sc02 start (10.0):  28.0−10.0 = 18.0 s → last_ms=18 000 (BUGGY)
+    // Relative to actual render sc02 start (20.0): 28.0−20.0 =  8.0 s → last_ms= 8 000 (CORRECT)
+    { item_id: 'vo-sc02-001', speaker_id: 'narrator', text: 'Line two.',
+      start_sec: 20.0, end_sec: 28.0 },
+  ],
+  resolved_assets: [],
+};
+
+test('KW-17b: sc02 duration must not be inflated when sc01 is VO-floor-extended', () => {
+  // ── 1. Temp dirs ─────────────────────────────────────────────────────────────
+  const tmpRoot   = fs.mkdtempSync(path.join(os.tmpdir(), 'kw17b-'));
+  const epDir     = path.join(tmpRoot, 'ep');
+  const binDir    = path.join(tmpRoot, 'bin');
+  const ffmpegLog = path.join(tmpRoot, 'ffmpeg_calls.jsonl');
+
+  fs.mkdirSync(epDir,  { recursive: true });
+  fs.mkdirSync(binDir, { recursive: true });
+
+  fs.writeFileSync(path.join(epDir, 'ShotList.json'),    JSON.stringify(KW17B_SHOTLIST));
+  fs.writeFileSync(path.join(epDir, 'VOPlan.en.json'),   JSON.stringify(KW17B_VOPLAN));
+
+  // ── 2. Fake ffmpeg ─────────────────────────────────────────────────────────
+  const fakeFfmpeg = path.join(binDir, 'ffmpeg');
+  fs.writeFileSync(fakeFfmpeg, FAKE_FFMPEG_SRC);
+  fs.chmodSync(fakeFfmpeg, 0o755);
+
+  // ── 3. Run render_video.py ─────────────────────────────────────────────────
+  const result = spawnSync(
+    'python3',
+    [RENDER_PY, '--plan', path.join(epDir, 'VOPlan.en.json'), '--locale', 'en'],
+    {
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, FFMPEG_LOG: ffmpegLog },
+      encoding: 'utf8',
+      timeout: 60_000,
+    }
+  );
+
+  expect(
+    result.status,
+    `render_video.py crashed.\nstderr: ${result.stderr}\nstdout: ${result.stdout}`
+  ).toBe(0);
+
+  // ── 4. Read render_output.json ─────────────────────────────────────────────
+  const renderOutputPath = path.join(epDir, 'renders', 'en', 'render_output.json');
+  expect(
+    fs.existsSync(renderOutputPath),
+    `render_output.json not written to ${renderOutputPath}`
+  ).toBe(true);
+
+  const renderOutput = JSON.parse(fs.readFileSync(renderOutputPath, 'utf8'));
+  const actualMs     = renderOutput.total_duration_ms;
+
+  // ── 5. Assert correct total duration ──────────────────────────────────────
+  //
+  // Correct calculation (both shots, 1 scene-boundary frame @ 24 fps):
+  //   sc01: last_ms=18000, tail=2000  → duration_ms = 20000
+  //   sc02: last_ms= 8000, tail=7000  → duration_ms = 15000  (base wins)
+  //   boundary: round(1000/24) = 42 ms
+  //   CORRECT total = 20000 + 42 + 15000 = 35042 ms
+  //
+  // Bug produces:
+  //   sc02: last_ms=18000 (uses stale ShotList.start_sec=10.0 instead of
+  //         _cumulative_shot_sec=20.0) → tail=2000 → duration_ms = 20000
+  //   BUGGY total = 20000 + 42 + 20000 = 40042 ms  (+5000 ms excess)
+  //
+  const CORRECT_TOTAL_MS = 35042;
+  const BUGGY_TOTAL_MS   = 40042;
+
+  expect(
+    actualMs,
+    `KW-17b FAIL: total_duration_ms = ${actualMs} ms.\n` +
+    `Expected ${CORRECT_TOTAL_MS} ms (≈ 0:35).\n` +
+    `Got      ${actualMs} ms (≈ 0:${Math.floor(actualMs/1000)}).\n\n` +
+    `Root cause: build_shot_plan() computes last_ms for sc02 using\n` +
+    `ShotList.start_sec (10.0 s) as the shot origin, but sc01 was\n` +
+    `floor-extended from 10 000 ms to 20 000 ms, shifting sc02's actual\n` +
+    `render start to 20.0 s.  The stale origin inflates last_ms from\n` +
+    `8 000 ms to 18 000 ms, wrongly triggering the VO-floor formula on\n` +
+    `sc02 and adding ${BUGGY_TOTAL_MS - CORRECT_TOTAL_MS} ms of extra duration.\n` +
+    `(If actualMs === ${BUGGY_TOTAL_MS} the original bug is still present.)`
+  ).toBe(CORRECT_TOTAL_MS);
+});
+
 test('KW-17: per-shot -t duration must be frame-aligned (multiple of 1/fps)', () => {
   // ── 1. Temp dirs ─────────────────────────────────────────────────────────────
   const tmpRoot   = fs.mkdtempSync(path.join(os.tmpdir(), 'kw17-'));

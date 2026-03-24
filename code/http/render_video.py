@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# render_video.py — Produce output.mp4 from VOPlan.{locale}.json + ShotList.json
+# render_video.py — Produce output.mp4 from VOPlan + MusicPlan + SfxPlan + MediaPlan
 # =============================================================================
 #
 # Reads VOPlan.{locale}.json + ShotList.json and resolves each shot into an MKV
@@ -185,7 +185,7 @@ def compute_duck_intervals_from_vo(
     return [[round(a, 3), round(b, 3)] for a, b in merged]
 
 
-def build_shots_for_render(
+def build_episode_timeline(
     shotlist: dict,
     media_map: dict,
     vo_items: list,
@@ -198,16 +198,25 @@ def build_shots_for_render(
     Builds shot dicts equivalent to what RenderPlan used to provide. Each returned dict has all fields
     render_shot() reads: shot_id, scene_id, duration_ms, background_asset_id,
     background_segments, character_asset_ids, music_asset_id, duck_intervals,
-    duck_db, music_fade_sec, start_sec.
+    duck_db, music_fade_sec, start_sec, render_start_sec.
     """
     vo_lookup = {v["item_id"]: v for v in vo_items}
     shots_out = []
+    # Track the cumulative render position (frame-snapped) so that last_ms for
+    # each shot is computed relative to where that shot actually starts in the
+    # rendered video — not the stale ShotList.start_sec.  When an earlier shot
+    # is VO-floor-extended beyond its ShotList duration, every subsequent
+    # ShotList.start_sec becomes too small, inflating last_ms and wrongly
+    # triggering the floor formula on those shots.  Using the running cumulative
+    # position (same formula as render loop line 1710) keeps the two in sync.
+    _cumulative_render_sec = 0.0
 
     for shot in shotlist.get("shots", []):
         shot_id      = shot["shot_id"]
         scene_id     = shot.get("scene_id", "")
-        shot_start   = shot.get("start_sec", 0.0)
+        shot_start   = shot.get("start_sec", 0.0)  # ShotList origin — used for SFX/music/duck (ShotList frame)
         duration_sec = shot.get("duration_sec", 0.0)
+        render_start_sec = _cumulative_render_sec  # episode-absolute start of this shot in the rendered video
 
         # ── background_asset_id + background_segments ────────────────────────
         bg_id      = shot.get("background_id")
@@ -266,7 +275,7 @@ def build_shots_for_render(
                     if i in vo_lookup and vo_lookup[i].get("end_sec") is not None]
         base_ms  = round(duration_sec * 1000)
         if _shot_vo:
-            last_ms  = round((max(v["end_sec"] for v in _shot_vo) - shot_start) * 1000)
+            last_ms  = round((max(v["end_sec"] for v in _shot_vo) - _cumulative_render_sec) * 1000)
             # scene_tail_ms: three-level resolution
             _tail_ms = _VO_TAIL_MS
             if duration_sec:
@@ -284,12 +293,16 @@ def build_shots_for_render(
         # ── duck_intervals from VO timing ─────────────────────────────────────
         _fade_sec = float(_ovr.get("fade_sec", 0.15))
         _fade_ms  = round(_fade_sec * 1000)
+        # Duck intervals are in the ShotList coordinate frame: music and SFX
+        # are placed using ShotList.start_sec as origin, so duck intervals must
+        # also use that origin to remain aligned with the music stream.
         duck_intervals = compute_duck_intervals_from_vo(_shot_vo, _fade_ms, shot_start)
 
         shots_out.append({
             "shot_id":             shot_id,
             "scene_id":            scene_id,
             "start_sec":           shot_start,
+            "render_start_sec":    render_start_sec,
             "duration_ms":         duration_ms,
             "background_asset_id": background_asset_id,
             "background_segments": bg_segments,
@@ -299,6 +312,10 @@ def build_shots_for_render(
             "duck_db":             float(_ovr.get("duck_db", -12.0)),
             "music_fade_sec":      _fade_sec,
         })
+
+        # Advance the cumulative render clock (frame-snapped, same formula as
+        # render loop line 1710) so the next shot's last_ms origin is correct.
+        _cumulative_render_sec += round(duration_ms * FPS / 1000) / FPS
 
     return shots_out
 
@@ -350,8 +367,8 @@ def load_vo_timing(manifest_path: Path, shotlist_path: Path) -> dict:
                 "text":             v.get("text", ""),
                 "ep_start_sec":     start_sec,                              # episode-absolute
                 "ep_end_sec":       end_sec,                                # episode-absolute
-                "shot_rel_in_ms":   round((start_sec - shot_start) * 1000),  # kept for legacy callers
-                "shot_rel_out_ms":  round((end_sec   - shot_start) * 1000),  # kept for legacy callers
+                "shot_rel_in_ms":   0,  # legacy field — not used; ep_start_sec/ep_end_sec are authoritative
+                "shot_rel_out_ms":  0,  # legacy field — not used; ep_start_sec/ep_end_sec are authoritative
             }
             # Optional chunk-WAV fields (Phase 3 deferred slicing)
             if v.get("audio_chunk_uri"):
@@ -422,9 +439,9 @@ def build_enable_expr(vo_lines: list[dict], speaker_id: str,
 
     vo_lines entries carry ep_start_sec / ep_end_sec (episode-absolute seconds).
     shot_offset_sec is the episode-absolute start of the current shot
-    (_cumulative_shot_sec from the render loop) so that the enable window
-    is expressed as seconds-into-the-shot, which is what FFmpeg's ``t``
-    variable measures inside a shot filter graph.
+    (shot["render_start_sec"]) so that the enable window is expressed as
+    seconds-into-the-shot, which is what FFmpeg's ``t`` variable measures
+    inside a shot filter graph.
 
     Returns '0' if the speaker never appears.
     """
@@ -595,7 +612,6 @@ def render_shot(
     verbose:            bool  = False,
     music_plan_data:    dict  = None,
     sfx_plan_override:  dict  = None,
-    _cumulative_shot_sec: float = 0.0,
 ) -> Path:
     """
     Render one shot to an MKV intermediate.
@@ -760,7 +776,7 @@ def render_shot(
         # Compute enable_expr BEFORE adding any active-stream filters so we
         # can skip [c{ci}a] entirely when the character never speaks.
         # An unconnected filter output causes FFmpeg to abort.
-        enable_expr  = build_enable_expr(vo_lines, char_id, _cumulative_shot_sec)
+        enable_expr  = build_enable_expr(vo_lines, char_id, shot["render_start_sec"])
         is_last_char = (ci == n_chars - 1)
         v_act_out    = "vout" if is_last_char else f"v{ci}a"
         has_speaking = (enable_expr != "0")
@@ -838,10 +854,10 @@ def render_shot(
         line_id  = vl.get("item_id", vl.get("line_id", ""))
         # Use episode-absolute timing so VO lands at the correct position
         # even when scene_heads push start_sec beyond the ShotList boundary.
-        # _cumulative_shot_sec is the episode-absolute start of THIS shot in
-        # the rendered video, so (ep_start_sec - _cumulative_shot_sec) gives
+        # render_start_sec is the episode-absolute start of THIS shot in
+        # the rendered video, so (ep_start_sec - render_start_sec) gives
         # the correct shot-relative delay.
-        delay_ms = max(0, round((vl["ep_start_sec"] - _cumulative_shot_sec) * 1000))
+        delay_ms = max(0, round((vl["ep_start_sec"] - shot["render_start_sec"]) * 1000))
         lbl      = f"vo{vo_i}"
 
         # Phase 3, Step 10: chunk-WAV deferred slicing path
@@ -932,13 +948,16 @@ def render_shot(
         if not sp_path.exists():
             print(f"  [WARN] SFX plan entry missing: {sfx_source}")
             continue
-        sp_start_ep  = sp_start   # episode-absolute
+        sp_start_ep  = sp_start   # episode-absolute (ShotList frame)
         sp_end_ep    = sp_end     # episode-absolute (or None)
         sp_idx       = add_input([], str(sp_path))
         lbl          = f"sfxp{sp_i}"
-        # SfxPlan.json stores episode-absolute timestamps; convert to shot-relative
-        # by subtracting the cumulative episode offset of this shot's start.
-        sp_start_rel = max(0.0, sp_start_ep - _cumulative_shot_sec)
+        # SfxPlan.start_sec and ShotList.shot.start_sec are both episode-absolute
+        # in the same ShotList coordinate frame — subtract directly to get
+        # shot-relative delay.  render_start_sec must NOT be used here: it
+        # is in the rendered-video frame, which diverges from the ShotList
+        # frame whenever an earlier shot is VO-floor-extended.
+        sp_start_rel = max(0.0, sp_start_ep - shot.get("start_sec", 0.0))
         delay_ms_sp  = round(sp_start_rel * 1000)
         filt = (
             f"[{sp_idx}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
@@ -1017,19 +1036,22 @@ def render_shot(
         if _plan_fade_sec is not None:
             shot["fade_sec"] = _plan_fade_sec
 
-        # music_delay_sec: episode-absolute start_sec minus cumulative shot offset
+        # music_delay_sec / music_end_sec: MusicPlan.start_sec/end_sec are
+        # ShotList-absolute (same frame as ShotList.shot.start_sec).
+        # Subtract shot["start_sec"] (ShotList origin) — NOT render_start_sec —
+        # to get shot-relative offsets that align with duck_intervals (also
+        # computed in the ShotList frame).
         _plan_start_sec = _plan_ovr.get("start_sec")
         if _plan_start_sec is not None:
-            shot["music_delay_sec"] = max(0.0, float(_plan_start_sec) - _cumulative_shot_sec)
+            shot["music_delay_sec"] = max(0.0, float(_plan_start_sec) - shot.get("start_sec", 0.0))
 
-        # music_end_sec: episode-absolute end_sec minus cumulative shot offset
         _plan_end_sec = _plan_ovr.get("end_sec")
         if _plan_end_sec is not None:
-            shot["music_end_sec"] = max(0.0, float(_plan_end_sec) - _cumulative_shot_sec)
+            shot["music_end_sec"] = max(0.0, float(_plan_end_sec) - shot.get("start_sec", 0.0))
 
         print(f"  [{_shot_id_key}] Using MusicPlan overrides — approved timing.")
 
-    # duck_intervals: use value computed in build_shots_for_render() (unchanged)
+    # duck_intervals: use value computed in build_episode_timeline() (unchanged)
 
     if not no_music and music_path and music_path.exists() and (_plan_provided_music or not music_info.get("is_placeholder", True)):
         duck_intervals  = shot.get("duck_intervals", [])
@@ -1208,9 +1230,8 @@ def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int,
     """
     lines: list[str] = []
     subs:  list[dict] = []
-    seq        = 1
-    offset_ms  = 0
-    frame_ms   = round(1000 / fps)
+    seq      = 1
+    frame_ms = round(1000 / fps)
 
     for i, shot in enumerate(shots):
         shot_id = shot.get("shot_id", "")
@@ -1218,12 +1239,9 @@ def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int,
             text = vl.get("text", "").strip()
             if not text:
                 continue
-            # offset_ms is the episode-absolute video position of this shot's start
-            # (accumulated from VO-ceiling duration_ms, same as _cumulative_shot_sec).
-            # Use ep_start/end_sec so SRT timestamps match actual render position
-            # even when scene_heads push VO beyond the ShotList shot boundary.
-            abs_in  = offset_ms + max(0, round((vl["ep_start_sec"] - offset_ms / 1000) * 1000))
-            abs_out = offset_ms + max(0, round((vl["ep_end_sec"]   - offset_ms / 1000) * 1000))
+            # ep_start_sec/ep_end_sec are episode-absolute; use them directly.
+            abs_in  = round(vl["ep_start_sec"] * 1000)
+            abs_out = round(vl["ep_end_sec"]   * 1000)
             timecode = f"{ms_to_srt_ts(abs_in)} --> {ms_to_srt_ts(abs_out)}"
             lines += [str(seq), timecode, text, ""]
             subs.append({
@@ -1233,12 +1251,10 @@ def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int,
             })
             seq += 1
 
-        offset_ms += shot["duration_ms"]
-
-        # Add black frame duration at scene boundaries
+        # Add black frame duration at scene boundaries (used for scene-boundary detection)
         if i < len(shots) - 1:
             if shots[i + 1].get("scene_id") != shot.get("scene_id"):
-                offset_ms += frame_ms
+                pass  # scene boundary noted; offset_ms no longer tracked here
 
     srt_path.write_text("\n".join(lines), encoding="utf-8")
     subs_path.write_text(json.dumps(subs, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1362,16 +1378,16 @@ def main() -> None:
             # Build ref duration_ms for each shot using same three-condition formula
             _ref_vo_lookup = {v["item_id"]: v for v in _ref_vo}
             _ref_scene_tails = _ref_voplan.get("scene_tails")
+            _ref_cumulative_sec = 0.0
             for _rs in _ref_shotlist.get("shots", []):
                 _rs_id   = _rs["shot_id"]
-                _rs_st   = _rs.get("start_sec", 0.0)
                 _rs_dur  = _rs.get("duration_sec", 0.0)
                 _rs_vids = _rs.get("audio_intent", {}).get("vo_item_ids", [])
                 _rs_vo   = [_ref_vo_lookup[i] for i in _rs_vids
                             if i in _ref_vo_lookup and _ref_vo_lookup[i].get("end_sec") is not None]
                 _rs_base = round(_rs_dur * 1000)
                 if _rs_vo:
-                    _rs_last = round((max(v["end_sec"] for v in _rs_vo) - _rs_st) * 1000)
+                    _rs_last = round((max(v["end_sec"] for v in _rs_vo) - _ref_cumulative_sec) * 1000)
                     _rs_tail = _VO_TAIL_MS
                     if _rs_dur:
                         _d = round(_rs_dur * 1000) - _rs_last
@@ -1383,6 +1399,7 @@ def main() -> None:
                     _ref_dur_map[_rs_id] = max(_rs_last + _rs_tail, _rs_base)
                 else:
                     _ref_dur_map[_rs_id] = _rs_base
+                _ref_cumulative_sec += round(_ref_dur_map.get(_rs_id, round(_rs_dur * 1000)) * FPS / 1000) / FPS
             print(f"  [render] EN floor loaded from {_ref_path.name} — {len(_ref_dur_map)} shots")
         except Exception as _ref_err:
             print(f"  [render] WARNING: Could not load --reference-approval: {_ref_err}")
@@ -1493,7 +1510,7 @@ def main() -> None:
     _vo_timing_by_shot = load_vo_timing(_manifest_path, _shotlist_path)
 
     # ── Build shot dicts from ShotList + VOPlan + MusicPlan ──────────────────
-    shots = build_shots_for_render(
+    shots = build_episode_timeline(
         shotlist           = shotlist,
         media_map          = media_map,
         vo_items           = voplan.get("vo_items", []),
@@ -1623,7 +1640,6 @@ def main() -> None:
     print()
     shot_mkv_pairs: list[tuple[dict, Path]] = []
     placeholder_count = 0
-    _cumulative_shot_sec = 0.0
 
     for i, shot in enumerate(shots):
         # CHANGE 5: override bg_segments from confirmed selections if present
@@ -1678,7 +1694,7 @@ def main() -> None:
                 shot = dict(shot)
                 shot["background_segments"] = []
                 print(f"  [{_shot_id_cur}] No confirmed selection — rendering black background.")
-        # else: _shot_to_segments is None → use bg_segments from build_shots_for_render (no change)
+        # else: _shot_to_segments is None → use bg_segments from build_episode_timeline (no change)
 
         m_start, m_fadeout = shot_music_params[i]
         mkv = render_shot(
@@ -1700,14 +1716,8 @@ def main() -> None:
                 "track_volumes":  _music_track_volumes,
             },
             sfx_plan_override=_sfx_plan_by_shot or None,
-            _cumulative_shot_sec=_cumulative_shot_sec,
         )
         shot_mkv_pairs.append((shot, mkv))
-        # Advance the episode clock by the SNAPPED duration (same formula used inside
-        # render_shot) so SFX / music timing offsets stay aligned with the actual
-        # video timeline.  Using raw dur_ms/1000.0 here would let the clock drift
-        # by up to 0.5/fps per shot, misplacing audio in every subsequent shot.
-        _cumulative_shot_sec += round(shot.get("duration_ms", 0) * fps / 1000) / fps
 
         # Count placeholders in this shot
         for asset_id in [shot.get("background_asset_id")] \

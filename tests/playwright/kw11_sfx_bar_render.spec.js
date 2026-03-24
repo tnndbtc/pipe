@@ -761,9 +761,13 @@ test('KW-26: SFX preview wrap is visible on episode select when preview_audio.wa
     ).toBeLessThan(100);
   }
 
+  // With scene_heads: {"sc01": 15} in the fixture VOPlan, /api/vo_timeline returns
+  // total_sec = 70.648 (15s head + 28.089s sc01 + 27.559s sc02).
+  // sfx-sc02-sh02-001 start_sec=35.0 → left = 35.0/70.648*100 ≈ 49.5%.
+  // Previously (scene_heads: {"sc01": 0}): total_sec=55.648, left ≈ 62.9%.
   const maxLeft = Math.max(...barPositions.map(b => b.left));
-  expect(maxLeft).toBeGreaterThan(55);
-  expect(maxLeft).toBeLessThan(70);
+  expect(maxLeft).toBeGreaterThan(43);
+  expect(maxLeft).toBeLessThan(57);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

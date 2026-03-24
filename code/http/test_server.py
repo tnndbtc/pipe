@@ -1525,10 +1525,6 @@ HTML = r"""<!DOCTYPE html>
   .media-body::-webkit-scrollbar { width: 6px; }
   .media-body::-webkit-scrollbar-track { background: transparent; }
   .media-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  .media-item-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; padding: 14px 18px; flex-shrink: 0;
-  }
   .media-item-header {
     font-size: 0.87em; font-weight: 700; color: var(--gold); margin-bottom: 4px;
   }
@@ -2739,7 +2735,7 @@ placeholder="Enter your story here"></textarea>
   </div>
 
   <!-- footer actions -->
-  <div class="media-footer" id="media-footer" style="display:none">
+  <div class="media-footer" id="media-footer">
     <span id="media-confirm-msg"></span>
     <button id="media-btn-reset"     onclick="mediaReset()">↺ Reset</button>
     <button id="media-btn-confirm"   onclick="mediaSaveAll()">✔ Confirm Plan</button>
@@ -6831,7 +6827,6 @@ placeholder="Enter your story here"></textarea>
   let _aiBatchFailed  = {};
   let _aiBatchTotal   = 0;
   let _mediaRecommendedSeq = null;
-  let _mediaSelections = {};
   let _mediaDragSrc   = null;
   let _mediaShotMap   = null;
   let _mediaShotDur   = null;
@@ -7002,6 +6997,8 @@ placeholder="Enter your story here"></textarea>
     _renderMediaSourcesTable();
     // Try to load an existing completed batch
     mediaLoadExisting();
+    // Restore any previously generated preview video
+    _mediaRestorePreviewIfExists();
     // Reload library when episode changes
     _mediaLibVideos = []; _mediaLibImages = []; _mediaCutClips = [];
     _mediaMarks = {}; _mediaOvrClip = {}; _mediaOvrTiming = {}; _mediaOvrSegments = {}; _mediaOvrPickerShot = null; _mediaOvrPreviewShot = null; _mediaShotTimeline = [];
@@ -7573,14 +7570,13 @@ placeholder="Enter your story here"></textarea>
 
     _mediaSetStatus('Submitting batch …', true);
     _mediaSearchBtnSet(true);
-    document.getElementById('media-footer').style.display = 'none';
+
     const _mbPreviewWrap = document.getElementById('media-preview-wrap');
     if (_mbPreviewWrap) _mbPreviewWrap.style.display = 'none';
     const _mbBody = document.getElementById('media-body');
     _mbBody.innerHTML = '<div id="media-shot-overrides"></div>';
     if (_mbPreviewWrap) _mbBody.insertBefore(_mbPreviewWrap, _mbBody.firstChild);
     mediaRenderAll();
-    _mediaSelections   = {};
     _mediaBatchId      = null;
     _mediaResults      = null;
     _mediaExpandedRows = new Set();
@@ -7792,11 +7788,12 @@ placeholder="Enter your story here"></textarea>
         _mediaSearchBtnSet(false);
         _mediaResults        = d.items || {};
         _mediaResults._topN  = d.top_n || 5;
+        _mediaItemIds        = Object.keys(_mediaResults).filter(k => k !== '_topN');
         _mediaRecommendedSeq = d.recommended_sequence || null;
         await _mediaLoadShotMap();
         _mediaApplyBgRemap();
-        _mediaRenderResults(_mediaResults);
         await _aiLoadSavedImages();
+        await mediaLoadLibrary();
       } else if (d.status === 'failed' || d.status === 'interrupted') {
         clearInterval(_mediaPollTimer); _mediaPollTimer = null;
         _mediaSetStatus((d.status === 'interrupted' ? 'Batch interrupted' : 'Batch failed')
@@ -7817,186 +7814,6 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  // ── Lazy-scroll helpers for media thumbnails ──
-  const _MEDIA_PAGE = 20;  // thumbnails per lazy-scroll page
-
-  // Append a page of thumbnails to a row, dimming items beyond topN
-  function _mediaAppendPage(row, entries, itemId, type, from, count, topN) {
-    const page = entries.slice(from, from + count);
-    page.forEach((entry, i) => {
-      const idx = from + i;
-      const th = _mediaThumb(itemId, type, entry, idx);
-      if (idx >= topN) th.classList.add('media-thumb-extended');
-      row.appendChild(th);
-    });
-    return from + page.length;
-  }
-
-  // Observe a sentinel div to lazy-load more thumbnails on scroll
-  function _mediaObserveSentinel(row, entries, itemId, type, topN) {
-    let loaded = _MEDIA_PAGE;
-    const sentinel = document.createElement('div');
-    sentinel.className = 'media-lazy-sentinel';
-    row.appendChild(sentinel);
-    const obs = new IntersectionObserver(ents => {
-      if (!ents[0].isIntersecting) return;
-      loaded = _mediaAppendPage(row, entries, itemId, type, loaded, _MEDIA_PAGE, topN);
-      // Re-position sentinel after newly appended thumbnails
-      row.appendChild(sentinel);
-      if (loaded >= entries.length) { obs.disconnect(); sentinel.remove(); }
-    }, { root: document.getElementById('media-body'), threshold: 0 });
-    obs.observe(sentinel);
-  }
-
-  // ── Helper: render one bg_id sub-section (search results + AI panel) inside a card ──
-  function _mediaRenderBgSection(card, bgId, cardId, items, d_topN) {
-    const item = items[bgId];
-    if (!item) return;
-
-    // Store manifest fields for info panel
-    _bgManifestData[bgId] = {
-      ai_prompt:            item.ai_prompt || '',
-      ai_prompt_variations: Array.isArray(item.ai_prompt_variations) ? item.ai_prompt_variations : [],
-      search_prompt:        item.search_prompt || '',
-      include_keywords:     (item.include_keywords || []).join(', '),
-      media_type:           (item.search_filters || {}).media_type || 'mixed',
-      motion_level:         item.motion_level || '',
-    };
-    const mdata = _bgManifestData[bgId];
-
-    // Background sub-header (collapsible)
-    const bgHdr = document.createElement('div');
-    bgHdr.className = 'media-bg-header';
-    bgHdr.style.cssText = 'display:flex; align-items:center; flex-wrap:wrap; padding:4px 8px; margin-top:4px; background:var(--hover-bg); border-radius:4px; font-size:12px; color:var(--dim); cursor:pointer;';
-    const bgLabel = document.createElement('span');
-    bgLabel.style.cssText = 'font-weight:600; color:var(--text); font-size:11px;';
-    bgLabel.textContent = '\u25BC ' + bgId;
-    bgHdr.appendChild(bgLabel);
-
-    // Manifest info toggle
-    const infoBtn = document.createElement('button');
-    infoBtn.textContent = '\uD83D\uDCCB';
-    infoBtn.title = 'Show manifest details';
-    infoBtn.style.cssText = 'margin-left:6px; padding:2px 7px; font-size:11px; cursor:pointer; background:#dbe8f5; border:1px solid #a0c0e0; border-radius:4px; color:#2a5a8a; vertical-align:middle;';
-    (function(bid) {
-      infoBtn.onclick = function(ev) {
-        ev.stopPropagation();
-        const panel = document.getElementById('manifest-panel-' + bid);
-        if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-      };
-    })(bgId);
-    bgHdr.appendChild(infoBtn);
-
-    // AI Generate toggle button
-    const aiGenToggleBtn = document.createElement('button');
-    aiGenToggleBtn.textContent = '\u2728 AI';
-    aiGenToggleBtn.title = 'Generate image with AI';
-    aiGenToggleBtn.style.cssText = 'margin-left:6px; padding:2px 7px; font-size:11px; cursor:pointer; background:#e8f5e8; border:1px solid #a8d8a8; border-radius:4px; color:#2a7a2a; vertical-align:middle;';
-    (function(bid) {
-      aiGenToggleBtn.onclick = function(ev) {
-        ev.stopPropagation();
-        const p = document.getElementById('ai-gen-panel-' + bid);
-        if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
-      };
-    })(bgId);
-    bgHdr.appendChild(aiGenToggleBtn);
-
-    card.appendChild(bgHdr);
-
-    // Collapsible content wrapper
-    const bgContent = document.createElement('div');
-    bgContent.className = 'media-bg-content';
-    bgContent.id = 'media-bg-content-' + bgId;
-    bgContent.dataset.bgId = bgId;
-
-    // Toggle collapse on header click
-    (function(content, label) {
-      bgHdr.addEventListener('click', function() {
-        const hidden = content.style.display === 'none';
-        content.style.display = hidden ? '' : 'none';
-        label.textContent = (hidden ? '\u25BC ' : '\u25B6 ') + bgId;
-      });
-    })(bgContent, bgLabel);
-
-    // Manifest detail panel (hidden by default)
-    const manifestPanel = document.createElement('div');
-    manifestPanel.id = 'manifest-panel-' + bgId;
-    manifestPanel.style.cssText = 'display:none; background:var(--panel-bg); padding:6px 12px; font-size:11px; color:#888888; font-family:monospace; margin-top:2px; border-radius:4px;';
-    const aiPromptTrunc = mdata.ai_prompt.length > 120 ? mdata.ai_prompt.slice(0, 120) + '\u2026' : mdata.ai_prompt;
-    manifestPanel.innerHTML = '<b style="color:#6a8aaa">ai_prompt:</b> ' + aiPromptTrunc + '<br>'
-      + '<b style="color:#6a8aaa">search_prompt:</b> ' + mdata.search_prompt + '<br>'
-      + '<b style="color:#6a8aaa">include_keywords:</b> ' + mdata.include_keywords + '<br>'
-      + '<b style="color:#6a8aaa">media_type:</b> ' + mdata.media_type + ' &nbsp; <b style="color:#6a8aaa">motion_level:</b> ' + mdata.motion_level;
-    bgContent.appendChild(manifestPanel);
-
-    const prompt = document.createElement('div');
-    prompt.className = 'media-item-prompt';
-    prompt.textContent = item.search_prompt || '';
-    bgContent.appendChild(prompt);
-
-    // ── Inline AI Generate panel ──
-    const aiGenPanel = document.createElement('div');
-    aiGenPanel.id = 'ai-gen-panel-' + bgId;
-    aiGenPanel.style.cssText = 'display:none; background:#e8f5e8; border:1px solid #a8d8a8; border-radius:4px; padding:8px 10px; margin:4px 0 6px 0;';
-    const aiGenTA = document.createElement('textarea');
-    aiGenTA.id = 'ai-gen-prompt-' + bgId;
-    aiGenTA.rows = 3;
-    aiGenTA.value = mdata.ai_prompt;
-    aiGenTA.style.cssText = 'width:100%; box-sizing:border-box; background:var(--panel-bg); color:var(--text); border:1px solid #a8d8a8; border-radius:3px; font-size:11px; font-family:monospace; resize:vertical; padding:4px;';
-    aiGenPanel.appendChild(aiGenTA);
-    const aiGenRow = document.createElement('div');
-    aiGenRow.style.cssText = 'margin-top:5px; display:flex; align-items:center; gap:8px;';
-    const aiGenBtn = document.createElement('button');
-    aiGenBtn.id = 'ai-gen-btn-' + bgId;
-    aiGenBtn.textContent = '\u2728 Generate';
-    aiGenBtn.style.cssText = 'padding:3px 12px; font-size:12px; cursor:pointer; background:#d4eed4; border:1px solid #8aba8a; border-radius:4px; color:#2a6a2a;';
-    (function(bid) { aiGenBtn.onclick = function() { _aiGenStart(bid); }; })(bgId);
-    aiGenRow.appendChild(aiGenBtn);
-    const aiGenStatus = document.createElement('span');
-    aiGenStatus.id = 'ai-gen-status-' + bgId;
-    aiGenStatus.style.cssText = 'font-size:11px; color:#888888;';
-    aiGenRow.appendChild(aiGenStatus);
-    aiGenPanel.appendChild(aiGenRow);
-    bgContent.appendChild(aiGenPanel);
-
-    // Images section — lazy-scroll with pagination
-    const imgs = item.images || [];
-    if (imgs.length) {
-      const lbl = document.createElement('div');
-      lbl.className = 'media-section-label';
-      lbl.textContent = 'Images (' + (item.total_images || imgs.length) + ' found)';
-      bgContent.appendChild(lbl);
-      const row = document.createElement('div');
-      row.className = 'media-thumb-row';
-      _mediaAppendPage(row, imgs, cardId, 'image', 0, _MEDIA_PAGE, d_topN);
-      bgContent.appendChild(row);
-      if (imgs.length > _MEDIA_PAGE) _mediaObserveSentinel(row, imgs, cardId, 'image', d_topN);
-    }
-
-    // Videos section — lazy-scroll with pagination
-    const vids = item.videos || [];
-    if (vids.length) {
-      const lbl = document.createElement('div');
-      lbl.className = 'media-section-label';
-      lbl.textContent = 'Videos (' + (item.total_videos || vids.length) + ' found)';
-      bgContent.appendChild(lbl);
-      const row = document.createElement('div');
-      row.className = 'media-thumb-row';
-      _mediaAppendPage(row, vids, cardId, 'video', 0, _MEDIA_PAGE, d_topN);
-      bgContent.appendChild(row);
-      if (vids.length > _MEDIA_PAGE) _mediaObserveSentinel(row, vids, cardId, 'video', d_topN);
-    }
-
-    if (!imgs.length && !vids.length) {
-      const empty = document.createElement('div');
-      empty.className = 'media-empty';
-      empty.textContent = item.error || 'No results found.';
-      bgContent.appendChild(empty);
-    }
-
-    card.appendChild(bgContent);
-  }
-
   // Format seconds as M:SS.d (e.g. 83.4 → "1:23.4")
   function _mediaFmtTime(sec) {
     const m = Math.floor(sec / 60);
@@ -8004,7 +7821,6 @@ placeholder="Enter your story here"></textarea>
     return m + ':' + (parseFloat(rem) < 10 ? '0' : '') + rem;
   }
 
-  // ── Render results grid (scene-grouped) ──
   // Remap _mediaResults keys from old bg_ids to current ShotList bg_ids using
   // bg_id_remap.json.  Called after _mediaLoadShotMap() so _mediaBgRemap is populated.
   function _mediaApplyBgRemap() {
@@ -8028,177 +7844,6 @@ placeholder="Enter your story here"></textarea>
     });
     if (topN !== undefined) remapped._topN = topN;
     _mediaResults = remapped;
-  }
-
-  function _mediaRenderResults(items) {
-    const body = document.getElementById('media-body');
-    const _pw = document.getElementById('media-preview-wrap');
-    if (_pw) _pw.style.display = 'none';
-    body.innerHTML = '<div id="media-shot-overrides"></div>';
-    if (_pw) body.insertBefore(_pw, body.firstChild);
-    mediaRenderAll();
-    const d_topN = _mediaResults?._topN || 5;
-    _mediaItemIds = Object.keys(items);
-    _mediaSelections = {};
-    _bgManifestData = {};
-
-    // Build ordered card list: one card per scene (or per orphan bg_id)
-    const cardOrder = [];   // { cardId, sceneShotIds, bgIds }
-    const assignedBgs = new Set();
-
-    if (_mediaSceneOrder && _mediaSceneBgs) {
-      _mediaSceneOrder.forEach(sceneId => {
-        // Only include bg_ids that have search results in the thumbnail section,
-        // but ALWAYS create a card for every scene (so all sc01–scN are shown,
-        // matching Music tab behaviour — scenes without results just have no thumbs).
-        const bgIds = (_mediaSceneBgs[sceneId] || []).filter(bg => items[bg]);
-        bgIds.forEach(bg => assignedBgs.add(bg));
-        const shotIds = _mediaSceneMap[sceneId] || [];
-        cardOrder.push({ cardId: sceneId, sceneShotIds: shotIds, bgIds: bgIds });
-      });
-    }
-    // Orphan bg_ids (in results but not assigned to any scene card above)
-    _mediaItemIds.forEach(bgId => {
-      if (bgId === '_topN') return;
-      if (assignedBgs.has(bgId)) return;
-      const shotIds = _mediaShotMap ? (_mediaShotMap[bgId] || []) : [];
-      cardOrder.push({ cardId: bgId, sceneShotIds: shotIds, bgIds: [bgId] });
-    });
-
-    // Sort the full cardOrder by scene position so both scene-based cards and
-    // orphan bg_id cards appear in ShotList order (sc01 → sc02 → …).
-    // This also corrects ordering when all cards end up as orphans because
-    // the media server returned keys in alphabetical/arbitrary order.
-    if (_mediaSceneOrder && _mediaSceneOrder.length > 0) {
-      const sceneIdx = {};
-      _mediaSceneOrder.forEach((sc, i) => { sceneIdx[sc] = i; });
-      const posOf = cid => {
-        if (sceneIdx[cid] !== undefined) return sceneIdx[cid];          // scene card
-        const sc = _mediaBgToScene && _mediaBgToScene[cid];             // orphan → look up scene
-        return (sc !== undefined && sceneIdx[sc] !== undefined) ? sceneIdx[sc] : 9999;
-      };
-      cardOrder.sort((a, b) => posOf(a.cardId) - posOf(b.cardId));
-    }
-
-    cardOrder.forEach(entry => {
-      const { cardId, sceneShotIds, bgIds } = entry;
-      const card = document.createElement('div');
-      card.className = 'media-item-card';
-      card.id = 'media-card-' + cardId;
-
-      // Card header
-      const hdr = document.createElement('div');
-      hdr.className = 'media-item-header';
-      hdr.style.display = 'flex';
-      hdr.style.alignItems = 'center';
-      hdr.style.flexWrap = 'wrap';
-      const hdrLabel = document.createElement('span');
-      if (sceneShotIds.length > 0) {
-        hdrLabel.textContent = cardId + ' \u2014 ' + sceneShotIds.length + ' shot'
-            + (sceneShotIds.length > 1 ? 's' : '') + ': ' + sceneShotIds.join(', ');
-      } else {
-        hdrLabel.textContent = cardId;
-      }
-      hdr.appendChild(hdrLabel);
-      // Scene time range (start of first shot → end of last shot)
-      if (sceneShotIds.length > 0 && _mediaShotStart) {
-        const firstSid = sceneShotIds[0];
-        const lastSid  = sceneShotIds[sceneShotIds.length - 1];
-        const t0 = _mediaShotStart[firstSid] || 0;
-        const t1 = (_mediaShotStart[lastSid] || 0) + ((_mediaShotDur && _mediaShotDur[lastSid]) || 0);
-        const timeSpan = document.createElement('span');
-        timeSpan.style.cssText = 'margin-left:10px;font-size:0.78em;color:var(--dim);font-family:var(--mono);font-weight:400';
-        timeSpan.textContent = _mediaFmtTime(t0) + '\u2013' + _mediaFmtTime(t1);
-        hdr.appendChild(timeSpan);
-      }
-
-      // Per-scene preview button (right-aligned in the header)
-      const _scenePreviewBtn = document.createElement('button');
-      _scenePreviewBtn.textContent = '🎬 Preview';
-      _scenePreviewBtn.style.cssText = 'margin-left:auto;font-size:0.75em;padding:3px 10px;'
-        + 'border-radius:5px;border:1px solid var(--border);background:var(--surface);'
-        + 'color:var(--text);cursor:pointer;flex-shrink:0';
-      (function(cid, sids, btn) {
-        btn.onclick = function(e) {
-          e.stopPropagation();
-          const resolvedSids = sids.length > 0 ? sids
-            : ((_mediaShotMap && _mediaShotMap[cid]) || [cid]);
-          mediaGenerateScenePreview(cid, resolvedSids, btn);
-        };
-      })(cardId, sceneShotIds, _scenePreviewBtn);
-      hdr.appendChild(_scenePreviewBtn);
-
-      card.appendChild(hdr);
-
-      // Per-scene inline video player (hidden until preview generated) — sits at top of card
-      const _sceneVideoWrap = document.createElement('div');
-      _sceneVideoWrap.id = 'media-scene-preview-' + cardId;
-      _sceneVideoWrap.style.cssText = 'display:none;padding:6px 0 8px;border-bottom:1px solid var(--active-bg)';
-      const _sceneVideo = document.createElement('video');
-      _sceneVideo.controls = true;
-      _sceneVideo.style.cssText = 'width:100%;max-height:360px;border-radius:4px';
-      _sceneVideoWrap.appendChild(_sceneVideo);
-      card.appendChild(_sceneVideoWrap);
-
-      // Per-shot assignment rows (selected media) — shown at top of card, above search results
-      if (_mediaShotMap && sceneShotIds.length > 0) {
-        const shotSection = document.createElement('div');
-        shotSection.className = 'media-shot-section';
-        shotSection.id = 'media-shots-' + cardId;
-
-        // Auto-assign button (only when >1 shot)
-        if (sceneShotIds.length > 1) {
-          const autoBtn = document.createElement('button');
-          autoBtn.className = 'media-btn-auto-assign';
-          autoBtn.textContent = '\u26A1 Auto-assign';
-          autoBtn.onclick = function() { mediaAutoAssign(cardId); };
-          shotSection.appendChild(autoBtn);
-        }
-
-        sceneShotIds.forEach(function(sid, idx) {
-          const row = document.createElement('div');
-          row.className = 'media-shot-row' + (idx === 0 ? ' media-shot-active' : '');
-          row.id = 'media-shot-row-' + cardId + '-' + sid;
-          const shotDur   = (_mediaShotDur   && _mediaShotDur[sid])   || 0;
-          const shotStart = (_mediaShotStart && _mediaShotStart[sid]) || 0;
-          const timeLabel = _mediaShotStart
-            ? ' <span style="font-family:var(--mono);font-size:0.82em;color:var(--dim)">'
-              + _mediaFmtTime(shotStart) + '\u2013' + _mediaFmtTime(shotStart + shotDur) + '</span>'
-            : (shotDur > 0 ? ' (' + shotDur.toFixed(1) + 's)' : '');
-          row.innerHTML = '<span class="media-shot-label">' + sid + timeLabel + ':</span>'
-              + '<div class="media-shot-bar"><div class="media-shot-bar-fill" style="width:0%"></div></div>'
-              + '<div class="media-shot-segments"></div>'
-              + '<span class="media-shot-gap">\u2014 not assigned \u2014</span>';
-          (function(cid, s) {
-            row.addEventListener('click', function(e) {
-              if (e.target.closest('.media-seg-remove')) return;
-              mediaSetActiveShot(cid, s);
-            });
-          })(cardId, sid);
-          shotSection.appendChild(row);
-        });
-        // First shot is active by default
-        _mediaActiveShot[cardId] = sceneShotIds[0];
-        card.appendChild(shotSection);
-      }
-
-      // Render each bg_id's search results as a sub-section
-      bgIds.forEach(bgId => {
-        _mediaRenderBgSection(card, bgId, cardId, items, d_topN);
-      });
-
-      body.appendChild(card);
-    });
-
-    document.getElementById('media-footer').style.display = 'flex';
-    document.getElementById('media-confirm-msg').textContent = '';
-    // Show "Apply Recommended Sequence" button only if server computed one
-    const applyBtn = document.getElementById('media-btn-apply-seq');
-    if (applyBtn) applyBtn.style.display = _mediaRecommendedSeq ? 'inline-block' : 'none';
-
-    // Restore any preview videos that were generated in a previous session
-    _mediaRestorePreviewIfExists();
-    _mediaUpdateGenAllBtn();
   }
 
   // ── Restore preview players that exist on disk after page reload ──
@@ -8449,17 +8094,8 @@ placeholder="Enter your story here"></textarea>
     title.textContent = '\u2795 Assign to shots (' + (type === 'video' ? '\uD83C\uDFA5' : '\uD83D\uDDBC\uFE0F') + ')';
     popup.appendChild(title);
 
-    // Which shots already have this URL?
+    // Which shots already have this URL? (card-selection system removed; alreadyIn always empty)
     var alreadyIn = {};
-    Object.keys(_mediaSelections).forEach(function(bgId) {
-      var ps = (_mediaSelections[bgId] || {}).per_shot || {};
-      Object.keys(ps).forEach(function(sid) {
-        var segs = (ps[sid] || {}).segments || [];
-        segs.forEach(function(s) {
-          if (s.url === (entry.url || '')) alreadyIn[sid] = bgId;
-        });
-      });
-    });
 
     var checkboxes = [];
     allShots.forEach(function(sid) {
@@ -8503,84 +8139,25 @@ placeholder="Enter your story here"></textarea>
           });
         }
         if (!targetBgId) return;
-        var targetCardId = (_mediaBgToScene && _mediaBgToScene[targetBgId]) || targetBgId;
-        // Build canonical segment copy (A2 contract)
+        // Build canonical segment copy for Shot Overrides
         var naturalDur = type === 'video' ? (entry.duration_sec || 0) : 0;
-        var shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
         var seg = {
-          media_type:            type,
+          type:                  type,
           url:                   entry.url || '',
           path:                  entry.path || '',
           score:                 entry.score,
-          natural_duration_sec:  type === 'video' ? naturalDur : null,
-          duration_override_sec: null,
           duration_sec:          type === 'video' ? naturalDur : null,
           hold_sec:              null,
-          source:                entry.source || null,
-          animation_type:        (type === 'image' && wrapEl && wrapEl.dataset.animType) ? wrapEl.dataset.animType : null,
-          start_sec:             null,
-          end_sec:               null,
+          clip_in:               type === 'video' ? 0 : null,
+          clip_out:              type === 'video' ? null : null,
+          animation:             (type === 'image' && wrapEl && wrapEl.dataset.animType) ? wrapEl.dataset.animType : 'none',
+          filename:              entry.filename || (entry.url || '').split('/').pop() || '',
         };
-        // Insert into target (selections keyed by bg_id)
-        if (!_mediaSelections[targetBgId]) _mediaSelections[targetBgId] = { per_shot: {} };
-        var ps = _mediaSelections[targetBgId].per_shot;
-        if (!ps[sid]) ps[sid] = { segments: [] };
-        if (!ps[sid].segments) {
-          var old = ps[sid];
-          ps[sid] = { segments: old.url ? [old] : [] };
-        }
-        ps[sid].segments.push(seg);
-        _mediaRebalanceImages(sid, ps[sid].segments);
-        _mediaRenderShotRow(targetCardId, sid);
-
-        // Also inject into the target bg's search results + thumbnail grid
-        if (_mediaResults && _mediaResults[targetBgId]) {
-          var targetItem = _mediaResults[targetBgId];
-          var listKey = type === 'video' ? 'videos' : 'images';
-          var list = targetItem[listKey] || [];
-          var entryUrl = entry.url || '';
-          var alreadyInList = list.some(function(e) { return e.url === entryUrl; });
-          if (!alreadyInList) {
-            list.push(entry);
-            targetItem[listKey] = list;
-            // Find the bg-content container for this bg within the scene card
-            var bgContent = document.getElementById('media-bg-content-' + targetBgId);
-            var card = bgContent || document.getElementById('media-card-' + targetCardId);
-            if (card) {
-              var isVideo = (type === 'video');
-              var labels = card.querySelectorAll('.media-section-label');
-              var targetRow = null;
-              labels.forEach(function(lbl) {
-                if (lbl.textContent.toLowerCase().indexOf(isVideo ? 'video' : 'image') >= 0) {
-                  var sib = lbl.nextElementSibling;
-                  if (sib && sib.classList.contains('media-thumb-row')) targetRow = sib;
-                }
-              });
-              if (!targetRow) {
-                var newLbl = document.createElement('div');
-                newLbl.className = 'media-section-label';
-                newLbl.textContent = (isVideo ? 'Videos' : 'Images') + ' (1 found)';
-                var newRow = document.createElement('div');
-                newRow.className = 'media-thumb-row';
-                card.appendChild(newLbl);
-                card.appendChild(newRow);
-                var emptyEl = card.querySelector('.media-empty');
-                if (emptyEl) emptyEl.remove();
-                targetRow = newRow;
-              } else {
-                var prevLbl = targetRow.previousElementSibling;
-                if (prevLbl && prevLbl.classList.contains('media-section-label')) {
-                  prevLbl.textContent = (isVideo ? 'Videos' : 'Images') + ' (' + list.length + ' found)';
-                }
-              }
-              var th = _mediaThumb(targetCardId, type, entry, list.length - 1);
-              th.classList.add('selected');
-              targetRow.appendChild(th);
-            }
-          }
-        }
+        // Store into Shot Overrides — append to any existing segments
+        if (!_mediaOvrSegments[sid]) _mediaOvrSegments[sid] = [];
+        _mediaOvrSegments[sid].push(seg);
       });
-      _mediaMarkCrossCardUsed();
+      mediaRenderShotOverrides();
     });
     popup.appendChild(doneBtn);
 
@@ -8668,8 +8245,7 @@ placeholder="Enter your story here"></textarea>
           }
           // Apply / remove live animation on the thumbnail img immediately
           _mediaApplyThumbAnim(wrap, animKey);
-          // If this thumb is already selected in a segment, sync that segment too
-          _mediaUpdateSegmentAnim(wrap, animKey === 'none' ? null : animKey);
+          // (segment sync removed with card grid)
         });
       });
       wrap.appendChild(animBtn);
@@ -8747,33 +8323,7 @@ placeholder="Enter your story here"></textarea>
     if (typeof entry.duration_sec === 'number') {
       wrap.dataset.durationSec = entry.duration_sec;
     }
-    wrap.addEventListener('click', () => mediaSelect(itemId, type, entry, wrap));
     return wrap;
-  }
-
-  // ── Update animation_type on any existing segment that matches this thumb's URL ──
-  function _mediaUpdateSegmentAnim(wrapEl, animKey) {
-    const cardId = wrapEl.dataset.itemId;  // cardId = scene_id
-    const url    = wrapEl.dataset.url || '';
-    if (!cardId || !url) return;
-    // Search across all bg_ids in this card's scene
-    const bgIds = (_mediaSceneBgs && _mediaSceneBgs[cardId]) || [cardId];
-    let updated = false;
-    bgIds.forEach(function(bgId) {
-      const sel = _mediaSelections[bgId];
-      if (!sel || !sel.per_shot) return;
-      Object.keys(sel.per_shot).forEach(function(sid) {
-        const ps = sel.per_shot[sid];
-        if (!ps.segments) return;
-        ps.segments.forEach(function(seg) {
-          if (seg.url === url) {
-            seg.animation_type = animKey || null;
-            updated = true;
-          }
-        });
-        if (updated) _mediaRenderShotRow(cardId, sid);
-      });
-    });
   }
 
   // ── Segment total duration helper ──
@@ -8846,132 +8396,6 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  // ── Select / deselect a thumb ──
-  // cardId = scene_id (or bg_id for orphan cards). Selections are stored by bg_id.
-  function mediaSelect(cardId, type, entry, wrapEl) {
-    // Resolve all shots in this card (scene-based or legacy bg-based)
-    const sceneShotIds = _mediaSceneMap ? (_mediaSceneMap[cardId] || []) : [];
-    const legacyShotIds = _mediaShotMap ? (_mediaShotMap[cardId] || []) : [];
-    const shotIds = sceneShotIds.length > 0 ? sceneShotIds : legacyShotIds;
-
-    if (_mediaShotMap && shotIds.length > 0) {
-      // ── Multi-segment stacking mode ──
-      const clickUrl = entry.url || '';
-
-      // ── Toggle-off: if this URL is already in any shot in this card, remove it ──
-      let removed = false;
-      for (const sid of shotIds) {
-        const bgId = (_mediaShotToBg && _mediaShotToBg[sid]) || cardId;
-        const ps = (_mediaSelections[bgId] && _mediaSelections[bgId].per_shot) || {};
-        if (!ps[sid] || !ps[sid].segments) continue;
-        const idx = ps[sid].segments.findIndex(function(s) { return s.url === clickUrl; });
-        if (idx !== -1) {
-          ps[sid].segments.splice(idx, 1);
-          if (ps[sid].segments.length === 0) {
-            delete _mediaSelections[bgId].per_shot[sid];
-          } else {
-            _mediaRebalanceImages(sid, ps[sid].segments);
-          }
-          _mediaRenderShotRow(cardId, sid);
-          removed = true;
-          break;
-        }
-      }
-      if (removed) {
-        wrapEl.classList.remove('selected');
-        mediaRenderShotOverrides();
-        return;
-      }
-
-      // ── Target: the user-selected active shot row ──
-      // If no shot is active (user deselected or never selected) and there are
-      // multiple shots, warn instead of silently falling back to the first shot.
-      if (_mediaActiveShot[cardId] == null && shotIds.length > 1) {
-        // Show a brief inline warning on the shot section
-        const _warnSec = document.getElementById('media-shots-' + cardId);
-        if (_warnSec) {
-          var _warnEl = _warnSec.querySelector('.media-shot-warn');
-          if (!_warnEl) {
-            _warnEl = document.createElement('div');
-            _warnEl.className = 'media-shot-warn';
-            _warnEl.style.cssText = 'font-size:11px;color:#c0392b;padding:2px 6px;margin:2px 0;';
-            _warnSec.insertBefore(_warnEl, _warnSec.firstChild);
-          }
-          _warnEl.textContent = 'Select a shot row first';
-          clearTimeout(_warnEl._hideTimer);
-          _warnEl._hideTimer = setTimeout(function() { _warnEl.textContent = ''; }, 2500);
-        }
-        return;
-      }
-      var targetShot = _mediaActiveShot[cardId] != null ? _mediaActiveShot[cardId] : shotIds[0];
-      var targetBgId = (_mediaShotToBg && _mediaShotToBg[targetShot]) || cardId;
-
-      // Keep _mediaShotToBg in sync so mediaSetTiming / mediaClearSegment can find this shot
-      if (!_mediaShotToBg) _mediaShotToBg = {};
-      if (!_mediaShotToBg[targetShot]) _mediaShotToBg[targetShot] = targetBgId;
-
-      // Initialize selections for the target bg_id
-      if (!_mediaSelections[targetBgId]) _mediaSelections[targetBgId] = { per_shot: {} };
-      const ps = _mediaSelections[targetBgId].per_shot;
-      if (!ps[targetShot]) ps[targetShot] = { segments: [] };
-      if (!ps[targetShot].segments) {
-        const old = ps[targetShot];
-        ps[targetShot] = { segments: old.url ? [old] : [] };
-      }
-
-      const segs = ps[targetShot].segments;
-      const shotDur = (_mediaShotDur && _mediaShotDur[targetShot]) || 0;
-      const filled = _mediaSegmentTotal({ segments: segs });
-      const remaining = Math.max(0, shotDur - filled);
-
-      const naturalDur = type === 'video' ? (entry.duration_sec || 0) : 0;
-      const animType = (type === 'image' && wrapEl.dataset.animType) ? wrapEl.dataset.animType : null;
-      segs.push({
-        media_type:           type,
-        url:                  entry.url || '',
-        path:                 entry.path || '',
-        score:                entry.score,
-        natural_duration_sec: type === 'video' ? naturalDur : null,
-        duration_override_sec:null,
-        duration_sec:         type === 'video' ? naturalDur : null,
-        hold_sec:             type === 'image' ? remaining : null,
-        source:               entry.source || null,
-        animation_type:       animType,
-        start_sec:            null,
-        end_sec:              null,
-      });
-
-      _mediaRebalanceImages(targetShot, segs);
-      wrapEl.classList.add('selected');
-      _mediaRenderShotRow(cardId, targetShot);
-      _mediaMarkCrossCardUsed();
-      mediaRenderShotOverrides();
-    } else {
-      // ── Single-selection mode (no ShotList) ──
-      const card = document.getElementById('media-card-' + cardId);
-      if (card) {
-        card.querySelectorAll('.media-thumb').forEach(t => t.classList.remove('selected'));
-        card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
-      }
-
-      if (_mediaSelections[cardId] && _mediaSelections[cardId].url === (entry.url || '')) {
-        delete _mediaSelections[cardId];
-        return;
-      }
-
-      _mediaSelections[cardId] = { media_type: type, url: entry.url || '',
-                                    path: entry.path || '', score: entry.score };
-      wrapEl.classList.add('selected');
-
-      const selBadge = document.createElement('span');
-      selBadge.className = 'media-sel-badge';
-      selBadge.textContent = '\u2714 ' + type;
-      wrapEl.appendChild(selBadge);
-      _mediaMarkCrossCardUsed();
-      mediaRenderShotOverrides();
-    }
-  }
-
   // Convert a segment URL (file:// or absolute path) to a browser-loadable URL.
   function _mediaSegThumbUrl(url) {
     if (!url) return '';
@@ -9025,334 +8449,8 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  // ── Render a per-shot row with segment list and fill bar ──
-  function _mediaRenderShotRow(cardId, shotId) {
-    const row = document.getElementById('media-shot-row-' + cardId + '-' + shotId);
-    if (!row) return;
-    const barFill = row.querySelector('.media-shot-bar-fill');
-    const segContainer = row.querySelector('.media-shot-segments');
-    const gapSpan = row.querySelector('.media-shot-gap');
-
-    // Look up bg_id for this shot to find its selection data
-    const bgId = (_mediaShotToBg && _mediaShotToBg[shotId]) || cardId;
-    const ps = (_mediaSelections[bgId] && _mediaSelections[bgId].per_shot) || {};
-    const shotEntry = ps[shotId];
-    const shotDur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
-
-    if (!shotEntry || !shotEntry.segments || shotEntry.segments.length === 0) {
-      if (barFill) barFill.style.width = '0%';
-      if (segContainer) segContainer.innerHTML = '';
-      if (gapSpan) gapSpan.textContent = '\u2014 not assigned \u2014';
-      row.classList.remove('media-shot-filled');
-      return;
-    }
-
-    const segs = shotEntry.segments;
-    const filled = _mediaSegmentTotal(shotEntry);
-    const pct = shotDur > 0 ? Math.min(100, (filled / shotDur) * 100) : 100;
-    if (barFill) barFill.style.width = pct.toFixed(1) + '%';
-
-    // Render segment entries
-    const videoSum = segs.reduce(function(s, sg) {
-      return s + (sg.media_type === 'video' ? _resolveVideoDur(sg) : 0);
-    }, 0);
-    const videoOverflow = shotDur > 0 && videoSum > shotDur + 0.05;
-    if (segContainer) {
-      segContainer.innerHTML = '';
-      segs.forEach(function(seg, idx) {
-        const se = document.createElement('div');
-        se.className = 'media-seg-entry';
-        const fname = (seg.path || seg.url || '').split('/').pop() || 'media';
-        if (seg.media_type === 'video') {
-          const natDur  = seg.natural_duration_sec || seg.duration_sec || 0;
-          const ovr     = seg.duration_override_sec;
-          const dispDur = _resolveVideoDur(seg);
-          const inp = document.createElement('input');
-          inp.type        = 'number';
-          inp.min         = '0.1';
-          inp.step        = '0.1';
-          inp.placeholder = natDur.toFixed(1);
-          inp.value       = (ovr != null && ovr > 0) ? ovr : '';
-          inp.title       = 'Override duration (s). Blank = natural ' + natDur.toFixed(1) + 's';
-          inp.style.cssText = 'width:54px;font-size:11px;background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:3px;padding:1px 3px;';
-          (function(cid, bid, sid, i, s) {
-            inp.addEventListener('change', function() {
-              var v = parseFloat(this.value);
-              if (isNaN(v) || v <= 0) {
-                s.duration_override_sec = null;
-                s.duration_sec = s.natural_duration_sec || 0;
-                this.value = '';
-              } else {
-                s.duration_override_sec = v;
-                s.duration_sec = v;
-              }
-              _mediaRebalanceImages(sid, (_mediaSelections[bid].per_shot[sid] || {segments:[]}).segments);
-              _mediaRenderShotRow(cid, sid);
-            });
-          })(cardId, bgId, shotId, idx, seg);
-          const vidThumb = document.createElement('video');
-          vidThumb.className = 'seg-thumb';
-          var _vts = seg.start_sec || 0;
-          var _vte = seg.end_sec   || natDur;
-          vidThumb.src = _mediaSegThumbUrl(seg.url || '') + '#t=' + _vts.toFixed(3);
-          vidThumb.preload = 'metadata';
-          vidThumb.muted = true;
-          vidThumb.setAttribute('playsinline', '');
-          vidThumb.title = fname + ' — click to play in/out';
-          vidThumb.dataset.start = _vts.toFixed(3);
-          vidThumb.dataset.end   = _vte.toFixed(3);
-          vidThumb.onclick       = function() { _mediaSegThumbClick(this); };
-          vidThumb.ontimeupdate  = function() { _mediaSegThumbTimeUpdate(this); };
-          se.appendChild(vidThumb);
-          const nameSpan = document.createElement('span');
-          nameSpan.className = 'seg-name';
-          nameSpan.textContent = fname;
-          se.appendChild(nameSpan);
-          se.appendChild(document.createTextNode('\u00a0'));
-          se.appendChild(inp);
-          const durSpan = document.createElement('span');
-          durSpan.className = 'seg-dur';
-          durSpan.textContent = dispDur.toFixed(1) + 's';
-          se.appendChild(durSpan);
-
-          // ── Clip trimmer row (start_sec / end_sec) ──
-          var trimRow = document.createElement('div');
-          trimRow.className = 'seg-trim-row';
-          var curStart = seg.start_sec || 0;
-          var curEnd   = seg.end_sec || natDur;
-          // Range bar showing selected portion
-          var rangeBar = document.createElement('div');
-          rangeBar.className = 'trim-range-bar';
-          var rangeFill = document.createElement('div');
-          rangeFill.className = 'trim-range-fill';
-          if (natDur > 0) {
-            rangeFill.style.left  = ((curStart / natDur) * 100).toFixed(1) + '%';
-            rangeFill.style.width = (((curEnd - curStart) / natDur) * 100).toFixed(1) + '%';
-          }
-          rangeBar.appendChild(rangeFill);
-          // In label
-          var startLbl = document.createElement('span');
-          startLbl.className = 'trim-label';
-          startLbl.textContent = 'in:';
-          var startInp = document.createElement('input');
-          startInp.type = 'number'; startInp.min = '0'; startInp.step = '0.1';
-          startInp.value = curStart > 0 ? curStart.toFixed(1) : '';
-          startInp.placeholder = '0';
-          // Out label
-          var endLbl = document.createElement('span');
-          endLbl.className = 'trim-label';
-          endLbl.textContent = 'out:';
-          var endInp = document.createElement('input');
-          endInp.type = 'number'; endInp.min = '0'; endInp.step = '0.1';
-          endInp.value = (seg.end_sec != null) ? curEnd.toFixed(1) : '';
-          endInp.placeholder = natDur > 0 ? natDur.toFixed(1) : '';
-          // Change handlers
-          (function(cid, bid, sid, i, s, sInp, eInp, rFill, nDur, vThumb) {
-            function applyTrim() {
-              var sv = parseFloat(sInp.value);
-              var ev = parseFloat(eInp.value);
-              if (isNaN(sv) || sv < 0) sv = 0;
-              if (sv >= nDur) { sv = 0; sInp.value = ''; }
-              if (isNaN(ev) || ev <= sv) ev = 0;
-              if (ev > nDur) ev = nDur;
-              s.start_sec = sv > 0 ? sv : null;
-              s.end_sec   = ev > 0 ? ev : null;
-              var effStart = s.start_sec || 0;
-              var effEnd   = s.end_sec || nDur;
-              var clipDur  = Math.max(0.1, effEnd - effStart);
-              s.duration_override_sec = clipDur;
-              s.duration_sec = clipDur;
-              if (nDur > 0) {
-                rFill.style.left  = ((effStart / nDur) * 100).toFixed(1) + '%';
-                rFill.style.width = (((effEnd - effStart) / nDur) * 100).toFixed(1) + '%';
-              }
-              // Keep video thumbnail in/out in sync so clicking plays the updated range
-              if (vThumb) {
-                vThumb.dataset.start = effStart.toFixed(3);
-                vThumb.dataset.end   = effEnd.toFixed(3);
-                vThumb.currentTime   = effStart;
-              }
-              _mediaRebalanceImages(sid, (_mediaSelections[bid].per_shot[sid] || {segments:[]}).segments);
-              _mediaRenderShotRow(cid, sid);
-              mediaRenderShotOverrides();
-            }
-            sInp.addEventListener('change', applyTrim);
-            eInp.addEventListener('change', applyTrim);
-          })(cardId, bgId, shotId, idx, seg, startInp, endInp, rangeFill, natDur, vidThumb);
-          var playBtn = document.createElement('button');
-          playBtn.textContent = '▶';
-          playBtn.title = 'Play in/out range';
-          playBtn.style.cssText = 'font-size:11px;padding:1px 6px;cursor:pointer;'
-            + 'background:var(--input-bg);border:1px solid var(--input-border);'
-            + 'border-radius:3px;color:var(--text);flex-shrink:0;';
-          (function(vt, btn) {
-            btn.onclick = function(ev) {
-              ev.stopPropagation();
-              _mediaSegThumbClick(vt);
-            };
-            vt.addEventListener('play',  function() { btn.textContent = '⏸'; });
-            vt.addEventListener('pause', function() { btn.textContent = '▶'; });
-          })(vidThumb, playBtn);
-          trimRow.appendChild(startLbl);
-          trimRow.appendChild(startInp);
-          trimRow.appendChild(rangeBar);
-          trimRow.appendChild(endLbl);
-          trimRow.appendChild(endInp);
-          trimRow.appendChild(playBtn);
-          se.appendChild(trimRow);
-        } else {
-          // Image segment
-          const dur = seg.hold_sec || 0;
-          const imgThumb = document.createElement('img');
-          imgThumb.className = 'seg-thumb';
-          imgThumb.src = _mediaSegThumbUrl(seg.url || '');
-          imgThumb.loading = 'lazy';
-          imgThumb.alt = fname;
-          imgThumb.title = fname;
-          se.appendChild(imgThumb);
-          const imgNameSpan = document.createElement('span');
-          imgNameSpan.className = 'seg-name';
-          imgNameSpan.textContent = fname;
-          se.appendChild(imgNameSpan);
-          // Editable duration input (1 decimal, replaces read-only span)
-          const imgDurInp = document.createElement('input');
-          imgDurInp.type = 'number';
-          imgDurInp.min = '0.1';
-          imgDurInp.step = '0.1';
-          imgDurInp.value = dur > 0 ? dur.toFixed(1) : '';
-          imgDurInp.placeholder = dur > 0 ? dur.toFixed(1) : 'auto';
-          imgDurInp.title = 'Display duration (s). Blank = auto-distribute.';
-          imgDurInp.style.cssText = 'width:48px;font-size:11px;background:var(--input-bg);color:var(--text);border:1px solid var(--input-border);border-radius:3px;padding:1px 3px;';
-          (function(cid, bid, sid, i, s) {
-            imgDurInp.addEventListener('change', function() {
-              var v = parseFloat(this.value);
-              if (isNaN(v) || v <= 0) {
-                s.hold_sec_locked = false;
-                s.hold_sec = null;
-                s.end_sec = null;  // clear stale end_sec so hold_sec is used on next save/preview
-                this.value = '';
-              } else {
-                s.hold_sec = Math.round(v * 10) / 10;
-                s.hold_sec_locked = true;
-                s.end_sec = null;  // clear stale end_sec so updated hold_sec is used on next save/preview
-              }
-              _mediaRebalanceImages(sid, (_mediaSelections[bid].per_shot[sid] || {segments:[]}).segments);
-              _mediaRenderShotRow(cid, sid);
-              mediaRenderShotOverrides();
-            });
-          })(cardId, bgId, shotId, idx, seg);
-          se.appendChild(imgDurInp);
-          // Animation badge — click to change
-          const animBadge = document.createElement('span');
-          animBadge.className = 'seg-anim-badge';
-          animBadge.title = 'Animation effect — click to change';
-          const animKey = seg.animation_type || 'none';
-          animBadge.textContent = animKey === 'none' ? '\uD83C\uDFAC \u2014' : ('\uD83C\uDFAC ' + (_ANIM_OPTIONS.find(o => o.key === animKey) || {label: animKey}).label);
-          (function(s, badge) {
-            badge.addEventListener('click', function(ev) {
-              ev.stopPropagation();
-              _mediaShowAnimPicker(ev, null, function(newKey) {
-                s.animation_type = newKey === 'none' ? null : newKey;
-                badge.textContent = (!newKey || newKey === 'none') ? '\uD83C\uDFAC \u2014' : ('\uD83C\uDFAC ' + (_ANIM_OPTIONS.find(o => o.key === newKey) || {label: newKey}).label);
-              });
-            });
-          })(seg, animBadge);
-          se.appendChild(animBadge);
-        }
-        const rmBtn = document.createElement('button');
-        rmBtn.className = 'media-seg-remove';
-        rmBtn.textContent = '\u2715';
-        rmBtn.onclick = (function(iid, sid, i) {
-          return function() { mediaRemoveSegment(iid, sid, i); };
-        })(cardId, shotId, idx);
-        se.appendChild(rmBtn);
-
-        // ── Drag handle + drag-to-reorder ──
-        const dragHandle = document.createElement('span');
-        dragHandle.textContent = '\u2630';
-        dragHandle.title = 'Drag to reorder';
-        dragHandle.style.cssText = 'cursor:grab;color:var(--dim);font-size:12px;flex-shrink:0;padding:0 2px;user-select:none';
-        se.insertBefore(dragHandle, se.firstChild);
-
-        se.draggable = true;
-        (function(cid, bid, sid, i) {
-          se.addEventListener('dragstart', function(e) {
-            _mediaDragSrc = { cardId: cid, bgId: bid, shotId: sid, idx: i };
-            e.dataTransfer.effectAllowed = 'move';
-            se.style.opacity = '0.4';
-          });
-          se.addEventListener('dragend', function() {
-            se.style.opacity = '';
-          });
-          se.addEventListener('dragover', function(e) {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = 'move';
-            se.style.outline = '2px solid var(--accent)';
-          });
-          se.addEventListener('dragleave', function() {
-            se.style.outline = '';
-          });
-          se.addEventListener('drop', function(e) {
-            e.preventDefault();
-            se.style.outline = '';
-            if (!_mediaDragSrc || _mediaDragSrc.shotId !== sid || _mediaDragSrc.idx === i) return;
-            var ps = _mediaSelections[_mediaDragSrc.bgId] && _mediaSelections[_mediaDragSrc.bgId].per_shot;
-            if (!ps || !ps[sid]) return;
-            var segs = ps[sid].segments;
-            var moved = segs.splice(_mediaDragSrc.idx, 1)[0];
-            var targetIdx = i > _mediaDragSrc.idx ? i - 1 : i;
-            segs.splice(targetIdx, 0, moved);
-            _mediaRebalanceImages(sid, segs);
-            _mediaRenderShotRow(cid, sid);
-            mediaRenderShotOverrides();
-          });
-        })(cardId, bgId, shotId, idx);
-
-        segContainer.appendChild(se);
-      });
-    }
-
-    // Gap / overflow indicator
-    const gap = shotDur > 0 ? shotDur - filled : 0;
-    if (gapSpan) {
-      if (videoOverflow) {
-        gapSpan.textContent = '\u26a0 Videos exceed shot (' + videoSum.toFixed(1) + 's > ' + shotDur.toFixed(1) + 's)';
-        gapSpan.style.color = '#e06c75';
-        row.classList.remove('media-shot-filled');
-      } else if (gap > 0.1) {
-        gapSpan.textContent = 'needs ' + gap.toFixed(1) + 's more';
-        gapSpan.style.color = '';
-        row.classList.remove('media-shot-filled');
-      } else {
-        gapSpan.textContent = '\u2713 filled';
-        gapSpan.style.color = '';
-        row.classList.add('media-shot-filled');
-      }
-    }
-  }
-
-  // ── Remove a segment from a shot ──
-  function mediaRemoveSegment(cardId, shotId, segIdx) {
-    const bgId = (_mediaShotToBg && _mediaShotToBg[shotId]) || cardId;
-    if (!_mediaSelections[bgId] || !_mediaSelections[bgId].per_shot) return;
-    const shotEntry = _mediaSelections[bgId].per_shot[shotId];
-    if (!shotEntry || !shotEntry.segments) return;
-    shotEntry.segments.splice(segIdx, 1);
-    if (shotEntry.segments.length === 0) {
-      delete _mediaSelections[bgId].per_shot[shotId];
-    } else {
-      _mediaRebalanceImages(shotId, shotEntry.segments);
-    }
-    _mediaRenderShotRow(cardId, shotId);
-  }
-
-  // ── Clear a single per-shot assignment (legacy + segments) ──
-  function mediaClearShot(cardId, shotId) {
-    const bgId = (_mediaShotToBg && _mediaShotToBg[shotId]) || cardId;
-    if (!_mediaSelections[bgId] || !_mediaSelections[bgId].per_shot) return;
-    delete _mediaSelections[bgId].per_shot[shotId];
-    _mediaRenderShotRow(cardId, shotId);
-  }
+  // _mediaRenderShotRow removed — card DOM no longer exists
+  function _mediaRenderShotRow(cardId, shotId) { /* no-op: card grid removed */ }
 
   function mediaRenderShotOverrides() {
     const container = document.getElementById('media-shot-overrides');
@@ -10443,92 +9541,6 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  function mediaSetTiming(shotId, segIdx, field, value) {
-    const bgId = _mediaShotToBg && _mediaShotToBg[shotId];
-    if (!bgId) { console.warn('[media] no bgId for shot', shotId); return; }
-    const segs = _mediaSelections[bgId] && _mediaSelections[bgId].per_shot &&
-                 _mediaSelections[bgId].per_shot[shotId] &&
-                 _mediaSelections[bgId].per_shot[shotId].segments;
-    if (!segs || !segs[segIdx]) return;
-    segs[segIdx][field] = parseFloat(value);
-  }
-
-  // ── Shot Overrides in/out handler — mirrors applyTrim from the card view ──
-  function _mediaOvrTrim(shotId, segIdx, field, value, natDur, fillId, durLblId) {
-    const bgId = _mediaShotToBg && _mediaShotToBg[shotId];
-    if (!bgId) return;
-    const segs = _mediaSelections[bgId] && _mediaSelections[bgId].per_shot &&
-                 _mediaSelections[bgId].per_shot[shotId] &&
-                 _mediaSelections[bgId].per_shot[shotId].segments;
-    if (!segs || !segs[segIdx]) return;
-    const seg = segs[segIdx];
-    var v = parseFloat(value);
-    if (field === 'start_sec') {
-      if (isNaN(v) || v < 0) v = 0;
-      if (natDur > 0 && v >= natDur) v = 0;
-      seg.start_sec = v;
-    } else {
-      if (isNaN(v) || v <= 0) v = natDur;
-      if (natDur > 0 && v > natDur) v = natDur;
-      seg.end_sec = v;
-    }
-    var effStart = seg.start_sec || 0;
-    var effEnd   = seg.end_sec   || natDur;
-    var clipDur  = Math.max(0.1, effEnd - effStart);
-    seg.duration_override_sec = clipDur;
-    seg.duration_sec = clipDur;
-    // Update range fill and duration label live
-    if (natDur > 0) {
-      var fill = document.getElementById(fillId);
-      if (fill) {
-        fill.style.left  = (effStart / natDur * 100).toFixed(1) + '%';
-        fill.style.width = (clipDur  / natDur * 100).toFixed(1) + '%';
-      }
-    }
-    if (durLblId) {
-      var durLbl = document.getElementById(durLblId);
-      if (durLbl) durLbl.textContent = clipDur.toFixed(1) + 's';
-    }
-  }
-
-  // ── Shot Overrides image hold_sec handler ──
-  function _mediaOvrHoldSec(shotId, segIdx, value) {
-    const bgId = _mediaShotToBg && _mediaShotToBg[shotId];
-    if (!bgId) return;
-    const segs = _mediaSelections[bgId] && _mediaSelections[bgId].per_shot &&
-                 _mediaSelections[bgId].per_shot[shotId] &&
-                 _mediaSelections[bgId].per_shot[shotId].segments;
-    if (!segs || !segs[segIdx]) return;
-    const seg = segs[segIdx];
-    const v = parseFloat(value);
-    const shotDur = (_mediaShotDur && _mediaShotDur[shotId]) || 0;
-    if (isNaN(v) || v <= 0) {
-      seg.hold_sec_locked = false;
-      seg.hold_sec = null;
-      seg.end_sec = null;  // clear stale end_sec so hold_sec is used on next save/preview
-    } else {
-      // Cap at shot duration so an image cannot push the shot longer than its allotted time.
-      const capped = shotDur > 0 ? Math.min(Math.round(v * 10) / 10, shotDur) : Math.round(v * 10) / 10;
-      seg.hold_sec = capped;
-      seg.hold_sec_locked = true;
-      seg.end_sec = null;  // clear stale end_sec so updated hold_sec is used on next save/preview
-    }
-    _mediaRebalanceImages(shotId, (_mediaSelections[bgId].per_shot[shotId] || {segments:[]}).segments);
-    const cardId = (_mediaBgToScene && _mediaBgToScene[bgId]) || bgId;
-    _mediaRenderShotRow(cardId, shotId);
-    mediaRenderShotOverrides();
-  }
-
-  function mediaClearSegment(shotId, segIdx) {
-    const bgId = _mediaShotToBg && _mediaShotToBg[shotId];
-    if (!bgId) return;
-    const ps = _mediaSelections[bgId] && _mediaSelections[bgId].per_shot;
-    if (!ps || !ps[shotId] || !ps[shotId].segments) return;
-    ps[shotId].segments.splice(segIdx, 1);
-    if (ps[shotId].segments.length === 0) delete ps[shotId];
-    mediaRenderShotOverrides();
-  }
-
   function mediaUpdatePreviewLabel() {
     const music = document.getElementById('media-include-music').checked;
     const sfx   = document.getElementById('media-include-sfx').checked;
@@ -10893,6 +9905,8 @@ placeholder="Enter your story here"></textarea>
       });
   }
 
+  function _mediaReleaseAllConnections() { /* no-op: video card grid removed */ }
+
   async function mediaGeneratePreview() {
     if (!_mediaSlug || !_mediaEpId) return;
     const btn = document.getElementById('media-btn-preview');
@@ -10902,19 +9916,8 @@ placeholder="Enter your story here"></textarea>
     // Free all video HTTP connections before the POST to guarantee a free slot
     _mediaReleaseAllConnections();
 
-    // Build perShot from scene-card selections, then overlay with Shot Overrides
+    // Build perShot from Shot Overrides (sole source after card grid removal)
     const perShot = {};
-    for (const [bgId, bgData] of Object.entries(_mediaSelections || {})) {
-      if (!bgData.per_shot) continue;
-      for (const [shotId, shotData] of Object.entries(bgData.per_shot || {})) {
-        perShot[shotId] = (shotData.segments || []).map(seg => ({
-          ...seg,
-          start_sec: seg.start_sec ?? 0,
-          end_sec:   seg.end_sec   ?? seg.hold_sec ?? 0,
-        }));
-      }
-    }
-    // Shot Overrides take priority — overwrite any scene-card entry for the same shot
     for (const [shotId, segs] of Object.entries(_mediaOvrSegments || {})) {
       if (!segs || segs.length === 0) continue;
       perShot[shotId] = segs.map(s => ({
@@ -10984,20 +9987,8 @@ placeholder="Enter your story here"></textarea>
     // Free all video HTTP connections before the POST to guarantee a free slot
     _mediaReleaseAllConnections();
 
-    // Collect selections for only these shots (flat perShot format)
+    // Build perShot from Shot Overrides for this scene (sole source after card grid removal)
     const perShot = {};
-    for (const [bgId, bgData] of Object.entries(_mediaSelections || {})) {
-      if (!bgData.per_shot) continue;
-      for (const [shotId, shotData] of Object.entries(bgData.per_shot || {})) {
-        if (!shotIds.includes(shotId)) continue;
-        perShot[shotId] = (shotData.segments || []).map(seg => ({
-          ...seg,
-          start_sec: seg.start_sec ?? 0,
-          end_sec:   seg.end_sec   ?? seg.hold_sec ?? 0,
-        }));
-      }
-    }
-    // Shot Overrides take priority — overwrite for any shots in this scene
     for (const [shotId, segs] of Object.entries(_mediaOvrSegments || {})) {
       if (!segs || segs.length === 0 || !shotIds.includes(shotId)) continue;
       perShot[shotId] = segs.map(s => ({
@@ -11058,138 +10049,7 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  // ── Auto-assign: stack segments to fill each shot's duration ──
-  function mediaAutoAssign(cardId) {
-    // Resolve shots: scene-based or legacy bg-based
-    const sceneShotIds = _mediaSceneMap ? (_mediaSceneMap[cardId] || []) : [];
-    const legacyShotIds = _mediaShotMap ? (_mediaShotMap[cardId] || []) : [];
-    const shotIds = sceneShotIds.length > 0 ? sceneShotIds : legacyShotIds;
-    if (shotIds.length === 0) return;
-
-    // Merge candidates from all bg_ids in the scene
-    const bgIds = (_mediaSceneBgs && _mediaSceneBgs[cardId]) || [cardId];
-    const candidates = [];
-    const allImgs = [];
-    bgIds.forEach(function(bid) {
-      const item = _mediaResults[bid];
-      if (!item) return;
-      const vids = (item.videos || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
-      const imgs = (item.images || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
-      vids.forEach(v => candidates.push({ type: 'video', entry: v }));
-      imgs.forEach(v => { candidates.push({ type: 'image', entry: v }); allImgs.push(v); });
-    });
-    if (candidates.length === 0) return;
-
-    const usedUrls = new Set();
-    let candIdx = 0;
-
-    shotIds.forEach(function(sid) {
-      const bgId = (_mediaShotToBg && _mediaShotToBg[sid]) || cardId;
-      if (!_mediaSelections[bgId]) _mediaSelections[bgId] = { per_shot: {} };
-      const ps = _mediaSelections[bgId].per_shot;
-      const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
-      ps[sid] = { segments: [] };
-      let filled = 0;
-
-      while (filled < shotDur && candIdx < candidates.length * 2) {
-        const idx = candIdx % candidates.length;
-        const cand = candidates[idx];
-        candIdx++;
-        if (ps[sid].segments.some(function(s) { return s.url === cand.entry.url; })) continue;
-        const remaining = Math.max(0, shotDur - filled);
-        if (cand.type === 'video') {
-          const dur = cand.entry.duration_sec || remaining;
-          ps[sid].segments.push({
-            media_type: 'video', url: cand.entry.url || '',
-            path: cand.entry.path || '', score: cand.entry.score,
-            duration_sec: dur, hold_sec: null,
-          });
-          filled += dur;
-          usedUrls.add(cand.entry.url);
-        } else {
-          ps[sid].segments.push({
-            media_type: 'image', url: cand.entry.url || '',
-            path: cand.entry.path || '', score: cand.entry.score,
-            duration_sec: null, hold_sec: remaining,
-          });
-          filled += remaining;
-          usedUrls.add(cand.entry.url);
-        }
-      }
-
-      if (ps[sid].segments.length === 0 && allImgs.length > 0) {
-        ps[sid].segments.push({
-          media_type: 'image', url: allImgs[0].url || '',
-          path: allImgs[0].path || '', score: allImgs[0].score,
-          duration_sec: null, hold_sec: shotDur,
-        });
-        usedUrls.add(allImgs[0].url);
-      }
-
-      _mediaRenderShotRow(cardId, sid);
-    });
-
-    const card = document.getElementById('media-card-' + cardId);
-    if (card) {
-      card.querySelectorAll('.media-thumb').forEach(t => {
-        const url = t.dataset.url;
-        if (usedUrls.has(url)) t.classList.add('selected');
-        else t.classList.remove('selected');
-      });
-    }
-  }
-
-  // ── Reset all selections ──
-  // ── Mark thumbnails used in OTHER cards with a teal "used" indicator ──
-  // Called after every selection change so all cards stay in sync.
-  function _mediaMarkCrossCardUsed() {
-    // Build a map: url → Set of cardIds (scene_ids) that use it
-    const urlToCardIds = {};
-    Object.keys(_mediaSelections).forEach(bgId => {
-      const cid = (_mediaBgToScene && _mediaBgToScene[bgId]) || bgId;
-      const ps = (_mediaSelections[bgId] || {}).per_shot || {};
-      Object.keys(ps).forEach(shotId => {
-        const segs = (ps[shotId] || {}).segments || [];
-        segs.forEach(s => {
-          if (!s.url) return;
-          if (!urlToCardIds[s.url]) urlToCardIds[s.url] = new Set();
-          urlToCardIds[s.url].add(cid);
-        });
-      });
-      // Also handle legacy single-selection mode
-      if (_mediaSelections[bgId] && _mediaSelections[bgId].url) {
-        const u = _mediaSelections[bgId].url;
-        if (!urlToCardIds[u]) urlToCardIds[u] = new Set();
-        urlToCardIds[u].add(cid);
-      }
-    });
-
-    // For every thumb in every card, add/remove .used-elsewhere and badge
-    // t.dataset.itemId is now the cardId (scene_id)
-    document.querySelectorAll('.media-thumb').forEach(t => {
-      const url    = t.dataset.url;
-      const cardId = t.dataset.itemId;
-      if (!url) return;
-      const users = urlToCardIds[url];
-      const usedElsewhere = users && [...users].some(id => id !== cardId);
-      if (usedElsewhere) {
-        t.classList.add('used-elsewhere');
-        if (!t.querySelector('.media-used-badge')) {
-          const b = document.createElement('span');
-          b.className = 'media-used-badge';
-          b.textContent = '↗ used';
-          t.appendChild(b);
-        }
-      } else {
-        t.classList.remove('used-elsewhere');
-        const b = t.querySelector('.media-used-badge');
-        if (b) b.remove();
-      }
-    });
-  }
-
   function mediaReset() {
-    _mediaSelections = {};
     document.querySelectorAll('.media-thumb.selected').forEach(t => t.classList.remove('selected'));
     document.querySelectorAll('.media-thumb.used-elsewhere').forEach(t => t.classList.remove('used-elsewhere'));
     document.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
@@ -11212,242 +10072,6 @@ placeholder="Enter your story here"></textarea>
       }
     }
     document.getElementById('media-confirm-msg').textContent = '';
-  }
-
-  // ── Apply recommended sequence from server ──
-  function mediaApplyRecommended() {
-    if (!_mediaRecommendedSeq) return;
-    // Reset current selections first
-    mediaReset();
-    let applied = 0;
-    for (const [bgId, cand] of Object.entries(_mediaRecommendedSeq)) {
-      if (!cand || !cand.url) continue;
-      const shotIds = _mediaShotMap ? (_mediaShotMap[bgId] || []) : [];
-      const sceneId = (_mediaBgToScene && _mediaBgToScene[bgId]) || bgId;
-
-      if (_mediaShotMap && shotIds.length > 0) {
-        const item = _mediaResults[bgId];
-        if (!item) continue;
-        const candidates = [];
-        const vids = (item.videos || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
-        const imgs = (item.images || []).slice().sort((a, b) => (b.score || 0) - (a.score || 0));
-        vids.forEach(v => candidates.push({ type: 'video', entry: v }));
-        imgs.forEach(v => candidates.push({ type: 'image', entry: v }));
-        if (candidates.length === 0) continue;
-
-        if (!_mediaSelections[bgId]) _mediaSelections[bgId] = { per_shot: {} };
-        const ps = _mediaSelections[bgId].per_shot;
-        const usedUrls = new Set();
-        let ci = 0;
-
-        shotIds.forEach(function(sid) {
-          const shotDur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
-          ps[sid] = { segments: [] };
-          if (!_mediaShotToBg) _mediaShotToBg = {};
-          _mediaShotToBg[sid] = bgId;
-          let filled = 0;
-          while (filled < shotDur && ci < candidates.length * 2) {
-            const pick = candidates[ci % candidates.length];
-            ci++;
-            if (ps[sid].segments.some(function(s) { return s.url === pick.entry.url; })) continue;
-            const remaining = Math.max(0, shotDur - filled);
-            if (pick.type === 'video') {
-              const dur = pick.entry.duration_sec || remaining;
-              ps[sid].segments.push({
-                media_type: 'video', url: pick.entry.url || '',
-                path: pick.entry.path || '', score: pick.entry.score,
-                duration_sec: dur, hold_sec: null,
-              });
-              filled += dur;
-            } else {
-              ps[sid].segments.push({
-                media_type: 'image', url: pick.entry.url || '',
-                path: pick.entry.path || '', score: pick.entry.score,
-                duration_sec: null, hold_sec: remaining,
-              });
-              filled += remaining;
-            }
-            usedUrls.add(pick.entry.url);
-          }
-          _mediaRenderShotRow(sceneId, sid);
-        });
-
-        // Mark used thumbs
-        const card = document.getElementById('media-card-' + sceneId);
-        if (card) {
-          card.querySelectorAll('.media-thumb').forEach(t => {
-            if (usedUrls.has(t.dataset.url)) t.classList.add('selected');
-          });
-        }
-        applied++;
-      } else {
-        const ext = (cand.path || cand.url || '').split('.').pop().toLowerCase();
-        const mType = ['mp4','mov','webm','mkv'].includes(ext) ? 'video' : 'image';
-        if (!_mediaSelections[bgId]) _mediaSelections[bgId] = { per_shot: {} };
-        if (!_mediaSelections[bgId].per_shot) _mediaSelections[bgId].per_shot = {};
-        _mediaSelections[bgId].per_shot[bgId] = {
-          segments: [{
-            media_type: mType, url: cand.url || '', path: cand.path || '',
-            score: cand.score || 0, hold_sec: null, duration_sec: null,
-            start_sec: null, end_sec: null,
-          }]
-        };
-        if (!_mediaShotToBg) _mediaShotToBg = {};
-        _mediaShotToBg[bgId] = bgId;
-        const card = document.getElementById('media-card-' + sceneId);
-        if (card) {
-          card.querySelectorAll('.media-sel-badge').forEach(b => b.remove());
-          let matched = false;
-          card.querySelectorAll('.media-thumb').forEach(thumb => {
-            thumb.classList.remove('selected');
-            if (!matched && thumb.dataset.url === cand.url) {
-              thumb.classList.add('selected');
-              const badge = document.createElement('div');
-              badge.className = 'media-sel-badge';
-              badge.textContent = '\u2714';
-              thumb.appendChild(badge);
-              matched = true;
-            }
-          });
-          if (!matched) {
-            const first = card.querySelector('.media-thumb');
-            if (first) {
-              first.classList.add('selected');
-              const badge = document.createElement('div');
-              badge.className = 'media-sel-badge';
-              badge.textContent = '\u2714';
-              first.appendChild(badge);
-            }
-          }
-        }
-        applied++;
-      }
-    }
-    mediaRenderShotOverrides();
-    document.getElementById('media-confirm-msg').textContent =
-      '\u26A1 Applied recommended sequence for ' + applied + ' item(s).';
-  }
-
-  // ── Confirm and write MediaPlan.json ──
-  // Release ALL video HTTP connections on the Media tab.
-  // Call this before any critical fetch (like Confirm) to guarantee a free slot.
-  function _mediaReleaseAllConnections() {
-    // 1. Stop the currently playing video (if any)
-    if (_mediaPlayingVid) {
-      _mediaStopVid(_mediaPlayingVid);
-      _mediaPlayingVid = null;
-    }
-    // 2. Drain the lazy-load queue so no new video loads start
-    _mediaLazyQueue.length = 0;
-    // 3. Abort videos that are actively downloading (readyState < 2 = still fetching
-    //    metadata or data).  Videos that already have metadata (readyState >= 2) are
-    //    idle — their preload='metadata' connection already closed naturally — so we
-    //    leave those alone to preserve their thumbnail first-frame.
-    document.querySelectorAll('#panel-media video[src]').forEach(function(v) {
-      // HAVE_CURRENT_DATA = 2; anything less means the browser is still fetching
-      if (v.readyState < 2 || (!v.paused && v !== _mediaPlayingVid)) {
-        var oldSrc = v.src;
-        v.removeAttribute('src');
-        v.load();   // forces browser to abort any in-flight request
-        v.preload = 'none';
-        if (oldSrc) v.dataset.lazySrc = oldSrc;
-      }
-    });
-    _mediaLazyLoading = 0;
-  }
-
-  async function mediaConfirm() {
-    const nSelected = Object.keys(_mediaSelections).length;
-    if (nSelected === 0) {
-      document.getElementById('media-confirm-msg').textContent = 'Select at least one item first.';
-      return;
-    }
-
-    // ── Guard: every shot must have media selected ──
-    if (_mediaShotMap) {
-      const missing = [];
-      for (const bgId in _mediaShotMap) {
-        const shotIds = _mediaShotMap[bgId];
-        const sel = _mediaSelections[bgId];
-        const ps = (sel && sel.per_shot) || {};
-        for (const sid of shotIds) {
-          const shotSel = ps[sid];
-          const hasMedia = shotSel && (
-            (shotSel.segments && shotSel.segments.length > 0) ||
-            shotSel.url || shotSel.abs_path
-          );
-          if (!hasMedia) missing.push(sid + ' (' + bgId + ')');
-        }
-      }
-      if (missing.length > 0) {
-        console.warn('[media] ' + missing.length + ' shot(s) unassigned — will render black bg: ' + missing.join(', '));
-        // do NOT return — fall through to save
-      }
-    }
-
-    document.getElementById('media-btn-confirm').disabled = true;
-    document.getElementById('media-confirm-msg').textContent = 'Saving …';
-
-    // Free all video HTTP connections before the POST to guarantee a slot
-    _mediaReleaseAllConnections();
-
-    try {
-      // Detect if any selection uses segments format → version 3
-      const hasSegments = Object.values(_mediaSelections).some(function(sel) {
-        return sel.per_shot && Object.values(sel.per_shot).some(function(ps) { return ps.segments; });
-      });
-      const selVersion = !_mediaShotMap ? 1 : hasSegments ? 3 : 2;
-      // Build selections payload with start_sec/end_sec per segment
-      const selectionsPayload = {};
-      for (const [bgId, bgData] of Object.entries(_mediaSelections || {})) {
-        if (!bgData.per_shot) {
-          // Flat/legacy single-selection — wrap in per_shot segments format
-          if (!bgData.url && !bgData.path) continue;
-          selectionsPayload[bgId] = {
-            per_shot: {
-              [bgId]: {
-                segments: [{
-                  media_type: bgData.media_type || 'image',
-                  url:        bgData.url  || '',
-                  path:       bgData.path || '',
-                  score:      bgData.score || 0,
-                  start_sec:  0,
-                  end_sec:    0,
-                  hold_sec:   null,
-                }]
-              }
-            }
-          };
-          continue;
-        }
-        selectionsPayload[bgId] = { per_shot: {} };
-        for (const [shotId, shotData] of Object.entries(bgData.per_shot || {})) {
-          selectionsPayload[bgId].per_shot[shotId] = {
-            segments: (shotData.segments || []).map(seg => ({
-              ...seg,
-              start_sec: seg.start_sec ?? 0,
-              end_sec:   seg.end_sec   ?? seg.hold_sec ?? 0,
-            }))
-          };
-        }
-      }
-      const r = await fetch('/api/media_confirm', {
-        method:  'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ slug: _mediaSlug, ep_id: _mediaEpId,
-                               batch_id: _mediaBatchId,
-                               version: selVersion,
-                               selections: selectionsPayload }),
-      });
-      const d = await r.json();
-      if (!r.ok || d.error) throw new Error(d.error || 'save failed');
-      document.getElementById('media-confirm-msg').textContent =
-        '✔ Saved ' + nSelected + ' selection(s) → ' + (d.path || 'MediaPlan.json');
-    } catch (err) {
-      document.getElementById('media-confirm-msg').textContent = 'Error: ' + err.message;
-    } finally {
-      document.getElementById('media-btn-confirm').disabled = false;
-    }
   }
 
   // ── Try to load the latest completed batch for the current episode ──
@@ -11482,6 +10106,7 @@ placeholder="Enter your story here"></textarea>
           if (r2.ok && !d2.error && d2.status === 'done') {
             _mediaResults        = d2.items || {};
             _mediaResults._topN  = d2.top_n || 5;
+            _mediaItemIds        = Object.keys(_mediaResults).filter(k => k !== '_topN');
             _mediaRecommendedSeq = d2.recommended_sequence || null;
             await _mediaLoadShotMap();
             _mediaApplyBgRemap();
@@ -11496,7 +10121,6 @@ placeholder="Enter your story here"></textarea>
               + nItems2 + ' backgrounds, '
               + totalImg2 + ' images + ' + totalVid2 + ' videos'
               + elapsed2 + '.', false);
-            _mediaRenderResults(_mediaResults);
             await _aiLoadSavedImages();
             _aiGenRestorePending();
             // Also restore saved selections on top of batch results
@@ -11522,119 +10146,13 @@ placeholder="Enter your story here"></textarea>
       if (!saved.selections || typeof saved.selections !== 'object') return;
 
       _mediaBatchId = saved.batch_id || '';
-      const sels = saved.selections;
-      const nSels = Object.keys(sels).length;
+      const nSels = Object.keys(saved.selections).length;
 
-      // Restore _mediaSelections from saved data
-      _mediaSelections = sels;
-
-      // If we don't have batch results (media server down), show a summary
-      if (!_mediaResults || Object.keys(_mediaResults).length === 0) {
-        await _mediaLoadShotMap();
-        _mediaRenderSavedSummary(sels);
-        mediaRenderShotOverrides();
-        _mediaSetStatus('Loaded ' + nSels + ' saved selection(s) from disk'
-          + ' (media server not available — showing saved selections only).', false);
-      } else {
-        // Batch results available — apply saved selections to the grid
-        _mediaApplySavedToGrid(sels);
-        mediaRenderShotOverrides();
-      }
+      // Render Shot Overrides (loaded separately via mediaLoadLibrary / mediaRenderAll)
+      await _mediaLoadShotMap();
+      mediaRenderShotOverrides();
+      _mediaSetStatus('Loaded ' + nSels + ' saved selection(s) from disk.', false);
     } catch (_) {}
-  }
-
-  function _mediaRenderSavedSummary(selections) {
-    // Render a read-only summary of saved selections when media server is unavailable
-    const body = document.getElementById('media-body');
-    const _pw = document.getElementById('media-preview-wrap');
-    body.innerHTML = '<div id="media-shot-overrides"></div>';
-    if (_pw) body.insertBefore(_pw, body.firstChild);
-    mediaRenderAll();
-
-    const shotDur = _mediaShotDur || {};
-    const shotMap = _mediaShotMap || {};
-
-    for (const [bgId, data] of Object.entries(selections)) {
-      const card = document.createElement('div');
-      card.className = 'media-item-card';
-
-      // Header with background ID and assigned shots
-      const shots = shotMap[bgId] || [];
-      const hdr = document.createElement('div');
-      hdr.className = 'media-item-header';
-      hdr.innerHTML = '<strong>' + escHtml(bgId) + '</strong>'
-        + (shots.length ? '<span style="color:var(--dim);margin-left:8px">→ '
-          + shots.map(s => '<code>' + escHtml(s) + '</code>').join(', ') + '</span>' : '');
-      card.appendChild(hdr);
-
-      const perShot = data.per_shot || {};
-      for (const [shotId, shotData] of Object.entries(perShot)) {
-        const dur = shotDur[shotId] || 0;
-        const row = document.createElement('div');
-        row.style.cssText = 'padding:6px 12px;border-top:1px solid var(--active-bg)';
-
-        let segsHtml = '<div style="color:var(--dim);font-size:0.82em;margin-bottom:4px">'
-          + '<strong>' + escHtml(shotId) + '</strong>'
-          + (dur ? ' (' + dur.toFixed(1) + 's)' : '') + '</div>';
-
-        const segments = shotData.segments || [shotData];
-        for (const seg of segments) {
-          const rawUrl = seg.url || seg.path || '';
-          // Convert file:/// or absolute paths to /serve_media URLs
-          let url = rawUrl;
-          if (rawUrl.startsWith('file:///')) {
-            url = '/serve_media?path=' + encodeURIComponent(rawUrl.replace('file://', ''));
-          } else if (rawUrl.startsWith('/') && !rawUrl.startsWith('/serve_media')) {
-            url = '/serve_media?path=' + encodeURIComponent(rawUrl);
-          }
-          const type = seg.media_type || 'image';
-          const name = rawUrl.split('/').pop() || '(unknown)';
-          const _durVal = type === 'image' ? (seg.hold_sec || seg.duration_sec) : seg.duration_sec;
-          const durS = _durVal ? ' ' + parseFloat(_durVal).toFixed(1) + 's' : '';
-          const icon = type === 'video' ? '🎬' : '🖼';
-
-          segsHtml += '<div style="display:flex;align-items:center;gap:8px;margin:2px 0">';
-          if (type === 'video' && url) {
-            segsHtml += '<video src="' + escHtml(url) + '" style="width:120px;height:68px;'
-              + 'object-fit:cover;border-radius:4px;border:1px solid rgba(0,0,0,0.12)" preload="metadata"></video>';
-          } else if (url) {
-            segsHtml += '<img src="' + escHtml(url) + '" style="width:120px;height:68px;'
-              + 'object-fit:cover;border-radius:4px;border:1px solid rgba(0,0,0,0.12)" loading="lazy">';
-          }
-          segsHtml += '<span style="font-family:var(--mono);font-size:0.8em;color:var(--text)">'
-            + icon + ' ' + escHtml(name) + durS + '</span></div>';
-        }
-
-        row.innerHTML = segsHtml;
-        card.appendChild(row);
-      }
-
-      body.appendChild(card);
-    }
-
-    if (Object.keys(selections).length === 0) {
-      const _pw2 = document.getElementById('media-preview-wrap');
-      body.innerHTML = '<div style="color:var(--dim);padding:16px;font-style:italic">'
-        + 'No saved media selections found.</div>';
-      if (_pw2) body.insertBefore(_pw2, body.firstChild);
-    }
-  }
-
-  function _mediaApplySavedToGrid(selections) {
-    // When batch results are available, restore selection highlights.
-    // cardId is derived per-shot from shotId (e.g. "sc03-sh03" → "sc03")
-    // rather than from _mediaBgToScene[bgId], which is ambiguous when two
-    // shots share the same background_id — the map only retains the last
-    // scene processed, causing _mediaRenderShotRow to look up the wrong
-    // DOM element and silently skip rendering the earlier shot's selections.
-    for (const [bgId, data] of Object.entries(selections)) {
-      const perShot = data.per_shot || {};
-      for (const [shotId, shotData] of Object.entries(perShot)) {
-        const cardId = shotId.split('-')[0];  // "sc03-sh03" → "sc03"
-        try { _mediaRenderShotRow(cardId, shotId); } catch (_) {}
-      }
-    }
-    _mediaMarkCrossCardUsed();
   }
 
   // ── Voice Cast editor ────────────────────────────────────────────────────────
