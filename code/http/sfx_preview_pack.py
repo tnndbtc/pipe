@@ -174,7 +174,21 @@ def build_shot_timeline(shots, manifest, vo_shot_map, music_index, loop_info):
         timeline_shots.append(entry)
         cumulative_sec += duration
 
-    return timeline_shots, round(cumulative_sec, 3)
+    # Derive total_dur from VOPlan vo_items — authoritative source for episode end.
+    # Never use ShotList cumulative: ShotList is downstream and can be stale after
+    # scene_heads are applied (e.g. scene_heads["sc01"]=15 shifts all VO timings
+    # forward but does NOT update ShotList.json).
+    # Derive total_dur from VOPlan vo_items — authoritative source for episode end.
+    # Never use ShotList cumulative: ShotList is downstream and can be stale after
+    # scene_heads are applied (e.g. scene_heads["sc01"]=15 shifts all VO timings
+    # forward but does NOT update ShotList.json).
+    total_dur = max(
+        ((vo.get("end_sec") or 0.0) + (vo.get("pause_after_ms") or 0) / 1000.0
+         for sh_vos in vo_shot_map.values()
+         for vo in sh_vos),
+        default=0.0,
+    )
+    return timeline_shots, total_dur
 
 
 # ── Per-VO-line duck envelope ────────────────────────────────────────────────
@@ -521,12 +535,11 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
                         "music_mood": entry.get("music_mood", ""),
                     })
 
-    # Trim buffer to last VO end + 5s (avoids writing excess silence)
-    if tl_vo_out:
-        last_vo_sec = max(v["end_sec"] for v in tl_vo_out)
-    else:
-        last_vo_sec = total_dur
-    trim_samples = min(int((last_vo_sec + 5.0) * SAMPLE_RATE), n_samples)
+    # Trim buffer to total_dur (which already includes pause_after_ms of the last VO item).
+    # Do NOT use last_vo_sec + 5: that ignores pause_after_ms (e.g. 10s tail on last item)
+    # and would cut the preview short.  total_dur = max(end_sec + pause_after_ms/1000) from
+    # VOPlan, so it is the authoritative episode end.
+    trim_samples = min(int(total_dur * SAMPLE_RATE), n_samples)
     buf = buf[:trim_samples]
 
     # Loudnorm pass targeting −16 LUFS

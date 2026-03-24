@@ -47,15 +47,83 @@ function resetKW1a() {
   if (fs.existsSync(mp)) fs.unlinkSync(mp);
 }
 
-// KW-2/KW-9 start: merged VOPlan present, fresh MusicPlan deleted
+// KW-2/KW-9 start: merged VOPlan present, fresh MusicPlan deleted.
+// The last VO end_sec is patched to 80.0 AND pause_after_ms to 10000 (10s).
+// This creates a two-level sentinel:
+//   - end_sec=80.0 exceeds ShotList total (55.648s) — catches tabs reading ShotList
+//   - pause_after_ms=10000 means full VO tail = 80.0+10.0 = 90.0s
+// Strong assertion threshold: >= 90.0.
+// Paths that include pause_after_ms in total (e.g. _loadAndMergeTl) return 90.0 → PASS.
+// Paths that ignore pause_after_ms (e.g. music_review_pack.build_timeline,
+// _musicTimeline JS) return only max(55.648, 80.0)=80.0 → FAIL at >= 90.0 → bug caught.
 function resetKW2() {
   const ep = getEpDir();
-  fs.copyFileSync(
-    path.join(FIXTURE_EP, 'VOPlan.en.json'),
-    path.join(ep, 'VOPlan.en.json')
-  );
+  const vp = JSON.parse(fs.readFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), 'utf8'));
+  vp.vo_items[vp.vo_items.length - 1].end_sec = 80.0;
+  vp.vo_items[vp.vo_items.length - 1].pause_after_ms = 10000;
+  fs.writeFileSync(path.join(ep, 'VOPlan.en.json'), JSON.stringify(vp, null, 2));
   const mp = path.join(ep, 'MusicPlan.json');
   if (fs.existsSync(mp)) fs.unlinkSync(mp);
+}
+
+// resetKW80: sentinel state used by KW-27 through KW-31.
+// VOPlan present with last vo_item end_sec patched to 80.0 (well above ShotList
+// total of 55.648s) AND pause_after_ms patched to 10000 (10s).
+// MusicPlan + SfxPlan + music WAVs present so all three timeline endpoints
+// (/api/vo_timeline, /api/music_timeline, /api/sfx_timeline) can respond with 200.
+// A stub SfxPreviewPack/preview_audio.wav is planted so KW-29 (SFX restore path)
+// can fire _loadAndMergeTl() without generating audio.
+//
+// Two-level sentinel:
+//   - end_sec=80.0 > ShotList total (55.648s): catches tabs reading ShotList alone
+//   - pause_after_ms=10000: full VO tail = 80.0+10.0 = 90.0s
+// Strong assertion threshold: >= 90.0.
+//
+// Paths that include pause_after_ms (_loadAndMergeTl):
+//   _voLastEnd = max(end_sec + pause_after_ms/1000) = 90.0 → PASS at >= 90.0
+// Paths that ignore pause_after_ms (music_review_pack.build_timeline, _musicTimeline JS):
+//   total_duration_sec = max(55.648, 80.0) = 80.0 → FAIL at >= 90.0 → bug caught
+function resetKW80() {
+  const ep = getEpDir();
+  // Patch last VO end_sec to 80.0 and pause_after_ms to 10000 (10s tail)
+  const vp = JSON.parse(fs.readFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), 'utf8'));
+  vp.vo_items[vp.vo_items.length - 1].end_sec = 80.0;
+  vp.vo_items[vp.vo_items.length - 1].pause_after_ms = 10000;
+  fs.writeFileSync(path.join(ep, 'VOPlan.en.json'), JSON.stringify(vp, null, 2));
+  // Mirror what patch_shotlist_durations.py does in the live pipeline:
+  // extend the last shot's duration_sec so ShotList agrees with VOPlan end_sec=80.0.
+  // Without this the test creates a ShotList/VOPlan divergence that never occurs in
+  // production (live ShotList is always patched before the UI is opened).
+  const sl = JSON.parse(fs.readFileSync(path.join(FIXTURE_EP, 'ShotList.json'), 'utf8'));
+  const lastShot = sl.shots[sl.shots.length - 1];
+  lastShot.duration_sec  = parseFloat((80.0 - (lastShot.start_sec || 0)).toFixed(3));
+  sl.total_duration_sec  = 80.0;
+  fs.writeFileSync(path.join(ep, 'ShotList.json'), JSON.stringify(sl, null, 2));
+  // MusicPlan + music WAVs (needed by music_timeline and SFX include_music path)
+  fs.copyFileSync(path.join(FIXTURE_EP, 'MusicPlan.json'), path.join(ep, 'MusicPlan.json'));
+  const musicDir = path.join(ep, 'assets', 'music');
+  fs.mkdirSync(musicDir, { recursive: true });
+  ['music-sc01-sh01.wav', 'music-sc02-sh02.wav'].forEach(wav => {
+    const src = path.join(FIXTURE_EP, 'assets', 'music', wav);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(musicDir, wav));
+  });
+  // SfxPlan (needed by sfx_timeline)
+  fs.copyFileSync(path.join(FIXTURE_EP, 'SfxPlan.json'), path.join(ep, 'SfxPlan.json'));
+  // Stub SfxPreviewPack/preview_audio.wav so _sfxTryRestorePreview() HEAD check passes
+  const packDir = path.join(ep, 'assets', 'sfx', 'SfxPreviewPack');
+  fs.mkdirSync(packDir, { recursive: true });
+  const wav = Buffer.alloc(44);
+  wav.write('RIFF', 0, 'ascii');   wav.writeUInt32LE(36, 4);
+  wav.write('WAVE', 8, 'ascii');   wav.write('fmt ', 12, 'ascii');
+  wav.writeUInt32LE(16, 16);       wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);        wav.writeUInt32LE(44100, 24);
+  wav.writeUInt32LE(88200, 28);    wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);       wav.write('data', 36, 'ascii');
+  wav.writeUInt32LE(0, 40);
+  fs.writeFileSync(path.join(packDir, 'preview_audio.wav'), wav);
+  // Remove any stale MediaPreviewPack
+  const mediaPack = path.join(ep, 'assets', 'media', 'MediaPreviewPack');
+  if (fs.existsSync(mediaPack)) fs.rmSync(mediaPack, { recursive: true, force: true });
 }
 
 // KW-13 start: merged VOPlan + committed MusicPlan both present
@@ -68,6 +136,13 @@ function resetKW13() {
   fs.copyFileSync(
     path.join(FIXTURE_EP, 'MusicPlan.json'),
     path.join(ep, 'MusicPlan.json')
+  );
+  // Restore the original ShotList fixture so that any previous resetKW80() patch
+  // (which extends the last shot duration to make total=80.0s) does not affect
+  // tests that depend on the unpatched ShotList (total=55.648s).
+  fs.copyFileSync(
+    path.join(FIXTURE_EP, 'ShotList.json'),
+    path.join(ep, 'ShotList.json')
   );
   // Copy music WAVs so sfx_preview_pack (and KW-11d/e) can find them.
   // sfx_preview_pack only adds music_items to tl_doc when the WAV exists.
@@ -259,6 +334,10 @@ function resetKW26() {
   fs.copyFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), path.join(ep, 'VOPlan.en.json'));
   fs.copyFileSync(path.join(FIXTURE_EP, 'MusicPlan.json'), path.join(ep, 'MusicPlan.json'));
   fs.copyFileSync(path.join(FIXTURE_EP, 'SfxPlan.json'),   path.join(ep, 'SfxPlan.json'));
+  // Restore the original ShotList fixture so that any previous resetKW80() patch
+  // (which extends the last shot duration to make total=80.0s) does not affect
+  // bar-position assertions that rely on the unpatched ShotList (total=55.648s).
+  fs.copyFileSync(path.join(FIXTURE_EP, 'ShotList.json'),  path.join(ep, 'ShotList.json'));
   // Music WAVs (needed by _loadAndMergeTl → music_timeline)
   const musicDir = path.join(ep, 'assets', 'music');
   fs.mkdirSync(musicDir, { recursive: true });
@@ -299,6 +378,7 @@ module.exports = {
   resetKW22,
   resetKW24,
   resetKW26,
+  resetKW80,
   // EP_DIR kept for backward compat — resolves dynamically via getEpDir()
   get EP_DIR() { return getEpDir(); },
 };

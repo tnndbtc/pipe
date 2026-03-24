@@ -348,8 +348,10 @@ def load_vo_timing(manifest_path: Path, shotlist_path: Path) -> dict:
                 "item_id":          iid,
                 "speaker_id":       v.get("speaker_id", ""),
                 "text":             v.get("text", ""),
-                "shot_rel_in_ms":   round((start_sec - shot_start) * 1000),
-                "shot_rel_out_ms":  round((end_sec   - shot_start) * 1000),
+                "ep_start_sec":     start_sec,                              # episode-absolute
+                "ep_end_sec":       end_sec,                                # episode-absolute
+                "shot_rel_in_ms":   round((start_sec - shot_start) * 1000),  # kept for legacy callers
+                "shot_rel_out_ms":  round((end_sec   - shot_start) * 1000),  # kept for legacy callers
             }
             # Optional chunk-WAV fields (Phase 3 deferred slicing)
             if v.get("audio_chunk_uri"):
@@ -412,13 +414,17 @@ def get_slot_geometry(n_chars: int, idx: int) -> tuple[int, int]:
 
 # ── FFmpeg expression builders ─────────────────────────────────────────────────
 
-def build_enable_expr(vo_lines: list[dict], speaker_id: str) -> str:
+def build_enable_expr(vo_lines: list[dict], speaker_id: str,
+                       shot_offset_sec: float = 0.0) -> str:
     """
     Build an FFmpeg ``enable=`` expression that evaluates to non-zero
     whenever ``speaker_id`` is the active VO speaker.
 
-    vo_lines entries use shot_rel_in_ms / shot_rel_out_ms (milliseconds,
-    shot-relative) as written by load_vo_timing().
+    vo_lines entries carry ep_start_sec / ep_end_sec (episode-absolute seconds).
+    shot_offset_sec is the episode-absolute start of the current shot
+    (_cumulative_shot_sec from the render loop) so that the enable window
+    is expressed as seconds-into-the-shot, which is what FFmpeg's ``t``
+    variable measures inside a shot filter graph.
 
     Returns '0' if the speaker never appears.
     """
@@ -426,7 +432,8 @@ def build_enable_expr(vo_lines: list[dict], speaker_id: str) -> str:
     if not windows:
         return "0"
     parts = [
-        f"between(t,{vl['shot_rel_in_ms'] / 1000:.3f},{vl['shot_rel_out_ms'] / 1000:.3f})"
+        f"between(t,{max(0.0, vl['ep_start_sec'] - shot_offset_sec):.3f},"
+        f"{max(0.0, vl['ep_end_sec'] - shot_offset_sec):.3f})"
         for vl in windows
     ]
     return "+".join(parts)
@@ -753,7 +760,7 @@ def render_shot(
         # Compute enable_expr BEFORE adding any active-stream filters so we
         # can skip [c{ci}a] entirely when the character never speaks.
         # An unconnected filter output causes FFmpeg to abort.
-        enable_expr  = build_enable_expr(vo_lines, char_id)
+        enable_expr  = build_enable_expr(vo_lines, char_id, _cumulative_shot_sec)
         is_last_char = (ci == n_chars - 1)
         v_act_out    = "vout" if is_last_char else f"v{ci}a"
         has_speaking = (enable_expr != "0")
@@ -829,7 +836,12 @@ def render_shot(
     # ── 4. VO audio streams ────────────────────────────────────────────────
     for vo_i, vl in enumerate(vo_lines):
         line_id  = vl.get("item_id", vl.get("line_id", ""))
-        delay_ms = vl["shot_rel_in_ms"]
+        # Use episode-absolute timing so VO lands at the correct position
+        # even when scene_heads push start_sec beyond the ShotList boundary.
+        # _cumulative_shot_sec is the episode-absolute start of THIS shot in
+        # the rendered video, so (ep_start_sec - _cumulative_shot_sec) gives
+        # the correct shot-relative delay.
+        delay_ms = max(0, round((vl["ep_start_sec"] - _cumulative_shot_sec) * 1000))
         lbl      = f"vo{vo_i}"
 
         # Phase 3, Step 10: chunk-WAV deferred slicing path
@@ -1206,8 +1218,12 @@ def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int,
             text = vl.get("text", "").strip()
             if not text:
                 continue
-            abs_in  = offset_ms + vl["shot_rel_in_ms"]
-            abs_out = offset_ms + vl["shot_rel_out_ms"]
+            # offset_ms is the episode-absolute video position of this shot's start
+            # (accumulated from VO-ceiling duration_ms, same as _cumulative_shot_sec).
+            # Use ep_start/end_sec so SRT timestamps match actual render position
+            # even when scene_heads push VO beyond the ShotList shot boundary.
+            abs_in  = offset_ms + max(0, round((vl["ep_start_sec"] - offset_ms / 1000) * 1000))
+            abs_out = offset_ms + max(0, round((vl["ep_end_sec"]   - offset_ms / 1000) * 1000))
             timecode = f"{ms_to_srt_ts(abs_in)} --> {ms_to_srt_ts(abs_out)}"
             lines += [str(seq), timecode, text, ""]
             subs.append({

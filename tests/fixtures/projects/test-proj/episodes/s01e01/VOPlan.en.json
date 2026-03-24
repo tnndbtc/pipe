@@ -666,5 +666,8 @@
       "schema_version": "1.0.0",
       "producer": "resolve_assets.py"
     }
-  ]
+  ],
+  "scene_heads": {
+    "sc01": 0
+  }
 }

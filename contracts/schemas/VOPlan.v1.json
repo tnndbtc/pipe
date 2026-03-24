@@ -303,6 +303,16 @@
         "description": "Tail silence in milliseconds for this shot_id."
       }
     },
+    "scene_heads": {
+      "type": "object",
+      "description": "Optional per-scene intro silence in SECONDS, keyed by scene_id (e.g. 'sc01'). Inserted before the first VO item of the scene. Written by the VO tab 'Intro pause' control and persisted by /api/vo_scene_head. Baked into vo_items[].start_sec at Confirm Plan time. Missing key = 0s (no intro pause). Unlike scene_tails (which uses ms), this field uses seconds to match the start_sec/end_sec coordinate space.",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 300,
+        "description": "Intro silence in seconds before the first VO item of this scene."
+      }
+    },
     "sfx_items": {
       "type": "array",
       "description": "One entry per (shot, sfx_tag) pair. item_id format: 'sfx-{shot_id}-{NNN}'. The tag field is the natural-language description for audio generation. ShotList.AudioIntent.sfx_item_ids[] references these by item_id.",

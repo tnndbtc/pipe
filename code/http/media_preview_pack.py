@@ -291,6 +291,34 @@ def main():
         else:
             print("  [sfx] WARNING: SfxPlan.json not found — SFX track skipped")
 
+    # Derive total_dur from VOPlan — authoritative source for episode end.
+    # Must be computed BEFORE the clip loop so the last shot's duration can be
+    # extended to cover the VO tail (pause_after_ms). ShotList is downstream
+    # and can be stale after scene_heads are applied.
+    _voplan_path = ep_dir / f"VOPlan.{locale}.json"
+    total_dur = 0.0
+    if _voplan_path.exists():
+        _vp = load_json(_voplan_path)
+        _vp_items = [v for v in _vp.get("vo_items", []) if v.get("end_sec") is not None]
+        if _vp_items:
+            total_dur = max(
+                v["end_sec"] + (v.get("pause_after_ms") or 0) / 1000.0
+                for v in _vp_items
+            )
+    if total_dur <= 0.0:
+        total_dur = sum(shot_dur_ms.values()) / 1000.0
+    print(f"  [dur] total_dur from VOPlan: {total_dur:.3f}s")
+
+    # Extend the last shot's duration so the video covers the full VO extent.
+    # Without this the concat_video ends at ShotList cumulative (e.g. 65.348s)
+    # and the final mux truncates to that even though audio is 80.348s.
+    _video_total_ms = sum(shot_dur_ms.values())
+    _extra_ms = int(total_dur * 1000) - _video_total_ms
+    if _extra_ms > 100 and ordered_shots:
+        _last_shot = ordered_shots[-1]
+        shot_dur_ms[_last_shot] = shot_dur_ms.get(_last_shot, 0) + _extra_ms
+        print(f"  [dur] Extended last shot {_last_shot} by {_extra_ms}ms to cover VO tail")
+
     # Generate per-shot video clips in a temp dir, then concatenate
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
@@ -487,8 +515,7 @@ def main():
             print(f"ERROR: concat failed: {result.stderr[-500:]}")
             sys.exit(1)
 
-        # Build VO audio track
-        total_dur = sum(shot_dur_ms.get(s, 0) for s in ordered_shots) / 1000.0
+        # Build VO audio track  (total_dur already computed above from VOPlan)
         vo_audio = tmp / "vo_mix.wav"
 
         vo_inputs = []
@@ -705,6 +732,8 @@ def main():
             final_audio = vo_audio
 
         # ── Mux video + final audio ───────────────────────────────────────────
+        # Use -t total_dur instead of -shortest: video was extended to cover
+        # total_dur (last shot padded with black), so both tracks are ~80.348s.
         result = subprocess.run([
             "ffmpeg", "-y",
             "-i", str(concat_video),
@@ -713,7 +742,7 @@ def main():
             "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k",
-            "-shortest",
+            "-t", str(total_dur),
             str(out_path)
         ], capture_output=True, text=True)
         if result.returncode != 0:

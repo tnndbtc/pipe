@@ -3978,6 +3978,7 @@ placeholder="Enter your story here"></textarea>
         }
         const items = data.items || [];
         items._scene_tails = data.scene_tails || {};
+        items._scene_heads = data.scene_heads || {};
         _renderVoItems(items, slug, epId, locale, data.voice_catalog || {});
         _voLoadSentinel(epDir, locale);
         _voLoadWhisperCompare(epDir, locale);  // TTS accuracy check (fire-and-forget)
@@ -4020,8 +4021,10 @@ placeholder="Enter your story here"></textarea>
       const lb = (_voVoiceCatalog[b].local_name || b).toLowerCase();
       return la < lb ? -1 : la > lb ? 1 : 0;
     });
-    // Build scene_tails lookup from items list (server injects it) or default 2000
+    // Build scene_tails / scene_heads lookups from server-injected data
     const sceneTails = items._scene_tails || {};
+    const sceneHeads = items._scene_heads || {};  // values in SECONDS (not ms)
+    window._voSceneHeads = sceneHeads;
 
     // Store global state for _voRecalcSceneTimes()
     window._voSceneOrder    = sceneOrder;
@@ -4059,9 +4062,17 @@ placeholder="Enter your story here"></textarea>
         </div>`;
       }
 
+      const headSec = sceneHeads[sc] ?? 0;
       html += `<div class="vo-scene-header">
         <span class="vo-scene-label">${escHtml(sc)}</span>
         <span class="vo-scene-time" id="vo-scene-time-${scIdE}"></span>
+        <span style="font-size:0.78em;color:var(--dim);margin-left:8px">Intro pause:</span>
+        <input class="vo-break-input" id="vo-head-${scIdE}" type="number"
+               value="${headSec}" min="0" max="300" step="0.5" title="Silence before first item of this scene (seconds)"
+               oninput="_voRecalcSceneTimes()" style="width:64px"/>
+        <span style="font-size:0.75em;color:var(--dim)">s</span>
+        <button class="vo-scene-btn" style="padding:2px 8px"
+                onclick='_voSaveSceneHead(${scJ},${epDirJ},${locJ})'>Save</button>
         <button class="vo-scene-btn" id="vo-scene-preview-${scIdE}"
           onclick='_voPreviewScene(${scJ},${slugJ},${epIdJ},${locJ},this)'>
           ▶ Preview</button></div>`;
@@ -4254,6 +4265,10 @@ placeholder="Enter your story here"></textarea>
         cursor += (tailEl ? (parseFloat(tailEl.value) || 0) : 2000) / 1000.0;
       }
 
+      // Scene head pause — stored in SECONDS, added directly (no /1000)
+      const headEl = document.getElementById('vo-head-' + scIdE);
+      cursor += headEl ? (parseFloat(headEl.value) || 0) : 0;
+
       const sceneStart = cursor;
 
       // Accumulate each item's trimmed duration + pause
@@ -4295,8 +4310,13 @@ placeholder="Enter your story here"></textarea>
     const shots = (vo.shots || []).map(s => ({
       ...s, offset_sec: s.start_sec ?? s.offset_sec ?? 0,
     }));
+    // Extend total_dur_sec to cover the last VO item's pause_after_ms tail.
+    // Without this, a 10 000ms ending-music gap on the last VO item is invisible:
+    // the ruler stops at end_sec and the pause bar overflows off-screen.
+    const _voLastEnd = (vo.vo_items || []).reduce(
+      (m, v) => Math.max(m, (v.end_sec || 0) + (v.pause_after_ms || 0) / 1000), 0);
     return {
-      total_dur_sec: vo.total_sec || sfx.total_dur_sec || mus.total_dur_sec || 0,
+      total_dur_sec: Math.max(vo.total_sec || 0, _voLastEnd) || sfx.total_dur_sec || mus.total_dur_sec || 0,
       shots,
       vo_items:    vo.vo_items    || [],
       sfx_items:   sfx.sfx_items  || [],
@@ -4360,7 +4380,7 @@ placeholder="Enter your story here"></textarea>
 
   // Play an ordered array of {epDir, locale, item_id} sequentially.
   // pauseMs is the gap between clips (from pause_after_ms, default 300ms).
-  async function _voPlaySequence(clips, ctxBtn, exitTailMs = 0) {
+  async function _voPlaySequence(clips, ctxBtn, exitTailMs = 0, entryHeadMs = 0) {
     window._voSeqAbort = false;
     const stopBtn = document.getElementById('vo-stop-preview-btn');
     const allBtn  = document.getElementById('vo-preview-all-btn');
@@ -4368,6 +4388,11 @@ placeholder="Enter your story here"></textarea>
     // Disable (never hide) Generate Preview during any sequence playback
     if (allBtn) allBtn.disabled = (ctxBtn !== allBtn);
     if (ctxBtn) { ctxBtn.textContent = ctxBtn.textContent.replace('▶', '■'); ctxBtn.classList.add('vo-scene-playing'); }
+
+    // Scene head pause — wait before playing first clip
+    if (!window._voSeqAbort && entryHeadMs > 0) {
+      await new Promise(r => setTimeout(r, entryHeadMs));
+    }
 
     for (const clip of clips) {
       if (window._voSeqAbort) break;
@@ -4424,11 +4449,15 @@ placeholder="Enter your story here"></textarea>
       // scene_tails are keyed by the next scene (sc07 tail = break after sc06→before sc07).
       const sceneOrder = window._voSceneOrder || [];
       const sceneIdx   = sceneOrder.indexOf(scene);
-      const nextScene  = sceneIdx >= 0 ? sceneOrder[sceneIdx + 1] : null;
-      const nextScIdE  = nextScene ? nextScene.replace(/[^a-zA-Z0-9_-]/g, '_') : null;
-      const tailEl     = nextScIdE ? document.getElementById('vo-tail-' + nextScIdE) : null;
-      const exitTailMs = tailEl ? (parseInt(tailEl.value, 10) || 0) : 0;
-      if (clips.length) _voPlaySequence(clips, btn, exitTailMs);
+      const nextScene   = sceneIdx >= 0 ? sceneOrder[sceneIdx + 1] : null;
+      const nextScIdE   = nextScene ? nextScene.replace(/[^a-zA-Z0-9_-]/g, '_') : null;
+      const tailEl      = nextScIdE ? document.getElementById('vo-tail-' + nextScIdE) : null;
+      const exitTailMs  = tailEl ? (parseInt(tailEl.value, 10) || 0) : 0;
+      // Head pause for this scene — stored in seconds, convert to ms for setTimeout
+      const thisScIdE   = scene.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const headEl      = document.getElementById('vo-head-' + thisScIdE);
+      const entryHeadMs = headEl ? Math.round((parseFloat(headEl.value) || 0) * 1000) : 0;
+      if (clips.length) _voPlaySequence(clips, btn, exitTailMs, entryHeadMs);
     }, 50);
   }
 
@@ -4576,6 +4605,12 @@ placeholder="Enter your story here"></textarea>
       document.getElementById('vo-tl-playbtn').textContent = '▶';
       window._voTlRaf && cancelAnimationFrame(window._voTlRaf);
       window._voTlRaf = null;
+    };
+    // Show total duration as soon as the browser reads audio metadata —
+    // before the user presses play (mirrors how Music tab shows e.g. "0:00 / 1:15").
+    audio.onloadedmetadata = () => {
+      const timeEl = document.getElementById('vo-tl-time');
+      if (timeEl) timeEl.textContent = '0:00 / ' + _fmtSec(audio.duration);
     };
 
     // Show bar — ready to play, but do NOT auto-play
@@ -5006,6 +5041,32 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
+  // POST /api/vo_scene_head — save scene intro pause (in seconds)
+  async function _voSaveSceneHead(scene, epDir, locale) {
+    const scIdE = scene.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const input = document.getElementById('vo-head-' + scIdE);
+    const headSec = parseFloat(input?.value ?? '0');
+    if (isNaN(headSec) || headSec < 0 || headSec > 300) {
+      alert('Invalid intro pause value (0–300 s)');
+      return;
+    }
+    try {
+      const r = await fetch('/api/vo_scene_head', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ep_dir: epDir, locale, scene, head_sec: headSec }),
+      });
+      const data = await r.json();
+      if (data.error) throw new Error(data.error);
+      _voMarkSentinelInvalid();
+      _voRecalcSceneTimes();
+      if (input) { input.style.outline = '2px solid #6ec96e';
+                   setTimeout(() => { input.style.outline = ''; }, 1500); }
+    } catch(e) {
+      alert('vo_scene_head error: ' + e.message);
+    }
+  }
+
   // Approved durations from VOPlan.{locale}.json → vo_approval — {item_id: duration_sec}.
   // Populated by _voLoadApprovedDurations() when the VO tab loads.
   window._voApprovedDurations = window._voApprovedDurations || {};
@@ -5114,12 +5175,15 @@ placeholder="Enter your story here"></textarea>
     const _approveItems = [];
     let _approveCursor = 0.0;
     (window._voSceneOrder || []).forEach((sc, scIdx) => {
+      const scIdE = sc.replace(/[^a-zA-Z0-9_-]/g, '_');
       // Scene tail: silence BEFORE this scene (same as _voRecalcSceneTimes)
       if (scIdx > 0) {
-        const scIdE  = sc.replace(/[^a-zA-Z0-9_-]/g, '_');
         const tailEl = document.getElementById('vo-tail-' + scIdE);
         _approveCursor += (tailEl ? (parseFloat(tailEl.value) || 2000) : 2000) / 1000.0;
       }
+      // Scene head pause — stored in SECONDS, added directly (no /1000)
+      const headEl = document.getElementById('vo-head-' + scIdE);
+      _approveCursor += headEl ? (parseFloat(headEl.value) || 0) : 0;
       (window._voItemsByScene[sc] || []).forEach(it => {
         const row     = document.getElementById('vo-row-'   + it.item_id);
         const pauseEl = document.getElementById('vo-pause-' + it.item_id);
@@ -6532,6 +6596,10 @@ placeholder="Enter your story here"></textarea>
       const audio = document.getElementById('sfx-preview-audio');
       audio.src = '/serve_media?path=' + encodeURIComponent(previewPath) + '&t=' + Date.now();
       document.getElementById('sfx-preview-wrap').style.display = '';
+      // Use the timeline returned by the backend — it has timing-aware SFX bar
+      // positions (from _sfxTiming passed in the POST body) AND the correct
+      // total_dur_sec from VOPlan (sfx_preview_pack.build_shot_timeline uses VOPlan).
+      // _loadAndMergeTl would ignore in-memory timing and show natural shot offsets.
       _sfxTimeline = d.timeline;
       sfxRenderTimeline();
       // Log timeline so user can confirm SFX items were mixed in
@@ -6613,8 +6681,11 @@ placeholder="Enter your story here"></textarea>
       voDiv.innerHTML = '';
       for (const v of (tl.vo_items || [])) {
         const el = document.createElement('div');
+        // Extend bar to include any intentional pause after the VO line ends
+        // (pause_after_ms on the last item = ending music gap).
+        const voBarEnd = (v.end_sec || 0) + (v.pause_after_ms || 0) / 1000;
         el.style.cssText = 'position:absolute;top:2px;bottom:2px;border-radius:2px;'
-          + 'background:#4a9eff;opacity:0.85;left:' + pct(v.start_sec) + ';width:' + w(v.start_sec, v.end_sec);
+          + 'background:#4a9eff;opacity:0.85;left:' + pct(v.start_sec) + ';width:' + w(v.start_sec, voBarEnd);
         el.title = (v.item_id || '') + (v.speaker_id ? ' (' + v.speaker_id + ')' : '');
         voDiv.appendChild(el);
       }
@@ -9567,10 +9638,10 @@ placeholder="Enter your story here"></textarea>
         : '';
 
       rowsHtml += `
-      <div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:6px">
+      <div data-shot-id="${sid}" style="border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:6px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <span style="font-weight:600;font-size:0.85em;color:var(--fg)">${sid}</span>
-          <span style="color:var(--dim);font-size:0.82em">${start}s–${end}s (${dur})</span>
+          <span class="music-shot-hdr-ep" style="color:var(--dim);font-size:0.82em">episode&nbsp;${start}s &ndash; ${end}s&nbsp;(${sh.duration_sec !== undefined ? sh.duration_sec.toFixed(1) : '?'}s)</span>
           ${coverageBadge}
           ${previewBtnHtml}
           <button onclick="mediaOvrTogglePicker('${sid}')"
@@ -9983,11 +10054,34 @@ placeholder="Enter your story here"></textarea>
     if (!_mediaSlug || !_mediaEpId) return;
     try {
       const base = `/api/episode_file?slug=${encodeURIComponent(_mediaSlug)}&ep_id=${encodeURIComponent(_mediaEpId)}`;
-      const [amR, slR, mpR] = await Promise.all([
+      const tlQs = `?slug=${encodeURIComponent(_mediaSlug)}&ep_id=${encodeURIComponent(_mediaEpId)}`;
+      const [amR, slR, mpR, voTlR, sfxTlR, musTlR] = await Promise.all([
         fetch(base + '&file=AssetManifest.shared.json'),
         fetch(base + '&file=ShotList.json'),
         fetch(base + '&file=MediaPlan.json'),
+        fetch('/api/vo_timeline'    + tlQs),
+        fetch('/api/sfx_timeline'   + tlQs),
+        fetch('/api/music_timeline' + tlQs),
       ]);
+      // Store timeline overlay data on _mediaShotTimeline for overlay consumers.
+      // _voTlShotsMap is hoisted so the shot-timing builder below can use it.
+      let _voTlShotsMap = {};
+      try {
+        const voTl  = voTlR.ok  ? await voTlR.json()  : {};
+        const sfxTl = sfxTlR.ok ? await sfxTlR.json() : {};
+        const musTl = musTlR.ok ? await musTlR.json() : {};
+        if (!_mediaShotTimeline._tlOverlay) _mediaShotTimeline._tlOverlay = {};
+        _mediaShotTimeline._tlOverlay = {
+          vo_items:    voTl.vo_items    || [],
+          sfx_items:   sfxTl.sfx_items  || [],
+          music_items: musTl.music_items || [],
+        };
+        const _voLastEnd = (voTl.vo_items || []).reduce(
+          (m, v) => Math.max(m, (v.end_sec || 0) + (v.pause_after_ms || 0) / 1000), 0);
+        _mediaShotTimeline._totalDurSec = Math.max(voTl.total_sec || 0, _voLastEnd);
+        // Hoist scene_heads-aware shot positions for use in shot-timing builder
+        (voTl.shots || []).forEach(s => { _voTlShotsMap[s.shot_id] = s; });
+      } catch (_) {}
       if (!amR.ok || !slR.ok) throw new Error('fetch failed');
       const am = await amR.json();
       const sl = await slR.json();
@@ -10034,17 +10128,27 @@ placeholder="Enter your story here"></textarea>
         } catch (_) { /* MediaPlan.json missing or malformed — silently skip */ }
       }
 
-      // Build shot timing map from ShotList
-      const shotDur = {};
+      // Build shot timing map — prefer /api/vo_timeline shots (scene_heads-aware)
+      // over raw ShotList cumulative which ignores scene_heads offsets.
+      const shotDur   = {};
       const shotStart = {};
+      const shotEnd   = {};
       let cursor = 0;
       const shots = sl.shots || sl;
       for (const sh of shots) {
-        const sid = sh.shot_id || sh.id;
-        const dur = sh.duration_sec || sh.duration || 0;
-        shotDur[sid]   = dur;
-        shotStart[sid] = cursor;
-        cursor += dur;
+        const sid  = sh.shot_id || sh.id;
+        const vtSh = _voTlShotsMap[sid];
+        if (vtSh) {
+          shotStart[sid] = vtSh.start_sec;
+          shotEnd[sid]   = vtSh.end_sec;
+          shotDur[sid]   = vtSh.end_sec - vtSh.start_sec;
+        } else {
+          const dur      = sh.duration_sec || sh.duration || 0;
+          shotStart[sid] = cursor;
+          shotEnd[sid]   = cursor + dur;
+          shotDur[sid]   = dur;
+          cursor        += dur;
+        }
       }
 
       // Build timeline from manifest shots order
@@ -10055,7 +10159,7 @@ placeholder="Enter your story here"></textarea>
         return {
           shot_id:      sid,
           epStart:      shotStart[sid] || 0,
-          epEnd:        (shotStart[sid] || 0) + dur,
+          epEnd:        shotEnd[sid]   || ((shotStart[sid] || 0) + dur),
           duration_sec: dur,
         };
       }).filter(s => s.shot_id);
@@ -10065,7 +10169,7 @@ placeholder="Enter your story here"></textarea>
         _mediaShotTimeline = shots.map(sh => {
           const sid = sh.shot_id || sh.id;
           const dur = shotDur[sid] || 0;
-          return { shot_id: sid, epStart: shotStart[sid] || 0, epEnd: (shotStart[sid] || 0) + dur, duration_sec: dur };
+          return { shot_id: sid, epStart: shotStart[sid] || 0, epEnd: shotEnd[sid] || ((shotStart[sid] || 0) + dur), duration_sec: dur };
         });
       }
     } catch (err) {
@@ -12706,12 +12810,16 @@ placeholder="Enter your story here"></textarea>
         _musicTimeline = await tr.json();
       }
     } catch (_) {}
+    // _voTlShotsMapM: scene_heads-aware shot positions from /api/vo_timeline.
+    // Hoisted so the ShotList section below can prefer these over raw cumulative.
+    let _voTlShotsMapM = {};
     try {
       const voTlResp = await fetch('/api/vo_timeline?slug=' + encodeURIComponent(_musicSlug)
         + '&ep_id=' + encodeURIComponent(_musicEpId));
       if (voTlResp.ok && _musicTimeline) {
         const voTl = await voTlResp.json();
         _musicTimeline.vo_items = voTl.vo_items || [];
+        (voTl.shots || []).forEach(s => { _voTlShotsMapM[s.shot_id] = s; });
       }
     } catch (_) {}
     // Fetch ShotList.json for authoritative shot timing (same source as SFX and Media tabs)
@@ -12728,16 +12836,34 @@ placeholder="Enter your story here"></textarea>
           slMap[s.shot_id] = { offset_sec: cum, duration_sec: s.duration_sec || 0 };
           cum += s.duration_sec || 0;
         }
-        _musicShotMap = slMap;   // store for fallback path in _musicRenderBody
+        // Build _musicShotMap preferring scene_heads-aware voTl positions
+        _musicShotMap = {};
+        for (const s of (shotListData.shots || [])) {
+          const sid  = s.shot_id;
+          const vtSh = _voTlShotsMapM[sid];
+          _musicShotMap[sid] = vtSh
+            ? { offset_sec: vtSh.start_sec, duration_sec: vtSh.end_sec - vtSh.start_sec }
+            : slMap[sid];
+        }
         if (_musicTimeline) {
           (_musicTimeline.shots || []).forEach(s => {
-            const sl = slMap[s.shot_id];
-            if (sl) {
-              s.offset_sec   = sl.offset_sec;
-              s.duration_sec = sl.duration_sec;
+            const vtSh = _voTlShotsMapM[s.shot_id];
+            if (vtSh) {
+              // Prefer scene_heads-aware positions from /api/vo_timeline
+              s.offset_sec   = vtSh.start_sec;
+              s.duration_sec = vtSh.end_sec - vtSh.start_sec;
+            } else {
+              const sl = slMap[s.shot_id];
+              if (sl) {
+                s.offset_sec   = sl.offset_sec;
+                s.duration_sec = sl.duration_sec;
+              }
             }
           });
-          _musicTimeline.total_duration_sec = cum;
+          // Extend ruler to cover VO if scene_heads push VO beyond shot boundary.
+          const _lastVoEnd1 = (_musicTimeline.vo_items || []).reduce(
+            (m, v) => Math.max(m, (v.end_sec || 0) + (v.pause_after_ms || 0) / 1000), 0);
+          _musicTimeline.total_duration_sec = Math.max(cum, _lastVoEnd1);
         }
       } else {
         console.warn('[Music] ShotList fetch failed, using MusicReviewPack timing as fallback');
@@ -12936,6 +13062,20 @@ placeholder="Enter your story here"></textarea>
       if (!r2.ok || d2.error) throw new Error(d2.error || 'review pack failed');
       _musicTimeline = d2.timeline || null;
 
+      // Refresh VO timeline overlay — uses latest start_sec from VOPlan (including
+      // any scene_heads baked in by the most recent Confirm Plan).
+      // _voTlShotsMapG: hoisted so ShotList section below can prefer these positions.
+      let _voTlShotsMapG = {};
+      try {
+        const voTlResp = await fetch('/api/vo_timeline?slug=' + encodeURIComponent(_musicSlug)
+          + '&ep_id=' + encodeURIComponent(_musicEpId));
+        if (voTlResp.ok && _musicTimeline) {
+          const voTl = await voTlResp.json();
+          _musicTimeline.vo_items = voTl.vo_items || [];
+          (voTl.shots || []).forEach(s => { _voTlShotsMapG[s.shot_id] = s; });
+        }
+      } catch (_) {}
+
       // Fetch ShotList.json for authoritative shot timing (same source as SFX and Media tabs)
       try {
         const slResp = await fetch(`/api/episode_file?slug=${encodeURIComponent(_musicSlug)}&ep_id=${encodeURIComponent(_musicEpId)}&file=ShotList.json`);
@@ -12951,13 +13091,23 @@ placeholder="Enter your story here"></textarea>
             cum += s.duration_sec || 0;
           }
           (_musicTimeline.shots || []).forEach(s => {
-            const sl = slMap[s.shot_id];
-            if (sl) {
-              s.offset_sec   = sl.offset_sec;
-              s.duration_sec = sl.duration_sec;
+            const vtSh = _voTlShotsMapG[s.shot_id];
+            if (vtSh) {
+              // Prefer scene_heads-aware positions from /api/vo_timeline
+              s.offset_sec   = vtSh.start_sec;
+              s.duration_sec = vtSh.end_sec - vtSh.start_sec;
+            } else {
+              const sl = slMap[s.shot_id];
+              if (sl) {
+                s.offset_sec   = sl.offset_sec;
+                s.duration_sec = sl.duration_sec;
+              }
             }
           });
-          _musicTimeline.total_duration_sec = cum;
+          // Extend ruler to cover VO if scene_heads push VO beyond shot boundary.
+          const _lastVoEnd2 = (_musicTimeline.vo_items || []).reduce(
+            (m, v) => Math.max(m, (v.end_sec || 0) + (v.pause_after_ms || 0) / 1000), 0);
+          _musicTimeline.total_duration_sec = Math.max(cum, _lastVoEnd2);
         } else {
           console.warn('[Music] ShotList fetch failed, using MusicReviewPack timing as fallback');
         }
@@ -12991,7 +13141,11 @@ placeholder="Enter your story here"></textarea>
     for (const sh of (tl.shots || [])) {
       const shStart = sh.offset_sec || 0;
       const shEnd   = shStart + (sh.duration_sec || 0);
-      // VO lines from this shot (episode-absolute)
+      // VO lines from this shot — only used as fallback when tl.vo_items is empty.
+      // When musicGenerateReview runs, both tl.vo_items (from /api/vo_timeline) and
+      // sh.vo_lines (from /api/music_review_pack) are populated with the same 9 items.
+      // Guard prevents double-rendering (18 bars instead of 9).
+      if (!voItems.length)
       for (const v of (sh.vo_lines || [])) {
         if (v.start_sec != null && v.end_sec != null) {
           voItems.push({ item_id: v.item_id, start_sec: v.start_sec, end_sec: v.end_sec, speaker_id: v.speaker_id || '' });
@@ -16501,6 +16655,7 @@ class Handler(BaseHTTPRequestHandler):
                     _mfdata = json.load(_mf)
                 vo_items = _mfdata.get("vo_items", [])
                 scene_tails = _mfdata.get("scene_tails", {})
+                scene_heads = _mfdata.get("scene_heads", {})  # values in seconds
                 vo_dir = os.path.join(full_ep, "assets", locale, "audio", "vo")
 
                 SAMPLE_RATE   = 24000
@@ -16523,6 +16678,14 @@ class Handler(BaseHTTPRequestHandler):
                         _sil = b'\x00' * ((tail_ms * BYTES_PER_SEC // 1000 // 2) * 2)
                         pcm_chunks.append(_sil)
                         current_sec += tail_ms / 1000
+                    # Scene head pause — stored in seconds, applied before first item of each scene
+                    if _scn != prev_scene:
+                        head_sec = float(scene_heads.get(_scn, 0.0))
+                        if head_sec > 0:
+                            _n_samps = round(head_sec * SAMPLE_RATE)
+                            _sil = b'\x00' * (_n_samps * 2)
+                            pcm_chunks.append(_sil)
+                            current_sec += head_sec
                     prev_scene = _scn
                     try:
                         with _wave.open(_wav) as _wf:
@@ -16774,8 +16937,10 @@ class Handler(BaseHTTPRequestHandler):
                         if e.get("voice")
                     }
                     scene_tails = manifest.get("scene_tails", {})
+                    scene_heads = manifest.get("scene_heads", {})
                     body = json.dumps({"items": items, "voice_catalog": voice_catalog,
-                                       "scene_tails": scene_tails}).encode()
+                                       "scene_tails": scene_tails,
+                                       "scene_heads": scene_heads}).encode()
                     self.send_response(200)
                 except FileNotFoundError:
                     body = json.dumps({"error": f"Manifest not found: {mpath}"}).encode()
@@ -18756,6 +18921,62 @@ class Handler(BaseHTTPRequestHandler):
                             else:
                                 _scene_map[_scid]["end_sec"] = _t1
                         _cum = _t1
+                    # ── Apply scene_heads offsets from VOPlan ─────────────────
+                    # scene_heads[scene_id] = N means the first VO item of that
+                    # scene starts N seconds into the episode (head before VO).
+                    # Each scene's head expands that scene's episode window by N s,
+                    # shifting all subsequent shot start/end positions forward too.
+                    try:
+                        import glob as _gh_sh
+                        import re   as _re_sh
+                        _sh_vp_list = [p for p in _gh_sh.glob(
+                            os.path.join(ep_dir, "VOPlan.*.json"))
+                            if os.path.basename(p) != "AssetManifest.shared.json"]
+                        if _sh_vp_list:
+                            _sh_loc  = "en"
+                            _sh_vars = os.path.join(ep_dir, "pipeline_vars.sh")
+                            if os.path.isfile(_sh_vars):
+                                _sh_m = _re_sh.search(
+                                    r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                                    open(_sh_vars).read())
+                                if _sh_m:
+                                    _sh_loc = _sh_m.group(1).strip()
+                            _sh_vp_path = os.path.join(ep_dir, f"VOPlan.{_sh_loc}.json")
+                            if not os.path.isfile(_sh_vp_path):
+                                _sh_vp_path = sorted(_sh_vp_list)[0]
+                            _sh_vp      = json.load(open(_sh_vp_path, encoding="utf-8"))
+                            _scene_heads_map = _sh_vp.get("scene_heads", {})
+                            if _scene_heads_map:
+                                _ep_off   = 0.0
+                                _seen_sc: set = set()
+                                for _se in _shot_entries:
+                                    _sc_sh = _se.get("scene_id", "")
+                                    _head  = (_scene_heads_map.get(_sc_sh, 0.0)
+                                              if _sc_sh and _sc_sh not in _seen_sc
+                                              else 0.0)
+                                    _se["start_sec"]    = round(_ep_off, 4)
+                                    _ep_off            += _head + _se["duration_sec"]
+                                    _se["end_sec"]      = round(_ep_off, 4)
+                                    _se["duration_sec"] = round(
+                                        _se["end_sec"] - _se["start_sec"], 4)
+                                    if _sc_sh:
+                                        _seen_sc.add(_sc_sh)
+                                _cum = _ep_off
+                                # Rebuild scene_map with corrected positions
+                                _scene_map = {}
+                                for _se in _shot_entries:
+                                    _sc_sh = _se.get("scene_id", "")
+                                    if _sc_sh:
+                                        if _sc_sh not in _scene_map:
+                                            _scene_map[_sc_sh] = {
+                                                "scene_id":  _sc_sh,
+                                                "start_sec": _se["start_sec"],
+                                                "end_sec":   _se["end_sec"],
+                                            }
+                                        else:
+                                            _scene_map[_sc_sh]["end_sec"] = _se["end_sec"]
+                    except Exception as _sh_err:
+                        print(f"  [WARN] vo_timeline: scene_heads: {_sh_err}")
                     # ── VOPlan → vo_items (authoritative source) ─────────────
                     # Build vid→shot_id from ShotList audio_intent (not from VOPlan)
                     # so the mapping is grounded in the timing-locked shot structure.
@@ -18790,11 +19011,12 @@ class Handler(BaseHTTPRequestHandler):
                                     _shot_id_vot = (_vid2shot_vot.get(_vo.get("item_id", ""))
                                                     or _vo.get("shot_id", ""))
                                     _vo_items_vot.append({
-                                        "item_id":    _vo.get("item_id", ""),
-                                        "start_sec":  round(float(_vs), 3),
-                                        "end_sec":    round(float(_ve or _vs), 3),
-                                        "speaker_id": _vo.get("speaker_id", ""),
-                                        "shot_id":    _shot_id_vot,
+                                        "item_id":       _vo.get("item_id", ""),
+                                        "start_sec":     round(float(_vs), 3),
+                                        "end_sec":       round(float(_ve or _vs), 3),
+                                        "speaker_id":    _vo.get("speaker_id", ""),
+                                        "shot_id":       _shot_id_vot,
+                                        "pause_after_ms": int(_vo.get("pause_after_ms") or 0),
                                     })
                     except Exception as _vot_err:
                         print(f"  [WARN] vo_timeline: VOPlan: {_vot_err}")
@@ -19647,6 +19869,38 @@ class Handler(BaseHTTPRequestHandler):
                     primary = _get_primary_locale(_P(full_ep))
                     _invalidate_vo_state(full_ep, primary)
                 _json_resp(self, {"scene": scene, "tail_ms": tail_ms})
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
+        # POST /api/vo_scene_head — set scene intro silence (seconds) before first VO item
+        elif self.path == "/api/vo_scene_head":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                req      = json.loads(self.rfile.read(length))
+                ep_dir   = req.get("ep_dir",   "").strip()
+                locale   = req.get("locale",   "").strip()
+                scene    = req.get("scene",    "").strip()
+                head_sec = float(req.get("head_sec", 0.0))
+                _log.info("[vo_scene_head] scene=%s  head_sec=%s  locale=%s  ep=%s",
+                          scene, head_sec, locale, ep_dir)
+                if not ep_dir or not locale or not scene:
+                    raise ValueError("ep_dir, locale, scene required")
+                if head_sec < 0 or head_sec > 300:
+                    raise ValueError("head_sec must be 0–300")
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                from pathlib import Path as _P
+                with _get_vo_lock(full_ep):
+                    mpath = os.path.join(full_ep, f"VOPlan.{locale}.json")
+                    with open(mpath, encoding="utf-8") as _mf:
+                        _mani = json.load(_mf)
+                    _mani.setdefault("scene_heads", {})[scene] = head_sec
+                    _tmp = mpath + ".tmp"
+                    with open(_tmp, "w", encoding="utf-8") as _mf:
+                        json.dump(_mani, _mf, indent=2, ensure_ascii=False)
+                    os.replace(_tmp, mpath)
+                    primary = _get_primary_locale(_P(full_ep))
+                    _invalidate_vo_state(full_ep, primary)
+                _json_resp(self, {"scene": scene, "head_sec": head_sec})
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 409)
 

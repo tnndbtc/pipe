@@ -221,6 +221,7 @@ def build_timeline(shots, manifest, vo_shot_map, music_index, loop_info):
                 "end_sec": vo.get("end_sec"),
                 "speaker_id": vo.get("speaker_id", ""),
                 "text": vo.get("text", ""),
+                "pause_after_ms": int(vo.get("pause_after_ms") or 0),
             })
 
         # Loop candidate info
@@ -247,7 +248,18 @@ def build_timeline(shots, manifest, vo_shot_map, music_index, loop_info):
         timeline_shots.append(entry)
         cumulative_sec += duration
 
-    return timeline_shots, round(cumulative_sec, 3)
+    # When scene_heads bake an offset into VO start_sec/end_sec, the last VO
+    # item can end beyond the ShotList shot total (e.g. 70.3s > 55.6s).
+    # total_duration_sec must cover the full VO extent so callers (JS ruler,
+    # preview audio trim) know the true content length.
+    last_vo_end = max(
+        ((vo.get("end_sec") or 0.0) + (vo.get("pause_after_ms") or 0) / 1000
+         for sh_vos in vo_shot_map.values()
+         for vo in sh_vos),
+        default=0.0,
+    )
+    total_dur = max(round(cumulative_sec, 3), last_vo_end)
+    return timeline_shots, total_dur
 
 
 def write_timeline_txt(timeline_shots, total_dur, episode_id, out_path):
@@ -312,12 +324,15 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
     episode_id = manifest.get("episode_id", "")
     locale = manifest.get("locale", "en")
 
+    VO_OUTRO_SEC = 5.0   # fade-out window after last VO line
     n_samples = int(total_dur * SAMPLE_RATE) + SAMPLE_RATE  # +1s safety
 
     # ── Grow buffer to accommodate episode-absolute VO timing (scene tails
-    # are already baked into manifest.vo_items[].start_sec by the approve flow,
-    # so the last VO item may end beyond total_dur which is shots-only). ──────
+    # and scene heads are already baked into manifest.vo_items[].start_sec by
+    # the approve flow, so the last VO item may end beyond total_dur which is
+    # shots-only). ────────────────────────────────────────────────────────────
     _scene_tails_cfg = manifest.get("scene_tails", {})
+    _scene_heads_cfg = manifest.get("scene_heads", {})  # values in seconds
     _DEFAULT_SCENE_TAIL_MS = 2000
     _prev_scene_id = None
     _shift_acc     = 0.0
@@ -329,8 +344,19 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
             _tail_ms = int(_scene_tails_cfg.get(
                 _scn, _scene_tails_cfg.get(_prev_scene_id, _DEFAULT_SCENE_TAIL_MS)))
             _shift_acc += _tail_ms / 1000.0
+        if _scn != _prev_scene_id:
+            # scene_heads are in seconds (not ms)
+            _shift_acc += float(_scene_heads_cfg.get(_scn, 0.0))
         _prev_scene_id = _scn
     n_samples += int(_shift_acc * SAMPLE_RATE)
+    max_pause_sec = max(
+        ((vl.get("pause_after_ms") or 0) / 1000
+         for entry in timeline_shots
+         for vl in entry.get("vo_lines", [])),
+        default=0.0,
+    )
+    n_samples += int(max_pause_sec * SAMPLE_RATE)
+    n_samples += int(VO_OUTRO_SEC * SAMPLE_RATE)   # headroom for post-VO fade-out
 
     buf = np.zeros((n_samples, CHANNELS), dtype=np.float64)
 
@@ -498,17 +524,21 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
             end = vo.get("end_sec")
             if end is not None:
                 # end_sec is episode-absolute (scene tails baked in by approve flow)
-                last_vo_end_sec = max(last_vo_end_sec, end)
-    VO_OUTRO_SEC = 5.0
-    trim_sec = min(last_vo_end_sec + VO_OUTRO_SEC, total_dur) if last_vo_end_sec > 0 else total_dur
+                effective_end = end + (vo.get("pause_after_ms") or 0) / 1000
+                last_vo_end_sec = max(last_vo_end_sec, effective_end)
+    # Trim to last_vo_end_sec which already includes pause_after_ms.
+    # pause_after_ms IS the musical tail — adding VO_OUTRO_SEC on top double-counts
+    # it and produces 85.348s instead of the correct 80.348s.
+    # Apply the fade within the pause_after_ms window instead.
+    trim_sec = last_vo_end_sec if last_vo_end_sec > 0 else total_dur
     trim_samples = int(trim_sec * SAMPLE_RATE)
     buf = buf[:trim_samples]
-    # Apply a short fade-out on the last VO_OUTRO_SEC so music doesn't cut abruptly
+    # Apply a short fade-out so music doesn't cut abruptly (within pause_after_ms window)
     fade_len = min(int(VO_OUTRO_SEC * SAMPLE_RATE), trim_samples)
     fade_env = np.linspace(1.0, 0.0, fade_len)
     buf[-fade_len:] *= fade_env[:, None] if CHANNELS > 1 else fade_env
     total_dur = trim_sec
-    print(f"  [TRIM] last VO at {last_vo_end_sec:.1f}s → preview trimmed to {trim_sec:.1f}s (+{VO_OUTRO_SEC:.0f}s fade)")
+    print(f"  [TRIM] last VO end={last_vo_end_sec:.3f}s (incl. pause_after_ms) → preview={trim_sec:.3f}s")
 
     # Clip to prevent distortion
     peak = np.max(np.abs(buf))
