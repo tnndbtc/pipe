@@ -2613,7 +2613,7 @@ placeholder="Enter your story here"></textarea>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-sfx" checked onchange="mediaUpdatePreviewLabel()"> Include SFX</label>
   </div>
   <div id="media-ai-search-row" style="display:none;padding:6px 0;">
-    <input id="media-ai-search-input" type="text" placeholder="Describe what to search for…"
+    <input id="media-ai-search-input" type="text" placeholder='Describe what to search, e.g. "add 10 images from pexels with keyword italy"'
            style="width:60%;padding:4px 8px;border:1px solid #444;background:#1e1e1e;color:#ccc;border-radius:4px;">
     <button onclick="mediaAiSearchSubmit()" style="margin-left:6px;padding:4px 10px;">Submit</button>
     <button onclick="mediaAiSearchToggle()" style="margin-left:4px;padding:4px 8px;opacity:0.6;">✕</button>

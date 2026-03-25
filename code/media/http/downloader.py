@@ -2042,6 +2042,50 @@ def _get_source_filters(item: dict | None, source: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Keyword pre-filter helpers for Pexels and Pixabay
+# ---------------------------------------------------------------------------
+
+# Max pages to scan when filtering by keyword.  Caps API calls when a keyword
+# has zero genuine matches (e.g. Pexels videos for "pompeii" → 0 across all pages).
+_KW_FILTER_PAGE_CAP = 15
+
+# Words that are operational (not subject keywords) and must not be used as
+# filter terms.  Extend if needed.
+_KW_STOPWORDS = frozenset({
+    "add", "more", "get", "find", "search", "fetch", "show", "give",
+    "images", "videos", "photos", "clips", "media",
+    "from", "with", "keyword", "about", "using",
+    "a", "an", "the", "and", "or", "in", "of", "for", "to", "on", "by",
+})
+
+
+def _kw_terms(query: str) -> list[str]:
+    """Return lowercase subject terms from a query, stripping stopwords and quotes.
+    Returns [] when the query has no identifiable keywords (purely operational).
+    """
+    tokens = re.split(r'[\s,]+', query)
+    terms = [t.strip('\'"').lower() for t in tokens if t.strip('\'"')]
+    return [t for t in terms if t and t not in _KW_STOPWORDS]
+
+
+def _kw_hit(terms: list[str], *text_fields: str) -> bool:
+    """Return True if at least one term appears in any of the text fields."""
+    combined = " ".join(f.lower() for f in text_fields if f)
+    return any(t in combined for t in terms)
+
+
+def _slug_text(page_url: str) -> str:
+    """Extract human-readable text from a Pexels/Pixabay page URL slug.
+    Strips the trailing numeric ID and replaces separators with spaces.
+    e.g. 'https://www.pexels.com/photo/ancient-ruins-of-pompeii-35750762/'
+         → 'photo ancient ruins of pompeii'
+    """
+    path = urlparse(page_url).path
+    path = re.sub(r"-?\d+/?$", "", path)          # strip trailing numeric ID
+    return re.sub(r"[/_\-]", " ", path).lower()
+
+
+# ---------------------------------------------------------------------------
 # Pexels — images
 # ---------------------------------------------------------------------------
 
@@ -2091,11 +2135,28 @@ def _pexels_search_images(
             "Pexels search images  q=%r page=%d page_size=%d extra=%s",
             q, page, page_size, extra_params,
         )
-        page_results = _with_backoff(call, backoff)
+        raw = _with_backoff(call, backoff)
+        # Keyword pre-filter: keep only photos whose alt text or URL slug
+        # contains at least one query term.  Skipped when query has no
+        # identifiable keywords (terms=[]).
+        _terms = _kw_terms(q)
+        if _terms:
+            page_results = [
+                p for p in raw
+                if _kw_hit(_terms, p.get("alt", ""), _slug_text(p.get("url", "")))
+            ]
+            log.debug("Pexels images kw-filter q=%r page=%d raw=%d kept=%d",
+                      q, page, len(raw), len(page_results))
+        else:
+            page_results = raw
         results.extend(page_results)
-        if len(page_results) < page_size:
-            break  # no more pages
+        if len(raw) < page_size:
+            break  # API has no more pages
         page += 1
+        if _terms and page > _KW_FILTER_PAGE_CAP:
+            log.info("Pexels images kw-filter q=%r: page cap %d reached, stopping",
+                     q, _KW_FILTER_PAGE_CAP)
+            break
 
     result = results[:n_requested]
     _search_cache[key] = result
@@ -2152,11 +2213,26 @@ def _pexels_search_videos(
             "Pexels search videos  q=%r page=%d page_size=%d extra=%s",
             q, page, page_size, extra_params,
         )
-        page_results = _with_backoff(call, backoff)
+        raw = _with_backoff(call, backoff)
+        # Keyword pre-filter: Pexels videos have no tags; check URL slug only.
+        _terms = _kw_terms(q)
+        if _terms:
+            page_results = [
+                v for v in raw
+                if _kw_hit(_terms, _slug_text(v.get("url", "")))
+            ]
+            log.debug("Pexels videos kw-filter q=%r page=%d raw=%d kept=%d",
+                      q, page, len(raw), len(page_results))
+        else:
+            page_results = raw
         results.extend(page_results)
-        if len(page_results) < page_size:
-            break  # no more pages
+        if len(raw) < page_size:
+            break  # API has no more pages
         page += 1
+        if _terms and page > _KW_FILTER_PAGE_CAP:
+            log.info("Pexels videos kw-filter q=%r: page cap %d reached, stopping",
+                     q, _KW_FILTER_PAGE_CAP)
+            break
 
     result = results[:n_requested]
     _search_cache[key] = result
@@ -2228,11 +2304,26 @@ def _pixabay_search_images(
 
         log.info("Pixabay search images  q=%r page=%d page_size=%d extra=%s",
                  q, page, page_size, extra_params)
-        page_results = _with_backoff(call, backoff)
+        raw = _with_backoff(call, backoff)
+        # Keyword pre-filter: Pixabay has reliable tags + URL slug.
+        _terms = _kw_terms(q)
+        if _terms:
+            page_results = [
+                h for h in raw
+                if _kw_hit(_terms, h.get("tags", ""), _slug_text(h.get("pageURL", "")))
+            ]
+            log.debug("Pixabay images kw-filter q=%r page=%d raw=%d kept=%d",
+                      q, page, len(raw), len(page_results))
+        else:
+            page_results = raw
         results.extend(page_results)
-        if len(page_results) < page_size:
-            break  # no more pages
+        if len(raw) < page_size:
+            break  # API has no more pages
         page += 1
+        if _terms and page > _KW_FILTER_PAGE_CAP:
+            log.info("Pixabay images kw-filter q=%r: page cap %d reached, stopping",
+                     q, _KW_FILTER_PAGE_CAP)
+            break
 
     result = results[:n_requested]
     _search_cache[key] = result
@@ -2292,11 +2383,26 @@ def _pixabay_search_videos(
 
         log.info("Pixabay search videos  q=%r page=%d page_size=%d extra=%s",
                  q, page, page_size, extra_params)
-        page_results = _with_backoff(call, backoff)
+        raw = _with_backoff(call, backoff)
+        # Keyword pre-filter: Pixabay has reliable tags + URL slug.
+        _terms = _kw_terms(q)
+        if _terms:
+            page_results = [
+                h for h in raw
+                if _kw_hit(_terms, h.get("tags", ""), _slug_text(h.get("pageURL", "")))
+            ]
+            log.debug("Pixabay videos kw-filter q=%r page=%d raw=%d kept=%d",
+                      q, page, len(raw), len(page_results))
+        else:
+            page_results = raw
         results.extend(page_results)
-        if len(page_results) < page_size:
-            break  # no more pages
+        if len(raw) < page_size:
+            break  # API has no more pages
         page += 1
+        if _terms and page > _KW_FILTER_PAGE_CAP:
+            log.info("Pixabay videos kw-filter q=%r: page cap %d reached, stopping",
+                     q, _KW_FILTER_PAGE_CAP)
+            break
 
     result = results[:n_requested]
     _search_cache[key] = result
