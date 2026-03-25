@@ -1447,10 +1447,42 @@ async def ai_ask(body: AiAskRequest, _: None = Depends(require_auth)):
     log.info("ai_ask: claude returned rc=%d  stdout_len=%d  response=%r",
              proc.returncode, len(proc.stdout), proc.stdout.strip())
 
+    # Persist last AI ask so Refresh can surface it in the UI
+    try:
+        import datetime as _dt
+        _ai_ask_path = (PROJECTS_ROOT / body.project / "episodes" / body.episode_id
+                        / "assets" / "media" / "ai_ask_last.json")
+        _ai_ask_path.parent.mkdir(parents=True, exist_ok=True)
+        _ai_ask_path.write_text(json.dumps({
+            "prompt":    body.prompt,
+            "response":  proc.stdout.strip(),
+            "error":     proc.stderr.strip() if proc.returncode != 0 else None,
+            "timestamp": _dt.datetime.now().isoformat(),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as _e:
+        log.warning("ai_ask: failed to write ai_ask_last.json: %s", _e)
+
     return {
         "response": proc.stdout.strip(),
         "error":    proc.stderr.strip() if proc.returncode != 0 else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /ai_ask_last — return last AI ask prompt+response for a project/episode
+# ---------------------------------------------------------------------------
+
+@app.get("/ai_ask_last")
+async def ai_ask_last(project: str = Query(...), episode_id: str = Query(...),
+                      _: None = Depends(require_auth)):
+    """Return the last AI ask prompt and response for the given project/episode."""
+    path = PROJECTS_ROOT / project / "episodes" / episode_id / "assets" / "media" / "ai_ask_last.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------

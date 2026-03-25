@@ -1489,7 +1489,9 @@ HTML = r"""<!DOCTYPE html>
     flex-shrink: 0; background: var(--surface); border: 1px solid var(--border);
     border-radius: 6px; padding: 8px 14px;
     font-size: 0.82em; color: var(--dim);
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: flex-start; gap: 10px;
+    max-height: 3.8em; overflow-y: auto; line-height: 1.7em;
+    white-space: pre-wrap; word-break: break-word;
   }
   .media-spinner {
     width: 14px; height: 14px; border-radius: 50%;
@@ -7504,6 +7506,7 @@ placeholder="Enter your story here"></textarea>
   async function mediaRefresh() {
     const slug = _mediaSlug, epId = _mediaEpId;
     const key = slug + ':' + epId;
+    console.log('[mediaRefresh] slug=' + slug + ' epId=' + epId + ' batchId=' + _mediaBatchId);
     const _rbtn = document.getElementById('media-btn-refresh');
     const _rOrig = _rbtn ? _rbtn.innerHTML : '';
     if (_rbtn) {
@@ -7562,20 +7565,29 @@ placeholder="Enter your story here"></textarea>
     // Step 3: check batch status
     try {
       const serverUrl = _mediaServerUrl();
+      console.log('[mediaRefresh] Step3 batchId=' + batchId + ' slug=' + slug + ' epId=' + epId);
       const r = await fetch('/api/media_batch_status?server_url=' + encodeURIComponent(serverUrl)
-          + '&batch_id=' + encodeURIComponent(batchId));
+          + '&batch_id=' + encodeURIComponent(batchId)
+          + '&slug=' + encodeURIComponent(slug)
+          + '&ep_id=' + encodeURIComponent(epId));
       const d = await r.json();
+      console.log('[mediaRefresh] batch_status response:', d);
       const status = d.status || d.state || '';
       const st = document.getElementById('media-status-text');
+      // Show last AI ask prompt+response if available
+      if (d.last_ai_ask && d.last_ai_ask.prompt) {
+        const ask = d.last_ai_ask;
+        const resp = ask.error ? '❌ ' + ask.error : '✅ ' + (ask.response || '');
+        if (st) st.textContent = '💬 Request: ' + ask.prompt + '\n' + resp;
+      }
       if (status === 'done' || status === 'completed') {
-        if (st) st.textContent = '✅ Batch done — loading library…';
         await mediaLoadLibrary();
       } else if (status === 'running' || status === 'pending') {
-        if (st) st.textContent = 'Still running… try again later';
+        if (st && !d.last_ai_ask) st.textContent = 'Still running… try again later';
       } else if (status === 'failed') {
-        if (st) st.textContent = '❌ Batch failed: ' + (d.error || d.message || status);
+        if (st && !d.last_ai_ask) st.textContent = '❌ Batch failed: ' + (d.error || d.message || status);
       } else {
-        if (st) st.textContent = 'Unknown batch status: ' + status;
+        if (st && !d.last_ai_ask) st.textContent = 'Unknown batch status: ' + status;
       }
     } catch (err) {
       const st = document.getElementById('media-status-text');
@@ -16685,6 +16697,8 @@ class Handler(BaseHTTPRequestHandler):
             params     = parse_qs(parsed.query)
             batch_id   = params.get("batch_id",   [""])[0].strip()
             server_url = params.get("server_url", ["http://localhost:8200"])[0].strip()
+            slug       = params.get("slug",  [""])[0].strip()
+            ep_id      = params.get("ep_id", [""])[0].strip()
             api_key    = os.environ.get("MEDIA_API_KEY", "")
             if not batch_id:
                 body = json.dumps({"error": "batch_id required"}).encode()
@@ -16696,6 +16710,25 @@ class Handler(BaseHTTPRequestHandler):
                                headers={"X-Api-Key": api_key})
                     with _urllib_req.urlopen(req, timeout=10) as resp:
                         body = resp.read()
+                    # Append last_ai_ask from media server if slug/ep_id provided
+                    if slug and ep_id:
+                        try:
+                            from urllib.parse import quote as _uquote
+                            _ask_url = (server_url.rstrip("/") + "/ai_ask_last"
+                                        + "?project=" + _uquote(slug)
+                                        + "&episode_id=" + _uquote(ep_id))
+                            print(f"  [media_batch_status] fetching ai_ask_last: {_ask_url}")
+                            _ask_req = _urllib_req.Request(_ask_url,
+                                           headers={"X-Api-Key": api_key})
+                            with _urllib_req.urlopen(_ask_req, timeout=5) as _ask_resp:
+                                _ask_data = json.loads(_ask_resp.read())
+                            print(f"  [media_batch_status] ai_ask_last response: {_ask_data}")
+                            if _ask_data:
+                                _d = json.loads(body)
+                                _d["last_ai_ask"] = _ask_data
+                                body = json.dumps(_d).encode()
+                        except Exception as _ask_exc:
+                            print(f"  [media_batch_status] ai_ask_last FAILED: {_ask_exc}")
                     self.send_response(200)
                 except Exception as exc:
                     body = json.dumps({"error": str(exc)}).encode()
