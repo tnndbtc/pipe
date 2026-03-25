@@ -99,6 +99,9 @@ import tempfile as _tempfile
 _jobs: dict = {}          # job_key → {"log": str, "done": bool, "rc": int|None}
 _jobs_lock = threading.Lock()
 
+# ── Media AI Ask: in-process error store for fire-and-forget background thread ──
+_media_ai_ask_errors: dict = {}   # key = "slug:ep_id" → error string
+
 # ── Per-episode VO write lock (INVARIANT G) ────────────────────────────────────
 # Keyed by ep_dir string. Acquired before any write to *.wav, *.source.wav,
 # vo_trim_overrides.json, vo_merge_log.json, VOPlan, or
@@ -1399,6 +1402,7 @@ HTML = r"""<!DOCTYPE html>
     transition: background .15s, color .15s, box-shadow .15s;
   }
   .tab:hover  { color: var(--text); background: var(--hover-bg); }
+  .tab:disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
   .tab.active {
     background: rgba(0,0,0,0.10); color: var(--text);
     box-shadow: 0 1px 4px #0005;
@@ -1469,6 +1473,15 @@ HTML = r"""<!DOCTYPE html>
   }
   #media-btn-search:hover  { opacity: 0.85; }
   #media-btn-search:disabled { opacity: 0.4; cursor: not-allowed; }
+  #media-btn-ai-search {
+    background: #2a3a5a;
+    color: #8ab4f8;
+    border: 1px solid #3a4a6a;
+    border-radius: 4px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  #media-btn-ai-search:disabled { opacity: 0.4; cursor: default; }
   #media-btn-gen-all { transition: opacity .15s; }
   #media-btn-gen-all:hover    { opacity: 0.85; }
   #media-btn-gen-all:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -1489,39 +1502,6 @@ HTML = r"""<!DOCTYPE html>
     display: flex; flex-direction: column; gap: 14px;
     padding-right: 2px;
   }
-  .media-progress-table {
-    width: 100%; border-collapse: collapse; font-size: 0.82em;
-    color: var(--text);
-  }
-  .media-progress-table th {
-    color: var(--dim); font-size: 0.78em; text-transform: uppercase;
-    letter-spacing: 0.05em; font-weight: 600; padding: 0 10px 6px 0;
-    text-align: left; border-bottom: 1px solid var(--border);
-  }
-  .media-progress-table td {
-    padding: 5px 10px 5px 0; border-bottom: 1px solid var(--border);
-    vertical-align: middle;
-  }
-  .media-progress-table tr:last-child td { border-bottom: none; }
-  .mprog-pending  { color: var(--dim); }
-  .mprog-dl       { color: #5bc4f5; }
-  .mprog-scoring  { color: var(--gold); }
-  .mprog-done     { color: #3ecf6e; }
-  .mprog-failed   { color: #f55; }
-  .mprog-num      { text-align: right; padding-right: 16px; font-family: var(--mono); }
-  .mprog-dash     { text-align: right; padding-right: 16px; color: var(--dim); }
-  .mprog-toggle   { cursor:pointer; user-select:none; color:var(--dim); font-size:0.8em;
-                    padding-right:6px; transition:color 0.15s; }
-  .mprog-toggle:hover { color:var(--text); }
-  .mprog-toggle.open  { color:var(--blue); }
-  .mprog-detail-row td { background:rgba(255,255,255,0.03); padding:6px 10px 8px 28px;
-                          border-bottom:1px solid var(--border); }
-  .mprog-detail-table { font-size:0.82em; border-collapse:collapse; }
-  .mprog-detail-table td { padding:2px 16px 2px 0; color:var(--dim); vertical-align:middle; }
-  .mprog-detail-table td.src-name { font-family:var(--mono); color:var(--text); min-width:90px; }
-  .mprog-detail-table td.src-num  { text-align:right; font-family:var(--mono);
-                                     color:var(--text); padding-right:20px; min-width:40px; }
-  .mprog-detail-note { font-size:0.8em; color:var(--dim); margin-top:4px; font-style:italic; }
   .media-body::-webkit-scrollbar { width: 6px; }
   .media-body::-webkit-scrollbar-track { background: transparent; }
   .media-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -1606,35 +1586,6 @@ HTML = r"""<!DOCTYPE html>
   #media-btn-apply-seq:hover { background: #364a70; color: #a8d0ff; }
   #media-confirm-msg { font-size: 0.80em; }
   .media-empty { color: var(--dim); font-style: italic; font-size: 0.83em; }
-  /* ── Per-shot assignment rows ── */
-  .media-shot-section {
-    margin-top: 10px; border-top: 1px solid var(--border);
-    padding-top: 8px;
-  }
-  .media-shot-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 3px 0; font-size: 0.78em; font-family: var(--mono);
-  }
-  .media-shot-label {
-    color: var(--blue, #5b9cf6); font-weight: 600; min-width: 120px;
-  }
-  .media-shot-preview {
-    color: var(--dim); flex: 1; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap;
-  }
-  .media-shot-clear {
-    background: none; border: none; color: var(--dim);
-    cursor: pointer; font-size: 1.0em; padding: 2px 4px;
-    transition: color .15s;
-  }
-  .media-shot-clear:hover { color: #e06c75; }
-  .media-btn-auto-assign {
-    background: #2a3a5c; color: #7eb8f7;
-    border: 1px solid #3d5a8a; border-radius: 5px;
-    font-size: 0.76em; padding: 4px 12px; cursor: pointer;
-    margin-bottom: 6px; transition: background .15s, color .15s;
-  }
-  .media-btn-auto-assign:hover { background: #364a70; color: #a8d0ff; }
   /* ── Extended thumbnails (beyond top_n — dimmed until hovered/selected) ── */
   .media-thumb-extended {
     opacity: 0.45; filter: grayscale(30%);
@@ -1762,32 +1713,6 @@ HTML = r"""<!DOCTYPE html>
   }
   .media-thumb:hover .media-copy-btn { opacity: 0.85; }
   .media-copy-btn:hover { opacity: 1 !important; background: #c0d8f0; }
-
-  /* ── Shot picker popup (cross-shot copy) ── */
-  #media-shot-picker {
-    position: fixed; z-index: 10000;
-    background: var(--surface); border: 1px solid #444; border-radius: 8px;
-    padding: 10px 12px; box-shadow: 0 6px 32px rgba(0,0,0,0.08);
-    display: none; min-width: 200px; max-height: 350px; overflow-y: auto;
-  }
-  #media-shot-picker .sp-title {
-    font-size: 0.75em; color: #888888; margin-bottom: 6px;
-  }
-  #media-shot-picker .sp-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 4px 6px; border-radius: 4px; cursor: pointer;
-    font-size: 0.82em; color: #ccc;
-  }
-  #media-shot-picker .sp-row:hover { background: #e8e6f0; }
-  #media-shot-picker .sp-row.sp-already { color: #666; cursor: default; }
-  #media-shot-picker .sp-row.sp-already:hover { background: transparent; }
-  #media-shot-picker .sp-cb { width: 14px; height: 14px; accent-color: #5b9cf6; }
-  #media-shot-picker .sp-done {
-    margin-top: 8px; padding: 4px 14px; font-size: 0.8em;
-    background: #c0e0c0; color: #8aba8a; border: 1px solid #4a7a4a;
-    border-radius: 4px; cursor: pointer; width: 100%;
-  }
-  #media-shot-picker .sp-done:hover { background: #b0d8b0; }
 
   /* ── Video clip trimmer (in segment row) ── */
   .seg-trim-row {
@@ -2678,6 +2603,7 @@ placeholder="Enter your story here"></textarea>
       <option value="">— select episode —</option>
     </select>
     <button id="media-btn-search" onclick="mediaStartSearch()" disabled>🔍 Search Media</button>
+    <button id="media-btn-ai-search" onclick="mediaAiSearchToggle()" disabled>✨ AI Search</button>
     <input  id="media-server-url" class="media-cfg-input" type="text"
             placeholder="Media server URL  e.g. http://localhost:8200"
             value="{{MEDIA_SERVER_URL}}" />
@@ -2685,6 +2611,12 @@ placeholder="Enter your story here"></textarea>
             style="margin-left:8px;margin-right:4px;background:var(--active-bg);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.80em;padding:5px 14px;cursor:pointer">🎬 Generate Preview</button>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-music" checked onchange="mediaUpdatePreviewLabel()"> Include Music</label>
     <label style="margin-right:6px;font-size:0.9em"><input type="checkbox" id="media-include-sfx" checked onchange="mediaUpdatePreviewLabel()"> Include SFX</label>
+  </div>
+  <div id="media-ai-search-row" style="display:none;padding:6px 0;">
+    <input id="media-ai-search-input" type="text" placeholder="Describe what to search for…"
+           style="width:60%;padding:4px 8px;border:1px solid #444;background:#1e1e1e;color:#ccc;border-radius:4px;">
+    <button onclick="mediaAiSearchSubmit()" style="margin-left:6px;padding:4px 10px;">Submit</button>
+    <button onclick="mediaAiSearchToggle()" style="margin-left:4px;padding:4px 8px;opacity:0.6;">✕</button>
   </div>
 
   <!-- per-source settings table (always visible once project selected) -->
@@ -3701,7 +3633,6 @@ placeholder="Enter your story here"></textarea>
     if (pipeStepEs) { try { pipeStepEs.close(); } catch(_){} pipeStepEs = null; }
     // Stop polling timers (their in-flight fetches occupy connection slots)
     if (_pipePoller)    { clearInterval(_pipePoller);    _pipePoller = null; }
-    if (_mediaPollTimer){ clearInterval(_mediaPollTimer); _mediaPollTimer = null; }
     // Release video connections
     if (typeof _mediaReleaseAllConnections === 'function') _mediaReleaseAllConnections();
     // Stop voice-preview audio
@@ -5353,7 +5284,16 @@ placeholder="Enter your story here"></textarea>
     });
   }
 
+  function _setVoTimingTabs(ready) {
+    ['music', 'sfx', 'media'].forEach(t => {
+      const btn = document.querySelector(`.tab[data-tab="${t}"]`);
+      if (btn) { btn.disabled = !ready; btn.title = ready ? '' : 'VO must be approved first'; }
+    });
+  }
+
   function switchTab(name) {
+    const _tBtn = document.querySelector(`.tab[data-tab="${name}"]`);
+    if (_tBtn && _tBtn.disabled) return;
     _updateEpLabels();
     document.querySelectorAll('.tab').forEach(t =>
       t.classList.toggle('active', t.dataset.tab === name));
@@ -6816,7 +6756,6 @@ placeholder="Enter your story here"></textarea>
   let _mediaEpId           = null;
   // Legacy batch state (kept for backward compat with any remaining refs)
   let _mediaBatchId        = null;
-  let _mediaPollTimer      = null;
   let _mediaExpandedRows   = new Set();
   let _mediaLastProgress   = null;
   let _mediaResults        = null;
@@ -6828,16 +6767,11 @@ placeholder="Enter your story here"></textarea>
   let _aiBatchTotal   = 0;
   let _mediaRecommendedSeq = null;
   let _mediaDragSrc   = null;
-  let _mediaShotMap   = null;
   let _mediaShotDur   = null;
   let _mediaShotStart = null;
   let _mediaActiveShot = {};
-  let _mediaSceneMap  = null;
   let _mediaShotToBg  = null;
-  let _mediaSceneBgs  = null;
   let _mediaBgToScene = null;
-  let _mediaSceneOrder = null;
-  let _mediaBgRemap   = null;
   var _mediaPlayingVid = null;
   let _bgManifestData = {};
   let _elManifestData = {};
@@ -6853,6 +6787,7 @@ placeholder="Enter your story here"></textarea>
   let _mediaOvrPreviewShot = null; // shot_id whose inline preview is open
   let _mediaOvrPreviews    = {};   // { safe: { timeline, shotDurSec, currentTime, playing, … } }
   let _mediaShotTimeline = [];   // [{ shot_id, epStart, epEnd, duration_sec }]
+  // (AI Ask errors are now polled from /api/media_ai_ask_error on each Refresh)
 
   // Stop a video and release its HTTP connection (pause alone doesn't close it).
   function _mediaStopVid(vid) {
@@ -6914,19 +6849,7 @@ placeholder="Enter your story here"></textarea>
 
   // ── called once when tab is first activated ──
   function _mediaRestoreLastEp() {
-    // Fallback: restore last-selected episode from localStorage (survives page reload)
-    if (_mediaSlug && _mediaEpId) return;  // already selected via Run-tab sync
-    var last = '';
-    try { last = localStorage.getItem('media_last_ep') || ''; } catch(_) {}
-    if (!last) return;
-    var sel = document.getElementById('media-ep-select');
-    for (var i = 0; i < sel.options.length; i++) {
-      if (sel.options[i].value === last) {
-        sel.value = last;
-        onMediaEpChange();
-        return;
-      }
-    }
+    // localStorage restore removed — Media tab now syncs from Run tab only.
   }
 
   function initMediaTab() {
@@ -6989,9 +6912,12 @@ placeholder="Enter your story here"></textarea>
     const v = document.getElementById('media-ep-select').value;
     if (!v) { _mediaSlug = null; _mediaEpId = null; return; }
     [_mediaSlug, _mediaEpId] = v.split('|');
-    try { localStorage.setItem('media_last_ep', v); } catch(_) {}
     _mediaSearchBtnSet(false);
+    const aiBtn = document.getElementById('media-btn-ai-search');
+    if (aiBtn) aiBtn.disabled = false;
     _mediaSetStatus('Episode selected. Click Search Media to begin.');
+    // Load source defaults from media server health endpoint, then load saved config
+    await _mediaLoadSrcDefaults();
     // Load saved per-source config from meta.json, then render the table
     await _loadMediaSourceConfig();
     _renderMediaSourcesTable();
@@ -7020,80 +6946,6 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('media-spinner').style.display = spinning ? 'inline-block' : 'none';
   }
 
-  // ── Load ShotList.json to build bg_id → [shot_id, ...] map + durations ──
-  // Also builds scene-based grouping maps for UI card rendering.
-  async function _mediaLoadShotMap() {
-    if (!_mediaSlug || !_mediaEpId) {
-      _mediaShotMap = null; _mediaShotDur = null;
-      _mediaSceneMap = null; _mediaShotToBg = null; _mediaSceneBgs = null;
-      _mediaBgToScene = null; _mediaSceneOrder = null;
-      return;
-    }
-    try {
-      const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
-          + '&ep_id=' + encodeURIComponent(_mediaEpId)
-          + '&file=ShotList.json');
-      if (!r.ok) {
-        _mediaShotMap = null; _mediaShotDur = null;
-        _mediaSceneMap = null; _mediaShotToBg = null; _mediaSceneBgs = null;
-        _mediaBgToScene = null; _mediaSceneOrder = null;
-        return;
-      }
-      const d = await r.json();
-      const shots = d.shots || [];
-      const map = {};
-      const durMap = {};
-      const sceneMap = {};
-      const shotToBg = {};
-      const sceneBgs = {};
-      const bgToScene = {};
-      const sceneOrder = [];
-      shots.forEach(s => {
-        const bg = s.background_id;
-        const sc = s.scene_id || bg;  // fallback to bg_id if no scene_id
-        const sid = s.shot_id;
-        if (!bg) return;
-        // bg → shots map (existing)
-        if (!map[bg]) map[bg] = [];
-        map[bg].push(sid);
-        durMap[sid] = s.duration_sec || 0;
-        // scene maps
-        shotToBg[sid] = bg;
-        bgToScene[bg] = sc;
-        if (!sceneMap[sc]) { sceneMap[sc] = []; sceneOrder.push(sc); }
-        sceneMap[sc].push(sid);
-        if (!sceneBgs[sc]) sceneBgs[sc] = [];
-        if (sceneBgs[sc].indexOf(bg) === -1) sceneBgs[sc].push(bg);
-      });
-      // Compute absolute start time for each shot (cumulative, ShotList order)
-      const startMap = {};
-      let _cum = 0;
-      shots.forEach(s => {
-        if (s.shot_id) { startMap[s.shot_id] = _cum; _cum += s.duration_sec || 0; }
-      });
-      _mediaShotMap   = map;
-      _mediaShotDur   = durMap;
-      _mediaShotStart = startMap;
-      _mediaSceneMap  = sceneMap;
-      _mediaShotToBg  = shotToBg;
-      _mediaSceneBgs  = sceneBgs;
-      _mediaBgToScene = bgToScene;
-      _mediaSceneOrder = sceneOrder;
-      // Load optional bg_id remap (written when MediaPlan.json keys are patched to
-      // match a new ShotList without re-running the full media search).
-      _mediaBgRemap = null;
-      try {
-        const rr = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
-            + '&ep_id=' + encodeURIComponent(_mediaEpId)
-            + '&file=assets/media/bg_id_remap.json');
-        if (rr.ok) { _mediaBgRemap = await rr.json(); }
-      } catch (_2) {}
-    } catch (_) {
-      _mediaShotMap = null; _mediaShotDur = null; _mediaShotStart = null;
-      _mediaSceneMap = null; _mediaShotToBg = null; _mediaSceneBgs = null;
-      _mediaBgToScene = null; _mediaSceneOrder = null; _mediaBgRemap = null;
-    }
-  }
 
   // ── AI Generation Queue — persisted in localStorage per project/episode ──
 
@@ -7394,16 +7246,10 @@ placeholder="Enter your story here"></textarea>
 
   // ── Per-source config: defaults, localStorage persistence ──────────────────
 
-  const _mediaSrcDefaults = {
-    //                enabled  n_img  n_vid
-    pexels:    { enabled: true,  n_img: 15, n_vid:  5 },
-    pixabay:   { enabled: true,  n_img: 15, n_vid:  5 },
-    openverse: { enabled: true,  n_img: 40, n_vid:  0 },
-    wikimedia: { enabled: true,  n_img: 40, n_vid:  0 },
-    europeana: { enabled: true,  n_img: 15, n_vid:  0 },
-    archive:   { enabled: false, n_img: 10, n_vid: 10 },
-  };
-  let _mediaSourceConfig = JSON.parse(JSON.stringify(_mediaSrcDefaults));
+  let _mediaSrcDefaults = {};
+  let _mediaSourceConfig = {};
+  let _mediaGlobalImg = 30;   // seeded from config.json via /health
+  let _mediaGlobalVid = 30;   // seeded from config.json via /health
 
   async function _saveMediaSourceConfig() {
     if (!_mediaSlug || !_mediaEpId) return;
@@ -7445,6 +7291,45 @@ placeholder="Enter your story here"></textarea>
         }
       });
     } catch(e) {}
+  }
+
+  async function _mediaLoadSrcDefaults() {
+    const serverUrl = _mediaServerUrl();
+    if (!serverUrl) return;
+
+    try {
+      const r = await fetch('/api/media_health?server_url=' + encodeURIComponent(serverUrl));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const h = await r.json();
+      const cfg = h.config || h;  // /health returns { ..., config: {...} } or flat
+      const sourceLimits = cfg.source_limits;
+      const globalImg = cfg.candidates_per_source_image || 30;
+      const globalVid = cfg.candidates_per_source_video || 30;
+      _mediaGlobalImg = globalImg;
+      _mediaGlobalVid = globalVid;
+
+      if (!sourceLimits) {
+        console.warn('source_limits missing from /health — update server.py');
+        const st = document.getElementById('media-status-text');
+        if (st) st.textContent = '⚠ source_limits not returned by media server — update server.py first';
+        return;
+      }
+
+      // Rebuild from sourceLimits keys or cfg.sources
+      const sources = cfg.sources || Object.keys(sourceLimits);
+      const newDefaults = {};
+      for (const src of sources) {
+        const lim = sourceLimits[src] || {};
+        newDefaults[src] = {
+          enabled: true,
+          n_img: lim.candidates_images !== undefined ? lim.candidates_images : globalImg,
+          n_vid: lim.candidates_videos !== undefined ? lim.candidates_videos : globalVid
+        };
+      }
+      _mediaSrcDefaults = newDefaults;
+    } catch (err) {
+      console.error('Failed to load media health:', err);
+    }
   }
 
   function _renderMediaSourcesTable() {
@@ -7513,8 +7398,7 @@ placeholder="Enter your story here"></textarea>
         if (running) {
           _mediaBatchId = running.batch_id;
           _mediaSearchBtnSet(true);
-          _mediaSetStatus('Reconnecting to running batch…', true);
-          _mediaStartPolling();
+          _mediaSetStatus('Batch is already running — click Refresh to check status', false);
           return;
         }
 
@@ -7554,8 +7438,7 @@ placeholder="Enter your story here"></textarea>
               const rd = await rr.json();
               if (!rr.ok || rd.error) throw new Error(rd.error || 'resume failed');
               _mediaBatchId = existing.batch_id;
-              _mediaSetStatus('Resuming — polling for results…', true);
-              _mediaStartPolling();
+              _mediaSetStatus('Batch resumed — click Refresh to check status', false);
             } catch (err) {
               _mediaSetStatus('Resume error: ' + err.message, false);
               _mediaSearchBtnSet(false);
@@ -7603,214 +7486,152 @@ placeholder="Enter your story here"></textarea>
             content_profile:        _formatToContentProfile(_selectedFormat),
             sources_override:       enabledSrcs,
             source_limits_override: srcLimits,
-            n_img:                  maxNImg || 15,
-            n_vid:                  maxNVid || 0,
+            n_img:                  maxNImg || _mediaGlobalImg,
+            n_vid:                  maxNVid || _mediaGlobalVid,
           };
         })()),
       });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || 'batch creation failed');
       _mediaBatchId = d.batch_id;
-      _mediaSetStatus('Batch queued — polling for results …', true);
-      _mediaStartPolling();
+      _mediaSetStatus('🔍 Search submitted — click Refresh when ready', false);
     } catch (err) {
       _mediaSetStatus('Error: ' + err.message, false);
       _mediaSearchBtnSet(false);
     }
   }
 
-  // ── Per-shot progress table (shown while batch is running) ──
-  //
-  // Column meanings:
-  //   📷 DL  = total image files downloaded across ALL sources × ALL search queries.
-  //            Higher than per-source candidate limit because multiple queries (one per
-  //            keyword set) × multiple sources each contribute candidates before dedup.
-  //   🎬 DL  = same, for video files.
-  //   📷 ✓   = images kept after CLIP scoring (top-N per source).
-  //   🎬 ✓   = videos kept after scoring.
-  //
-  // Click ▶ on any row to expand per-source breakdown (available once item is done).
-  //
-  function _mediaRenderProgress(d) {
-    if (d) _mediaLastProgress = d;
-    else   d = _mediaLastProgress;
-    if (!d) return;
-    const body  = document.getElementById('media-body');
-    const items = d.items || {};
-    if (!Object.keys(items).length) return;
-
-    // Re-use existing table if already rendered; otherwise create it
-    let tbl = body.querySelector('.media-progress-table');
-    if (!tbl) {
-      const _pw = document.getElementById('media-preview-wrap');
-      body.innerHTML = '';
-      if (_pw) body.insertBefore(_pw, body.firstChild);
-      tbl = document.createElement('table');
-      tbl.className = 'media-progress-table';
-      tbl.innerHTML = `<thead><tr>
-        <th style="width:18px"></th>
-        <th>Shot</th>
-        <th>Status</th>
-        <th style="text-align:right;padding-right:16px" title="Total image files downloaded across all sources and search queries">Img Downloaded</th>
-        <th style="text-align:right;padding-right:16px" title="Total video files downloaded across all sources and search queries">Vid Downloaded</th>
-        <th style="text-align:right;padding-right:16px" title="Images kept after CLIP scoring">Img Scored</th>
-        <th style="text-align:right;padding-right:16px" title="Videos kept after CLIP scoring">Vid Scored</th>
-      </tr></thead><tbody></tbody>`;
-      body.appendChild(tbl);
+  async function mediaRefresh() {
+    const slug = _mediaSlug, epId = _mediaEpId;
+    const key = slug + ':' + epId;
+    const _rbtn = document.getElementById('media-btn-refresh');
+    const _rOrig = _rbtn ? _rbtn.innerHTML : '';
+    if (_rbtn) {
+      _rbtn.innerHTML = '<span style="display:inline-block;animation:spin .7s linear infinite">🔄</span> Refreshing…';
+      _rbtn.disabled = true;
     }
-
-    const tbody = tbl.querySelector('tbody');
-
-    // Helper: build per-source detail HTML from source counts dicts
-    function _sourceDetailHtml(imgSources, vidSources, isDone) {
-      const allSources = new Set([...Object.keys(imgSources), ...Object.keys(vidSources)]);
-      if (!allSources.size) {
-        if (!isDone) {
-          return `<div class="mprog-detail-note">Per-source breakdown available after item completes.</div>`;
-        }
-        return `<div class="mprog-detail-note">No per-source data.</div>`;
-      }
-      let rows = '';
-      allSources.forEach(src => {
-        const iN = imgSources[src] || 0;
-        const vN = vidSources[src] || 0;
-        rows += `<tr>
-          <td class="src-name">${src}</td>
-          <td class="src-num">${iN || '—'}</td>
-          <td style="color:var(--dim);padding-right:8px">img</td>
-          <td class="src-num">${vN || '—'}</td>
-          <td style="color:var(--dim)">vid</td>
-        </tr>`;
-      });
-      return `<table class="mprog-detail-table">
-        <tr><td colspan="5" style="color:var(--dim);font-size:0.85em;padding-bottom:3px">
-          Per-source breakdown (ranked candidates kept after scoring)
-        </td></tr>
-        ${rows}
-      </table>
-      <div class="mprog-detail-note">
-        DL total may exceed per-source limit: multiple search queries × sources contribute candidates before dedup &amp; scoring.
-      </div>`;
-    }
-
-    // Update or create one row per item
-    Object.entries(items).forEach(([itemId, it]) => {
-      const phase  = it.phase || it.status || 'pending';
-      const isDone = it.status === 'done';
-      const isOpen = _mediaExpandedRows.has(itemId);
-
-      let statusCls, statusTxt;
-      if      (it.status === 'failed')  { statusCls = 'mprog-failed';  statusTxt = '✗ failed'; }
-      else if (isDone)                  { statusCls = 'mprog-done';    statusTxt = '✓ done'; }
-      else if (phase === 'scoring')     { statusCls = 'mprog-scoring'; statusTxt = '⚙ scoring…'; }
-      else if (phase === 'downloading') { statusCls = 'mprog-dl';      statusTxt = '↓ downloading…'; }
-      else                             { statusCls = 'mprog-pending'; statusTxt = '· pending'; }
-
-      const num = (n) => (n != null && n > 0)
-        ? `<td class="mprog-num">${n}</td>`
-        : `<td class="mprog-dash">—</td>`;
-
-      const imgDl  = isDone ? it.total_images : it.imgs_downloaded;
-      const vidDl  = isDone ? it.total_videos : it.vids_downloaded;
-      const imgSc  = isDone ? it.total_images : it.imgs_scored;
-      const vidSc  = isDone ? it.total_videos : it.vids_scored;
-
-      // ── Main row ──
-      let row = tbody.querySelector(`tr.mprog-main-row[data-item="${CSS.escape(itemId)}"]`);
-      if (!row) {
-        row = document.createElement('tr');
-        row.className = 'mprog-main-row';
-        row.dataset.item = itemId;
-        tbody.appendChild(row);
-      }
-      const toggleCls = 'mprog-toggle' + (isOpen ? ' open' : '');
-      const toggleChar = isOpen ? '▼' : '▶';
-      row.innerHTML = `
-        <td><span class="${toggleCls}" data-toggle="${CSS.escape(itemId)}">${toggleChar}</span></td>
-        <td style="font-family:var(--mono);font-size:0.9em">${itemId}</td>
-        <td class="${statusCls}">${statusTxt}</td>
-        ${num(imgDl)}${num(vidDl)}${num(imgSc)}${num(vidSc)}`;
-
-      // Wire toggle click — re-render using cached _mediaLastProgress
-      row.querySelector('[data-toggle]').onclick = () => {
-        if (_mediaExpandedRows.has(itemId)) _mediaExpandedRows.delete(itemId);
-        else                                _mediaExpandedRows.add(itemId);
-        _mediaRenderProgress(null);   // null → uses _mediaLastProgress
-      };
-
-      // ── Detail row ──
-      let detailRow = tbody.querySelector(`tr[data-detail="${CSS.escape(itemId)}"]`);
-      if (isOpen) {
-        if (!detailRow) {
-          detailRow = document.createElement('tr');
-          detailRow.dataset.detail = itemId;
-          detailRow.className = 'mprog-detail-row';
-          row.insertAdjacentElement('afterend', detailRow);
-        }
-        const imgSrc = it.img_sources || {};
-        const vidSrc = it.vid_sources || {};
-        detailRow.innerHTML = `<td colspan="7">${_sourceDetailHtml(imgSrc, vidSrc, isDone)}</td>`;
-      } else if (detailRow) {
-        detailRow.remove();
-      }
-    });
-  }
-
-  // ── Poll loop ──
-  function _mediaStartPolling() {
-    if (_mediaPollTimer) clearInterval(_mediaPollTimer);
-    _mediaPollTimer = setInterval(_mediaPoll, 3000);
-    _mediaPoll();   // immediate first check
-  }
-
-  async function _mediaPoll() {
-    if (!_mediaBatchId) return;
-    const serverUrl = _mediaServerUrl();
+    const _rT0 = Date.now();
     try {
-      const r = await fetch(
-        '/api/media_batch_status?batch_id=' + encodeURIComponent(_mediaBatchId)
-        + '&server_url=' + encodeURIComponent(serverUrl));
-      const d = await r.json();
-      if (!r.ok || d.error) throw new Error(d.error || 'poll failed');
 
-      if (d.status === 'done') {
-        clearInterval(_mediaPollTimer); _mediaPollTimer = null;
-        let totalImg = 0, totalVid = 0;
-        Object.values(d.items || {}).forEach(it => {
-          totalImg += it.total_images || 0;
-          totalVid += it.total_videos || 0;
-        });
-        const elapsed = d.elapsed_sec != null ? ' in ' + d.elapsed_sec + 's' : '';
-        const nItems = Object.keys(d.items || {}).length;
-        _mediaSetStatus('Done — ' + nItems + ' backgrounds, '
-          + totalImg + ' images + ' + totalVid + ' videos found'
-          + elapsed + '.', false);
-        _mediaSearchBtnSet(false);
-        _mediaResults        = d.items || {};
-        _mediaResults._topN  = d.top_n || 5;
-        _mediaItemIds        = Object.keys(_mediaResults).filter(k => k !== '_topN');
-        _mediaRecommendedSeq = d.recommended_sequence || null;
-        await _mediaLoadShotMap();
-        _mediaApplyBgRemap();
-        await _aiLoadSavedImages();
+    // Step 0: check for pending AI Ask error (surfaced from backend background thread)
+    try {
+      const errR = await fetch('/api/media_ai_ask_error?slug=' + encodeURIComponent(slug)
+                               + '&ep_id=' + encodeURIComponent(epId));
+      if (errR.ok) {
+        const errD = await errR.json();
+        if (errD.error) {
+          const st = document.getElementById('media-status-text');
+          if (st) st.textContent = '⚠ AI Search error: ' + errD.error;
+          return;
+        }
+      }
+    } catch (_) { /* non-critical — continue with batch status check */ }
+
+    // Step 1: ensure we have a batch_id
+    let batchId = _mediaBatchId;
+    if (!batchId) {
+      // Step 2: recover from server
+      try {
+        const serverUrl = _mediaServerUrl();
+        if (!serverUrl) {
+          const st = document.getElementById('media-status-text');
+          if (st) st.textContent = 'No media server URL set.';
+          return;
+        }
+        const r = await fetch('/api/media_batches?server_url=' + encodeURIComponent(serverUrl)
+            + '&slug=' + encodeURIComponent(slug) + '&ep_id=' + encodeURIComponent(epId));
+        const d = await r.json();
+        const batches = d.batches || (Array.isArray(d) ? d : []);
+        if (!batches || batches.length === 0) {
+          const st = document.getElementById('media-status-text');
+          if (st) st.textContent = 'No search batch found. Click Search Media to start.';
+          return;
+        }
+        const _bestBatch = batches.find(b => b.status === 'done')
+                        || batches.find(b => b.status === 'running')
+                        || batches[0];
+        batchId = _bestBatch.batch_id || _bestBatch.id;
+        _mediaBatchId = batchId;
+      } catch (err) {
+        const st = document.getElementById('media-status-text');
+        if (st) st.textContent = 'Error fetching batch list: ' + err.message;
+        return;
+      }
+    }
+
+    // Step 3: check batch status
+    try {
+      const serverUrl = _mediaServerUrl();
+      const r = await fetch('/api/media_batch_status?server_url=' + encodeURIComponent(serverUrl)
+          + '&batch_id=' + encodeURIComponent(batchId));
+      const d = await r.json();
+      const status = d.status || d.state || '';
+      const st = document.getElementById('media-status-text');
+      if (status === 'done' || status === 'completed') {
+        if (st) st.textContent = '✅ Batch done — loading library…';
         await mediaLoadLibrary();
-      } else if (d.status === 'failed' || d.status === 'interrupted') {
-        clearInterval(_mediaPollTimer); _mediaPollTimer = null;
-        _mediaSetStatus((d.status === 'interrupted' ? 'Batch interrupted' : 'Batch failed')
-          + ': ' + (d.error || 'unknown') + ' — click Search Media to resume.', false);
-        _mediaSearchBtnSet(false);
+      } else if (status === 'running' || status === 'pending') {
+        if (st) st.textContent = 'Still running… try again later';
+      } else if (status === 'failed') {
+        if (st) st.textContent = '❌ Batch failed: ' + (d.error || d.message || status);
       } else {
-        // Running — show progress string in status bar + per-shot table in body
-        const doneCount  = Object.values(d.items || {}).filter(it => it.status === 'done').length;
-        const totalCount = Object.keys(d.items || {}).length;
-        _mediaSetStatus(
-          (d.progress || d.status) + ' …' +
-          (totalCount ? `  (${doneCount}/${totalCount} done)` : ''),
-          true);
-        _mediaRenderProgress(d);
+        if (st) st.textContent = 'Unknown batch status: ' + status;
       }
     } catch (err) {
-      _mediaSetStatus('Poll error: ' + err.message, true);
+      const st = document.getElementById('media-status-text');
+      if (st) st.textContent = 'Error checking batch status: ' + err.message;
+    }
+
+    } finally {
+      const _elapsed = Date.now() - _rT0;
+      if (_elapsed < 1000) await new Promise(r => setTimeout(r, 1000 - _elapsed));
+      if (_rbtn) { _rbtn.innerHTML = _rOrig; _rbtn.disabled = false; }
+    }
+  }
+
+  function mediaAiSearchToggle() {
+    const row = document.getElementById('media-ai-search-row');
+    if (!row) return;
+    const visible = row.style.display !== 'none';
+    row.style.display = visible ? 'none' : 'flex';
+    if (!visible) {
+      const inp = document.getElementById('media-ai-search-input');
+      if (inp) inp.focus();
+    }
+  }
+
+  async function mediaAiSearchSubmit() {
+    const inp = document.getElementById('media-ai-search-input');
+    const prompt = inp ? inp.value.trim() : '';
+    if (!prompt) return;
+
+    const serverUrl = _mediaServerUrl();
+    const st = document.getElementById('media-status-text');
+
+    const body = {
+      slug: _mediaSlug,
+      ep_id: _mediaEpId,
+      server_url: serverUrl,
+      prompt: prompt,
+      batch_id: _mediaBatchId || null
+    };
+
+    try {
+      const r = await fetch('/api/media_ai_ask', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+      });
+      const d = await r.json();
+      if (d.error) {
+        if (st) st.textContent = '⚠ AI Search error: ' + d.error;
+      } else {
+        if (st) st.textContent = '✨ AI Search submitted — click Refresh when ready';
+        mediaAiSearchToggle(); // collapse the input row
+        if (inp) inp.value = '';
+      }
+    } catch (err) {
+      if (st) st.textContent = 'Error submitting AI Search: ' + err.message;
     }
   }
 
@@ -7819,31 +7640,6 @@ placeholder="Enter your story here"></textarea>
     const m = Math.floor(sec / 60);
     const rem = (sec % 60).toFixed(1);
     return m + ':' + (parseFloat(rem) < 10 ? '0' : '') + rem;
-  }
-
-  // Remap _mediaResults keys from old bg_ids to current ShotList bg_ids using
-  // bg_id_remap.json.  Called after _mediaLoadShotMap() so _mediaBgRemap is populated.
-  function _mediaApplyBgRemap() {
-    if (!_mediaBgRemap || !_mediaResults) return;
-    const remap = _mediaBgRemap;
-    const remapped = {};
-    const topN = _mediaResults._topN;
-    Object.entries(_mediaResults).forEach(([oldKey, val]) => {
-      if (oldKey === '_topN') return;
-      const newKey = remap[oldKey] || oldKey;
-      if (newKey !== oldKey && remapped[newKey]) {
-        // Merge: both old keys map to the same new bg_id (e.g. sc03+sc04 → same bg)
-        // Keep the entry with more results
-        const existing = remapped[newKey];
-        const existingCount = (existing.images || []).length + (existing.videos || []).length;
-        const newCount = (val.images || []).length + (val.videos || []).length;
-        if (newCount > existingCount) remapped[newKey] = val;
-      } else {
-        remapped[newKey] = val;
-      }
-    });
-    if (topN !== undefined) remapped._topN = topN;
-    _mediaResults = remapped;
   }
 
   // ── Restore preview players that exist on disk after page reload ──
@@ -8064,126 +7860,6 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
-  // ── Cross-shot copy: show shot picker popup ──
-  function _mediaShowShotPicker(e, itemId, type, entry, wrapEl) {
-    e.stopPropagation();
-    e.preventDefault();
-
-    // Find ALL shots across ALL background items that could use this media
-    var allShots = [];
-    if (_mediaShotMap) {
-      Object.keys(_mediaShotMap).forEach(function(bgId) {
-        (_mediaShotMap[bgId] || []).forEach(function(sid) {
-          if (allShots.indexOf(sid) === -1) allShots.push(sid);
-        });
-      });
-    }
-    if (allShots.length === 0) return;
-
-    // Build or reuse popup
-    var popup = document.getElementById('media-shot-picker');
-    if (!popup) {
-      popup = document.createElement('div');
-      popup.id = 'media-shot-picker';
-      document.body.appendChild(popup);
-    }
-    popup.innerHTML = '';
-
-    var title = document.createElement('div');
-    title.className = 'sp-title';
-    title.textContent = '\u2795 Assign to shots (' + (type === 'video' ? '\uD83C\uDFA5' : '\uD83D\uDDBC\uFE0F') + ')';
-    popup.appendChild(title);
-
-    // Which shots already have this URL? (card-selection system removed; alreadyIn always empty)
-    var alreadyIn = {};
-
-    var checkboxes = [];
-    allShots.forEach(function(sid) {
-      var row = document.createElement('div');
-      row.className = 'sp-row' + (alreadyIn[sid] ? ' sp-already' : '');
-      var cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.className = 'sp-cb';
-      cb.dataset.shotId = sid;
-      cb.disabled = !!alreadyIn[sid];
-      if (alreadyIn[sid]) cb.checked = true;
-      var lbl = document.createElement('span');
-      var dur = (_mediaShotDur && _mediaShotDur[sid]) || 0;
-      lbl.textContent = sid + (dur > 0 ? ' (' + dur.toFixed(1) + 's)' : '')
-          + (alreadyIn[sid] ? ' \u2713' : '');
-      row.appendChild(cb);
-      row.appendChild(lbl);
-      if (!alreadyIn[sid]) {
-        row.addEventListener('click', function(ev) {
-          if (ev.target !== cb) cb.checked = !cb.checked;
-        });
-      }
-      popup.appendChild(row);
-      checkboxes.push(cb);
-    });
-
-    var doneBtn = document.createElement('button');
-    doneBtn.className = 'sp-done';
-    doneBtn.textContent = '\u2714 Apply';
-    doneBtn.addEventListener('click', function() {
-      popup.style.display = 'none';
-      // Copy to each checked shot
-      checkboxes.forEach(function(cb) {
-        if (!cb.checked || cb.disabled) return;
-        var sid = cb.dataset.shotId;
-        // Find which bgId owns this shot, and the scene-based cardId for DOM
-        var targetBgId = (_mediaShotToBg && _mediaShotToBg[sid]) || null;
-        if (!targetBgId) {
-          Object.keys(_mediaShotMap || {}).forEach(function(bgId) {
-            if ((_mediaShotMap[bgId] || []).indexOf(sid) !== -1) targetBgId = bgId;
-          });
-        }
-        if (!targetBgId) return;
-        // Build canonical segment copy for Shot Overrides
-        var naturalDur = type === 'video' ? (entry.duration_sec || 0) : 0;
-        var seg = {
-          type:                  type,
-          url:                   entry.url || '',
-          path:                  entry.path || '',
-          score:                 entry.score,
-          duration_sec:          type === 'video' ? naturalDur : null,
-          hold_sec:              null,
-          clip_in:               type === 'video' ? 0 : null,
-          clip_out:              type === 'video' ? null : null,
-          animation:             (type === 'image' && wrapEl && wrapEl.dataset.animType) ? wrapEl.dataset.animType : 'none',
-          filename:              entry.filename || (entry.url || '').split('/').pop() || '',
-        };
-        // Store into Shot Overrides — append to any existing segments
-        if (!_mediaOvrSegments[sid]) _mediaOvrSegments[sid] = [];
-        _mediaOvrSegments[sid].push(seg);
-      });
-      mediaRenderShotOverrides();
-    });
-    popup.appendChild(doneBtn);
-
-    // Position near click
-    var x = e.clientX, y = e.clientY;
-    popup.style.display = 'block';
-    var pw = popup.offsetWidth, ph = popup.offsetHeight;
-    if (x + pw > window.innerWidth - 10) x = window.innerWidth - pw - 10;
-    if (y + ph > window.innerHeight - 10) y = window.innerHeight - ph - 10;
-    popup.style.left = x + 'px';
-    popup.style.top  = y + 'px';
-
-    // Dismiss on outside click
-    setTimeout(function() {
-      document.addEventListener('click', _shotPickerDismiss, true);
-    }, 0);
-  }
-
-  function _shotPickerDismiss(e) {
-    var popup = document.getElementById('media-shot-picker');
-    if (popup && !popup.contains(e.target)) {
-      popup.style.display = 'none';
-      document.removeEventListener('click', _shotPickerDismiss, true);
-    }
-  }
-
   // ── Build a single thumbnail cell ──
   function _mediaThumb(itemId, type, entry, idx) {
     const wrap = document.createElement('div');
@@ -8302,20 +7978,6 @@ placeholder="Enter your story here"></textarea>
       aiBadge.textContent = 'AI';
       aiBadge.style.cssText = 'position:absolute;bottom:2px;left:2px;background:#d4eed4;color:#2a7a2a;font-size:9px;font-weight:bold;padding:1px 4px;border-radius:3px;pointer-events:none;';
       wrap.appendChild(aiBadge);
-    }
-
-    // Cross-shot copy button (top-left, shows on hover when ShotList available)
-    if (_mediaShotMap) {
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'media-copy-btn';
-      copyBtn.textContent = '\u2795';
-      copyBtn.title = 'Assign to other shots';
-      (function(iid, t, e, w) {
-        copyBtn.addEventListener('click', function(ev) {
-          _mediaShowShotPicker(ev, iid, t, e, w);
-        });
-      })(itemId, type, entry, wrap);
-      wrap.appendChild(copyBtn);
     }
 
     // Store original URL and duration as data attributes
@@ -9297,85 +8959,112 @@ placeholder="Enter your story here"></textarea>
     const wrap = document.getElementById('media-library-wrap');
     if (!wrap) return;
 
-    // Helper: badge for batch-sourced items
-    function _batchBadge(v) {
-      if (!v.from_batch) return '';
-      const score = v.score ? (v.score * 100).toFixed(0) + '%' : '';
-      const site  = v.source_site || 'batch';
-      const title = v.title ? `title="${v.title.replace(/"/g,'&quot;')}"` : '';
-      return `<span ${title} style="font-size:0.75em;padding:1px 5px;border-radius:3px;
-              background:var(--purple,#7c3aed);color:#fff;margin-left:4px;cursor:default">
-              ${site}${score ? ' · ' + score : ''}</span>`;
+    // Group an array of items by source_site; manual uploads go into 'uploaded'.
+    function _groupBySource(items) {
+      const groups = {};
+      items.forEach(item => {
+        const key = item.from_batch ? (item.source_site || 'unknown') : 'uploaded';
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(item);
+      });
+      // Sort: 'uploaded' first, then alphabetical
+      return Object.entries(groups).sort(([a], [b]) => {
+        if (a === 'uploaded') return -1;
+        if (b === 'uploaded') return 1;
+        return a.localeCompare(b);
+      });
     }
 
-    // Video sub-section — thumbnail grid matching image size (160×90, multiple per row)
-    let vidItems = '';
-    _mediaLibVideos.forEach((v, idx) => {
+    // Render one source row header: "wikimedia (12)"
+    function _sourceHeader(name, count) {
+      return `<div style="font-size:0.78em;font-weight:600;color:var(--dim);
+                          margin:8px 0 4px;text-transform:capitalize;letter-spacing:.02em">
+                ${name} <span style="font-weight:400;color:var(--text-muted,#888)">(${count})</span>
+              </div>`;
+    }
+
+    // Render a single video card
+    function _vidCard(v) {
       const dur = v.duration_sec ? v.duration_sec.toFixed(1) + 's' : '?s';
       const safeFilename = (v.filename || '').replace(/"/g, '&quot;');
-      vidItems += `
+      const scoreLabel = v.score ? ` · ${(v.score * 100).toFixed(0)}%` : '';
+      const titleAttr  = v.title ? ` title="${v.title.replace(/"/g,'&quot;')}"` : '';
+      return `
         <div style="position:relative;width:160px;flex-shrink:0;
                     border:2px solid var(--border);border-radius:6px;overflow:hidden;
-                    background:var(--bg2)">
+                    background:var(--bg2)"${titleAttr}>
           <div style="position:relative">
             <video src="${v.url}" muted
                    style="width:160px;height:90px;object-fit:cover;display:block;background:#111"
                    onmouseenter="this.play()" onmouseleave="this.pause();this.currentTime=0"></video>
             <span style="position:absolute;bottom:4px;left:4px;font-size:0.68em;
-                         background:#000000cc;color:#eee;padding:2px 5px;border-radius:4px">${dur}</span>
-            <a href="${v.url}" target="_blank" title="Open original"
+                         background:#000000cc;color:#eee;padding:2px 5px;border-radius:4px">${dur}${scoreLabel}</span>
+            <a href="${v.page_url || v.url}" target="_blank" rel="noopener noreferrer"
+               title="Open on ${v.source_site || 'source'}"
                style="position:absolute;bottom:4px;right:4px;font-size:0.68em;line-height:1;
                       background:#000000cc;color:#eee;padding:2px 5px;border-radius:4px;
                       text-decoration:none">🔗</a>
           </div>
-          <div style="padding:4px 5px">
+          <div style="padding:3px 5px">
             <div style="font-size:0.70em;color:var(--fg);overflow:hidden;text-overflow:ellipsis;
                         white-space:nowrap" title="${safeFilename}">${v.filename}</div>
-            ${_batchBadge(v)}
           </div>
         </div>`;
-    });
-    const vidRows = vidItems
-      ? `<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px">${vidItems}</div>`
-      : '';
+    }
 
-    // Image sub-section — thumbnail grid, ~7 per row (same style as scene/shot section)
-    let imgThumbs = '';
-    _mediaLibImages.forEach((img, idx) => {
+    // Render a single image card
+    function _imgCard(img) {
       const dims  = (img.width && img.height) ? `${img.width}×${img.height}` : '';
-      const title = [img.filename, dims].filter(Boolean).join(' · ').replace(/"/g, '&quot;');
-      imgThumbs += `
-        <div class="media-thumb" title="${title}">
-          <img src="${img.url}" loading="lazy" alt="${img.filename.replace(/"/g,'&quot;')}">
-          <a href="${img.url}" target="_blank" rel="noopener noreferrer" title="Open original"
+      const scoreLabel = img.score ? ` · ${(img.score * 100).toFixed(0)}%` : '';
+      const titleParts = [img.title || img.filename, dims, scoreLabel.trim()].filter(Boolean);
+      const titleAttr  = titleParts.join(' · ').replace(/"/g, '&quot;');
+      return `
+        <div class="media-thumb" title="${titleAttr}">
+          <img src="${img.url}" loading="lazy" alt="${(img.filename||'').replace(/"/g,'&quot;')}">
+          <a href="${img.page_url || img.url}" target="_blank" rel="noopener noreferrer"
+             title="Open on ${img.source_site || 'source'}"
              class="media-src-link" onclick="event.stopPropagation()">🔗</a>
-          ${_batchBadge(img)}
         </div>`;
-    });
-    const imgRows = imgThumbs
-      ? `<div class="media-thumb-row">${imgThumbs}</div>`
-      : '';
+    }
+
+    // Build grouped video rows
+    function _renderVidGroups(videos) {
+      if (!videos.length) return '<div style="font-size:0.82em;color:var(--dim);margin-bottom:8px">No videos yet.</div>';
+      return _groupBySource(videos).map(([src, items]) =>
+        _sourceHeader(src, items.length) +
+        `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px">${items.map(_vidCard).join('')}</div>`
+      ).join('');
+    }
+
+    // Build grouped image rows
+    function _renderImgGroups(images) {
+      if (!images.length) return '<div style="font-size:0.82em;color:var(--dim)">No images yet.</div>';
+      return _groupBySource(images).map(([src, items]) =>
+        _sourceHeader(src, items.length) +
+        `<div class="media-thumb-row" style="margin-bottom:4px">${items.map(_imgCard).join('')}</div>`
+      ).join('');
+    }
 
     wrap.innerHTML = `
       <div style="padding:10px 14px">
-        <div style="font-weight:700;font-size:0.9em;margin-bottom:10px;color:var(--fg)">📁 Media Library</div>
+        <div style="font-weight:700;font-size:0.9em;margin-bottom:10px;color:var(--fg);display:flex;align-items:center;gap:10px">📁 Media Library<button id="media-btn-refresh" onclick="mediaRefresh()" style="font-size:0.82em;padding:3px 10px;background:#1e3a2a;color:#6fcf97;border:1px solid #2a4a3a;border-radius:4px;cursor:pointer">🔄 Refresh</button></div>
 
         <div id="media-library-videos-wrap">
-          <div style="font-size:0.82em;font-weight:600;color:var(--dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">── Videos ──</div>
+          <div style="font-size:0.82em;font-weight:600;color:var(--dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">── Videos ── <span style="font-size:0.88em;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-muted,#888)">(${_mediaLibVideos.length})</span></div>
           <label style="display:inline-block;margin-bottom:8px;padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--active-bg);color:var(--fg);font-size:0.82em;cursor:pointer">
             📤 Upload Video
             <input type="file" id="mlib-vid-upload" accept="video/*" hidden onchange="mediaUpload('video')">
           </label>
-          ${vidRows || '<div style="font-size:0.82em;color:var(--dim);margin-bottom:8px">No videos uploaded yet.</div>'}
+          ${_renderVidGroups(_mediaLibVideos)}
         </div>
 
         <div id="media-library-images-wrap" style="margin-top:12px">
-          <div style="font-size:0.82em;font-weight:600;color:var(--dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">── Images ──</div>
+          <div style="font-size:0.82em;font-weight:600;color:var(--dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em">── Images ── <span style="font-size:0.88em;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-muted,#888)">(${_mediaLibImages.length})</span></div>
           <label style="display:inline-block;margin-bottom:8px;padding:5px 12px;border-radius:4px;border:1px solid var(--border);background:var(--active-bg);color:var(--fg);font-size:0.82em;cursor:pointer">
             📤 Upload Image
             <input type="file" id="mlib-img-upload" accept="image/*" hidden onchange="mediaUpload('image')">
           </label>
-          ${imgRows || '<div style="font-size:0.82em;color:var(--dim)">No images uploaded yet.</div>'}
+          ${_renderImgGroups(_mediaLibImages)}
         </div>
       </div>`;
   }
@@ -10063,14 +9752,7 @@ placeholder="Enter your story here"></textarea>
     document.querySelectorAll('.media-shot-row').forEach(r => r.classList.remove('media-shot-filled'));
     // Reset active shot to first shot per card (scene-based)
     document.querySelectorAll('.media-shot-row').forEach(r => r.classList.remove('media-shot-active'));
-    for (var cid in _mediaActiveShot) {
-      var sids = (_mediaSceneMap && _mediaSceneMap[cid]) || (_mediaShotMap ? (_mediaShotMap[cid] || []) : []);
-      if (sids.length > 0) {
-        _mediaActiveShot[cid] = sids[0];
-        var firstRow = document.getElementById('media-shot-row-' + cid + '-' + sids[0]);
-        if (firstRow) firstRow.classList.add('media-shot-active');
-      }
-    }
+    _mediaActiveShot = {};
     document.getElementById('media-confirm-msg').textContent = '';
   }
 
@@ -10092,8 +9774,7 @@ placeholder="Enter your story here"></textarea>
         if (running) {
           _mediaBatchId = running.batch_id;
           _mediaSearchBtnSet(true);
-          _mediaSetStatus('Reconnecting to running batch…', true);
-          _mediaStartPolling();
+          _mediaSetStatus('Batch is still running — click Refresh to check status', false);
           return;
         }
         const done = batches.find(b => b.status === 'done');
@@ -10108,8 +9789,6 @@ placeholder="Enter your story here"></textarea>
             _mediaResults._topN  = d2.top_n || 5;
             _mediaItemIds        = Object.keys(_mediaResults).filter(k => k !== '_topN');
             _mediaRecommendedSeq = d2.recommended_sequence || null;
-            await _mediaLoadShotMap();
-            _mediaApplyBgRemap();
             let totalImg2 = 0, totalVid2 = 0;
             Object.values(d2.items || {}).forEach(it => {
               totalImg2 += it.total_images || 0;
@@ -10123,35 +9802,10 @@ placeholder="Enter your story here"></textarea>
               + elapsed2 + '.', false);
             await _aiLoadSavedImages();
             _aiGenRestorePending();
-            // Also restore saved selections on top of batch results
-            await _mediaLoadSavedSelections();
             return;
           }
         }
       }
-    } catch (_) {}
-
-    // ── Try 2: load saved MediaPlan.json from disk ──────────────────────
-    await _mediaLoadSavedSelections();
-  }
-
-  async function _mediaLoadSavedSelections() {
-    if (!_mediaSlug || !_mediaEpId) return;
-    try {
-      const r = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
-        + '&ep_id=' + encodeURIComponent(_mediaEpId)
-        + '&file=MediaPlan.json');
-      if (!r.ok) return;
-      const saved = await r.json();
-      if (!saved.selections || typeof saved.selections !== 'object') return;
-
-      _mediaBatchId = saved.batch_id || '';
-      const nSels = Object.keys(saved.selections).length;
-
-      // Render Shot Overrides (loaded separately via mediaLoadLibrary / mediaRenderAll)
-      await _mediaLoadShotMap();
-      mediaRenderShotOverrides();
-      _mediaSetStatus('Loaded ' + nSels + ' saved selection(s) from disk.', false);
     } catch (_) {}
   }
 
@@ -13601,6 +13255,13 @@ placeholder="Enter your story here"></textarea>
   async function loadEpisodeDetails(slug, epId) {
     currentSlug = slug; currentEpId = epId;
     _lastRunFilename = null;   // force story reload — never show previous episode's story
+    // Grey out Music/SFX/Media tabs until VOPlan has timing data.
+    try {
+      const _vtR = await fetch('/api/vo_timeline?slug=' + encodeURIComponent(slug)
+                               + '&ep_id=' + encodeURIComponent(epId));
+      const _vtD = _vtR.ok ? await _vtR.json() : {};
+      _setVoTimingTabs((_vtD.vo_items || []).length > 0);
+    } catch(_) { _setVoTimingTabs(false); }
     try {
       const res    = await fetch('/pipeline_status?slug=' + encodeURIComponent(slug) +
                                  '&ep_id=' + encodeURIComponent(epId));
@@ -16863,6 +16524,12 @@ class Handler(BaseHTTPRequestHandler):
                             with _urllib_req_ml.urlopen(_req2, timeout=15) as _resp2:
                                 _batch_data = json.loads(_resp2.read())
 
+                            # Dedup keys — track seen asset_page_url (canonical
+                            # identity across items/sources) falling back to
+                            # filename when page_url is absent.
+                            _seen_img_keys: set = set()
+                            _seen_vid_keys: set = set()
+
                             for _iid, _item in _batch_data.get("items", {}).items():
                                 if _item.get("status") != "done":
                                     continue
@@ -16895,6 +16562,10 @@ class Handler(BaseHTTPRequestHandler):
                                     if not _raw_url:
                                         continue
                                     _src = _vr.get("source") or {}
+                                    _vkey = _src.get("asset_page_url", "") or os.path.basename(_path)
+                                    if _vkey in _seen_vid_keys:
+                                        continue
+                                    _seen_vid_keys.add(_vkey)
                                     _abs = _abs_path_from_url(_raw_url, _path)
                                     videos.append({
                                         "id":           f"batch_{_bid}_{_iid}_{os.path.basename(_path)}",
@@ -16907,6 +16578,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "score":        float(_vr.get("score") or 0.0),
                                         "title":        _src.get("title", ""),
                                         "source_site":  _src.get("source_site", ""),
+                                        "page_url":     _src.get("asset_page_url", ""),
                                         "url":          _to_serve_url(_raw_url),
                                     })
                                 # Images — field is "images"
@@ -16916,6 +16588,10 @@ class Handler(BaseHTTPRequestHandler):
                                     if not _raw_url:
                                         continue
                                     _src = _ir.get("source") or {}
+                                    _ikey = _src.get("asset_page_url", "") or os.path.basename(_path)
+                                    if _ikey in _seen_img_keys:
+                                        continue
+                                    _seen_img_keys.add(_ikey)
                                     _abs = _abs_path_from_url(_raw_url, _path)
                                     images.append({
                                         "id":          f"batch_{_bid}_{_iid}_{os.path.basename(_path)}",
@@ -16929,6 +16605,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "score":       float(_ir.get("score") or 0.0),
                                         "title":       _src.get("title", ""),
                                         "source_site": _src.get("source_site", ""),
+                                        "page_url":    _src.get("asset_page_url", ""),
                                         "url":         _to_serve_url(_raw_url),
                                     })
                         except Exception as _be:
@@ -16980,6 +16657,29 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        # ── Media proxy: health check (GET /api/media_health) ───────────────────
+        elif parsed.path == "/api/media_health":
+            params     = parse_qs(parsed.query)
+            server_url = params.get("server_url", ["http://localhost:8200"])[0].strip().rstrip("/")
+            api_key    = os.environ.get("MEDIA_API_KEY", "")
+            if not server_url:
+                body = json.dumps({"error": "server_url required"}).encode()
+                self.send_response(400)
+            else:
+                try:
+                    req  = _urllib_req.Request(f"{server_url}/health",
+                               headers={"X-Api-Key": api_key} if api_key else {})
+                    with _urllib_req.urlopen(req, timeout=10) as resp:
+                        body = resp.read()
+                    self.send_response(200)
+                except Exception as exc:
+                    body = json.dumps({"error": str(exc)}).encode()
+                    self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # ── Media proxy: poll batch status (GET /api/media_batch_status) ────────
         elif parsed.path == "/api/media_batch_status":
             params     = parse_qs(parsed.query)
@@ -17000,6 +16700,20 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     body = json.dumps({"error": str(exc)}).encode()
                     self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── Media AI Ask error poll (GET /api/media_ai_ask_error?slug=X&ep_id=Y) ─
+        elif parsed.path == "/api/media_ai_ask_error":
+            params = parse_qs(parsed.query)
+            slug   = params.get("slug",  [""])[0].strip()
+            ep_id  = params.get("ep_id", [""])[0].strip()
+            key    = f"{slug}:{ep_id}"
+            err    = _media_ai_ask_errors.pop(key, None)
+            body   = json.dumps({"error": err} if err else {}).encode()
+            self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -19550,6 +19264,81 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── Media AI Ask: fire-and-forget proxy (POST /api/media_ai_ask) ────────
+        elif self.path == "/api/media_ai_ask":
+            try:
+                length     = int(self.headers.get("Content-Length", 0))
+                payload    = json.loads(self.rfile.read(length))
+                slug       = payload.get("slug", "").strip()
+                ep_id      = payload.get("ep_id", "").strip()
+                server_url = (payload.get("server_url") or "http://localhost:8200").rstrip("/")
+                prompt     = payload.get("prompt", "").strip()
+                batch_id   = payload.get("batch_id")
+                if not server_url:
+                    raise ValueError("server_url required")
+                if not prompt:
+                    raise ValueError("prompt required")
+                if not batch_id:
+                    # Try to recover batch_id from media server
+                    try:
+                        _ak = os.environ.get("MEDIA_API_KEY", "")
+                        _r  = _urllib_req.Request(
+                            f"{server_url}/batches?project={urllib.parse.quote(slug)}&episode_id={urllib.parse.quote(ep_id)}",
+                            headers={"X-Api-Key": _ak} if _ak else {})
+                        with _urllib_req.urlopen(_r, timeout=10) as _resp:
+                            _batches = json.loads(_resp.read())
+                        if _batches:
+                            _best = (next((b for b in _batches if b.get("status") == "done"), None)
+                                     or next((b for b in _batches if b.get("status") == "running"), None)
+                                     or _batches[0])
+                            batch_id = _best.get("batch_id") or _best.get("id")
+                    except Exception:
+                        pass
+                if not batch_id:
+                    raise ValueError("No batch found. Run Search Media first.")
+                key = f"{slug}:{ep_id}"
+                print(f"  [media_ai_ask] submitted  slug={slug}  ep={ep_id}  batch={batch_id}  prompt={prompt!r}")
+                def _run(_su=server_url, _slug=slug, _ep=ep_id,
+                         _prompt=prompt, _bid=batch_id, _key=key):
+                    try:
+                        _ak  = os.environ.get("MEDIA_API_KEY", "")
+                        _payload = json.dumps({
+                            "project": _slug, "episode_id": _ep,
+                            "prompt": _prompt, "batch_id": _bid
+                        }).encode()
+                        _req = _urllib_req.Request(
+                            f"{_su}/ai_ask", data=_payload,
+                            headers={
+                                **( {"X-Api-Key": _ak} if _ak else {} ),
+                                "Content-Type": "application/json",
+                                "Content-Length": str(len(_payload)),
+                            },
+                            method="POST",
+                        )
+                        with _urllib_req.urlopen(_req, timeout=360) as _resp:
+                            _status = _resp.status
+                            _body   = _resp.read().decode(errors="replace")
+                        if _status not in (200, 201, 202):
+                            _err = f"AI Ask failed ({_status}): {_body[:200]}"
+                            _media_ai_ask_errors[_key] = _err
+                            print(f"  [media_ai_ask] ERROR  slug={_slug}  ep={_ep}  batch={_bid}  {_err}")
+                        else:
+                            print(f"  [media_ai_ask] done   slug={_slug}  ep={_ep}  batch={_bid}  status={_status}  response={_body[:300]!r}")
+                    except Exception as _exc:
+                        _media_ai_ask_errors[_key] = str(_exc)
+                        print(f"  [media_ai_ask] EXCEPTION  slug={_slug}  ep={_ep}  batch={_bid}  {_exc}")
+                import threading as _threading
+                _threading.Thread(target=_run, daemon=True).start()
+                body = json.dumps({"status": "submitted"}).encode()
+                self.send_response(200)
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode()
+                self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         # ── SFX: search candidates (POST /api/sfx_search) ────────────────────
         elif self.path == "/api/sfx_search":
             try:
@@ -22036,6 +21825,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/create_episode", "/api/save_episode_meta",
                   "/api/diagnose_pipeline",
                   "/api/media_batches", "/api/media_batch_status",
+                  "/api/media_health", "/api/media_ai_ask", "/api/media_ai_ask_error",
                   "/api/media_batch", "/api/media_batch_resume", "/api/media_batch_prune",
                   "/api/media_confirm",
                   "/api/media_preview",

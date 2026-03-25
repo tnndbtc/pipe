@@ -3,8 +3,9 @@ server.py — Media Search & Rating Service
 ==========================================
 
 FastAPI server that, given an asset manifest containing a `backgrounds` map,
-searches Pexels + Pixabay for every background item, scores each candidate
-with CLIP + calmness, and returns top-N ranked candidates per item.
+searches Pexels + Pixabay (and other sources) for every background item,
+scores each candidate with a keyword-match score, and returns top-N ranked
+candidates per item.
 
 Usage
 -----
@@ -57,6 +58,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,6 +67,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.responses import FileResponse
@@ -109,6 +112,11 @@ log = logging.getLogger("server")
 
 _cfg_path = Path(__file__).parent / "config.json"
 config: dict = json.loads(_cfg_path.read_text(encoding="utf-8"))
+
+if "candidates_per_source_image" not in config:
+    raise ValueError("candidates_per_source_image missing from config.json")
+if "candidates_per_source_video" not in config:
+    raise ValueError("candidates_per_source_video missing from config.json")
 
 PROJECTS_ROOT = (Path(__file__).parent / config["projects_root"]).resolve()
 
@@ -263,8 +271,9 @@ async def lifespan(app: FastAPI):
     ttl = config.get("cache_ttl_days", 7)
     cleanup.evict_old_batches(PROJECTS_ROOT, ttl)
 
-    # Load CLIP (CPU, may take 10-15 s on first run)
-    clip_model = await asyncio.to_thread(scorer.load_clip, config)
+    # CLIP scoring retired — keyword-match scoring is used instead.
+    # clip_model stays None; scorer.load_clip is not called.
+    log.info("Keyword-match scoring active — CLIP model not loaded")
 
     # Batch store
     store = bs.BatchStore(PROJECTS_ROOT)
@@ -923,9 +932,46 @@ class AiAskRequest(BaseModel):
 
 class AppendRequest(BaseModel):
     ai_prompt:        str                  # search query for this item
-    n_img:            int = 10             # number of new image candidates to fetch
-    n_vid:            int = 0              # number of new video candidates to fetch
+    n_img:            Optional[int] = None # number of new image candidates to fetch
+    n_vid:            Optional[int] = None # number of new video candidates to fetch
     sources_override: Optional[list] = None
+
+
+def _keyword_score(query: str, info: dict) -> float:
+    """
+    Keyword-match score: fraction of search-query terms found in entry metadata.
+    Checks source.title, source.tags, and source.asset_page_url slug (case-insensitive).
+    Returns 0.0–1.0.  Returns 1.0 when query is empty or info has no text fields.
+    """
+    if not query:
+        return 1.0
+    terms = [t for t in query.lower().split() if t]
+    if not terms:
+        return 1.0
+
+    parts: list[str] = []
+
+    title = (info.get("title") or "").lower()
+    if title:
+        parts.append(title)
+
+    tags = info.get("tags") or []
+    if tags:
+        parts.append(" ".join(str(t).lower() for t in tags))
+
+    url = info.get("asset_page_url") or ""
+    if url:
+        slug = urlparse(url).path
+        slug = re.sub(r"-\d+/?$", "", slug)        # strip trailing numeric ID
+        slug = re.sub(r"[/_\-]", " ", slug).lower()
+        parts.append(slug)
+
+    if not parts:
+        return 1.0   # no metadata to match against — don't penalise
+
+    searchable = " ".join(parts)
+    matched = sum(1 for t in terms if t in searchable)
+    return round(matched / len(terms), 4)
 
 
 def _apply_filter(entries: list[dict], fs: FilterSpec) -> list[dict]:
@@ -966,7 +1012,14 @@ def _apply_filter(entries: list[dict], fs: FilterSpec) -> list[dict]:
             desc     = (src.get("description") or "").lower()
             tags     = src.get("tags") or []
             tags_str = " ".join(tags).lower() if isinstance(tags, list) else str(tags).lower()
-            return needle in title or needle in desc or needle in tags_str
+            # Also check URL slug — reliable signal for Pexels (no tags) and Pixabay
+            url      = src.get("asset_page_url") or ""
+            slug     = ""
+            if url:
+                _slug = urlparse(url).path
+                _slug = re.sub(r"-\d+/?$", "", _slug)
+                slug  = re.sub(r"[/_\-]", " ", _slug).lower()
+            return needle in title or needle in desc or needle in tags_str or needle in slug
 
         kept = [e for e in kept if _matches(e)]
 
@@ -1134,6 +1187,13 @@ async def append_to_batch(
     if item_id not in state["items"]:
         raise HTTPException(status_code=422, detail=f"Unknown item_id: {item_id}")
 
+    n_img = body.n_img if body.n_img is not None else config.get("candidates_per_source_image")
+    n_vid = body.n_vid if body.n_vid is not None else config.get("candidates_per_source_video")
+    if n_img is None:
+        raise HTTPException(status_code=500, detail="candidates_per_source_image missing from config.json")
+    if n_vid is None:
+        raise HTTPException(status_code=500, detail="candidates_per_source_video missing from config.json")
+
     # Build a minimal single-item manifest.  Must use "asset_id" key (NOT "item_id")
     # so that create_batch's list→dict conversion in server.py line 352 picks it up.
     tmp_batch_id = "b_" + uuid.uuid4().hex[:8]
@@ -1143,14 +1203,31 @@ async def append_to_batch(
         state["episode_id"],
         top_n            = state.get("top_n", 5),
         backgrounds      = {item_id: {
-            "asset_id":     item_id,
-            "ai_prompt":    body.ai_prompt,
-            "search_prompt": body.ai_prompt,   # worker reads search_prompt for API queries
+            **state["items"][item_id],          # inherit scoring_hints, cinematic_role, search_filters, etc.
+            "asset_id":      item_id,
+            "ai_prompt":     body.ai_prompt,
+            "search_prompt": body.ai_prompt,    # worker reads search_prompt for API queries
+            "search_queries": None,             # ignore parent's rich queries — use search_prompt verbatim
+            "images_ranked": [],                # reset — fresh tmp batch
+            "videos_ranked": [],
         }},
-        content_profile  = state.get("content_profile", "default"),
-        n_img            = body.n_img,
-        n_vid            = body.n_vid,
-        sources_override = body.sources_override,
+        content_profile         = state.get("content_profile", "default"),
+        n_img                   = n_img,
+        n_vid                   = n_vid,
+        sources_override        = body.sources_override or state.get("sources_override"),
+        # When n_img/n_vid is explicitly passed by the caller, apply it to
+        # each source's candidates_images/candidates_videos so it isn't
+        # silently swallowed by an existing source_limits_override on the
+        # parent batch.
+        source_limits_override  = {
+            src: {
+                "candidates_images": n_img if body.n_img is not None
+                                     else lims.get("candidates_images", n_img),
+                "candidates_videos": n_vid if body.n_vid is not None
+                                     else lims.get("candidates_videos", n_vid),
+            }
+            for src, lims in (state.get("source_limits_override") or {}).items()
+        } or None,
     )
     await batch_queue.put(tmp_batch_id)
 
@@ -1208,11 +1285,44 @@ async def poll_append(
     new_images      = list(tmp_item.get("images_ranked", []))
     new_videos      = list(tmp_item.get("videos_ranked", []))
 
-    # Deduplicate by path
-    existing_img_paths = {e.get("path") for e in existing_images}
-    existing_vid_paths = {e.get("path") for e in existing_videos}
-    new_images_deduped = [e for e in new_images if e.get("path") not in existing_img_paths]
-    new_videos_deduped = [e for e in new_videos if e.get("path") not in existing_vid_paths]
+    # Deduplicate by path OR canonical asset_page_url.
+    # Path-only dedup fails when the same remote image is downloaded under a
+    # different local filename (e.g. same Commons asset found via Wikimedia AND
+    # Openverse in separate append searches).  asset_page_url is the stable
+    # identity key across all sources (Wikimedia curid URL, Pexels photo page,
+    # etc.) and is already used for attribution dedup elsewhere.
+    def _img_keys(entries: list[dict]) -> tuple[set[str], set[str]]:
+        paths = set()
+        urls  = set()
+        for e in entries:
+            if e.get("path"):
+                paths.add(e["path"])
+            u = (e.get("source") or {}).get("asset_page_url", "")
+            if u:
+                urls.add(u)
+        return paths, urls
+
+    existing_img_paths, existing_img_urls = _img_keys(existing_images)
+    existing_vid_paths, existing_vid_urls = _img_keys(existing_videos)
+
+    def _is_new_img(e: dict) -> bool:
+        if e.get("path") in existing_img_paths:
+            return False
+        u = (e.get("source") or {}).get("asset_page_url", "")
+        if u and u in existing_img_urls:
+            return False
+        return True
+
+    def _is_new_vid(e: dict) -> bool:
+        if e.get("path") in existing_vid_paths:
+            return False
+        u = (e.get("source") or {}).get("asset_page_url", "")
+        if u and u in existing_vid_urls:
+            return False
+        return True
+
+    new_images_deduped = [e for e in new_images if _is_new_img(e)]
+    new_videos_deduped = [e for e in new_videos if _is_new_vid(e)]
 
     # Move files from tmp batch dir to target batch dir (same relative structure)
     target_batch_dir = store.batch_dir(state["project"], state["episode_id"], batch_id)
@@ -1313,6 +1423,9 @@ async def ai_ask(body: AiAskRequest, _: None = Depends(require_auth)):
         batch_id   = body.batch_id,
     )
 
+    log.info("ai_ask: prompt=%r  project=%r  episode=%r  batch=%r",
+             body.prompt, body.project, body.episode_id, body.batch_id)
+
     try:
         proc = await asyncio.to_thread(
             subprocess.run,
@@ -1331,12 +1444,152 @@ async def ai_ask(body: AiAskRequest, _: None = Depends(require_auth)):
         log.exception("ai_ask: subprocess failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
-    log.info("ai_ask: claude returned rc=%d  stdout_len=%d",
-             proc.returncode, len(proc.stdout))
+    log.info("ai_ask: claude returned rc=%d  stdout_len=%d  response=%r",
+             proc.returncode, len(proc.stdout), proc.stdout.strip())
 
     return {
         "response": proc.stdout.strip(),
         "error":    proc.stderr.strip() if proc.returncode != 0 else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /fetch_direct — download a specific Pexels photo by URL into a batch
+# ---------------------------------------------------------------------------
+
+class FetchDirectRequest(BaseModel):
+    batch_id: str
+    item_id:  str
+    url:      str
+
+
+@app.post("/fetch_direct")
+async def fetch_direct(body: FetchDirectRequest, _: None = Depends(require_auth)):
+    """
+    Download a specific Pexels photo by its page URL and append it to an
+    existing batch item's result set (score=1.0, as user-selected).
+
+    Extracts the numeric photo ID from the URL, calls the Pexels single-photo
+    API, downloads src.large, writes the file to the standard batch path, and
+    appends a result entry to images_ranked via read-modify-write.
+
+    Returns: { "photo_id": int, "path": str, "title": str }
+    """
+    import re
+    import requests as _req
+
+    # ── 1. Extract Pexels photo ID from URL ──────────────────────────────────
+    # Supports: https://www.pexels.com/photo/<slug>-<id>/
+    m = re.search(r"-(\d+)/?$", body.url.rstrip("/"))
+    if not m:
+        raise HTTPException(status_code=400, detail="Cannot extract photo ID from URL")
+    photo_id = int(m.group(1))
+
+    # ── 2. Validate batch and item; reject if batch is still running ──────────
+    state = store.get(body.batch_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    if state["status"] == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot add to a running batch — wait for it to finish",
+        )
+    if body.item_id not in state["items"]:
+        raise HTTPException(status_code=404,
+                            detail=f"Item '{body.item_id}' not found in batch")
+
+    # ── 3. Call Pexels single-photo API ──────────────────────────────────────
+    pexels_key = API_KEYS.get("pexels", "")
+    if not pexels_key:
+        raise HTTPException(status_code=500,
+                            detail="PEXELS_API_KEY not configured on server")
+
+    api_url = f"https://api.pexels.com/v1/photos/{photo_id}"
+    try:
+        api_resp = await asyncio.to_thread(
+            lambda: _req.get(api_url,
+                             headers={"Authorization": pexels_key},
+                             timeout=15)
+        )
+    except Exception as exc:
+        log.exception("fetch_direct: Pexels API call failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Pexels API unreachable: {exc}")
+
+    if api_resp.status_code == 403:
+        raise HTTPException(status_code=500,
+                            detail="Pexels API key invalid or unauthorized")
+    if api_resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="Photo not found on Pexels")
+    if api_resp.status_code == 429:
+        raise HTTPException(status_code=429,
+                            detail="Pexels rate limit hit — retry after a moment")
+    if not api_resp.ok:
+        raise HTTPException(status_code=502,
+                            detail=f"Pexels API error {api_resp.status_code}: "
+                                   f"{api_resp.text[:200]}")
+
+    photo   = api_resp.json()
+    src     = photo.get("src", {})
+    img_url = src.get("large") or src.get("original")
+    if not img_url:
+        raise HTTPException(status_code=502,
+                            detail="Pexels API returned no usable image URL")
+
+    # ── 4. Download to standard batch path ───────────────────────────────────
+    batch_dir = store.batch_dir(state["project"], state["episode_id"], body.batch_id)
+    dest_dir  = batch_dir / body.item_id / "images" / "pexels"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"pexels_img_{photo_id}.jpg"
+
+    if not dest.exists():
+        def _download():
+            r = _req.get(img_url,
+                         headers={"User-Agent": "PipedMediaServer/1.0"},
+                         stream=True, timeout=60)
+            r.raise_for_status()
+            tmp = dest.with_suffix(".part")
+            with tmp.open("wb") as fh:
+                for chunk in r.iter_content(65536):
+                    if chunk:
+                        fh.write(chunk)
+            tmp.replace(dest)
+        try:
+            await asyncio.to_thread(_download)
+        except Exception as exc:
+            log.exception("fetch_direct: image download failed: %s", exc)
+            raise HTTPException(status_code=502,
+                                detail=f"Image download failed: {exc}")
+
+    # ── 5. Read-modify-write: append new entry to images_ranked ──────────────
+    rel_path  = str(dest.relative_to(batch_dir))
+    new_entry = {
+        "path":  rel_path,
+        "score": 1.0,
+        "source": {
+            "source_site":    "pexels",
+            "asset_page_url": photo.get("url", body.url),
+            "photographer":   photo.get("photographer", ""),
+            "width":          photo.get("width"),
+            "height":         photo.get("height"),
+        },
+    }
+
+    item_state = state["items"][body.item_id]
+    existing   = list(item_state.get("images_ranked", []))
+    store.update_item(
+        body.batch_id, body.item_id,
+        status=item_state["status"],
+        images_ranked=existing + [new_entry],
+    )
+
+    title = photo.get("alt") or photo.get("url", f"pexels_img_{photo_id}")
+    log.info("fetch_direct: added pexels photo %d to %s/%s  path=%s",
+             photo_id, body.batch_id, body.item_id, rel_path)
+
+    return {
+        "photo_id": photo_id,
+        "path":     rel_path,
+        "title":    title,
     }
 
 
@@ -1376,6 +1629,7 @@ async def health():
             "candidates_per_source_video": config.get("candidates_per_source_video", 5),
             "sources":                     config.get("sources", []),
             "cache_ttl_days":              config.get("cache_ttl_days", 7),
+            "source_limits":               config.get("source_limits", {}),
         },
     }
 
@@ -1767,8 +2021,8 @@ async def _run_batch(batch_id: str) -> None:
     episode_id  = state["episode_id"]
     backgrounds = state["items"]
     item_count  = len(backgrounds)
-    n_img       = state.get("n_img") or config.get("candidates_per_source_image", 15)
-    n_vid       = state.get("n_vid") or config.get("candidates_per_source_video", 5)
+    n_img       = state.get("n_img") or config.get("candidates_per_source_image")
+    n_vid       = state.get("n_vid") or config.get("candidates_per_source_video")
 
     # Apply per-batch content_profile override (section 30)
     # Use a shallow copy so the global config is never mutated across concurrent batches
@@ -1777,13 +2031,17 @@ async def _run_batch(batch_id: str) -> None:
     # Apply per-batch source overrides from UI settings
     if state.get("sources_override"):
         cfg["sources"] = state["sources_override"]
-    # source_limits_override is required — the server has no defaults of its own.
-    # Every enabled source must supply candidates_images and candidates_videos.
+    # Auto-derive source_limits_override when absent: divide n_img/n_vid evenly
+    # across all active sources so callers don't need to supply it explicitly.
     source_limits_override = state.get("source_limits_override") or {}
-    if not source_limits_override:
-        raise HTTPException(status_code=400,
-            detail="source_limits_override is required: client must supply per-source candidate counts")
     active_sources = cfg.get("sources", [])
+    if not source_limits_override and active_sources:
+        per_img = n_img or config.get("candidates_per_source_image", 30)
+        per_vid = n_vid or config.get("candidates_per_source_video", 30)
+        source_limits_override = {
+            src: {"candidates_images": per_img, "candidates_videos": per_vid}
+            for src in active_sources
+        }
     missing = [
         src for src in active_sources
         if "candidates_images" not in source_limits_override.get(src, {})
@@ -1803,29 +2061,8 @@ async def _run_batch(batch_id: str) -> None:
 
     batch_dir = store.batch_dir(project, episode_id, batch_id)
 
-    # Check if distributed workers are available
-    workers_cfg     = config.get("workers", {})
-    _use_distributed = False
-    if job_queue is not None and workers_cfg.get("enabled", False):
-        grace = workers_cfg.get("fallback_grace_seconds", 10)
-        if job_queue.worker_count > 0:
-            _use_distributed = True
-            log.info("Batch %s: using %d distributed workers",
-                     batch_id, job_queue.worker_count)
-        elif grace > 0:
-            log.info("Batch %s: waiting up to %ds for workers to register…",
-                     batch_id, grace)
-            deadline = asyncio.get_event_loop().time() + grace
-            while asyncio.get_event_loop().time() < deadline:
-                if job_queue.worker_count > 0:
-                    _use_distributed = True
-                    log.info("Batch %s: %d worker(s) registered — using distributed scoring",
-                             batch_id, job_queue.worker_count)
-                    break
-                await asyncio.sleep(1)
-            if not _use_distributed:
-                log.warning("Batch %s: no workers registered after %ds — falling back to local scoring",
-                            batch_id, grace)
+    # Distributed workers are no longer used for scoring (keyword-match scoring
+    # is synchronous and requires no GPU workers).
 
     # Shared counters (mutated only from async gather callbacks — safe in asyncio)
     # dl_started: increments as each item begins downloading (for progress display)
@@ -1942,129 +2179,42 @@ async def _run_batch(batch_id: str) -> None:
         )
 
     # ---------------------------------------------------------------
-    # Phase 2 — Image scoring (all items in one batch → all workers busy)
+    # Phase 2 — Image scoring (keyword-match; no CLIP inference)
     # ---------------------------------------------------------------
 
     image_results: dict[str, list[dict]] = {}   # item_id → scored list
 
-    if _use_distributed:
-        img_batch_input = []
-        for item_id, (img_pi, _, item) in items_to_score.items():
-            img_paths = [p for p, _ in img_pi]
-            if not img_paths:
-                image_results[item_id] = []
-                continue
-            img_infos = {str(p): info for p, info in img_pi}
-            img_batch_input.append((item_id, item, img_paths, img_infos))
-
-        if img_batch_input:
-            image_results.update(
-                await _score_images_distributed_batch(batch_id, img_batch_input, cfg)
-            )
-    else:
-        weights = cfg.get("score_weights")
-        for item_id, (img_pi, _, item) in items_to_score.items():
-            img_paths = [p for p, _ in img_pi]
-            img_infos = {str(p): info for p, info in img_pi}
-            image_results[item_id] = await asyncio.to_thread(
-                scorer.score_images, clip_model, item, img_paths, weights, cfg, img_infos,
-            )
+    for item_id, (img_pi, _, item) in items_to_score.items():
+        query  = item.get("ai_prompt") or item.get("search_prompt", "")
+        scored = []
+        for p, info in img_pi:
+            scored.append({
+                "path":   str(p),
+                "score":  _keyword_score(query, info),
+                "source": info,
+            })
+        scored.sort(key=lambda r: r["score"], reverse=True)
+        image_results[item_id] = scored
+        log.info("Image keyword scoring: item=%s query=%r scored=%d", item_id, query, len(scored))
 
     # ---------------------------------------------------------------
-    # Phase 3 — Video scoring (all items in one batch → all workers busy)
+    # Phase 3 — Video scoring (keyword-match; no CLIP inference)
     # ---------------------------------------------------------------
 
     video_results: dict[str, list[dict]] = {}   # item_id → scored list
 
-    if _use_distributed:
-        # Build all video tasks across all items at once
-        all_vid_tasks = []
-        for item_id, (_, vid_pi, item) in items_to_score.items():
-            vid_paths = [p for p, _ in vid_pi]
-            if not vid_paths:
-                video_results[item_id] = []
-                continue
-            vid_infos = {str(p): info for p, info in vid_pi}
-            scoring_config = {
-                k: cfg[k] for k in (
-                    "score_weights", "scoring_profiles", "content_profile",
-                    "phash_dedup_threshold", "diversity_phash_threshold",
-                ) if k in cfg
-            }
-            for vp in vid_paths:
-                frames_dir = batch_dir / "_frames" / vp.stem
-                all_vid_tasks.append({
-                    "item_id":    item_id,
-                    "video_path": str(vp),
-                    "frames_dir": str(frames_dir),
-                    "item":       item,
-                    "config":     scoring_config,
-                })
-
-        if all_vid_tasks:
-            workers_cfg     = cfg.get("workers", {})
-            timeout_seconds = workers_cfg.get("timeout_seconds", 120)
-
-            async with _jq_sem:
-                job_queue.enqueue(batch_id, all_vid_tasks)
-                job_queue.start_reaper(timeout_seconds=timeout_seconds)
-                try:
-                    log.info(
-                        "Waiting for %d video scoring jobs across all items (batch %s)…",
-                        len(all_vid_tasks), batch_id,
-                    )
-                    await job_queue.wait_until_done()
-                finally:
-                    job_queue.stop_reaper()
-                raw_vid_results = job_queue.get_results_dict()   # {job_id: dict}
-
-            # Group video results by item_id (from task metadata)
-            _workers_nfs = [w.nfs_root for w in job_queue._workers.values()] if job_queue else []
-            grouped: dict[str, list[dict]] = {}
-            for job_id, r in raw_vid_results.items():
-                task_meta = job_queue._job_tasks.get(job_id, {})
-                item_id = task_meta.get("item_id", "")
-                if not item_id:
-                    continue
-                # Reverse-remap worker path
-                worker_path = r.get("path", "")
-                server_path = worker_path
-                for wnfs in _workers_nfs:
-                    if worker_path.startswith(wnfs):
-                        server_path = job_queue.server_nfs_root + worker_path[len(wnfs):]
-                        break
-                r_remapped = {**r, "path": server_path}
-
-                # Attach source metadata
-                vid_pi_for_item = items_to_score.get(item_id, ([], [], None))[1]
-                vid_infos_for_item = {str(p): info for p, info in vid_pi_for_item} if vid_pi_for_item else {}
-                source = vid_infos_for_item.get(server_path)
-                if source is None:
-                    for wnfs in _workers_nfs:
-                        if worker_path.startswith(wnfs):
-                            source = vid_infos_for_item.get(
-                                job_queue.server_nfs_root + worker_path[len(wnfs):]
-                            )
-                            if source:
-                                break
-                if source is not None:
-                    r_remapped["source"] = source
-
-                grouped.setdefault(item_id, []).append(r_remapped)
-
-            # Sort each item's videos by score descending
-            for item_id, vlist in grouped.items():
-                vlist.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-                video_results[item_id] = vlist
-    else:
-        weights = cfg.get("score_weights")
-        for item_id, (_, vid_pi, item) in items_to_score.items():
-            vid_paths = [p for p, _ in vid_pi]
-            vid_infos = {str(p): info for p, info in vid_pi}
-            video_results[item_id] = await asyncio.to_thread(
-                scorer.score_videos, clip_model, item, vid_paths, batch_dir, weights, cfg,
-                vid_infos,
-            )
+    for item_id, (_, vid_pi, item) in items_to_score.items():
+        query  = item.get("ai_prompt") or item.get("search_prompt", "")
+        scored = []
+        for p, info in vid_pi:
+            scored.append({
+                "path":   str(p),
+                "score":  _keyword_score(query, info),
+                "source": info,
+            })
+        scored.sort(key=lambda r: r["score"], reverse=True)
+        video_results[item_id] = scored
+        log.info("Video keyword scoring: item=%s query=%r scored=%d", item_id, query, len(scored))
 
     # ---------------------------------------------------------------
     # Phase 4 — Save results per item

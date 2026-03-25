@@ -28,12 +28,20 @@
   ],
 
   "base_url":      "",
-  "projects_root": "/data/shared",
+  "projects_root": "/data/shared/media",
   "cache_ttl_days": 7,
 
   "candidates_per_source_image": 30,
   "candidates_per_source_video": 30,
   "max_candidates_per_item":     300,
+
+  "source_limits": {
+    "pexels":    { "candidates_images": 10, "candidates_videos": 2 },
+    "pixabay":   { "candidates_images": 10, "candidates_videos": 2 },
+    "openverse": { "candidates_images": 10, "candidates_videos": 0 },
+    "wikimedia": { "candidates_images": 10, "candidates_videos": 2 },
+    "europeana": { "candidates_images": 10, "candidates_videos": 0 }
+  },
 
   "_comment_sources": [
     "Safe default sources — RULE 9. Only sources with proven pipelines enabled.",
@@ -60,7 +68,7 @@
   "clip_pretrained": "laion2b_s34b_b79k",
 
   "transport":       "file",
-  "file_mount_root": "/mnt/shared",
+  "file_mount_root": "/mnt/shared/media",
 
   "rate_limits": {
     "pexels":    { "max_concurrent": 2, "delay_ms_min": 200, "delay_ms_max": 600 },

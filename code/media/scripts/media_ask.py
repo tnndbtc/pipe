@@ -38,7 +38,8 @@ Available tools (each prints JSON to stdout):
     python {TOOLS_PATH} search_for_shot \\
       --project {PROJECT} --episode {EPISODE_ID} \\
       --item_id ITEM_ID --query "SEARCH TERMS" \\
-      [--n_img N] [--n_vid N]
+      [--n_img N] [--n_vid N] \\
+      [--sources SOURCE1 SOURCE2 ...]
     Returns: { "batch_id": "...", "item_id": "...", "status": "queued", "poll_url": "..." }
 
   Add more images/videos to an existing batch item (without creating a new batch):
@@ -46,7 +47,8 @@ Available tools (each prints JSON to stdout):
       --batch_id BATCH_ID \\
       --item_id  ITEM_ID \\
       --prompt   "SEARCH TERMS" \\
-      [--n_img N] [--n_vid N]
+      [--n_img N] [--n_vid N] \\
+      [--sources SOURCE1 SOURCE2 ...]
     Returns: {{ "status": "appending", "tmp_batch_id": "...", "poll_url": "..." }}
 
   Poll the status of an append operation (call in a loop until done or failed):
@@ -57,6 +59,15 @@ Available tools (each prints JSON to stdout):
     Returns: {{ "status": "pending"|"done"|"failed", ... }}
     When done: {{ "status": "done", "images_appended": N, "videos_appended": N,
                   "images_total": N, "videos_total": N }}
+
+  Download a specific Pexels photo by its page URL and add it to a batch item:
+    python {TOOLS_PATH} fetch_by_url \\
+      --batch_id BATCH_ID --item_id ITEM_ID \\
+      --url "https://www.pexels.com/photo/<slug>-<id>/"
+    Returns: {{ "photo_id": N, "path": "...", "title": "..." }}
+    Use when the user pastes a Pexels photo URL directly.
+    item_id must be the asset_id from get_manifest (e.g. bg-sc03-ruins),
+    NOT the shot_id. No polling needed — download is synchronous.
 
   Delete images and/or videos from a batch that do not match a filter:
     python {TOOLS_PATH} delete_batch_images \\
@@ -74,16 +85,20 @@ Available tools (each prints JSON to stdout):
       exclude_sources list[str]      — drop entries from these sources (blacklist)
       keep_top_n      int            — after filtering, keep only top N by score
       title_contains  str            — keep only entries whose title, description,
-                                       or tags contain this substring (case-insensitive)
+                                       tags, or URL slug contain this substring
+                                       (case-insensitive)
       media_types     list[str]      — scope filter to ["images"], ["videos"], or
                                        omit / null to apply to both
 
 Rules:
 1. Always call get_manifest first to understand the shot structure.
-2. Identify the target shot by matching the user's shot reference (e.g. "sc01-sh01")
-   against the shot_id field (e.g. "s01e01_sc01_sh01") in the get_manifest output.
+2. Identify the target background by matching the user's reference
+   against the asset_id field in the get_manifest output.
    IMPORTANT: the --item_id argument must be the asset_id field of the matched item,
    NOT the shot_id. These are two different fields with different values.
+   If the user does not specify which shot/background to target, default to the
+   FIRST item in the get_manifest output. Never ask the user to clarify — just
+   proceed with the first item.
 3. Decide whether to search or append:
    - If the user asks to search for images/videos for a shot with NO existing done batch,
      use search_for_shot (creates a new top-level batch).
@@ -93,6 +108,10 @@ Rules:
 4. Call search_for_shot with the user's search terms as --query.
    License filtering (CC0 / CC BY only via wikimedia, openverse, europeana) is
    applied automatically by the tool — do NOT add any license flags manually.
+   search_for_shot is fire-and-forget (returns immediately with status "queued").
+   Poll GET <poll_url> every 10 seconds until status is "done" or "failed", then
+   apply the same auto-filter as Rule 8 (remove zero-scoring entries) if the query
+   has identifiable keywords.
 5. After triggering the search, report:
      batch_id | item_id | status | poll_url
 6. Tell the user where results will be saved:
@@ -100,15 +119,25 @@ Rules:
 7. When the user says "delete", "remove", "filter out", or "keep only" images or videos
    in a batch, call delete_batch_images. Translate the natural-language filter into a
    FilterSpec JSON string passed to --filter.
+
+   SCORE NOTE: score is a keyword-match score (0.0–1.0), NOT a visual/CLIP score.
+   It reflects how many of the original search terms appear in the entry's title,
+   tags, and URL slug.
+     min_score: 1.0 = all search terms matched in metadata  (strict)
+     min_score: 0.5 = at least half the search terms matched (recommended gate)
+     min_score: 0.0 = no filter
+
    Examples:
      "delete pexels images"
        → --filter '{{"exclude_sources": ["pexels"]}}'
-     "keep only CC images with score above 0.6"
-       → --filter '{{"keep_sources": ["wikimedia", "openverse", "europeana"], "min_score": 0.6}}'
+     "keep only CC images with score above 0.5"
+       → --filter '{{"keep_sources": ["wikimedia", "openverse", "europeana"], "min_score": 0.5}}'
      "keep top 5 images per shot"
        → --filter '{{"keep_top_n": 5, "media_types": ["images"]}}'
      "delete low-scoring pexels and pixabay images"
        → --filter '{{"exclude_sources": ["pexels", "pixabay"], "min_score": 0.5}}'
+     "keep only images relevant to the search query"
+       → --filter '{{"min_score": 0.5}}'
      "keep only videos mentioning Pompeii"
        → --filter '{{"title_contains": "pompeii", "media_types": ["videos"]}}'
      "delete all videos that don't mention Rome"
@@ -127,6 +156,42 @@ Rules:
    When done, report to the user: "Added N images and N videos to batch BATCH_ID shot ITEM_ID.
    Total: N images, N videos."
    If failed, report the error from the response.
+   After a successful poll (status "done"), if the user's query contains one or more
+   recognisable keywords (i.e. the query is not purely operational like "add more" or
+   "get more"), automatically call delete_batch_images to remove zero-scoring entries:
+     python {TOOLS_PATH} delete_batch_images \
+       --batch_id BATCH_ID \
+       --item_id  ITEM_ID \
+       --filter '{{"min_score": 0.0001, "media_types": [MEDIA_TYPES]}}'
+   where MEDIA_TYPES is ["images"] if only images were added, ["videos"] if only videos,
+   or omit media_types entirely if both were added.
+   This removes any result whose metadata contains none of the query terms
+   (score = 0.0), while keeping everything that matched at least one term.
+   Do NOT run this auto-filter if:
+     - the user explicitly asked to skip filtering, OR
+     - the query has no identifiable keywords (e.g. "add more", "get more photos").
+9. If the user names a specific source (e.g. "from pexels", "pixabay only", "wikimedia"),
+   pass --sources with that source name. Valid sources: pexels, pixabay, wikimedia,
+   openverse, europeana. Multiple sources allowed: --sources pexels pixabay
+10. Respect the media type the user asks for:
+   - If the user asks for ONLY images (e.g. "add images", "10 more images"), pass --n_vid 0.
+   - If the user asks for ONLY videos (e.g. "add videos", "5 more videos"), pass --n_img 0.
+   - If the user asks for both or doesn't specify, omit --n_img and --n_vid (use defaults).
+11. When the user asks to add images WITHOUT specifying a source (e.g. "add 100 more
+    images", "get more photos"), split the request across sources:
+    a. Call get_batch_results to read source_counts["images"] for the target item.
+    b. Active sources: pexels, pixabay, wikimedia, openverse, europeana (all 5),
+       unless the user restricted to specific sources.
+    c. Compute per-source quota: per_source = ceil(n_img / number_of_active_sources).
+       Example: "add 100 images" across 5 sources → 20 per source.
+    d. Call append_to_batch ONCE PER SOURCE:
+         --sources <source> --n_img <per_source>
+       One call per source is required so the page-math inside the tool can apply
+       the correct page offset for each source independently.
+    e. After each append_to_batch call, poll the returned tmp_batch_id with
+       poll_append (sleep 5s between calls) until "done" or "failed".
+    f. After all sources complete, report a combined summary table:
+         source | images added | videos added | images total | videos total
 
 User query: {QUERY}
 """

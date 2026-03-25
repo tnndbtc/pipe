@@ -505,12 +505,9 @@ def _normalize_europeana_license(rights_uri: str) -> str:
     if "/licenses/by/3" in uri:       return "CC BY 3.0"
     if "/licenses/by/2" in uri:       return "CC BY 2.0"
     if "/licenses/by/1" in uri:       return "CC BY 1.0"
-    # CC BY-SA (attribution + ShareAlike) — commercially usable; dominates Wikimedia/Europeana
+    # CC BY-SA — ShareAlike clause conflicts with YouTube ToS; not accepted.
     # Must be matched BEFORE /by-nd/ and /by-nc/ to avoid false prefix match.
-    if "/licenses/by-sa/" in uri:
-        m = re.search(r"/by-sa/(\d+)", uri)
-        ver = m.group(1) if m else "4"
-        return f"CC BY-SA {ver}.0"
+    if "/licenses/by-sa/" in uri:     return ""
     # Non-commercial or NoDerivatives — not accepted for commercial use
     if "/licenses/by-nd/" in uri:     return ""
     if "/licenses/by-nc" in uri:      return ""
@@ -638,34 +635,54 @@ def _source_search_openverse_images(
     # Sending page_size > 50 with a token returns 401 (not 400) — which is
     # the root cause of the 401 storm: all threads got 401 simultaneously,
     # triggering cascading token refreshes that 429'd the auth endpoint.
-    max_page = 50 if token else 20
+    max_page    = 50 if token else 20
+    n_requested = per_page
+    page_size   = min(n_requested, max_page)
+
+    # Base params shared across pages (no "page" key yet).
     # cc0, by only — CC BY-SA excluded (ShareAlike conflicts with YouTube ToS).
-    params: dict = {"q": query, "license": "cc0,by",
-                    "page_size": min(per_page, max_page), "filter_dead": "true", "extension": "jpg,png"}
-    if extra_params: params.update(extra_params)
+    base_params: dict = {"q": query, "license": "cc0,by",
+                         "page_size": page_size, "filter_dead": "true",
+                         "extension": "jpg,png"}
+    if extra_params: base_params.update(extra_params)
 
-    def call():
-        # Acquire global semaphore to cap cross-item concurrency at 2 total
-        # (prevents 9 parallel items from firing 36 simultaneous API calls).
-        with _openverse_search_sem:
-            r = requests.get("https://api.openverse.org/v1/images/",
-                             headers=headers, params=params, timeout=_TIMEOUT)
-        r.raise_for_status()
-        return r.json().get("results", [])
+    all_raw: list = []
+    page           = 1
+    error_occurred = False
+    while len(all_raw) < n_requested:
+        params = dict(base_params)
+        params["page"] = page
 
-    log.info("Openverse search images q=%r per_page=%d", query, per_page)
-    try:
-        results = _with_backoff(call, backoff)
-    except requests.HTTPError as exc:
-        body = (exc.response.text or "")[:200] if exc.response is not None else ""
-        log.warning("Openverse search failed q=%r: %s  body=%r", query, exc, body)
-        return []  # do NOT cache failures — allow retry on next call
-    except Exception as exc:
-        log.warning("Openverse search failed q=%r: %s", query, exc)
-        return []  # do NOT cache failures — allow retry on next call
+        def call(p=params):
+            # Acquire global semaphore to cap cross-item concurrency at 2 total
+            # (prevents 9 parallel items from firing 36 simultaneous API calls).
+            with _openverse_search_sem:
+                r = requests.get("https://api.openverse.org/v1/images/",
+                                 headers=headers, params=p, timeout=_TIMEOUT)
+            r.raise_for_status()
+            return r.json().get("results", [])
+
+        log.info("Openverse search images q=%r page=%d page_size=%d", query, page, page_size)
+        try:
+            page_results = _with_backoff(call, backoff)
+        except requests.HTTPError as exc:
+            body = (exc.response.text or "")[:200] if exc.response is not None else ""
+            log.warning("Openverse search failed q=%r page=%d: %s  body=%r",
+                        query, page, exc, body)
+            error_occurred = True
+            break  # do NOT cache — allow retry
+        except Exception as exc:
+            log.warning("Openverse search failed q=%r page=%d: %s", query, page, exc)
+            error_occurred = True
+            break  # do NOT cache — allow retry
+
+        all_raw.extend(page_results)
+        if len(page_results) < page_size:
+            break  # no more pages
+        page += 1
 
     candidates = []
-    for result in results:
+    for result in all_raw[:n_requested]:
         license_summary = _normalize_openverse_license(result)
         if not is_license_acceptable(license_summary): continue
 
@@ -697,7 +714,9 @@ def _source_search_openverse_images(
             "attribution_required": attr_required, "attribution_text": attr_text,
             "provider": result.get("provider", ""),
         })
-    _search_cache[key] = candidates
+
+    if not error_occurred:
+        _search_cache[key] = candidates
     return candidates
 
 
@@ -715,68 +734,87 @@ def _source_search_wikimedia_images(
     headers: dict = {"User-Agent": _USER_AGENT}
     if token: headers["Authorization"] = f"Bearer {token}"
 
-    params: dict = {
-        "action": "query", "generator": "search", "gsrnamespace": 6,
-        "gsrsearch": query, "gsrlimit": min(per_page, 500),
-        "prop": "imageinfo",
-        "iiprop": "url|size|dimensions|extmetadata|mime|mediatype",
-        "iiurlwidth": 800, "format": "json",
-    }
-    if extra_params: params.update(extra_params)
-
-    def call():
-        r = requests.get("https://commons.wikimedia.org/w/api.php",
-                         headers=headers, params=params, timeout=_TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-
-    log.info("Wikimedia search images q=%r per_page=%d", query, per_page)
-    try: data = _with_backoff(call, backoff)
-    except Exception as exc:
-        log.warning("Wikimedia search failed: %s", exc)
-        return []  # do NOT cache failures — allow retry on next call
-
-    pages = (data.get("query") or {}).get("pages", {})
+    page_size     = min(per_page, 500)
     ACCEPTED_MIMES = {"image/jpeg", "image/png", "image/gif"}
-    candidates = []
+    candidates: list = []
+    gsroffset     = 0
+    page_num      = 1
+    fetch_failed  = False
 
-    for page in pages.values():
-        ii_list = page.get("imageinfo") or []
-        if not ii_list: continue
-        ii = ii_list[0]
-        if ii.get("mime", "") not in ACCEPTED_MIMES: continue
-
-        meta = ii.get("extmetadata", {})
-        title = page.get("title", "").replace("File:", "", 1).strip()
-        author = _strip_html((meta.get("Artist") or {}).get("value", ""))
-        license_short_raw = (meta.get("LicenseShortName") or {}).get("value", "")
-        license_summary = _normalize_wikimedia_license(license_short_raw)
-        if not is_license_acceptable(license_summary): continue
-
-        license_url = (meta.get("LicenseUrl") or {}).get("value", "")
-        categories_raw = (meta.get("Categories") or {}).get("value", "")
-        tags = [c.strip() for c in categories_raw.split("|") if c.strip()]
-        asset_page = ii.get("descriptionurl", "")
-        source_id = page.get("title", "")
-        attr_required = (meta.get("AttributionRequired") or {}).get("value", "").lower() == "true"
-        attr_text = (f'"{title}" by {author} / Wikimedia Commons / {license_summary}' if author
-                     else f'"{title}" / Wikimedia Commons / {license_summary}')
-
-        candidate = {
-            "source_site": "wikimedia", "source_id": source_id,
-            "asset_page_url": asset_page,
-            "file_url": ii.get("url", ""),
-            "preview_url": ii.get("thumburl") or ii.get("url", ""),
-            "title": title, "description": "", "tags": tags,
-            "photographer": author, "license_summary": license_summary,
-            "license_url": license_url, "query_used": query,
-            "width": ii.get("width", 0), "height": ii.get("height", 0),
-            "attribution_required": attr_required, "attribution_text": attr_text,
+    while len(candidates) < per_page:
+        params: dict = {
+            "action": "query", "generator": "search", "gsrnamespace": 6,
+            "gsrsearch": query, "gsrlimit": page_size,
+            "prop": "imageinfo",
+            "iiprop": "url|size|dimensions|extmetadata|mime|mediatype",
+            "iiurlwidth": 800, "format": "json",
         }
-        if license_short_raw.lower().startswith("pd-art"):
-            candidate["license_note"] = "PD-Art — jurisdiction-specific reproduction limits may apply"
-        candidates.append(candidate)
-    _search_cache[key] = candidates
+        if gsroffset > 0:
+            params["gsroffset"] = gsroffset
+            params["continue"]  = "gsroffset||"
+        if extra_params: params.update(extra_params)
+
+        def call(p=params):
+            r = requests.get("https://commons.wikimedia.org/w/api.php",
+                             headers=headers, params=p, timeout=_TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+
+        log.info("Wikimedia search images q=%r page=%d per_page=%d", query, page_num, per_page)
+        try:
+            data = _with_backoff(call, backoff)
+        except Exception as exc:
+            log.warning("Wikimedia search failed: %s", exc)
+            fetch_failed = True
+            break  # do NOT cache failures — allow retry on next call
+
+        pages_data = (data.get("query") or {}).get("pages", {})
+        for wm_page in pages_data.values():
+            ii_list = wm_page.get("imageinfo") or []
+            if not ii_list: continue
+            ii = ii_list[0]
+            if ii.get("mime", "") not in ACCEPTED_MIMES: continue
+
+            meta = ii.get("extmetadata", {})
+            title = wm_page.get("title", "").replace("File:", "", 1).strip()
+            author = _strip_html((meta.get("Artist") or {}).get("value", ""))
+            license_short_raw = (meta.get("LicenseShortName") or {}).get("value", "")
+            license_summary = _normalize_wikimedia_license(license_short_raw)
+            if not is_license_acceptable(license_summary): continue
+
+            license_url = (meta.get("LicenseUrl") or {}).get("value", "")
+            categories_raw = (meta.get("Categories") or {}).get("value", "")
+            tags = [c.strip() for c in categories_raw.split("|") if c.strip()]
+            asset_page = ii.get("descriptionurl", "")
+            source_id = wm_page.get("title", "")
+            attr_required = (meta.get("AttributionRequired") or {}).get("value", "").lower() == "true"
+            attr_text = (f'"{title}" by {author} / Wikimedia Commons / {license_summary}' if author
+                         else f'"{title}" / Wikimedia Commons / {license_summary}')
+
+            candidate = {
+                "source_site": "wikimedia", "source_id": source_id,
+                "asset_page_url": asset_page,
+                "file_url": ii.get("url", ""),
+                "preview_url": ii.get("thumburl") or ii.get("url", ""),
+                "title": title, "description": "", "tags": tags,
+                "photographer": author, "license_summary": license_summary,
+                "license_url": license_url, "query_used": query,
+                "width": ii.get("width", 0), "height": ii.get("height", 0),
+                "attribution_required": attr_required, "attribution_text": attr_text,
+            }
+            if license_short_raw.lower().startswith("pd-art"):
+                candidate["license_note"] = "PD-Art — jurisdiction-specific reproduction limits may apply"
+            candidates.append(candidate)
+
+        cont = data.get("continue")
+        if not cont or not pages_data:
+            break  # no more pages
+        gsroffset = cont.get("gsroffset", gsroffset)
+        page_num += 1
+
+    candidates = candidates[:per_page]
+    if not fetch_failed or candidates:
+        _search_cache[key] = candidates
     return candidates
 
 
@@ -794,70 +832,89 @@ def _source_search_wikimedia_videos(
     headers: dict = {"User-Agent": _USER_AGENT}
     if token: headers["Authorization"] = f"Bearer {token}"
 
-    params: dict = {
-        "action": "query", "generator": "search", "gsrnamespace": 6,
-        "gsrsearch": f"filetype:video {query}", "gsrlimit": min(per_page, 500),
-        "prop": "imageinfo",
-        "iiprop": "url|size|dimensions|extmetadata|mime|mediatype",
-        "format": "json",
-    }
-    if extra_params: params.update(extra_params)
-
-    def call():
-        r = requests.get("https://commons.wikimedia.org/w/api.php",
-                         headers=headers, params=params, timeout=_TIMEOUT)
-        r.raise_for_status()
-        return r.json()
-
-    log.info("Wikimedia search videos q=%r per_page=%d", query, per_page)
-    try: data = _with_backoff(call, backoff)
-    except Exception as exc:
-        log.warning("Wikimedia video search failed: %s", exc)
-        return []  # do NOT cache failures — allow retry on next call
-
-    pages = (data.get("query") or {}).get("pages", {})
+    page_size      = min(per_page, 500)
     ACCEPTED_MIMES = {"video/webm", "video/ogg", "video/mp4"}
-    candidates = []
+    candidates: list = []
+    gsroffset      = 0
+    page_num       = 1
+    fetch_failed   = False
 
-    for page in pages.values():
-        ii_list = page.get("imageinfo") or []
-        if not ii_list: continue
-        ii = ii_list[0]
-        mime = ii.get("mime", "")
-        if mime not in ACCEPTED_MIMES: continue
-
-        meta = ii.get("extmetadata", {})
-        title = page.get("title", "").replace("File:", "", 1).strip()
-        author = _strip_html((meta.get("Artist") or {}).get("value", ""))
-        license_short_raw = (meta.get("LicenseShortName") or {}).get("value", "")
-        license_summary = _normalize_wikimedia_license(license_short_raw)
-        if not is_license_acceptable(license_summary): continue
-
-        license_url = (meta.get("LicenseUrl") or {}).get("value", "")
-        categories_raw = (meta.get("Categories") or {}).get("value", "")
-        tags = [c.strip() for c in categories_raw.split("|") if c.strip()]
-        asset_page = ii.get("descriptionurl", "")
-        source_id = page.get("title", "")
-        attr_required = (meta.get("AttributionRequired") or {}).get("value", "").lower() == "true"
-        attr_text = (f'"{title}" by {author} / Wikimedia Commons / {license_summary}' if author
-                     else f'"{title}" / Wikimedia Commons / {license_summary}')
-
-        candidate = {
-            "source_site": "wikimedia", "source_id": source_id,
-            "asset_page_url": asset_page,
-            "file_url": ii.get("url", ""),
-            "preview_url": "",
-            "title": title, "description": "", "tags": tags,
-            "photographer": author, "license_summary": license_summary,
-            "license_url": license_url, "query_used": query,
-            "width": ii.get("width", 0), "height": ii.get("height", 0),
-            "mime": mime,
-            "attribution_required": attr_required, "attribution_text": attr_text,
+    while len(candidates) < per_page:
+        params: dict = {
+            "action": "query", "generator": "search", "gsrnamespace": 6,
+            "gsrsearch": f"filetype:video {query}", "gsrlimit": page_size,
+            "prop": "imageinfo",
+            "iiprop": "url|size|dimensions|extmetadata|mime|mediatype",
+            "format": "json",
         }
-        if license_short_raw.lower().startswith("pd-art"):
-            candidate["license_note"] = "PD-Art — jurisdiction-specific reproduction limits may apply"
-        candidates.append(candidate)
-    _search_cache[key] = candidates
+        if gsroffset > 0:
+            params["gsroffset"] = gsroffset
+            params["continue"]  = "gsroffset||"
+        if extra_params: params.update(extra_params)
+
+        def call(p=params):
+            r = requests.get("https://commons.wikimedia.org/w/api.php",
+                             headers=headers, params=p, timeout=_TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+
+        log.info("Wikimedia search videos q=%r page=%d per_page=%d", query, page_num, per_page)
+        try:
+            data = _with_backoff(call, backoff)
+        except Exception as exc:
+            log.warning("Wikimedia video search failed: %s", exc)
+            fetch_failed = True
+            break  # do NOT cache failures — allow retry on next call
+
+        pages_data = (data.get("query") or {}).get("pages", {})
+        for wm_page in pages_data.values():
+            ii_list = wm_page.get("imageinfo") or []
+            if not ii_list: continue
+            ii = ii_list[0]
+            mime = ii.get("mime", "")
+            if mime not in ACCEPTED_MIMES: continue
+
+            meta = ii.get("extmetadata", {})
+            title = wm_page.get("title", "").replace("File:", "", 1).strip()
+            author = _strip_html((meta.get("Artist") or {}).get("value", ""))
+            license_short_raw = (meta.get("LicenseShortName") or {}).get("value", "")
+            license_summary = _normalize_wikimedia_license(license_short_raw)
+            if not is_license_acceptable(license_summary): continue
+
+            license_url = (meta.get("LicenseUrl") or {}).get("value", "")
+            categories_raw = (meta.get("Categories") or {}).get("value", "")
+            tags = [c.strip() for c in categories_raw.split("|") if c.strip()]
+            asset_page = ii.get("descriptionurl", "")
+            source_id = wm_page.get("title", "")
+            attr_required = (meta.get("AttributionRequired") or {}).get("value", "").lower() == "true"
+            attr_text = (f'"{title}" by {author} / Wikimedia Commons / {license_summary}' if author
+                         else f'"{title}" / Wikimedia Commons / {license_summary}')
+
+            candidate = {
+                "source_site": "wikimedia", "source_id": source_id,
+                "asset_page_url": asset_page,
+                "file_url": ii.get("url", ""),
+                "preview_url": "",
+                "title": title, "description": "", "tags": tags,
+                "photographer": author, "license_summary": license_summary,
+                "license_url": license_url, "query_used": query,
+                "width": ii.get("width", 0), "height": ii.get("height", 0),
+                "mime": mime,
+                "attribution_required": attr_required, "attribution_text": attr_text,
+            }
+            if license_short_raw.lower().startswith("pd-art"):
+                candidate["license_note"] = "PD-Art — jurisdiction-specific reproduction limits may apply"
+            candidates.append(candidate)
+
+        cont = data.get("continue")
+        if not cont or not pages_data:
+            break  # no more pages
+        gsroffset = cont.get("gsroffset", gsroffset)
+        page_num += 1
+
+    candidates = candidates[:per_page]
+    if not fetch_failed or candidates:
+        _search_cache[key] = candidates
     return candidates
 
 
@@ -876,64 +933,84 @@ def _source_search_europeana_images(
     key = ("europeana", "image", query, per_page, tuple(sorted((extra_params or {}).items())))
     if key in _search_cache: return _search_cache[key]
 
-    params: dict = {
+    page_size = min(per_page, 100)
+    # "open" = CC0/PDM only.  "restricted" adds CC BY (and CC BY-SA/NC which
+    # is_license_acceptable will then reject).  Using both broadens recall
+    # significantly — many cultural heritage items carry CC BY, not CC0/PDM.
+    base_params: dict = {
         "wskey": europeana_key, "query": query, "qf": "TYPE:IMAGE",
-        # "open" = CC0/PDM only.  "restricted" adds CC BY (and CC BY-SA/NC which
-        # is_license_acceptable will then reject).  Using both broadens recall
-        # significantly — many cultural heritage items carry CC BY, not CC0/PDM.
         "reusability": "open,restricted", "media": "true", "thumbnail": "true",
-        "rows": min(per_page, 100), "cursor": "*", "profile": "rich",
+        "rows": page_size, "profile": "rich",
     }
-    if extra_params: params.update(extra_params)
+    if extra_params: base_params.update(extra_params)
 
-    def call():
-        r = requests.get("https://api.europeana.eu/record/v2/search.json",
-                         headers={"User-Agent": _USER_AGENT}, params=params, timeout=_TIMEOUT)
-        r.raise_for_status()
-        return r.json()
+    candidates: list = []
+    cursor       = "*"
+    page_num     = 1
+    fetch_failed = False
 
-    log.info("Europeana search images q=%r per_page=%d", query, per_page)
-    try: data = _with_backoff(call, backoff)
-    except Exception as exc:
-        log.warning("Europeana search failed: %s", exc)
-        return []  # do NOT cache failures — allow retry on next call
+    while len(candidates) < per_page:
+        params = dict(base_params)
+        params["cursor"] = cursor
 
-    items = data.get("items") or []
-    candidates = []
-    for item in items:
-        if item.get("previewNoDistribute"): continue
-        url = (item.get("edmIsShownBy") or [""])[0]
-        if not url: continue
-        rights_uri = (item.get("rights") or [""])[0]
-        license_summary = _normalize_europeana_license(rights_uri)
-        if not is_license_acceptable(license_summary): continue
+        def call(p=params):
+            r = requests.get("https://api.europeana.eu/record/v2/search.json",
+                             headers={"User-Agent": _USER_AGENT}, params=p, timeout=_TIMEOUT)
+            r.raise_for_status()
+            return r.json()
 
-        preview_url = (item.get("edmPreview") or [""])[0]
-        # Require Europeana's own CDN thumbnail.  The fallback (edmIsShownBy) is a
-        # museum/institution server URL that is almost never in DOWNLOAD_ALLOWLIST.
-        if not preview_url:
-            continue
-        title = (item.get("title") or [""])[0]
-        author = ", ".join(item.get("dcCreator") or [])
-        provider = (item.get("dataProvider") or [""])[0]
-        guid = item.get("guid", "")
-        source_id = item.get("id", "")
-        attr_required = license_summary not in {"CC0", "Public Domain"}
-        attr_text = (f'"{title}" by {author} / {provider} / {license_summary}' if author
-                     else f'"{title}" / {provider} / {license_summary}')
+        log.info("Europeana search images q=%r page=%d per_page=%d", query, page_num, per_page)
+        try:
+            data = _with_backoff(call, backoff)
+        except Exception as exc:
+            log.warning("Europeana search failed q=%r page=%d: %s", query, page_num, exc)
+            fetch_failed = True
+            break  # do NOT cache partial failures — return what we have
 
-        candidates.append({
-            "source_site": "europeana", "source_id": source_id,
-            "asset_page_url": guid,
-            "file_url": url, "preview_url": preview_url,
-            "title": title, "description": "", "tags": [],
-            "photographer": author, "license_summary": license_summary,
-            "license_url": rights_uri, "query_used": query,
-            "width": 0, "height": 0,
-            "attribution_required": attr_required, "attribution_text": attr_text,
-            "provider": provider,
-        })
-    _search_cache[key] = candidates
+        items = data.get("items") or []
+        for item in items:
+            if item.get("previewNoDistribute"): continue
+            url = (item.get("edmIsShownBy") or [""])[0]
+            if not url: continue
+            rights_uri = (item.get("rights") or [""])[0]
+            license_summary = _normalize_europeana_license(rights_uri)
+            if not is_license_acceptable(license_summary): continue
+
+            preview_url = (item.get("edmPreview") or [""])[0]
+            # Require Europeana's own CDN thumbnail.  The fallback (edmIsShownBy) is a
+            # museum/institution server URL that is almost never in DOWNLOAD_ALLOWLIST.
+            if not preview_url:
+                continue
+            title     = (item.get("title") or [""])[0]
+            author    = ", ".join(item.get("dcCreator") or [])
+            provider  = (item.get("dataProvider") or [""])[0]
+            guid      = item.get("guid", "")
+            source_id = item.get("id", "")
+            attr_required = license_summary not in {"CC0", "Public Domain"}
+            attr_text = (f'"{title}" by {author} / {provider} / {license_summary}' if author
+                         else f'"{title}" / {provider} / {license_summary}')
+
+            candidates.append({
+                "source_site": "europeana", "source_id": source_id,
+                "asset_page_url": guid,
+                "file_url": url, "preview_url": preview_url,
+                "title": title, "description": "", "tags": [],
+                "photographer": author, "license_summary": license_summary,
+                "license_url": rights_uri, "query_used": query,
+                "width": 0, "height": 0,
+                "attribution_required": attr_required, "attribution_text": attr_text,
+                "provider": provider,
+            })
+
+        next_cursor = data.get("nextCursor")
+        if not next_cursor or len(items) < page_size:
+            break  # no more pages or source exhausted
+        cursor   = next_cursor
+        page_num += 1
+
+    candidates = candidates[:per_page]
+    if not fetch_failed or candidates:
+        _search_cache[key] = candidates
     return candidates
 
 
@@ -1694,6 +1771,25 @@ def _run_download_tasks(
                     if is_robot_policy:
                         log.warning("  %s  skipped %s: Wikimedia robot policy block (UA rejected)",
                                     tag, task["dest"].name)
+                    else:
+                        # _wait is None → final 429 attempt exhausted.
+                        # Try preview fallback URL (e.g. api.openverse.org) if available.
+                        _fb = task.get("fallback_url", "")
+                        if _fb:
+                            log.debug("  %s  429 retries exhausted → preview fallback for %s",
+                                      tag, task["dest"].name)
+                            try:
+                                _fb_result = _download_file(
+                                    _fb, task["dest"], headers={},
+                                    cfg=cfg, source=_dl_source, media_type=_dl_media_type,
+                                )
+                                if _fb_result == "pending":
+                                    return task, "pending"
+                                log.info("  %s  fallback ok %s", tag, task["dest"].name)
+                                return task, "ok"
+                            except Exception as _fb_exc:  # noqa: BLE001
+                                log.warning("  %s  fallback failed %s: %s",
+                                            tag, task["dest"].name, _fb_exc)
                 log.warning("  %s  failed %s: %s", tag, task["dest"].name, exc)
                 return task, "failed"
             except Exception as exc:  # noqa: BLE001
@@ -1963,30 +2059,45 @@ def _pexels_search_images(
 
     headers = {"Authorization": api_key}
     q = " ".join(query.splitlines())
+    n_requested = per_page
+    page_size = min(n_requested, 80)
 
-    # Always-on Pexels image defaults
-    params: dict = {
-        "query":       q,
-        "per_page":    per_page,
-        "orientation": "landscape",
-        "size":        "large",
-    }
-    # Merge caller-supplied overrides (source_filters["pexels"])
-    if extra_params:
-        params.update(extra_params)
+    results: list[dict] = []
+    page = 1
+    while len(results) < n_requested:
+        # Always-on Pexels image defaults
+        params: dict = {
+            "query":       q,
+            "per_page":    page_size,
+            "page":        page,
+            "orientation": "landscape",
+            "size":        "large",
+        }
+        # Merge caller-supplied overrides (source_filters["pexels"])
+        if extra_params:
+            params.update(extra_params)
 
-    def call() -> list[dict]:
-        r = requests.get(
-            "https://api.pexels.com/v1/search",
-            headers=headers,
-            params=params,
-            timeout=_TIMEOUT,
+        def call(p=params) -> list[dict]:
+            r = requests.get(
+                "https://api.pexels.com/v1/search",
+                headers=headers,
+                params=p,
+                timeout=_TIMEOUT,
+            )
+            r.raise_for_status()
+            return r.json().get("photos", [])
+
+        log.info(
+            "Pexels search images  q=%r page=%d page_size=%d extra=%s",
+            q, page, page_size, extra_params,
         )
-        r.raise_for_status()
-        return r.json().get("photos", [])
+        page_results = _with_backoff(call, backoff)
+        results.extend(page_results)
+        if len(page_results) < page_size:
+            break  # no more pages
+        page += 1
 
-    log.info("Pexels search images  q=%r per_page=%d extra=%s", q, per_page, extra_params)
-    result = _with_backoff(call, backoff)
+    result = results[:n_requested]
     _search_cache[key] = result
     return result
 
@@ -2013,26 +2124,41 @@ def _pexels_search_videos(
 
     headers = {"Authorization": api_key}
     q = " ".join(query.splitlines())
+    n_requested = per_page
+    page_size = min(n_requested, 80)
 
-    params: dict = {
-        "query":    q,
-        "per_page": per_page,
-    }
-    if extra_params:
-        params.update(extra_params)
+    results: list[dict] = []
+    page = 1
+    while len(results) < n_requested:
+        params: dict = {
+            "query":    q,
+            "per_page": page_size,
+            "page":     page,
+        }
+        if extra_params:
+            params.update(extra_params)
 
-    def call() -> list[dict]:
-        r = requests.get(
-            "https://api.pexels.com/videos/search",
-            headers=headers,
-            params=params,
-            timeout=_TIMEOUT,
+        def call(p=params) -> list[dict]:
+            r = requests.get(
+                "https://api.pexels.com/videos/search",
+                headers=headers,
+                params=p,
+                timeout=_TIMEOUT,
+            )
+            r.raise_for_status()
+            return r.json().get("videos", [])
+
+        log.info(
+            "Pexels search videos  q=%r page=%d page_size=%d extra=%s",
+            q, page, page_size, extra_params,
         )
-        r.raise_for_status()
-        return r.json().get("videos", [])
+        page_results = _with_backoff(call, backoff)
+        results.extend(page_results)
+        if len(page_results) < page_size:
+            break  # no more pages
+        page += 1
 
-    log.info("Pexels search videos  q=%r per_page=%d extra=%s", q, per_page, extra_params)
-    result = _with_backoff(call, backoff)
+    result = results[:n_requested]
     _search_cache[key] = result
     return result
 
@@ -2067,33 +2193,48 @@ def _pixabay_search_images(
     if key in _search_cache:
         return _search_cache[key]
 
-    q = " ".join(query.splitlines())[:100]
+    q           = " ".join(query.splitlines())[:100]
+    n_requested = per_page
+    page_size   = max(3, min(n_requested, 200))  # Pixabay hard minimum: per_page < 3 → HTTP 400
 
-    # Always-on Pixabay image defaults
-    params: dict = {
+    # Base params shared across pages (no "page" key yet)
+    base_params: dict = {
         "key":         api_key,
         "q":           q,
         "image_type":  "photo",
         "orientation": "horizontal",
         "safesearch":  "true",
         "order":       "popular",
-        "per_page":    per_page,
+        "per_page":    page_size,
     }
     # Merge caller-supplied overrides (source_filters["pixabay"])
     if extra_params:
-        params.update(extra_params)
+        base_params.update(extra_params)
 
-    def call() -> list[dict]:
-        r = requests.get(
-            "https://pixabay.com/api/",
-            params=params,
-            timeout=_TIMEOUT,
-        )
-        r.raise_for_status()
-        return r.json().get("hits", [])
+    results: list[dict] = []
+    page = 1
+    while len(results) < n_requested:
+        params = dict(base_params)
+        params["page"] = page
 
-    log.info("Pixabay search images  q=%r per_page=%d extra=%s", q, per_page, extra_params)
-    result = _with_backoff(call, backoff)
+        def call(p=params) -> list[dict]:
+            r = requests.get(
+                "https://pixabay.com/api/",
+                params=p,
+                timeout=_TIMEOUT,
+            )
+            r.raise_for_status()
+            return r.json().get("hits", [])
+
+        log.info("Pixabay search images  q=%r page=%d page_size=%d extra=%s",
+                 q, page, page_size, extra_params)
+        page_results = _with_backoff(call, backoff)
+        results.extend(page_results)
+        if len(page_results) < page_size:
+            break  # no more pages
+        page += 1
+
+    result = results[:n_requested]
     _search_cache[key] = result
     return result
 
@@ -2117,32 +2258,47 @@ def _pixabay_search_videos(
     if key in _search_cache:
         return _search_cache[key]
 
-    q = " ".join(query.splitlines())[:100]
+    q           = " ".join(query.splitlines())[:100]
+    n_requested = per_page
+    page_size   = max(3, min(n_requested, 200))  # Pixabay hard minimum: per_page < 3 → HTTP 400
 
-    # Always-on Pixabay video defaults
-    params: dict = {
+    # Base params shared across pages (no "page" key yet)
+    base_params: dict = {
         "key":        api_key,
         "q":          q,
         "video_type": "film",
         "safesearch": "true",
         "order":      "popular",
-        "per_page":   per_page,
+        "per_page":   page_size,
     }
     # Merge caller-supplied overrides (source_filters["pixabay"])
     if extra_params:
-        params.update(extra_params)
+        base_params.update(extra_params)
 
-    def call() -> list[dict]:
-        r = requests.get(
-            "https://pixabay.com/api/videos/",
-            params=params,
-            timeout=_TIMEOUT,
-        )
-        r.raise_for_status()
-        return r.json().get("hits", [])
+    results: list[dict] = []
+    page = 1
+    while len(results) < n_requested:
+        params = dict(base_params)
+        params["page"] = page
 
-    log.info("Pixabay search videos  q=%r per_page=%d extra=%s", q, per_page, extra_params)
-    result = _with_backoff(call, backoff)
+        def call(p=params) -> list[dict]:
+            r = requests.get(
+                "https://pixabay.com/api/videos/",
+                params=p,
+                timeout=_TIMEOUT,
+            )
+            r.raise_for_status()
+            return r.json().get("hits", [])
+
+        log.info("Pixabay search videos  q=%r page=%d page_size=%d extra=%s",
+                 q, page, page_size, extra_params)
+        page_results = _with_backoff(call, backoff)
+        results.extend(page_results)
+        if len(page_results) < page_size:
+            break  # no more pages
+        page += 1
+
+    result = results[:n_requested]
     _search_cache[key] = result
     return result
 
@@ -2392,11 +2548,16 @@ def fetch_images(
                         file_host = urlparse(url).hostname or ""
                         file_allowed = _is_host_allowed(file_host) in ("static", "dynamic")
                         dl_url = url if file_allowed else (preview or url)
+                        # When using the direct CDN URL (e.g. live.staticflickr.com), keep
+                        # the Openverse preview URL as a fallback in case the CDN returns 429.
+                        # api.openverse.org is always allowlisted and serves a usable thumbnail.
+                        fallback_url = preview if (file_allowed and preview and preview != dl_url) else ""
                         ext = Path(dl_url.split("?")[0]).suffix or ".jpg"
                         if ext.lower() not in {".jpg", ".jpeg", ".png", ".gif"}: ext = ".jpg"
                         dest = src_dir / f"{uid}{ext}"
                         info  = {**c, "file_url": url, "preview_url": preview}
-                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info, "thumb": preview})
+                        pre.append({"_uid": uid, "dest": dest, "url": dl_url, "info": info, "thumb": preview,
+                                    "fallback_url": fallback_url})
 
                 elif source == "wikimedia":
                     candidates = _source_search_wikimedia_images(

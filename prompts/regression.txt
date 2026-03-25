@@ -3539,3 +3539,258 @@ Image segments must save only `duration_sec` (no in/out fields).
 - `resolve_assets.py` v2 branch (`shot_overrides`) stops reading `clip_in`/`clip_out`
 - `media_preview_pack.py` `_seg_display_dur()` stops checking `clip_in`/`clip_out` for videos
 - Image segments accidentally include `clip_in`/`clip_out` fields in the saved JSON
+
+---
+
+## KW-25: Media Search — Direct Pexels URL Fetch (fetch_by_url)
+
+### What this tests
+When a user pastes a Pexels photo page URL directly into the AI search prompt
+(e.g. "add this image: https://www.pexels.com/photo/ancient-ruins-35750762/"),
+the pipeline must download that specific photo and add it to the batch — without
+triggering a new search or polling.
+
+### Files involved
+- `code/media/http/server.py` — `POST /fetch_direct` endpoint + `FetchDirectRequest` model
+- `code/media/tools/server_tools.py` — `cmd_fetch_by_url` subcommand
+- `code/media/scripts/media_ask.py` — fetch_by_url tool entry in Claude prompt
+
+### Invariants that must hold
+1. `POST /fetch_direct` with a valid Pexels URL downloads the photo to
+   `assets/media/{batch_id}/{item_id}/images/pexels/pexels_img_{photo_id}.jpg`.
+2. The returned entry has `score: 1.0` (user-chosen, no query context).
+3. The entry is appended to `images_ranked` in `batch_state.json` via read-modify-write
+   — existing entries are NOT overwritten.
+4. Returns 409 Conflict if the batch status is "running".
+5. The `source` dict contains `source_site: "pexels"`, `asset_page_url`, `photographer`,
+   `width`, `height`.
+6. `server_tools.py cmd_fetch_by_url` POSTs to `MEDIA_URL/fetch_direct` and
+   returns `{"photo_id": N, "path": "...", "title": "..."}` to stdout as JSON.
+7. Claude uses `fetch_by_url` (not `search_for_shot` or `append_to_batch`) when
+   the user provides a direct Pexels URL.
+
+### Most likely to break when
+- Photo ID regex `r"-(\d+)/?$"` fails to extract ID from a non-standard Pexels URL
+- `store.update_item()` read-modify-write loses existing entries (race or overwrite)
+- Pexels `src.large` field absent → KeyError on download
+- `item_id` passed to `fetch_by_url` is the shot_id instead of asset_id (wrong path)
+- Score is changed from 1.0 to a computed value (breaks the "user-chosen = always keep" semantic)
+
+---
+
+## KW-26: Media Search — Per-Source Pagination + Page-Math in append_to_batch
+
+### What this tests
+When a user asks to add more images from Pixabay or Openverse (sources that previously
+issued only one page), the system must paginate beyond already-downloaded pages so it
+returns NEW images rather than duplicates.
+
+For Pexels, Pixabay, and Openverse (Group A sources), `append_to_batch` in
+`server_tools.py` computes an adjusted `n_img` that tells the downloader to fetch
+enough pages to skip past already-seen results.
+
+### Files involved
+- `code/media/http/downloader.py` — pagination while-loops for Pixabay images,
+  Pixabay videos, and Openverse images
+- `code/media/tools/server_tools.py` — `cmd_append_to_batch` page-math block +
+  `_count_by_source()` helper + `cmd_get_batch_results` source_counts field +
+  `_GROUP_A_PAGE_SIZES` constant
+- `code/media/scripts/media_ask.py` — Rule 11 (multi-source split)
+
+### Page-math formula (Group A sources: pexels=80, pixabay=200, openverse=50)
+```
+pages_already = ceil(existing_count / page_size)
+pages_for_new = ceil(user_n_img    / page_size)
+n_img_adjusted = (pages_already + pages_for_new) * page_size
+```
+`n_img_adjusted` is passed to the downloader so it fetches beyond already-seen pages.
+
+### Invariants that must hold
+1. `get_batch_results` returns `source_counts: {"images": {"pexels": N, ...}, "videos": {...}}`.
+2. `_count_by_source()` counts entries by `entry["source"]["source_site"]`, falling back
+   to path component parsing for legacy entries without a source dict.
+3. `append_to_batch` page-math runs only when `args.n_img is not None` AND at least
+   one Group A source is active. Falls back to `args.n_img` on any fetch error.
+4. Pixabay image and video search functions paginate with `while len(results) < n_requested`
+   and break when a page returns fewer results than page_size (source exhausted).
+5. Openverse image search paginates the same way; partial-result pages do not get cached.
+6. Page-math diagnostics are printed to stderr (not stdout) so they don't corrupt JSON output.
+7. Rule 11 in Claude prompt: when user requests images with no source specified,
+   Claude calls `append_to_batch` once per source (`--sources <source> --n_img <per_source>`)
+   so page-math applies per-source independently.
+
+### Most likely to break when
+- `_GROUP_A_PAGE_SIZES` values change without updating the matching `page_size` constants
+  in `downloader.py` (page offsets computed with wrong page size → still fetches duplicates)
+- `cmd_get_batch_results` omits `source_counts` from the returned JSON (Claude cannot
+  check existing counts → Rule 11 split breaks)
+- `_count_by_source()` reads `source_site` from wrong dict level (returns all zeros)
+- Openverse `error_occurred` flag not set on exception → partial results cached →
+  next append re-uses stale cached page and returns duplicates
+- Page-math prints to stdout instead of stderr → corrupts JSON output parsed by Claude
+
+---
+
+## KW-27: Media Search — Keyword-Match Scoring (CLIP Retired)
+
+### What this tests
+CLIP visual-similarity scoring has been retired. Every image and video entry now
+receives a `score` (0.0–1.0) computed by matching the search query terms against
+the entry's metadata: `source.title`, `source.tags`, and the URL slug extracted
+from `source.asset_page_url`.
+
+The `FilterSpec.title_contains` filter now also checks the URL slug (additive — an
+entry passes if ANY of title / description / tags / URL slug matches).
+
+### Files involved
+- `code/media/http/server.py` — `_keyword_score()` function; Phase 2 and Phase 3
+  of `_do_batch_search()` replaced; `_apply_filter._matches()` extended;
+  `scorer.load_clip` no longer called at startup
+- `code/media/scripts/media_ask.py` — Rule 7 SCORE NOTE; FilterSpec
+  `title_contains` description updated
+
+### Score semantics (0.0–1.0)
+```
+score = matched_query_terms / total_query_terms
+
+Examples (query: "pompeii ruins ancient"):
+  Wikimedia title "Composition ruins Pompeii.jpg" + tags[Pompeii, Ancient Rome]
+    → all 3 terms matched → score = 1.0
+  Pexels URL slug "ancient-ruins-of-pompeii-in-naples-italy-35750762"
+    → all 3 terms matched → score = 1.0
+  Pexels alt text "gray storage house" + irrelevant slug
+    → 0 terms matched → score = 0.0  (correctly filtered by min_score: 0.5)
+  Europeana title "Beggars outside S. Giuliano, near Pompeii. 1904-05"
+    → 1/3 terms matched → score = 0.33
+```
+
+Special cases:
+- Empty query → score = 1.0 for all entries (no filter)
+- No metadata (no title, no tags, no URL) → score = 1.0 (don't penalise)
+- `fetch_by_url` entries → score = 1.0 (user explicitly chose the image)
+
+### Metadata checked per source
+| Source    | title             | tags | URL slug |
+|-----------|-------------------|------|----------|
+| Pexels    | photographer alt  | —    | ✓        |
+| Pixabay   | slug-derived      | ✓    | ✓        |
+| Openverse | actual title      | ✓    | —        |
+| Wikimedia | curator filename  | ✓    | —        |
+| Europeana | museum title      | —    | —        |
+
+### Invariants that must hold
+1. Server startup log contains "Keyword-match scoring active" (confirms CLIP not loaded).
+2. After a batch completes, every `images_ranked` / `videos_ranked` entry has a
+   `score` in [0.0, 1.0] that equals `matched_terms / total_terms` for the item's
+   `ai_prompt` against the entry's metadata.
+3. `fetch_by_url` entries always have `score: 1.0`.
+4. `FilterSpec min_score: 0.5` retains entries where ≥ half the query terms appear
+   in metadata; drops entries with no keyword match.
+5. `FilterSpec title_contains: "pompeii"` retains entries where "pompeii" appears
+   in title OR description OR tags OR URL slug. Pexels entries with "pompeii" in
+   their URL slug but not in alt text must be KEPT (not dropped).
+6. `scorer.load_clip` is never called — no torch/open_clip import at server startup.
+7. Distributed worker scoring path is removed — `_use_distributed` no longer exists
+   in `_do_batch_search`.
+
+### Most likely to break when
+- `_keyword_score` reads `info.get("title")` but the field is stored as a different
+  key for a specific source (e.g. Wikimedia stores `source.title` not top-level `title`)
+- URL slug regex `r"-\d+/?$"` fails to strip the trailing numeric ID, leaving the
+  number as a "word" that dilutes the match score
+- `_apply_filter._matches()` reverts to the old 3-field check (title/desc/tags only),
+  dropping Pexels entries that only match via URL slug
+- `scorer.load_clip` is re-introduced (adds 10–15 s startup penalty; fails if
+  torch/open_clip not installed)
+- The `parts` list is empty for an entry but `score` returns 0.0 instead of 1.0
+  (would incorrectly filter out entries with no metadata)
+
+---
+
+## KW-28: Media Search — Source Pagination for "Search Media" button
+
+### What this tests
+When "Search Media" is clicked, each source must fetch enough pages to deliver the
+requested number of candidates. Three sources gained pagination loops (media6.txt):
+
+- **Wikimedia images + videos**: gsroffset + `continue` token loop (up to 500/page)
+- **Europeana images**: `cursor` → `nextCursor` loop (up to 100/page)
+
+`config.json` source_limits were also raised so the loops are triggered at realistic
+candidate counts (previously all limits were ≤15, never exceeding one page).
+
+### Files involved
+- `code/media/http/downloader.py` — `_source_search_wikimedia_images`,
+  `_source_search_wikimedia_videos`, `_source_search_europeana_images`
+- `code/media/http/config.json` — `source_limits` raised for all five sources
+
+### New source_limits (config.json)
+```
+pexels:    candidates_images=80   (one full Pexels page)
+pixabay:   candidates_images=50   (Pixabay total for "pompeii" is only 57)
+openverse: candidates_images=50   (one full authenticated Openverse page)
+wikimedia: candidates_images=50
+europeana: candidates_images=50
+```
+
+### Wikimedia pagination mechanics
+API uses `gsroffset` integer offset + `continue=gsroffset||` string in query params.
+The `data.get("continue")` dict in the response drives the next offset.
+Loop breaks when `cont` is absent or `pages_data` is empty.
+
+```python
+# Invariant: gsroffset advances correctly each page
+cont = data.get("continue")          # {"gsroffset": 500, "continue": "gsroffset||"}
+gsroffset = cont.get("gsroffset", gsroffset)
+```
+
+### Europeana pagination mechanics
+API uses cursor-based pagination. First request uses `cursor="*"`.
+Subsequent requests use `nextCursor` from previous response.
+Loop breaks when `nextCursor` is absent OR `len(items) < page_size` (source exhausted).
+
+```python
+next_cursor = data.get("nextCursor")
+if not next_cursor or len(items) < page_size:
+    break
+cursor = next_cursor
+```
+
+### Cache-failure guard (all three functions)
+If the API fails on page 1 with zero candidates accumulated, the result is NOT cached
+(preserves retry on next call). If failure occurs on page 2+, partial results ARE cached.
+Guard: `if not fetch_failed or candidates: _search_cache[key] = candidates`
+
+### Invariants that must hold
+1. Wikimedia images: requesting `per_page=600` issues at least 2 API calls
+   (500 on page 1, remainder on page 2 via gsroffset).
+2. Wikimedia: `params["continue"] = "gsroffset||"` is only added when `gsroffset > 0`
+   (first page must NOT send a continue param — API rejects it).
+3. Europeana: requesting `per_page=250` issues at least 3 API calls
+   (100 per page × 3 = 300 raw items, trimmed to 250 after filtering).
+4. Europeana: `cursor="*"` is used for the first page only; subsequent pages use
+   the opaque `nextCursor` string returned by the API.
+5. All three functions: a page-1 API failure returns `[]` immediately (not cached).
+   A page-2+ failure returns the partial candidates collected so far (cached).
+6. `candidates = candidates[:per_page]` trims the final list so callers never
+   receive more than `per_page` results even when pages overshoot.
+7. Cache keys are identical in structure to the pre-pagination single-request keys
+   — same tuple shape, same field order. No cache invalidation needed.
+8. `config.json` source_limits for images: pexels=80, pixabay=50, openverse=50,
+   wikimedia=50, europeana=50. Any regression to lower values silently caps results.
+9. "Search Media" button sends `source_limits_override` per-source from the UI table
+   (pre-populated from config.json). Raising limits in config.json raises the UI
+   defaults — users see larger numbers in the table on next page load.
+
+### Most likely to break when
+- `gsroffset` continuation: `params["continue"]` key name conflicts with Python's
+  `continue` keyword — it does NOT (dict string keys are not keywords). If someone
+  renames it, the API will no longer paginate and silently return only the first 500.
+- Europeana `nextCursor` contains base64 `+`/`/`/`=` — `requests` library URL-encodes
+  these automatically. If someone switches to manual URL construction without encoding,
+  the cursor will be rejected and pagination will silently stop after page 1.
+- `fetch_failed` flag not initialised before the loop → `NameError` on first exception.
+- `candidates[:per_page]` removed → callers receive more candidates than `source_limits`
+  intends, inflating candidate counts and downstream CLIP/keyword scoring pools.
+- `config.json` source_limits reverted to old values (15/5) → while loops never
+  paginate because `n_requested ≤ page_size` in every case.

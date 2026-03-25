@@ -25,6 +25,7 @@ Environment variables:
 
 import argparse
 import json
+import math
 import os
 import sys
 import urllib.request
@@ -138,12 +139,41 @@ def cmd_list_batches(args):
 
 # ── Subcommand: get_batch_results ────────────────────────────────────────────
 
+def _count_by_source(entries: list) -> dict:
+    """
+    Count entries by source_site.  Prefers entry["source"]["source_site"];
+    falls back to path parsing for relative paths
+    (format: {item_id}/{images|videos}/{source}/{filename}).
+    """
+    counts: dict = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        src = (entry.get("source") or {}).get("source_site", "") \
+              if isinstance(entry.get("source"), dict) else ""
+        if not src:
+            path = entry.get("path", "").replace("\\", "/")
+            if path and not path.startswith("/"):
+                parts = path.split("/")
+                if len(parts) >= 4:
+                    src = parts[2]
+        if src:
+            counts[src] = counts.get(src, 0) + 1
+    return counts
+
+
 def cmd_get_batch_results(args):
     """
     Return the list of already-downloaded file paths for a specific item in a
-    batch. Used by Claude for deduplication before triggering a new search.
+    batch, plus per-source image/video counts for page-math calculations.
 
-    Output: JSON { item_id, images: [...paths], videos: [...paths], batch_status }
+    Output: JSON {
+      item_id, images: [...paths], videos: [...paths], batch_status,
+      source_counts: {
+        images: { "pexels": N, "pixabay": N, ... },
+        videos: { "pexels": N, ... }
+      }
+    }
     """
     url = (
         f"{PIPELINE_URL}/api/media_batch_status"
@@ -164,6 +194,7 @@ def cmd_get_batch_results(args):
             "images":       [],
             "videos":       [],
             "batch_status": batch_status,
+            "source_counts": {"images": {}, "videos": {}},
         }, indent=2))
         return
 
@@ -175,19 +206,26 @@ def cmd_get_batch_results(args):
             "images":       [],
             "videos":       [],
             "batch_status": batch_status,
+            "source_counts": {"images": {}, "videos": {}},
         }, indent=2))
         return
 
     # API response fields are "images" and "videos" — arrays of objects with
-    # "path", "url", "score". Extract just the path strings for dedup.
-    images = [img["path"] for img in item.get("images", []) if "path" in img]
-    videos = [vid["path"] for vid in item.get("videos", []) if "path" in vid]
+    # "path", "url", "score", "source". Extract paths and per-source counts.
+    img_entries = item.get("images", [])
+    vid_entries = item.get("videos", [])
+    images = [img["path"] for img in img_entries if "path" in img]
+    videos = [vid["path"] for vid in vid_entries if "path" in vid]
 
     print(json.dumps({
         "item_id":      args.item_id,
         "images":       images,
         "videos":       videos,
         "batch_status": batch_status,
+        "source_counts": {
+            "images": _count_by_source(img_entries),
+            "videos": _count_by_source(vid_entries),
+        },
     }, indent=2))
 
 
@@ -238,7 +276,7 @@ def cmd_search_for_shot(args):
         "project":          args.project,
         "episode_id":       args.episode,
         "manifest":         minimal_manifest,
-        "sources_override": CC_SOURCES,
+        "sources_override": args.sources if args.sources else CC_SOURCES,
         "n_img":            args.n_img,
         "n_vid":            args.n_vid,
     }
@@ -261,12 +299,27 @@ def cmd_search_for_shot(args):
     }, indent=2))
 
 
+# Page sizes for Group A sources (those that use simple page=N pagination).
+# Must match the page_size constants in downloader.py.
+_GROUP_A_PAGE_SIZES = {
+    "pexels":    80,
+    "pixabay":   200,
+    "openverse": 50,
+}
+
+
 # ── Subcommand: append_to_batch ──────────────────────────────────────────────
 
 def cmd_append_to_batch(args):
     """
     Add more images/videos to an existing batch item by triggering an
     additional search without replacing current results.
+
+    For Group A sources (pexels, pixabay, openverse) the tool auto-adjusts
+    n_img to skip pages already downloaded: it fetches the current per-source
+    image count, then computes n_img = (pages_already_fetched + pages_for_new)
+    × page_size so the downloader fetches at least one new page beyond what
+    was already seen.
 
     Calls POST MEDIA_URL/batches/{batch_id}/items/{item_id}/append.
 
@@ -275,16 +328,69 @@ def cmd_append_to_batch(args):
     if not MEDIA_KEY:
         _err("MEDIA_API_KEY env var is not set — required for media server auth")
 
+    # ── Page-math for Group A sources ────────────────────────────────────────
+    effective_sources = args.sources if args.sources else CC_SOURCES
+    group_a_active    = [s for s in _GROUP_A_PAGE_SIZES if s in effective_sources]
+    n_img_adjusted    = args.n_img  # start with user's value (may be None)
+
+    if group_a_active and args.n_img is not None:
+        status_url = (
+            f"{PIPELINE_URL}/api/media_batch_status"
+            f"?batch_id={urllib.parse.quote(args.batch_id)}"
+            f"&server_url={urllib.parse.quote(MEDIA_URL)}"
+        )
+        try:
+            state        = _get(status_url)
+            batch_status = state.get("status", "unknown")
+            item         = state.get("items", {}).get(args.item_id, {})
+
+            # Count existing images per source (only meaningful for done batches)
+            source_counts: dict = {}
+            if batch_status == "done":
+                source_counts = _count_by_source(item.get("images", []))
+
+            # Per-source adjusted n_img; take the maximum across all active
+            # Group A sources so every source gets enough pages fetched.
+            user_n_img   = args.n_img
+            max_adjusted = user_n_img
+            for source in group_a_active:
+                page_size      = _GROUP_A_PAGE_SIZES[source]
+                existing       = source_counts.get(source, 0)
+                pages_already  = math.ceil(existing / page_size) if existing > 0 else 0
+                pages_for_new  = math.ceil(user_n_img / page_size)
+                adjusted       = (pages_already + pages_for_new) * page_size
+                max_adjusted   = max(max_adjusted, adjusted)
+                print(
+                    f"# page-math: {source} existing={existing} "
+                    f"pages_skip={pages_already} → n_img {user_n_img}→{adjusted}",
+                    file=sys.stderr,
+                )
+            n_img_adjusted = max_adjusted
+
+        except RuntimeError as e:
+            print(
+                f"# page-math: could not fetch batch state ({e}), "
+                f"using n_img={args.n_img}",
+                file=sys.stderr,
+            )
+
+    # ── POST to media server ──────────────────────────────────────────────────
     url     = f"{MEDIA_URL}/batches/{args.batch_id}/items/{args.item_id}/append"
     payload = {
         "ai_prompt": args.prompt,
-        "n_img":     args.n_img,
+        "n_img":     n_img_adjusted,
         "n_vid":     args.n_vid,
     }
+    if args.sources:
+        payload["sources_override"] = args.sources
     try:
         result = _post(url, payload, MEDIA_KEY)
     except RuntimeError as e:
         _err(f"append_to_batch POST failed: {e}")
+
+    # Surface the adjustment so Claude can mention it in its response
+    if n_img_adjusted != args.n_img and args.n_img is not None:
+        result["_n_img_adjusted"] = n_img_adjusted
 
     print(json.dumps(result, indent=2))
 
@@ -381,6 +487,35 @@ def cmd_delete_batch_images(args):
     )
 
 
+# ── Subcommand: fetch_by_url ──────────────────────────────────────────────────
+
+def cmd_fetch_by_url(args):
+    """
+    Download a specific Pexels photo by its page URL and append it to a batch item.
+    Calls POST MEDIA_URL/fetch_direct (synchronous — no polling needed).
+
+    Output: JSON { "photo_id": N, "path": "...", "title": "..." }
+    """
+    if not MEDIA_KEY:
+        _err("MEDIA_API_KEY env var is not set — required for media server auth")
+
+    payload = {
+        "batch_id": args.batch_id,
+        "item_id":  args.item_id,
+        "url":      args.url,
+    }
+    url = f"{MEDIA_URL}/fetch_direct"
+    try:
+        result = _post(url, payload, MEDIA_KEY)
+    except RuntimeError as e:
+        _err(f"fetch_by_url failed: {e}")
+
+    print(json.dumps(result, indent=2))
+    title = result.get("title", "")
+    path  = result.get("path", "")
+    print(f"# ✓ Added: {title}  ({path})")
+
+
 # ── CLI dispatcher ────────────────────────────────────────────────────────────
 
 def main():
@@ -411,8 +546,10 @@ def main():
     p_sfs.add_argument("--episode",  required=True)
     p_sfs.add_argument("--item_id",  required=True, help="asset_id from get_manifest output")
     p_sfs.add_argument("--query",    required=True, help="search terms (overrides ai_prompt)")
-    p_sfs.add_argument("--n_img",    type=int, default=15, help="number of images to fetch")
-    p_sfs.add_argument("--n_vid",    type=int, default=0,  help="number of videos to fetch")
+    p_sfs.add_argument("--n_img",    type=int, default=None, help="number of images to fetch")
+    p_sfs.add_argument("--n_vid",    type=int, default=None, help="number of videos to fetch")
+    p_sfs.add_argument("--sources",  nargs="+", default=None,
+                       help="override sources list (e.g. pexels pixabay wikimedia)")
 
     # append_to_batch
     p_atb = sub.add_parser("append_to_batch",
@@ -420,8 +557,10 @@ def main():
     p_atb.add_argument("--batch_id", required=True, help="target batch id (e.g. b_822b661e)")
     p_atb.add_argument("--item_id",  required=True, help="asset_id of the background item")
     p_atb.add_argument("--prompt",   required=True, help="search terms for this append run")
-    p_atb.add_argument("--n_img",    type=int, default=10, help="number of images to fetch")
-    p_atb.add_argument("--n_vid",    type=int, default=0,  help="number of videos to fetch")
+    p_atb.add_argument("--n_img",    type=int, default=None, help="number of images to fetch")
+    p_atb.add_argument("--n_vid",    type=int, default=None, help="number of videos to fetch")
+    p_atb.add_argument("--sources",  nargs="+", default=None,
+                       help="override sources list (e.g. pexels pixabay wikimedia)")
 
     # poll_append
     p_pa = sub.add_parser("poll_append",
@@ -442,6 +581,15 @@ def main():
                        help='FilterSpec as JSON string '
                             '(e.g. \'{"exclude_sources": ["pexels"], "min_score": 0.5}\')')
 
+    # fetch_by_url
+    p_fbu = sub.add_parser("fetch_by_url",
+                           help="download a specific Pexels photo by URL and add to a batch")
+    p_fbu.add_argument("--batch_id", required=True, help="target batch id (e.g. b_822b661e)")
+    p_fbu.add_argument("--item_id",  required=True, help="asset_id of the target shot")
+    p_fbu.add_argument("--url",      required=True,
+                       help="Pexels photo page URL "
+                            "(e.g. https://www.pexels.com/photo/ruins-7535541/)")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -452,6 +600,7 @@ def main():
         "append_to_batch":     cmd_append_to_batch,
         "poll_append":         cmd_poll_append,
         "delete_batch_images": cmd_delete_batch_images,
+        "fetch_by_url":        cmd_fetch_by_url,
     }
     try:
         dispatch[args.subcommand](args)
