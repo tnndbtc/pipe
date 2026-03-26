@@ -5974,12 +5974,14 @@ placeholder="Enter your story here"></textarea>
                           + '&ep_id=' + encodeURIComponent(_sfxEpId)
                           + '&file=assets/sfx/sfx_search_results.json');
       if (!r.ok) {
+        _sfxResults = {}; _sfxItems = [];
         statusBar.textContent = 'No previous results found. Run a search to get started.';
         document.getElementById('sfx-btn-search').disabled = false;
         return;
       }
       const saved = await r.json();
       if (!saved || !saved.results) {
+        _sfxResults = {}; _sfxItems = [];
         statusBar.textContent = 'No previous results found. Run a search to get started.';
         document.getElementById('sfx-btn-search').disabled = false;
         return;
@@ -6066,9 +6068,9 @@ placeholder="Enter your story here"></textarea>
       const rcc = await fetch('/api/episode_file?slug=' + encodeURIComponent(_sfxSlug)
                             + '&ep_id=' + encodeURIComponent(_sfxEpId)
                             + '&file=assets/sfx/sfx_cut_clips.json');
-      if (!rcc.ok) return;
+      if (!rcc.ok) { _sfxCutClips = []; sfxRenderShotOverrides(); return; }
       const data = await rcc.json();
-      if (!Array.isArray(data) || !data.length) return;
+      if (!Array.isArray(data) || !data.length) { _sfxCutClips = []; sfxRenderShotOverrides(); return; }
       _sfxCutClips = data;
       // Rebuild marks so In/Out labels display correctly in Source SFX Library
       _sfxCutClips.forEach(cl => {
@@ -6525,7 +6527,11 @@ placeholder="Enter your story here"></textarea>
       // Check preview_audio.wav exists — that is the authoritative signal that a
       // previous Generate Preview completed.  Then merge all three timelines.
       const audioCheck = await fetch('/serve_media?path=' + encodeURIComponent(audioPath), { method: 'HEAD' });
-      if (!audioCheck.ok) return;
+      if (!audioCheck.ok) {
+        _sfxTimeline = null;
+        document.getElementById('sfx-preview-wrap').style.display = 'none';
+        return;
+      }
       _sfxTimeline = await _loadAndMergeTl(_sfxSlug, _sfxEpId);
       const audio = document.getElementById('sfx-preview-audio');
       audio.src = '/serve_media?path=' + encodeURIComponent(audioPath);
