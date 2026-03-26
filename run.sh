@@ -66,7 +66,10 @@ fi
 STORY_FILE="${EP_DIR}/story.txt"
 VARS_FILE="${EP_DIR}/pipeline_vars.sh"
 
-if [[ ! -f "$STORY_FILE" ]]; then
+_fmt_pre=$(python3 -c \
+  "import json,sys; d=json.load(open('${EP_DIR}/meta.json')); \
+   print(d.get('story_format',''))" 2>/dev/null || echo "")
+if [[ "$_fmt_pre" != "Script.json" && ! -f "$STORY_FILE" ]]; then
   echo "✗ ERROR: story file not found: $STORY_FILE" >&2
   exit 1
 fi
@@ -555,6 +558,34 @@ source "$VARS_FILE"
 echo "  Loaded vars from $VARS_FILE"
 echo "  PROJECT_SLUG=$PROJECT_SLUG  EPISODE_ID=$EPISODE_ID"
 
+# ── PREPARE: Script.json format — validate contract & create story.txt ──
+if [[ "${STORY_FORMAT:-}" == "Script.json" ]]; then
+  echo ""
+  echo "══════════════════════════════════════════════════════════════"
+  echo "  PREPARE  —  Validate Script.json contract"
+  echo "══════════════════════════════════════════════════════════════"
+  # Recovery: episodes created before the create_episode fix only have
+  # story.txt (which contains the Script.json content).  Restore Script.json
+  # from story.txt so validation and all downstream stages can find it.
+  if [[ ! -f "$EP_DIR/Script.json" && -f "$STORY_FILE" ]]; then
+    cp "$STORY_FILE" "$EP_DIR/Script.json"
+    echo "  ℹ  Script.json restored from story.txt"
+  fi
+  python3 "contracts/tools/verify_contracts.py" \
+      "$EP_DIR/Script.json"
+  _rc=$?
+  if [[ $_rc -ne 0 ]]; then
+    echo "✗ Script.json failed contract validation — pipeline aborted."
+    echo "  Fix the Script.json provided by the external agent and re-run."
+    exit 1
+  fi
+  echo "✓ Script.json contract valid"
+  # Mirror Script.json → story.txt for consistency with all other formats.
+  # story.txt is for human reference; every stage reads Script.json directly.
+  cp "$EP_DIR/Script.json" "$STORY_FILE"
+  echo "✓ story.txt created (copy of Script.json)"
+fi
+
 # NOTE: VO_DURATION_TABLE removed. ShotList duration_sec is now patched
 # deterministically by patch_shotlist_durations.py after Stage 4 completes.
 
@@ -615,6 +646,13 @@ for N in 1 2 3 4 5 6 7 8 9; do
       continue
     fi
 
+    # Skip Stage 2 for Script.json (no StoryPrompt needed — Script.json is the input)
+    if [[ "${STORY_FORMAT:-}" == "Script.json" && "$N" -eq 2 ]]; then
+      echo ""
+      echo "  ⏭  Stage 2 skipped (Script.json — no StoryPrompt needed)"
+      continue
+    fi
+
     # ── P1+FIX3: Stage 9 skip (render_video.py reads VOPlan directly) ──────
     # Also preserves the pre-render checkpoint pause (FIX3).
     if [[ "$N" -eq 9 ]]; then
@@ -660,6 +698,11 @@ for N in 1 2 3 4 5 6 7 8 9; do
     # ── P7: Stage 3 → gen_script_narration.py for narration formats ─────
     if [[ "$N" -eq 3 ]]; then
       _fmt3="${STORY_FORMAT:-episodic}"
+      if [[ "$_fmt3" == "Script.json" ]]; then
+        echo ""
+        echo "  ⏭  Stage 3 skipped (Script.json provided by external agent)"
+        continue
+      fi
       if [[ "$_fmt3" == "continuous_narration" || \
             "$_fmt3" == "illustrated_narration" || \
             "$_fmt3" == "documentary" ]]; then
@@ -746,18 +789,15 @@ for N in 1 2 3 4 5 6 7 8 9; do
 
         echo ""
         echo "══════════════════════════════════════════════════════════════"
-        echo "  ⏸  PAUSED — Stage 3.5: VO review required"
+        echo "  ✔  Stage 3.5 complete — VO synthesis done"
         echo ""
-        echo "  Voice-over preview is ready for review:"
+        echo "  Voice-over is ready for review.  No pause here — pipeline"
+        echo "  continues to Stage 5.  Review and approve VO during the"
+        echo "  media selection pause at the end of Stage 5:"
         echo "    1. Switch to the 🎙 VO tab"
         echo "    2. Review every line — trim and adjust timing as needed"
-        echo "    3. Click ✓ Approve VO to write vo_approval into:"
-        echo "       VOPlan.${_s35_primary}.json"
-        echo ""
-        echo "  Then resume from Stage 4:"
-        echo "    ./run.sh ${EP_DIR} 4"
+        echo "    3. Click ✓ Approve VO"
         echo "══════════════════════════════════════════════════════════════"
-        exit 0
       elif python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${_s35_primary}"; then
         echo "  ✓ Stage 3.5 approved — patch_shotlist_durations.py will set duration_sec after Stage 4"
       elif [[ "${STORY_FORMAT:-}" == "ssml_narration" ]]; then
@@ -872,13 +912,14 @@ for N in 1 2 3 4 5 6 7 8 9; do
         if [[ ! -f "$_sel_file" ]]; then
           echo ""
           echo "══════════════════════════════════════════════════════════════"
-          echo "  ⏸  PAUSED after Stage 5 — media selections required"
+          echo "  ⏸  PAUSED after Stage 5 — VO review + media selections required"
           echo ""
-          echo "  VOPlan is ready.  Open the VC editor:"
-          echo "    1. Go to the 🖼 Media tab"
-          echo "    2. Select this episode and click Search Media"
-          echo "    3. Choose images/videos for each background"
-          echo "    4. Click ✔ Confirm Selections"
+          echo "  Complete both tasks before resuming:"
+          echo "    1. 🎙 Switch to the VO tab — review every line, trim and"
+          echo "       adjust timing as needed, then click ✓ Approve VO"
+          echo "    2. 🖼 Go to the Media tab — select this episode and click"
+          echo "       Search Media, choose images/videos for each background,"
+          echo "       then click ✔ Confirm Selections"
           echo ""
           echo "  Then resume the pipeline:"
           echo "    ./run.sh ${EP_DIR} 6"
@@ -979,13 +1020,14 @@ for N in 1 2 3 4 5 6 7 8 9; do
       if [[ ! -f "$_sel_file" ]]; then
         echo ""
         echo "══════════════════════════════════════════════════════════════"
-        echo "  ⏸  PAUSED after Stage 5 — media selections required"
+        echo "  ⏸  PAUSED after Stage 5 — VO review + media selections required"
         echo ""
-        echo "  VOPlan is ready.  Open the VC editor:"
-        echo "    1. Go to the 🖼 Media tab"
-        echo "    2. Select this episode and click Search Media"
-        echo "    3. Choose images/videos for each background"
-        echo "    4. Click ✔ Confirm Selections"
+        echo "  Complete both tasks before resuming:"
+        echo "    1. 🎙 Switch to the VO tab — review every line, trim and"
+        echo "       adjust timing as needed, then click ✓ Approve VO"
+        echo "    2. 🖼 Go to the Media tab — select this episode and click"
+        echo "       Search Media, choose images/videos for each background,"
+        echo "       then click ✔ Confirm Selections"
         echo ""
         echo "  Then resume the pipeline:"
         echo "    ./run.sh ${EP_DIR} 6"

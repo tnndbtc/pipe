@@ -3,6 +3,7 @@
 //
 // KW-2a/2b : Generate Preview path      — fixture: resetKW2 (no MusicPlan, end_sec=80.0)
 // KW-2c–2f : Shot Overrides path        — fixture: resetKW80 (MusicPlan present, inline)
+// KW-2g    : API fallback to VOPlan     — fixture: resetKW2g (VOPlan music_items, no MusicPlan)
 // KW-9     : no-clip selection persists — fixture: resetKW13 (MusicPlan, original VOPlan, inline)
 // KW-10    : music bar end position     — fixture: resetKW13 (inline)
 // KW-14    : music stops at end_sec     — fixture: resetKW13 (inline)
@@ -13,7 +14,7 @@ const fs               = require('fs');
 const os               = require('os');
 const path             = require('path');
 const { startTestServer, stopTestServer } = require('../helpers/server');
-const { resetKW2, resetKW80, resetKW13, getEpDir, musicplan } = require('../helpers/fixture_state');
+const { resetKW2, resetKW2g, resetKW80, resetKW13, getEpDir, musicplan } = require('../helpers/fixture_state');
 
 let serverProc;
 test.beforeAll(async () => { serverProc = await startTestServer(); });
@@ -253,6 +254,41 @@ test('KW-2f: Shot Override last shot end label reflects VOPlan extent (>= 80.0)'
     '(sc02-sh02: 28.089 + 27.559 = 55.648s) instead of VOPlan last VO end_sec=80.0.\n' +
     'Fix: use /api/vo_timeline shot start_sec/end_sec for Shot Override timing labels.'
   ).toBeGreaterThanOrEqual(80.0);
+});
+
+// ── KW-2g: /api/music_timeline must read VOPlan.music_items when MusicPlan absent ─
+//
+// Bug: /api/music_timeline builds music_index only from MusicPlan.shot_overrides.
+// When MusicPlan.json does not exist, _midx_mtl stays empty → every shot in
+// build_timeline() gets music_item_id="" → frontend filter rejects all →
+// Shot Overrides section is empty even though VOPlan already has music_items.
+//
+// Fixture: VOPlan with two music_items (sc01-sh01, sc02-sh02), no MusicPlan.
+// Invariant: /api/music_timeline must return >= 1 shot with non-empty music_item_id.
+//
+// FAILS today: all shots return music_item_id="" → Shot Overrides section empty.
+// PASSES with fix: API falls back to VOPlan.{locale}.json music_items when MusicPlan absent.
+
+test('KW-2g: /api/music_timeline falls back to VOPlan.music_items when MusicPlan absent', async ({ request }) => {
+  resetKW2g();
+
+  const resp = await request.get('/api/music_timeline?slug=test-proj&ep_id=s01e01');
+  expect(resp.status()).toBe(200);
+  const body = await resp.json();
+
+  const withMusicId = (body.shots || []).filter(s => s.music_item_id);
+
+  expect(
+    withMusicId.length,
+    'SHOT OVERRIDES EMPTY: /api/music_timeline returned ' + (body.shots || []).length +
+    ' shots but none have music_item_id set.\n' +
+    'Root cause: API builds music_index only from MusicPlan.shot_overrides.\n' +
+    'When MusicPlan.json is absent, _midx_mtl={} → every shot gets music_item_id="".\n' +
+    'VOPlan.music_items (sc01-sh01, sc02-sh02) are never consulted.\n' +
+    'Fix: when MusicPlan.json is absent (or has no shot_overrides), fall back to\n' +
+    'reading music_index from VOPlan.{locale}.json music_items — matching the CLI path\n' +
+    'in music_review_pack.py main() lines 689-693.'
+  ).toBeGreaterThanOrEqual(1);
 });
 
 // ── KW-9: no-clip selection persists after tab switch (migrated from kw9) ─────

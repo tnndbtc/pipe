@@ -94,7 +94,6 @@ _procs = {}   # client_addr → subprocess.Popen
 # Decouples subprocess/loop lifetime from the SSE connection.
 # A job keeps running even if the browser tab disconnects; the client can
 # reconnect and replay the full output from the beginning of the log file.
-import tempfile as _tempfile
 
 _jobs: dict = {}          # job_key → {"log": str, "done": bool, "rc": int|None}
 _jobs_lock = threading.Lock()
@@ -119,15 +118,15 @@ def _get_vo_lock(ep_dir: str) -> threading.Lock:
         return _vo_locks[ep_dir]
 
 
-def _job_log_path(job_key: str) -> str:
-    """Stable tmp path for this job's output log."""
+def _job_log_path(job_key: str, ep_dir: str) -> str:
+    """Stable path for this job's output log, stored under the episode directory."""
     h = hashlib.md5(job_key.encode()).hexdigest()
-    d = os.path.join(_tempfile.gettempdir(), "pipe_jobs")
+    d = os.path.join(ep_dir, "pipe_jobs")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, h + ".log")
 
 
-def _launch_stream_job(job_key: str, cmd: list, env: dict, client) -> str:
+def _launch_stream_job(job_key: str, ep_dir: str, cmd: list, env: dict, client) -> str:
     """Run cmd in a background thread, writing tagged lines to a log file.
 
     Tags written to log:
@@ -139,7 +138,7 @@ def _launch_stream_job(job_key: str, cmd: list, env: dict, client) -> str:
     reconnected), returns the existing log path so the client can replay from
     the start.
     """
-    log_path = _job_log_path(job_key)
+    log_path = _job_log_path(job_key, ep_dir)
     with _jobs_lock:
         existing = _jobs.get(job_key)
         if existing and not existing["done"]:
@@ -192,13 +191,13 @@ def _launch_stream_job(job_key: str, cmd: list, env: dict, client) -> str:
     return log_path
 
 
-def _launch_fn_job(job_key: str, target_fn) -> str:
+def _launch_fn_job(job_key: str, ep_dir: str, target_fn) -> str:
     """Run target_fn(write_log) in a background thread.
 
     target_fn receives write_log(tag, data) where tag is 'O', 'E', or 'D'.
     Returns the log path.
     """
-    log_path = _job_log_path(job_key)
+    log_path = _job_log_path(job_key, ep_dir)
     with _jobs_lock:
         existing = _jobs.get(job_key)
         if existing and not existing["done"]:
@@ -2505,6 +2504,7 @@ placeholder="Enter your story here"></textarea>
           <option value="documentary"           disabled title="Not yet validated">Documentary / Explainer</option>
           <option value="monologue"             disabled title="Not yet validated">Monologue / First-Person</option>
           <option value="ssml_narration">SSML Narration (authored)</option>
+          <option value="Script.json">Provided Script (external agent)</option>
         </select>
         <span id="badge-format" class="info-badge" style="display:none"></span>
       </div>
@@ -2546,6 +2546,7 @@ placeholder="Enter your story here"></textarea>
         <option value="documentary"           disabled title="Not yet validated">Documentary / Explainer</option>
         <option value="monologue"             disabled title="Not yet validated">Monologue / First-Person</option>
         <option value="ssml_narration">SSML Narration (authored)</option>
+        <option value="Script.json">Provided Script (external agent)</option>
       </select>
     </div>
     <div id="media-config-panel-existing" style="margin-top:10px; padding:10px 14px; background:#e8f5e8; border:1px solid #a8d8a8; border-radius:6px; font-size:12px; color:#555; line-height:1.7;">
@@ -4223,12 +4224,17 @@ placeholder="Enter your story here"></textarea>
   //   vo_timeline   → shots (timing anchor) + vo_items  (from VOPlan)
   //   sfx_timeline  → sfx_items                         (from SfxPlan)
   //   music_timeline→ music_items                       (from MusicPlan)
-  async function _loadAndMergeTl(slug, epId) {
+  async function _loadAndMergeTl(slug, epId, sceneHeads) {
     const _qs = '?slug=' + encodeURIComponent(slug)
               + '&ep_id=' + encodeURIComponent(epId)
               + '&t=' + Date.now();
+    // Forward unsaved scene_heads from the DOM so the timeline bars match the
+    // audio preview even before the user clicks Save.
+    const _voQs = sceneHeads && Object.keys(sceneHeads).length
+      ? _qs + '&scene_heads=' + encodeURIComponent(JSON.stringify(sceneHeads))
+      : _qs;
     const [voR, sfxR, musR] = await Promise.all([
-      fetch('/api/vo_timeline'    + _qs),
+      fetch('/api/vo_timeline'    + _voQs),
       fetch('/api/sfx_timeline'   + _qs),
       fetch('/api/music_timeline' + _qs),
     ]);
@@ -4257,11 +4263,27 @@ placeholder="Enter your story here"></textarea>
   // ── VO visual timeline ───────────────────────────────────────────────────────
 
   let _voVisTlData = null;
-  async function _voVisLoadTimeline() {
+  async function _voVisLoadTimeline(sceneHeads, previewClips) {
     const slug = window._voSlug, epId = window._voEpId;
     if (!slug || !epId) return;
     try {
-      _voVisTlData = await _loadAndMergeTl(slug, epId);
+      _voVisTlData = await _loadAndMergeTl(slug, epId, sceneHeads);
+      // If previewClips are supplied (from a just-completed Generate Preview),
+      // replace vo_items positions with the DOM-based clip timing rather than
+      // the stale VOPlan-on-disk start_sec values.  This ensures bars match
+      // the audio preview even when the user has not clicked Save.
+      if (previewClips && previewClips.length) {
+        const clipMap = {};
+        for (const c of previewClips) clipMap[c.item_id] = c;
+        _voVisTlData = {
+          ..._voVisTlData,
+          vo_items: _voVisTlData.vo_items.map(v => {
+            const c = clipMap[v.item_id];
+            if (!c) return v;
+            return { ...v, start_sec: c.start_sec, end_sec: c.start_sec + c.duration_sec };
+          }),
+        };
+      }
       _tlRender('vo-vis', _voVisTlData, 'vo-tl-audio');
     } catch (e) { console.warn('[VO] timeline load failed', e); }
   }
@@ -4573,21 +4595,33 @@ placeholder="Enter your story here"></textarea>
     const locale = locSel?.value;
     if (!epDir || !locale) return;
 
-    _voVisLoadTimeline();
-
     // Stop any in-progress per-item playback
     if (window._voAudio) { window._voAudio.pause(); window._voAudio = null; }
     window._voSeqAbort = true;
+
+    // Collect unsaved scene_head values from the DOM so the backend uses the
+    // current UI values rather than the stale VOPlan values on disk.
+    const sceneHeadsFromDom = {};
+    document.querySelectorAll('input[id^="vo-head-"]').forEach(el => {
+      const scene = el.id.replace(/^vo-head-/, '');
+      const v = parseFloat(el.value);
+      if (!isNaN(v)) sceneHeadsFromDom[scene] = v;
+    });
 
     const btn = document.getElementById('vo-preview-all-btn');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Building…'; }
     try {
       const resp = await fetch(
-        `/api/vo_preview_concat?ep_dir=${encodeURIComponent(epDir)}&locale=${encodeURIComponent(locale)}`
+        `/api/vo_preview_concat?ep_dir=${encodeURIComponent(epDir)}&locale=${encodeURIComponent(locale)}` +
+        `&scene_heads=${encodeURIComponent(JSON.stringify(sceneHeadsFromDom))}`
       );
       if (!resp.ok) throw new Error(await resp.text());
       const data = await resp.json();
       _voTlBuild(data);
+      // Reload timeline bars AFTER preview is built, passing both the DOM
+      // scene_heads AND the preview clips so bar positions come from the
+      // DOM-based preview timing rather than stale VOPlan-on-disk values.
+      _voVisLoadTimeline(sceneHeadsFromDom, data.clips);
     } catch(e) {
       alert('Preview error: ' + e.message);
     } finally {
@@ -5401,8 +5435,8 @@ placeholder="Enter your story here"></textarea>
 
   function _sfxSyncFromRunTab() {
     // Auto-select episode from Run tab globals if SFX tab has no selection
-    if (_sfxSlug && _sfxEpId) {
-      // Already selected — restore sessionStorage selections
+    if (_sfxSlug && _sfxEpId && _sfxSlug === currentSlug && _sfxEpId === currentEpId) {
+      // Already on correct project — restore sessionStorage selections
       const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
       if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
       return;
@@ -6897,7 +6931,7 @@ placeholder="Enter your story here"></textarea>
 
   function _mediaSyncFromRunTab() {
     // If Run tab has a project/episode selected and Media tab doesn't, propagate it
-    if (_mediaSlug && _mediaEpId) return;  // already selected
+    if (_mediaSlug && _mediaEpId && _mediaSlug === currentSlug && _mediaEpId === currentEpId) return;  // already on correct project
     if (!currentSlug || !currentEpId) return;  // nothing in Run tab
     var target = currentSlug + '|' + currentEpId;
     var sel = document.getElementById('media-ep-select');
@@ -10935,7 +10969,7 @@ placeholder="Enter your story here"></textarea>
     const sel = document.getElementById('music-ep-select');
     // If episode already selected, reload data automatically (user may have
     // run step 5 or copied songs since last visit).
-    if (_musicSlug && _musicEpId) { _musicLoadExisting(); return; }
+    if (_musicSlug && _musicEpId && _musicSlug === currentSlug && _musicEpId === currentEpId) { _musicLoadExisting(); return; }
     if (sel.options.length > 1) { _musicSyncFromRunTab(); return; }
     fetch('/list_projects').then(r => r.json()).then(data => {
       (data.projects || []).forEach(proj => {
@@ -10951,7 +10985,7 @@ placeholder="Enter your story here"></textarea>
   }
 
   function _musicSyncFromRunTab() {
-    if (_musicSlug && _musicEpId) return;
+    if (_musicSlug && _musicEpId && _musicSlug === currentSlug && _musicEpId === currentEpId) return;
     if (!currentSlug || !currentEpId) return;
     const target = currentSlug + '|' + currentEpId;
     const sel = document.getElementById('music-ep-select');
@@ -10969,8 +11003,10 @@ placeholder="Enter your story here"></textarea>
     if (!v) { _musicSlug = null; _musicEpId = null; return; }
     [_musicSlug, _musicEpId] = v.split('|');
     _musicClipVolumes = {};
+    _musicClipResults = [];   // reset; repopulated from gen_music_clip_results.json by _musicLoadExisting
     _musicCutClips    = [];   // reset on episode change; repopulated from disk by _musicLoadExisting
     _musicShotMap     = {};   // reset; repopulated from ShotList.json by _musicLoadExisting
+    _musicOverrides   = {};   // reset; repopulated from MusicPlan.json by _musicLoadExisting
     document.getElementById('music-btn-review').disabled  = false;
     _musicSetStatus('Episode selected. Click Generate Preview to begin.');
     // Try to load existing data
@@ -11563,52 +11599,62 @@ placeholder="Enter your story here"></textarea>
       }
     }
 
-    // ── Source Music Browser (with mark start/end + cut) ──
-    if (_musicSources && _musicSources.length > 0) {
+    // ── Source Music Browser (always visible; Refresh re-scans resources/music) ──
+    {
       const srcCard = document.createElement('div');
       srcCard.className = 'music-card';
-      let srcHtml = '<div class="music-card-hdr">Music Library</div>'
-        + '<div class="music-card-sub">Play a source track, mark Start &amp; End positions, '
-        + 'then Cut Clip to create a candidate for shot assignment.</div>';
-      _musicSources.forEach((s, si) => {
-        const dur = s.duration_sec != null
-          ? (s.duration_sec / 60 | 0) + ':' + String(Math.round(s.duration_sec % 60)).padStart(2, '0')
-          : '—';
-        const bpm = s.bpm != null ? Math.round(s.bpm) + ' BPM' : '';
-        const mark = _musicMarks[s.stem] || {};
-        const markStartTxt = mark.start != null ? mark.start.toFixed(1) + 's' : '—';
-        const markEndTxt   = mark.end   != null ? mark.end.toFixed(1)   + 's' : '—';
-        const volVal = _musicTrackVolumes[s.stem] || 0;
-        const volStyle = volVal !== 0
-          ? 'color:var(--gold);font-weight:700' : 'color:var(--dim)';
-        srcHtml += '<div class="music-src-row">'
-          + '<div class="music-src-top">'
-          + '<span class="music-src-stem">' + s.stem + '</span>'
-          + '<span class="music-src-meta">' + dur + (bpm ? ' · ' + bpm : '') + '</span>'
-          + '<label style="margin-left:auto;display:flex;align-items:center;gap:4px;font-size:0.80em">'
-          + '<span style="' + volStyle + '">vol</span>'
-          + '<input type="number" step="1" min="-18" max="0" value="' + volVal + '"'
-          + ' title="Track volume offset in dB (0 = default -6 dB base; -6 = plays at -12 dB; attenuation only)"'
-          + ' style="width:52px;background:var(--input-bg,#1e1e2e);color:' + (volVal !== 0 ? 'var(--gold)' : 'var(--text)') + ';border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.95em"'
-          + ' onchange="_musicSetTrackVolume(\'' + s.stem + '\',this.value);this.style.color=parseInt(this.value)!==0?\'var(--gold)\':\'var(--text)\'">'
-          + '</label>'
-          + '<div class="music-src-player">'
-          + '<audio id="music-src-audio-' + si + '" controls preload="none" style="width:100%;height:32px"'
-          + ' src="/serve_media?path=' + encodeURIComponent(s.path) + '"></audio>'
-          + '</div></div>'
-          + '<div class="music-src-controls">'
-          + '<button onclick="_musicMarkPos(\'' + s.stem + '\',' + si + ',\'start\')"'
-          + (mark.start != null ? ' class="active"' : '') + '>Mark Start</button>'
-          + '<span class="mark-label">In: ' + markStartTxt + '</span>'
-          + '<button onclick="_musicMarkPos(\'' + s.stem + '\',' + si + ',\'end\')"'
-          + (mark.end != null ? ' class="active"' : '') + '>Mark End</button>'
-          + '<span class="mark-label">Out: ' + markEndTxt + '</span>'
-          + '<button onclick="_musicCutClip(\'' + s.stem + '\')"'
-          + ' style="' + (mark.start != null && mark.end != null
-            ? 'background:var(--gold);color:#0d0d10;font-weight:700' : '')
-          + '">✂ Cut Clip</button>'
-          + '</div></div>';
-      });
+      srcCard.id = 'music-library-card';
+      let srcHtml = '<div class="music-card-hdr">Music Library'
+        + '<button onclick="_musicRefreshLibrary()" id="music-library-refresh-btn"'
+        + ' style="margin-left:10px;font-size:0.75em;padding:2px 8px;vertical-align:middle">'
+        + '↻ Refresh</button></div>';
+      if (!_musicSources || _musicSources.length === 0) {
+        srcHtml += '<div class="music-card-sub" style="color:var(--dim)">No music files found in'
+          + ' <code>resources/music</code>. Add .mp3 / .wav / .flac / .ogg files then click'
+          + ' <strong>Refresh</strong>.</div>';
+      } else {
+        srcHtml += '<div class="music-card-sub">Play a source track, mark Start &amp; End positions, '
+          + 'then Cut Clip to create a candidate for shot assignment.</div>';
+        _musicSources.forEach((s, si) => {
+          const dur = s.duration_sec != null
+            ? (s.duration_sec / 60 | 0) + ':' + String(Math.round(s.duration_sec % 60)).padStart(2, '0')
+            : '—';
+          const bpm = s.bpm != null ? Math.round(s.bpm) + ' BPM' : '';
+          const mark = _musicMarks[s.stem] || {};
+          const markStartTxt = mark.start != null ? mark.start.toFixed(1) + 's' : '—';
+          const markEndTxt   = mark.end   != null ? mark.end.toFixed(1)   + 's' : '—';
+          const volVal = _musicTrackVolumes[s.stem] || 0;
+          const volStyle = volVal !== 0
+            ? 'color:var(--gold);font-weight:700' : 'color:var(--dim)';
+          srcHtml += '<div class="music-src-row">'
+            + '<div class="music-src-top">'
+            + '<span class="music-src-stem">' + s.stem + '</span>'
+            + '<span class="music-src-meta">' + dur + (bpm ? ' · ' + bpm : '') + '</span>'
+            + '<label style="margin-left:auto;display:flex;align-items:center;gap:4px;font-size:0.80em">'
+            + '<span style="' + volStyle + '">vol</span>'
+            + '<input type="number" step="1" min="-18" max="0" value="' + volVal + '"'
+            + ' title="Track volume offset in dB (0 = default -6 dB base; -6 = plays at -12 dB; attenuation only)"'
+            + ' style="width:52px;background:var(--input-bg,#1e1e2e);color:' + (volVal !== 0 ? 'var(--gold)' : 'var(--text)') + ';border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.95em"'
+            + ' onchange="_musicSetTrackVolume(\'' + s.stem + '\',this.value);this.style.color=parseInt(this.value)!==0?\'var(--gold)\':\'var(--text)\'">'
+            + '</label>'
+            + '<div class="music-src-player">'
+            + '<audio id="music-src-audio-' + si + '" controls preload="none" style="width:100%;height:32px"'
+            + ' src="/serve_media?path=' + encodeURIComponent(s.path) + '"></audio>'
+            + '</div></div>'
+            + '<div class="music-src-controls">'
+            + '<button onclick="_musicMarkPos(\'' + s.stem + '\',' + si + ',\'start\')"'
+            + (mark.start != null ? ' class="active"' : '') + '>Mark Start</button>'
+            + '<span class="mark-label">In: ' + markStartTxt + '</span>'
+            + '<button onclick="_musicMarkPos(\'' + s.stem + '\',' + si + ',\'end\')"'
+            + (mark.end != null ? ' class="active"' : '') + '>Mark End</button>'
+            + '<span class="mark-label">Out: ' + markEndTxt + '</span>'
+            + '<button onclick="_musicCutClip(\'' + s.stem + '\')"'
+            + ' style="' + (mark.start != null && mark.end != null
+              ? 'background:var(--gold);color:#0d0d10;font-weight:700' : '')
+            + '">✂ Cut Clip</button>'
+            + '</div></div>';
+        });
+      }
       srcCard.innerHTML = srcHtml;
       body.appendChild(srcCard);
     }
@@ -11734,6 +11780,18 @@ placeholder="Enter your story here"></textarea>
         }
       }
     }
+  }
+
+  // ── Refresh Music Library (re-scans resources/music folder) ──
+  async function _musicRefreshLibrary() {
+    const btn = document.getElementById('music-library-refresh-btn');
+    if (btn) { btn.disabled = true; btn.textContent = '↻ …'; }
+    try {
+      const sr = await fetch('/api/music_sources?slug=' + encodeURIComponent(_musicSlug)
+        + '&ep_id=' + encodeURIComponent(_musicEpId));
+      if (sr.ok) { _musicSources = await sr.json(); }
+    } catch (_) {}
+    _musicRenderBody();
   }
 
   // ── Cut clip from source track ──
@@ -12632,7 +12690,7 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('ex-genre').value = meta.genre  || '';
     document.getElementById('save-ep-status').textContent = '';
     if (meta.story_format) {
-      const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration']);
+      const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration', 'Script.json']);
       const fmt = _ENABLED_FORMATS.has(meta.story_format) ? meta.story_format : 'continuous_narration';
       _selectedFormat = fmt;
       document.getElementById('info-format-sel-existing').value = fmt;
@@ -13503,7 +13561,7 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('info-slug').value = slug;
     updateSlugBadge(d.slug_exists, slug);
     // Format — fall back to continuous_narration if saved format is disabled
-    const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration']);
+    const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration', 'Script.json']);
     if (!_ENABLED_FORMATS.has(_selectedFormat)) _selectedFormat = 'continuous_narration';
     const fsel = document.getElementById('info-format-sel');
     fsel.value = _selectedFormat;
@@ -13583,6 +13641,7 @@ placeholder="Enter your story here"></textarea>
       documentary:           'No characters. Narrator explains over b-roll backgrounds.',
       monologue:             'Single character speaks to camera. No scene changes.',
       ssml_narration:        'Pre-authored SSML. Pipeline generates cinematic visuals. Stages 1–3 & 8 skipped.',
+      'Script.json':         'External agent supplies Script.json directly. Stages 2–3 skipped. Dialogue preserved verbatim. Runs like continuous_narration with multiple named speakers.',
     };
     document.getElementById(hintId).textContent = hints[fmt] || '';
   }
@@ -14019,11 +14078,11 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
             "artifacts": [ep_rel("stage_1_check.txt")],
         },
         "stage_2": {
-            "done": check(ep("StoryPrompt.json")),
+            "done": check(ep("StoryPrompt.json")) or _log_done(2),
             "artifacts": [ep_rel("StoryPrompt.json")],
         },
         "stage_3": {
-            "done": check(ep("Script.json")),
+            "done": check(ep("Script.json")) or _log_done(3),
             "artifacts": [ep_rel("Script.json")],
         },
         "stage_4": {
@@ -14846,10 +14905,32 @@ class Handler(BaseHTTPRequestHandler):
                     _mfdata = json.load(_mf)
                 vo_items = _mfdata.get("vo_items", [])
                 scene_tails = _mfdata.get("scene_tails", {})
+                # scene_heads: start with VOPlan values, then override with any
+                # unsaved DOM values sent by the frontend (so Generate Preview
+                # reflects changes the user has typed but not yet saved).
                 scene_heads = _mfdata.get("scene_heads", {})  # values in seconds
+                _sh_param = unquote_plus(params.get("scene_heads", [""])[0]).strip()
+                if _sh_param:
+                    try:
+                        _sh_override = json.loads(_sh_param)
+                        if isinstance(_sh_override, dict):
+                            scene_heads = {**scene_heads, **_sh_override}
+                    except Exception:
+                        pass
                 vo_dir = os.path.join(full_ep, "assets", locale, "audio", "vo")
 
-                SAMPLE_RATE   = 24000
+                # Detect sample rate from the first available WAV so the output
+                # header matches the source files.  All items in a single locale
+                # are synthesised by the same TTS engine at the same rate, so
+                # reading the first file is sufficient.  Fall back to 24000 only
+                # when no WAV exists yet (empty episode edge-case).
+                SAMPLE_RATE = 24000  # fallback
+                for _it_sr in vo_items:
+                    _wav_sr = os.path.join(vo_dir, f"{_it_sr.get('item_id','')}.wav")
+                    if os.path.isfile(_wav_sr):
+                        with _wave.open(_wav_sr) as _wf_sr:
+                            SAMPLE_RATE = _wf_sr.getframerate()
+                        break
                 BYTES_PER_SEC = SAMPLE_RATE * 2  # 16-bit mono
 
                 pcm_chunks: list[bytes] = []
@@ -14880,13 +14961,38 @@ class Handler(BaseHTTPRequestHandler):
                     prev_scene = _scn
                     try:
                         with _wave.open(_wav) as _wf:
+                            _item_rate = _wf.getframerate()
                             _pcm = _wf.readframes(_wf.getnframes())
-                            _dur = _wf.getnframes() / _wf.getframerate()
+                            _dur = _wf.getnframes() / _item_rate
                     except Exception as _wav_err:
                         raise RuntimeError(
                             f"{_iid}.wav is corrupt or unreadable: {_wav_err}. "
                             f"Re-create this item in the VO tab before generating preview."
                         )
+                    # Resample to the output rate when this item was synthesised
+                    # at a different sample rate (e.g. 16000 Hz re-gen in a 24000 Hz
+                    # episode). Without resampling the PCM byte-count is wrong and
+                    # the segment plays at the wrong speed (cartoon / fast-forward).
+                    if _item_rate != SAMPLE_RATE:
+                        try:
+                            import audioop as _audioop  # stdlib up to Python 3.12
+                            _pcm, _ = _audioop.ratecv(
+                                _pcm, 2, 1, _item_rate, SAMPLE_RATE, None)
+                        except ImportError:
+                            # Python ≥ 3.13 removed audioop — linear interpolation fallback
+                            import array as _array
+                            _src   = _array.array('h', _pcm)
+                            _ratio = SAMPLE_RATE / _item_rate
+                            _n_out = round(len(_src) * _ratio)
+                            _dst   = _array.array('h', [0] * _n_out)
+                            for _ri in range(_n_out):
+                                _pos  = _ri / _ratio
+                                _lo   = int(_pos)
+                                _hi   = min(_lo + 1, len(_src) - 1)
+                                _frac = _pos - _lo
+                                _dst[_ri] = round(
+                                    _src[_lo] * (1 - _frac) + _src[_hi] * _frac)
+                            _pcm = bytes(_dst)
                     clips_meta.append({
                         "item_id":      _iid,
                         "scene_id":     _scn,
@@ -15280,6 +15386,7 @@ class Handler(BaseHTTPRequestHandler):
             job_key = f"stream\x00{ep_dir_param}\x00{from_stage}\x00{to_stage}"
             log_path = _launch_stream_job(
                 job_key,
+                os.path.join(PIPE_DIR, ep_dir_param),
                 ["bash", "run.sh", ep_dir_param, from_stage, to_stage],
                 run_env,
                 client,
@@ -15900,7 +16007,7 @@ class Handler(BaseHTTPRequestHandler):
                 _append_tts_usage_to_status_report(slug, ep_id, write_log)
                 write_log("D", "0")
 
-            log_path = _launch_fn_job(job_key, _run_locale_job)
+            log_path = _launch_fn_job(job_key, os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id), _run_locale_job)
             try:
                 _tail_log_to_sse(self.wfile, log_path)
             except (BrokenPipeError, ConnectionResetError):
@@ -16096,7 +16203,7 @@ class Handler(BaseHTTPRequestHandler):
                 _append_tts_usage_to_status_report(slug, ep_id, write_log)
                 write_log("D", "0")
 
-            log_path = _launch_fn_job(job_key, _run_stage10_job)
+            log_path = _launch_fn_job(job_key, _ep_dir_s10, _run_stage10_job)
             try:
                 _tail_log_to_sse(self.wfile, log_path)
             except (BrokenPipeError, ConnectionResetError):
@@ -16219,7 +16326,7 @@ class Handler(BaseHTTPRequestHandler):
                 write_log("O", "\n✓ Stage 3.5 complete — VO ready for review")
                 write_log("D", "0")
 
-            log_path = _launch_fn_job(job_key, _run_stage35_job)
+            log_path = _launch_fn_job(job_key, os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id), _run_stage35_job)
             try:
                 _tail_log_to_sse(self.wfile, log_path)
             except (BrokenPipeError, ConnectionResetError):
@@ -16306,7 +16413,7 @@ class Handler(BaseHTTPRequestHandler):
                 write_log("O", "\n✓ Stage 7.5 complete — VO ready for review")
                 write_log("D", "0")
 
-            log_path = _launch_fn_job(job_key, _run_stage75_job)
+            log_path = _launch_fn_job(job_key, os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id), _run_stage75_job)
             try:
                 _tail_log_to_sse(self.wfile, log_path)
             except (BrokenPipeError, ConnectionResetError):
@@ -16837,8 +16944,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         # ── Music: return timeline JSON (GET /api/music_timeline) ────────────
-        # Authoritative sources: ShotList.json (timing) + MusicPlan.json (content).
-        # VOPlan is NOT consulted — music data lives exclusively in MusicPlan.
+        # Primary sources: ShotList.json (timing) + MusicPlan.json (content).
+        # Fallback: when MusicPlan is absent or empty, VOPlan.*.json music_items
+        # are used to seed the music index so Shot Overrides render on first load.
         elif parsed.path == "/api/music_timeline":
             params = parse_qs(parsed.query)
             slug   = params.get("slug", [""])[0].strip()
@@ -16885,6 +16993,57 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     except Exception as _mp_err_mtl:
                         print(f"  [WARN] music_timeline: MusicPlan.json: {_mp_err_mtl}")
+
+                # ── Fallback: read music_items from VOPlan when MusicPlan absent/empty ──
+                # Mirrors the CLI path in music_review_pack.py main() lines 689-693.
+                # When MusicPlan.json does not exist yet (or has no shot_overrides with
+                # both shot_id and item_id), seed the music index from VOPlan.music_items
+                # so the Shot Overrides section renders correctly on first tab load.
+                if not _midx_mtl:
+                    for _vp_path_mtl in sorted(Path(_ep_dir_mtl).glob("VOPlan.*.json")):
+                        try:
+                            _vp_mtl = json.load(open(_vp_path_mtl, encoding="utf-8"))
+                            _midx_mtl = {
+                                _mi["shot_id"]: {
+                                    "item_id": _mi["item_id"],
+                                    "shot_id": _mi["shot_id"],
+                                }
+                                for _mi in _vp_mtl.get("music_items", [])
+                                if _mi.get("shot_id") and _mi.get("item_id")
+                            }
+                            if _midx_mtl:
+                                break
+                        except Exception as _vp_err_mtl:
+                            print(f"  [WARN] music_timeline: VOPlan fallback "
+                                  f"{_vp_path_mtl.name}: {_vp_err_mtl}")
+
+                # ── Fallback: read music_items from AssetManifest when VOPlan absent/empty ──
+                # Projects that were generated without VOPlan.music_items (e.g. "script")
+                # carry music_items in AssetManifest.shared.json instead.  Check shared
+                # first, then any language-specific manifest, so Shot Overrides render
+                # on first load before any MusicPlan has been saved.
+                if not _midx_mtl:
+                    for _am_path_mtl in (
+                        [Path(_ep_dir_mtl) / "AssetManifest.shared.json"]
+                        + sorted(Path(_ep_dir_mtl).glob("AssetManifest.*.json"))
+                    ):
+                        if not _am_path_mtl.exists():
+                            continue
+                        try:
+                            _am_mtl = json.load(open(_am_path_mtl, encoding="utf-8"))
+                            _midx_mtl = {
+                                _mi["shot_id"]: {
+                                    "item_id": _mi["item_id"],
+                                    "shot_id": _mi["shot_id"],
+                                }
+                                for _mi in _am_mtl.get("music_items", [])
+                                if _mi.get("shot_id") and _mi.get("item_id")
+                            }
+                            if _midx_mtl:
+                                break
+                        except Exception as _am_err_mtl:
+                            print(f"  [WARN] music_timeline: AssetManifest fallback "
+                                  f"{_am_path_mtl.name}: {_am_err_mtl}")
 
                 # build_timeline receives no VOPlan manifest (empty dict) and no
                 # VO shot map (empty dict) — VO data is not music_timeline's concern.
@@ -17151,6 +17310,18 @@ class Handler(BaseHTTPRequestHandler):
                 ep_id = params.get("ep_id", [""])[0].strip()
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
+                # Optional DOM scene_heads override — forwarded by _loadAndMergeTl
+                # when called from _voPreviewAll, so bars match the audio preview
+                # even before the user clicks Save.
+                _tl_sh_param = unquote_plus(params.get("scene_heads", [""])[0]).strip()
+                _tl_sh_override: dict = {}
+                if _tl_sh_param:
+                    try:
+                        _parsed_sh = json.loads(_tl_sh_param)
+                        if isinstance(_parsed_sh, dict):
+                            _tl_sh_override = _parsed_sh
+                    except Exception:
+                        pass
                 ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
                 sl_path = os.path.join(ep_dir, "ShotList.json")
                 if not os.path.isfile(sl_path):
@@ -17210,7 +17381,8 @@ class Handler(BaseHTTPRequestHandler):
                             if not os.path.isfile(_sh_vp_path):
                                 _sh_vp_path = sorted(_sh_vp_list)[0]
                             _sh_vp      = json.load(open(_sh_vp_path, encoding="utf-8"))
-                            _scene_heads_map = _sh_vp.get("scene_heads", {})
+                            # DOM override takes precedence over saved VOPlan values
+                            _scene_heads_map = {**_sh_vp.get("scene_heads", {}), **_tl_sh_override}
                             if _scene_heads_map:
                                 _ep_off   = 0.0
                                 _seen_sc: set = set()
@@ -18632,6 +18804,35 @@ class Handler(BaseHTTPRequestHandler):
                                     "[vo_approve] ShotList.json update failed: %s", _sl_err)
                     # ─────────────────────────────────────────────────────────────────
 
+                    # ── Re-patch AssetManifest durations after ShotList is fixed ──────
+                    # When Stage 3.5 no longer pauses, Stages 4+5 run before VO is
+                    # approved, so AssetManifest.shared.json was written with 0
+                    # durations.  Now that ShotList has correct values, re-run
+                    # patch_manifest_durations.py to sync AssetManifest.
+                    _asset_manifest_path = os.path.join(full_ep, "AssetManifest.shared.json")
+                    if os.path.isfile(_asset_manifest_path):
+                        try:
+                            _pmd_script = os.path.join(
+                                os.path.dirname(os.path.abspath(__file__)),
+                                "patch_manifest_durations.py",
+                            )
+                            _pmd_result = subprocess.run(
+                                [sys.executable, _pmd_script, full_ep],
+                                capture_output=True, text=True, timeout=30,
+                            )
+                            if _pmd_result.returncode == 0:
+                                _log.info("[vo_approve] patch_manifest_durations ✓")
+                            else:
+                                _log.warning(
+                                    "[vo_approve] patch_manifest_durations failed: %s",
+                                    _pmd_result.stderr,
+                                )
+                        except Exception as _pmd_err:
+                            _log.warning(
+                                "[vo_approve] patch_manifest_durations error: %s", _pmd_err
+                            )
+                    # ─────────────────────────────────────────────────────────────────
+
                     # ── Cache approved WAVs ───────────────────────────────────────────
                     # Copy every approved WAV into assets/meta/vo_approved_cache/{locale}/
                     # so that a subsequent step-6 re-run restores these exact files
@@ -18969,11 +19170,36 @@ class Handler(BaseHTTPRequestHandler):
 
             import tempfile, re as _re
 
+            # ── Script.json pre-check: detect a provided Script before calling haiku ──
+            _script_data = None
+            try:
+                _parsed_sj = json.loads(story)
+                if isinstance(_parsed_sj, dict) and _parsed_sj.get("schema_id") == "Script":
+                    _sj_title   = _parsed_sj.get("title", "")
+                    _sj_proj_id = _parsed_sj.get("project_id", "")
+                    # project_id is already a validated slug (^[a-z0-9-]+$); prefer it
+                    # over a title-derived slug which can produce unexpected values.
+                    _sj_slug = _sj_proj_id if _sj_proj_id else (
+                        _re.sub(r'[^a-z0-9]+', '-', _sj_title.lower()).strip('-')[:60]
+                        if _sj_title else ""
+                    )
+                    _script_data = {
+                        "title":          _sj_title,
+                        "slug":           _sj_slug,
+                        "genre":          _parsed_sj.get("genre", ""),
+                        "story_format":   "Script.json",
+                        "metadata_found": ["schema_id", "title", "genre", "cast", "scenes"],
+                    }
+            except (json.JSONDecodeError, ValueError):
+                pass
+
             # ── SSML pre-check: detect authored SSML before calling haiku ──
             _ssml_pattern = _re.compile(
                 r'<(?:speak|voice|prosody|mstts:)\b', _re.IGNORECASE
             )
-            if _ssml_pattern.search(story[:2000]):
+            if _script_data is not None:
+                data = _script_data
+            elif _ssml_pattern.search(story[:2000]):
                 # SSML detected — skip haiku call, return ssml_narration directly
                 _ssml_title = ""
                 # Try to extract title from SSML comment
@@ -19039,9 +19265,13 @@ class Handler(BaseHTTPRequestHandler):
                     import os as _os
                     _os.unlink(tmp_path)
 
-            # Check slug uniqueness
+            # Check slug uniqueness.
+            # Script.json is exempt: its project_id is the intended slug and the
+            # project directory is expected to already exist (we are adding a new
+            # episode, not creating a new project). Renaming to "pompeii-2" would
+            # be wrong, and slug_exists=True would hide the Save button.
             slug = data.get("slug", "")
-            if slug:
+            if slug and data.get("story_format") != "Script.json":
                 projects_dir = os.path.join(PIPE_DIR, "projects")
                 if os.path.isdir(os.path.join(projects_dir, slug)):
                     data["slug_exists"] = True
@@ -19053,6 +19283,9 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     data["slug_exists"] = False
                     data["slug_suggested"] = slug
+            else:
+                data["slug_exists"] = False
+                data["slug_suggested"] = slug
 
             resp = json.dumps(data).encode()
             self.send_response(200)
@@ -19096,6 +19329,12 @@ class Handler(BaseHTTPRequestHandler):
                 # Write story.txt
                 with open(os.path.join(ep_dir, "story.txt"), "w", encoding="utf-8") as _f:
                     _f.write(story_text)
+
+                # For provided-script episodes, also write Script.json so the pipeline
+                # PREPARE stage can locate and validate it at the expected path.
+                if story_format == "Script.json":
+                    with open(os.path.join(ep_dir, "Script.json"), "w", encoding="utf-8") as _f:
+                        _f.write(story_text)
 
                 # Write meta.json with full schema (field names match what p_0.txt reads)
                 gen_seed = _random.randint(100_000_000, 999_999_999)

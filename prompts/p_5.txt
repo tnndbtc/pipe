@@ -1,5 +1,5 @@
 # ══════════════════════════════════════════════════════════════════════
-# STAGE 5 — Produce AssetManifest.shared.json + AssetManifest.en.json
+# STAGE 5 — Produce AssetManifest.shared.json + AssetManifest.{{PRIMARY_LOCALE}}.json
 # ══════════════════════════════════════════════════════════════════════
 #
 # 📥 PLACEHOLDERS (replaced by run.sh via sed before calling claude -p):
@@ -16,7 +16,7 @@
 # 📤 OUTPUT:
 #     • Stdout: progress + validation result  (web UI)
 #     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.shared.json
-#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.en.json
+#     • projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.{{PRIMARY_LOCALE}}.json
 #
 # ▶ Invoked by run.sh as:
 #     claude -p prompts/p_5_filled.txt
@@ -24,7 +24,7 @@
 
 You are Stage 5 of a 10-stage AI narrative pipeline.
 Your ONLY job: produce two valid draft manifests derived from ShotList.json —
-one shared (locale-free assets) and one locale (English VO items).
+one shared (locale-free assets) and one locale (primary-locale VO items).
 
 ---
 
@@ -368,15 +368,15 @@ Skip shots where music_item_id is null or absent.
 
 ---
 
-### File 2: AssetManifest.en.json  (English locale — VO only)
+### File 2: AssetManifest.{{PRIMARY_LOCALE}}.json  (primary locale — VO only)
 
 Required top-level fields:
   schema_id        : "AssetManifest"
   schema_version   : "1.0.0"
-  manifest_id      : "{{PROJECT_SLUG}}-{{EPISODE_ID}}-en-manifest"
+  manifest_id      : "{{PROJECT_SLUG}}-{{EPISODE_ID}}-{{PRIMARY_LOCALE}}-manifest"
   project_id       : "{{PROJECT_SLUG}}"
   episode_id       : "{{EPISODE_ID}}"
-  locale           : "en"
+  locale           : "{{PRIMARY_LOCALE}}"
   locale_scope     : "locale"
   shared_ref       : "AssetManifest.shared.json"
   shotlist_ref     : "ShotList.json"
@@ -402,13 +402,13 @@ Required fields per entry:
 **tts_prompt** per entry — copy ALL fields verbatim from VoiceCast.json:
 ```json
 {
-  "locale"             : "en",
-  "azure_voice"        : "<character[en].azure_voice from VoiceCast.json — copy exactly>",
-  "azure_style"        : "<character[en].azure_style from VoiceCast.json — omit if null or absent>",
-  "azure_style_degree" : <character[en].azure_style_degree from VoiceCast.json — copy exactly>,
-  "azure_rate"         : "<character[en].azure_rate from VoiceCast.json — copy exactly>",
-  "azure_pitch"        : "<character[en].azure_pitch from VoiceCast.json — copy exactly>",
-  "azure_break_ms"     : <character[en].azure_break_ms from VoiceCast.json — copy exactly>
+  "locale"             : "{{PRIMARY_LOCALE}}",
+  "azure_voice"        : "<character[{{PRIMARY_LOCALE}}].azure_voice from VoiceCast.json — copy exactly>",
+  "azure_style"        : "<character[{{PRIMARY_LOCALE}}].azure_style from VoiceCast.json — omit if null or absent>",
+  "azure_style_degree" : <character[{{PRIMARY_LOCALE}}].azure_style_degree from VoiceCast.json — copy exactly>,
+  "azure_rate"         : "<character[{{PRIMARY_LOCALE}}].azure_rate from VoiceCast.json — copy exactly>",
+  "azure_pitch"        : "<character[{{PRIMARY_LOCALE}}].azure_pitch from VoiceCast.json — copy exactly>",
+  "azure_break_ms"     : <character[{{PRIMARY_LOCALE}}].azure_break_ms from VoiceCast.json — copy exactly>
 }
 ```
 
@@ -417,7 +417,7 @@ verbatim from the character's locale entry. Do NOT invent voice_style, emotion,
 pace, or per-line azure_style overrides. Do NOT omit any field present in VoiceCast.json.
 
 If a character is not in VoiceCast.json:
-  - Omit all azure_* fields and leave just `"locale": "en"`
+  - Omit all azure_* fields and leave just `"locale": "{{PRIMARY_LOCALE}}"`
   - Log: "⚠ No VoiceCast entry for <speaker_id> — tts_prompt will be minimal"
 
 ### VoiceCast.json is the sole TTS authority
@@ -442,7 +442,7 @@ Write the validated shared artifact to:
   projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.shared.json
 
 Write the validated locale artifact to:
-  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.en.json
+  projects/{{PROJECT_SLUG}}/episodes/{{EPISODE_ID}}/AssetManifest.{{PRIMARY_LOCALE}}.json
 
 Print validation result:
 ```
@@ -453,7 +453,7 @@ AssetManifest.shared.json  →  VALID ✓
   sfx_items       : <count>
   music_items     : <count>
 
-AssetManifest.en.json            →  VALID ✓
+AssetManifest.{{PRIMARY_LOCALE}}.json  →  VALID ✓
   vo_items        : <count>
 ────────────────────────────────────────────────────────────
 ```

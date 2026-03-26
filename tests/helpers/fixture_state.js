@@ -157,6 +157,30 @@ function resetKW13() {
   if (fs.existsSync(packDir)) fs.rmSync(packDir, { recursive: true, force: true });
 }
 
+// KW-2g: VOPlan with music_items present, NO MusicPlan.
+// Sentinel: two shots (sc01-sh01, sc02-sh02) carry item_id in VOPlan.music_items.
+// The API must fall back to VOPlan.music_items when MusicPlan.json is absent.
+// FAILS today: API builds music_index only from MusicPlan.shot_overrides → empty →
+//   all shots get music_item_id="" → Shot Overrides section shows nothing.
+// PASSES with fix: API reads VOPlan.music_items as fallback → shots get music_item_id.
+function resetKW2g() {
+  const ep = getEpDir();
+  const vp = JSON.parse(fs.readFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), 'utf8'));
+  vp.music_items = [
+    { shot_id: 'sc01-sh01', item_id: 'music-sc01-sh01' },
+    { shot_id: 'sc02-sh02', item_id: 'music-sc02-sh02' },
+  ];
+  fs.writeFileSync(path.join(ep, 'VOPlan.en.json'), JSON.stringify(vp, null, 2));
+  // Restore canonical ShotList so timing is correct
+  fs.copyFileSync(
+    path.join(FIXTURE_EP, 'ShotList.json'),
+    path.join(ep, 'ShotList.json')
+  );
+  // No MusicPlan — this is the exact state that triggers the bug
+  const mp = path.join(ep, 'MusicPlan.json');
+  if (fs.existsSync(mp)) fs.unlinkSync(mp);
+}
+
 // KW-12 start: merged VOPlan present, SFX source fixture WAV in place, no prior cut output.
 function resetKW12() {
   const ep = getEpDir();
@@ -309,6 +333,15 @@ function resetKW22() {
   if (fs.existsSync(zhVoPlan)) fs.unlinkSync(zhVoPlan);
 }
 
+// KW-3: VOPlan with scene_heads={"sc01":0} so any DOM-supplied head value stands out.
+// VO WAVs are already present via the full fixture copy done by startTestServer.
+function resetKW3() {
+  const ep = getEpDir();
+  const vp = JSON.parse(fs.readFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), 'utf8'));
+  vp.scene_heads = { sc01: 0 };
+  fs.writeFileSync(path.join(ep, 'VOPlan.en.json'), JSON.stringify(vp, null, 2));
+}
+
 // KW-24: VOPlan + MusicPlan at episode root (correct location) + music WAVs.
 function resetKW24() {
   const ep = getEpDir();
@@ -363,10 +396,12 @@ module.exports = {
   getEpDir,
   setPipeTestDir,
   voplan,
+  resetKW3,
   musicplan,
   resetKW1,
   resetKW1a,
   resetKW2,
+  resetKW2g,
   resetKW12,
   resetKW13,
   resetKW15,

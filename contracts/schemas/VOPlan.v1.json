@@ -348,62 +348,6 @@
         }
       }
     },
-    "music_items": {
-      "type": "array",
-      "description": "One entry per shot with a non-null music_mood. item_id format: 'music-{shot_id}'. Editorial duck_intervals are written by apply_music_plan.py from approved MusicPlan.json. NOTE: render_video.py reads music timing from MusicPlan.json (shot_overrides), NOT from this field.",
-      "items": {
-        "type": "object",
-        "required": [
-          "item_id",
-          "shot_id",
-          "music_mood",
-          "duration_sec",
-          "license_type"
-        ],
-        "additionalProperties": true,
-        "properties": {
-          "item_id": {
-            "type": "string",
-            "description": "Format: music-{shot_id}"
-          },
-          "shot_id": {
-            "type": "string"
-          },
-          "music_mood": {
-            "type": "string",
-            "description": "Natural-language music direction for MusicGen (from ShotList audio_intent.music_mood)"
-          },
-          "duration_sec": {
-            "type": "number"
-          },
-          "license_type": {
-            "type": "string"
-          },
-          "start_sec": {
-            "type": "number",
-            "description": "Music start time within the shot (seconds). LLM-authored editorial intent."
-          },
-          "duck_db": {
-            "type": "number",
-            "description": "Music attenuation in dB during VO playback (e.g. -12.0)."
-          },
-          "fade_sec": {
-            "type": "number",
-            "description": "Linear ramp duration in seconds at each duck interval boundary (e.g. 0.15)."
-          },
-          "duck_intervals": {
-            "type": "array",
-            "description": "List of [t0, t1] episode-absolute intervals (seconds) during which music is ducked. Written in-place by apply_music_plan.py.",
-            "items": {
-              "type": "array",
-              "minItems": 2,
-              "maxItems": 2,
-              "items": { "type": "number" }
-            }
-          }
-        }
-      }
-    },
     "element_images": {
       "type": "array",
       "description": "Per-shot scene element image entries. Each entry describes one physical visual element identified from the shot's narration. item_id format: 'el-{shot_id}-{element-slug}'.",

@@ -12,6 +12,7 @@
 # 📥 FILES READ:
 #     {{EPISODE_DIR}}/meta.json             (all pipeline variables — source of truth)
 #     {{EPISODE_DIR}}/story.txt             (story content, used for voice casting only)
+#     {{EPISODE_DIR}}/Script.json           (if present — cast[] overrides story.txt for Script.json format)
 #     prompts/azure_tts_styles.txt          (inlined by run.sh)
 #
 # 📤 OUTPUT (stdout printed to web UI + files written to disk):
@@ -40,9 +41,10 @@ Print: `▶ [0/9] Stage 0 — Voice casting …`
 ### Step 1 — Read inputs
 
 Read these files:
-  1. `{{EPISODE_DIR}}/meta.json`  — all pipeline variables are here; use them exactly as-is
-  2. `{{EPISODE_DIR}}/story.txt`  — story content, used for voice casting only
-  3. `prompts/azure_tts_styles.txt`  — available Azure voices and styles
+  1. `{{EPISODE_DIR}}/meta.json`        — all pipeline variables are here; use them exactly as-is
+  2. `{{EPISODE_DIR}}/story.txt`        — story content (may be placeholder for Script.json format)
+  3. `{{EPISODE_DIR}}/Script.json`      — if present, cast[] overrides character discovery from story.txt
+  4. `prompts/azure_tts_styles.txt`     — available Azure voices and styles
 
 Extract these variables from meta.json:
 
@@ -77,6 +79,7 @@ Using the story file and prompts/azure_tts_styles.txt you already read:
 | `illustrated_narration` | **narrator ONLY** — characters appear visually but never speak     |
 | `documentary`           | **narrator ONLY** — no characters, narrator explains everything    |
 | `monologue`             | **protagonist ONLY** — protagonist IS the narrator; do NOT create a separate narrator entry |
+| `Script.json`           | All characters listed in Script.json cast[] — use character_id and gender exactly as given; do NOT infer additional characters from story.txt |
 
 For `episodic`: narrator is mandatory. Every episode has off-screen narration lines.
 Narrator is not a story character but must appear in VoiceCast.json with its own voice.

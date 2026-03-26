@@ -738,7 +738,7 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 - azure_style fallback chain (in order): angry→shouting→unfriendly→serious→(omit), fearful→terrified→whispering→sad→(omit), cheerful→excited→friendly→hopeful→(omit), etc.
 - For DragonHD voices (whose available_styles are archetype names like "assassin", "captain"): use `VoiceCast.json character[locale].azure_style` when no emotion fallback matches
 - Duration Matching Rule: translated text should take same time to speak as English (±20%)
-- **`item_id` must be copied byte-for-byte from `AssetManifest.en.json`** — Stage 8 produces a brand-new locale manifest but must NOT invent new item IDs. WAV filenames = `{item_id}.wav`; any deviation means TTS writes to a different filename than gen_render_plan.py looks up.
+- **`item_id` must be copied byte-for-byte from `AssetManifest.{primary_locale}.json`** — Stage 8 produces a brand-new locale manifest but must NOT invent new item IDs. WAV filenames = `{item_id}.wav`; any deviation means TTS writes to a different filename than gen_render_plan.py looks up.
 - DO NOT include `start_sec`, `end_sec` in translated vo_items
 - DO NOT translate: `search_prompt`, `ai_prompt`, `motion.description`, any `*_id` field
 
