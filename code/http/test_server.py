@@ -7616,6 +7616,7 @@ placeholder="Enter your story here"></textarea>
     if (_mbVideoEl) { _mbVideoEl.src = ''; _mbVideoEl.style.display = 'none'; }
     const _mbPlaceholder = document.getElementById('media-preview-placeholder');
     if (_mbPlaceholder) _mbPlaceholder.style.display = '';
+    const _mbPreviewWrap = document.getElementById('media-preview-wrap');
     const _mbBody = document.getElementById('media-body');
     _mbBody.innerHTML = '<div id="media-segments-wrap"></div>';
     if (_mbPreviewWrap) _mbBody.insertBefore(_mbPreviewWrap, _mbBody.firstChild);
