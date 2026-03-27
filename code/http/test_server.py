@@ -2409,6 +2409,16 @@ HTML = r"""<!DOCTYPE html>
       <option value="">—</option>
     </select>
   </div>
+  <!-- New episode ID row — shown when "＋ New episode…" is selected -->
+  <div id="run-new-ep-row" style="display:none;align-items:center;gap:8px;margin-top:4px;flex-wrap:wrap">
+    <span style="color:var(--dim);font-size:0.8em">New&nbsp;episode&nbsp;ID</span>
+    <input id="run-new-ep-id" type="text" placeholder="s01e02"
+           style="font-family:var(--mono);width:90px;padding:2px 6px;border:1px solid #444;border-radius:4px;font-size:0.9em"
+           oninput="onNewEpIdInput()">
+    <button onclick="onNewEpQuickPick('preview')" style="padding:1px 7px;font-size:0.78em;background:#2a2a3e;color:var(--dim);border:1px solid #444;border-radius:3px;cursor:pointer">preview</button>
+    <button onclick="onNewEpQuickPick('pilot')"   style="padding:1px 7px;font-size:0.78em;background:#2a2a3e;color:var(--dim);border:1px solid #444;border-radius:3px;cursor:pointer">pilot</button>
+    <span id="run-new-ep-status" style="font-size:0.78em"></span>
+  </div>
     <textarea id="story" spellcheck="false"
 placeholder="Enter your story here"></textarea>
     <div id="vc-editor" style="display:none">
@@ -3302,7 +3312,8 @@ placeholder="Enter your story here"></textarea>
   let _episodeCreated = false; // true after Create Episode completes
   let _runProjectList = [];    // cached project list for run-tab dropdowns
   let _selectedFormat  = 'continuous_narration';
-  let _usingExistingEp = false;  // true when an existing project/episode is selected
+  let _usingExistingEp = false;        // true when an existing project/episode is selected
+  let _newEpForExistingProject = false; // true when adding a new episode to an existing project
   const stageStartMs = {};   // stage number → Date.now() at start
   let _runFromStage = 0;
   let _runToStage   = 10;
@@ -3664,9 +3675,10 @@ placeholder="Enter your story here"></textarea>
     const stagesRaw    = promptEl.value.trim() || '0 10';
     let { from, to } = parseStages(stagesRaw);
 
-    // For new projects: Run auto-creates the episode if Prepare has been run.
-    // For existing projects: currentSlug/currentEpId are set by the dropdown.
-    if (!currentSlug || !currentEpId) {
+    // For new projects / new episode for existing project: Run auto-creates the
+    // episode if Prepare has been run.
+    // For existing episodes: currentSlug/currentEpId are set by the dropdown.
+    if (!currentSlug || !currentEpId || _newEpForExistingProject) {
       if (!_preparedEpId) {
         appendLine('⚠  Paste a story and click Prepare first.', 'err');
         return;
@@ -3697,8 +3709,8 @@ placeholder="Enter your story here"></textarea>
     hideStageProgress();
     setStatus('running');
 
-    // ── Auto-create episode dir for new projects (Prepare → Run flow) ────────
-    if (!currentSlug || !currentEpId) {
+    // ── Auto-create episode dir for new projects / new episode for existing project ──
+    if (!currentSlug || !currentEpId || _newEpForExistingProject) {
       const _slug = document.getElementById('info-slug').value.trim();
       appendLine(`Creating episode ${_slug}/${_preparedEpId}…`, 'sys');
       try {
@@ -8390,11 +8402,18 @@ placeholder="Enter your story here"></textarea>
 
       const typeOpts = ['image','video'].map(t =>
         `<option value="${t}"${seg.type === t ? ' selected' : ''}>${t}</option>`).join('');
+      const _transOpts = [
+        ['none','— cut'],['dissolve_short','dissolve S'],['dissolve_medium','dissolve M'],
+        ['dissolve_long','dissolve L'],['fade_black','fade ⬛'],['flash_white','flash ⬜'],
+      ].map(([v,l]) => `<option value="${v}"${(seg.transition||'none')===v?' selected':''}>${l}</option>`).join('');
+      const _transStyle = idx === 0 ? 'visibility:hidden' : '';
       segsHtml += `
         <div class="media-segment-row" style="display:flex;gap:8px;align-items:flex-start;border:1px solid var(--border);border-radius:4px;padding:6px;margin-bottom:5px">
           <div style="display:flex;flex-direction:column;gap:3px;flex-shrink:0;padding-top:2px">
             <select class="media-seg-type" onchange="mediaSegSetField(${idx},'type',this.value);mediaRenderSegments()"
                     style="font-size:0.75em;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--fg)">${typeOpts}</select>
+            <select title="Transition into this clip" onchange="mediaSegSetField(${idx},'transition',this.value)"
+                    style="font-size:0.72em;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--fg);${_transStyle}">${_transOpts}</select>
           </div>
           ${thumb}
           <div style="flex:1;min-width:0">
@@ -8681,6 +8700,7 @@ placeholder="Enter your story here"></textarea>
                 clip_out:     t === 'video' ? (s.clip_out ?? s.end_sec   ?? null) : null,
                 hold_sec:     t === 'image' ? (s.hold_sec  ?? null) : null,
                 animation:    t === 'image' ? (s.animation_type || s.animation || 'none') : null,
+                transition:   s.transition || 'none',
               };
             });
           }
@@ -8962,6 +8982,7 @@ placeholder="Enter your story here"></textarea>
         path:         s.path         || null,
         clip_id:      s.clip_id      || null,
         duration_sec: s.duration_sec || null,
+        transition:   s.transition   || 'none',
       };
       if (_saveType === 'video') {
         const inSec  = s.clip_in  ?? 0;
@@ -13081,6 +13102,7 @@ placeholder="Enter your story here"></textarea>
       epSel.disabled = true;
       epSel.innerHTML = '<option value="">—</option>';
       _usingExistingEp = false;
+      _newEpForExistingProject = false;
       currentSlug = null;
       currentEpId = null;
       _preparedMeta = null;
@@ -13089,6 +13111,7 @@ placeholder="Enter your story here"></textarea>
       document.getElementById('info-bar').classList.remove('visible');
       document.getElementById('existing-ep-bar').style.display = 'none';
       document.getElementById('btn-prepare').style.display = '';
+      document.getElementById('run-new-ep-row').style.display = 'none';
       storyEl.value = '';
       outputEl.innerHTML = '<span class="sys">Ready. Paste a story above and press Run.</span>\n';
       document.getElementById('save-new-ep-row').style.display = 'none';
@@ -13105,8 +13128,14 @@ placeholder="Enter your story here"></textarea>
       o.value = ep.id; o.textContent = ep.id;
       epSel.appendChild(o);
     });
+    // Add "＋ New episode…" option at the end
+    const _newEpOpt = document.createElement('option');
+    _newEpOpt.value = '__new__'; _newEpOpt.textContent = '＋ New episode…';
+    epSel.appendChild(_newEpOpt);
 
     _usingExistingEp = true;
+    _newEpForExistingProject = false;
+    document.getElementById('run-new-ep-row').style.display = 'none';
     document.getElementById('info-bar').classList.remove('visible');
     document.getElementById('existing-ep-bar').style.display = 'block';
     document.getElementById('btn-prepare').style.display = 'none';
@@ -13123,11 +13152,75 @@ placeholder="Enter your story here"></textarea>
   function onRunEpisodeChange() {
     const slug = document.getElementById('run-project-sel').value;
     const epId = document.getElementById('run-episode-sel').value;
+
+    if (epId === '__new__') {
+      // ── New episode for existing project ──────────────────────────────────
+      _usingExistingEp = false;
+      _newEpForExistingProject = true;
+      currentSlug = slug;
+      // Do NOT null currentEpId — other tabs (Media, SFX, Music) read it for their own
+      // sync and would show stale data if it is suddenly null.  The new-episode create
+      // flow is gated on _newEpForExistingProject instead of !currentEpId.
+      _preparedEpId = null;
+      _episodeCreated = false;
+      document.getElementById('existing-ep-bar').style.display = 'none';
+      document.getElementById('btn-prepare').style.display = '';
+      document.getElementById('info-bar').classList.remove('visible');
+      document.getElementById('save-new-ep-row').style.display = 'none';
+      // Show and pre-fill new episode ID input
+      const newRow = document.getElementById('run-new-ep-row');
+      newRow.style.display = 'flex';
+      const epInput = document.getElementById('run-new-ep-id');
+      epInput.dataset.userEdited = '';
+      setRunBtnEnabled(false);
+      storyEl.value = '';
+      outputEl.innerHTML = '<span class="sys">Type the new episode ID above, paste a story, then click Prepare.</span>\n';
+      // Pre-fill episode ID from server
+      fetch('/api/next_episode_id?slug=' + encodeURIComponent(slug))
+        .then(r => r.json())
+        .then(d => {
+          if (!epInput.dataset.userEdited) {
+            epInput.value = d.next_ep_id || 's01e01';
+            onNewEpIdInput();
+          }
+        })
+        .catch(() => {});
+      return;
+    }
+
+    // ── Normal existing episode selected ──────────────────────────────────────
+    document.getElementById('run-new-ep-row').style.display = 'none';
+    _newEpForExistingProject = false;
     if (slug && epId) loadEpisodeDetails(slug, epId);
     // Refresh YouTube tab if it is currently visible
     if (document.getElementById('panel-youtube').style.display !== 'none') {
       initYoutubeTab();
     }
+  }
+
+  function onNewEpIdInput() {
+    const slug   = document.getElementById('run-project-sel').value;
+    const epId   = document.getElementById('run-new-ep-id').value.trim();
+    const hint   = document.getElementById('run-new-ep-status');
+    const input  = document.getElementById('run-new-ep-id');
+    input.dataset.userEdited = '1';
+    if (!epId) { hint.textContent = ''; return; }
+    const proj   = _runProjectList.find(p => p.slug === slug);
+    const exists = proj && proj.episodes.some(e => e.id === epId);
+    if (exists) {
+      hint.textContent = '⚠ already exists';
+      hint.style.color = 'var(--red,#e06c75)';
+    } else {
+      hint.textContent = '✓ available';
+      hint.style.color = 'var(--green,#98c379)';
+    }
+  }
+
+  function onNewEpQuickPick(name) {
+    const input = document.getElementById('run-new-ep-id');
+    input.value = name;
+    input.dataset.userEdited = '1';
+    onNewEpIdInput();
   }
 
   // ── Prepare button ───────────────────────────────────────────────────────────
@@ -13152,6 +13245,20 @@ placeholder="Enter your story here"></textarea>
       _updateMediaConfigPanel(_selectedFormat);
       applyPreparedMeta(d);
       document.getElementById('info-bar').classList.add('visible');
+
+      // ── New episode for existing project: lock slug, use user-typed ep ID ──
+      if (_newEpForExistingProject) {
+        const lockedSlug = document.getElementById('run-project-sel').value;
+        document.getElementById('info-slug').value = lockedSlug;
+        const customEpId = document.getElementById('run-new-ep-id').value.trim() || 's01e01';
+        _preparedEpId = customEpId;
+        const epEl = document.getElementById('info-ep-id');
+        if (epEl) epEl.textContent = _preparedEpId;
+        document.getElementById('save-new-ep-row').style.display = 'none';
+        setRunBtnEnabled(true);
+        return;
+      }
+
       // For new projects: fetch next episode ID and show Create Episode button
       const _slug = document.getElementById('info-slug').value.trim();
       if (_slug && !d.slug_exists) {
@@ -13211,6 +13318,7 @@ placeholder="Enter your story here"></textarea>
     currentSlug = d.slug;
     currentEpId = d.ep_id;
     _episodeCreated = true;
+    _newEpForExistingProject = false;  // episode now exists; no longer in "new episode" mode
     document.getElementById('save-new-ep-row').style.display = '';
     // Refresh project dropdown so it reflects the new project
     loadRunProjects().then(() => {

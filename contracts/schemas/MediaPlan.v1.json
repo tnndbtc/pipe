@@ -64,6 +64,13 @@
             "type": ["number", "null"],
             "minimum": 0,
             "description": "Rendered duration of this segment (seconds). null = derive from clip or hold_sec."
+          },
+          "transition": {
+            "type": ["string", "null"],
+            "default": "none",
+            "enum": ["none", "dissolve_short", "dissolve_medium", "dissolve_long",
+                     "fade_black", "flash_white", null],
+            "description": "Transition applied at the START of this segment (i.e. the cut from the previous segment into this one). Ignored for the first segment."
           }
         }
       }

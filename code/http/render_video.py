@@ -1256,6 +1256,149 @@ def generate_black_frame(shots_dir: Path, fps: int) -> Path:
     return path
 
 
+# ── Shot-stitch transitions ────────────────────────────────────────────────────
+
+# Durations (seconds) for each dissolve variant
+_DISSOLVE_DURATIONS: dict[str, float] = {
+    "dissolve_short":  0.3,
+    "dissolve_medium": 0.5,
+    "dissolve_long":   1.0,
+}
+# Duration of the inserted colour clip for hard-stop transitions
+_FLASH_DURATIONS: dict[str, float] = {
+    "fade_black":  0.5,
+    "flash_white": 0.1,
+}
+
+
+def _make_color_clip(path: Path, color: str, dur: float, fps: int,
+                     w: int, h: int, sample_rate: int) -> None:
+    """Generate a solid-colour silent clip (used for fade-through-black / white flash)."""
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c={color}:size={w}x{h}:rate={fps}:duration={dur:.3f}",
+        "-f", "lavfi", "-i", f"anullsrc=r={sample_rate}:cl=stereo",
+        "-t", f"{dur:.3f}",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ar", str(sample_rate),
+        "-shortest", str(path),
+    ], capture_output=True, text=True, check=False)
+
+
+def _concat_with_transitions(
+    clip_files:  list,
+    clip_durs:   list,
+    clip_trans:  list,
+    output:      Path,
+    tmp:         Path,
+    fps:         int,
+    w:           int,
+    h:           int,
+    sample_rate: int,
+) -> subprocess.CompletedProcess:
+    """
+    Join *clip_files* with per-boundary transitions.
+
+    clip_trans[i]  = transition keyword at the start of clip i
+                     (clip_trans[0] is always ignored — no "before first clip").
+    Supported values:
+        "none"           → hard cut  (stream-copy concat, fastest)
+        "dissolve_short" → 0.3 s xfade/acrossfade
+        "dissolve_medium"→ 0.5 s xfade/acrossfade
+        "dissolve_long"  → 1.0 s xfade/acrossfade
+        "fade_black"     → 0.5 s black clip inserted between the two clips (hard cuts)
+        "flash_white"    → 0.1 s white clip inserted between the two clips (hard cuts)
+    """
+    n = len(clip_files)
+
+    # ── Fast path: no transitions ──────────────────────────────────────────────
+    if all((clip_trans[i] or "none") == "none" for i in range(1, n)):
+        lst = tmp / "concat.txt"
+        lst.write_text("".join(f"file '{p}'\n" for p in clip_files))
+        return subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+             "-i", str(lst), "-c", "copy", str(output)],
+            capture_output=True, text=True,
+        )
+
+    # ── Expand: insert colour clips for fade_black / flash_white ──────────────
+    exp_files: list = [clip_files[0]]
+    exp_durs:  list = [clip_durs[0]]
+    exp_trans: list = ["none"]
+
+    for i in range(1, n):
+        t = clip_trans[i] or "none"
+        if t in _FLASH_DURATIONS:
+            color    = "black" if t == "fade_black" else "white"
+            dur_fd   = _FLASH_DURATIONS[t]
+            fd_path  = tmp / f"fade_{i:04d}_{color}.mp4"
+            _make_color_clip(fd_path, color, dur_fd, fps, w, h, sample_rate)
+            exp_files.append(fd_path);       exp_durs.append(dur_fd);      exp_trans.append("none")
+            exp_files.append(clip_files[i]); exp_durs.append(clip_durs[i]); exp_trans.append("none")
+        else:
+            exp_files.append(clip_files[i]); exp_durs.append(clip_durs[i]); exp_trans.append(t)
+
+    # ── If still no dissolves, concat-copy is enough ──────────────────────────
+    if all((exp_trans[i] or "none") == "none" for i in range(1, len(exp_files))):
+        lst = tmp / "concat.txt"
+        lst.write_text("".join(f"file '{p}'\n" for p in exp_files))
+        return subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+             "-i", str(lst), "-c", "copy", str(output)],
+            capture_output=True, text=True,
+        )
+
+    # ── Build filter_complex with chained xfade / concat ──────────────────────
+    m = len(exp_files)
+    ffmpeg_inputs: list = []
+    for p in exp_files:
+        ffmpeg_inputs += ["-i", str(p)]
+
+    parts:   list  = []
+    cur_v          = "[0:v]"
+    cur_a          = "[0:a]"
+    cum_dur: float = exp_durs[0]
+
+    for i in range(1, m):
+        t  = exp_trans[i] or "none"
+        d  = exp_durs[i]
+        lv = f"v{i}"
+        la = f"a{i}"
+
+        if t == "none":
+            parts.append(f"{cur_v}[{i}:v]concat=n=2:v=1:a=0[{lv}]")
+            parts.append(f"{cur_a}[{i}:a]concat=n=2:v=0:a=1[{la}]")
+            cum_dur += d
+        else:
+            td     = _DISSOLVE_DURATIONS[t]
+            offset = max(0.0, cum_dur - td)
+            parts.append(
+                f"{cur_v}[{i}:v]xfade=transition=fade:"
+                f"duration={td:.3f}:offset={offset:.3f},format=yuv420p[{lv}]"
+            )
+            parts.append(f"{cur_a}[{i}:a]acrossfade=d={td:.3f}[{la}]")
+            cum_dur = cum_dur + d - td   # xfade overlaps the two clips by td
+
+        cur_v = f"[{lv}]"
+        cur_a = f"[{la}]"
+
+    filter_complex = ";".join(parts)
+    print(f"  [transitions] filter_complex built ({len(parts)} filter parts for {m} clips)")
+
+    return subprocess.run(
+        ["ffmpeg", "-y"]
+        + ffmpeg_inputs
+        + [
+            "-filter_complex", filter_complex,
+            "-map", cur_v, "-map", cur_a,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", str(sample_rate),
+            str(output),
+        ],
+        capture_output=True, text=True,
+    )
+
+
 # ── Concat + loudnorm ──────────────────────────────────────────────────────────
 
 def concat_to_mp4(
@@ -1721,6 +1864,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as _tmp_dir:
         _tmp = Path(_tmp_dir)
         _clip_files: list = []
+        _clip_durs:  list = []   # parallel: rendered duration of each clip in _clip_files
+        _clip_trans: list = []   # parallel: transition keyword at the *start* of each clip
 
         # ── 5. Build video clips from segments ──────────────────────────────
         if not media_segments:
@@ -1734,6 +1879,8 @@ def main() -> None:
             ], capture_output=True, text=True)
             if _r.returncode == 0:
                 _clip_files.append(_bp)
+                _clip_durs.append(total_dur)
+                _clip_trans.append("none")
                 print(f"  [clip] black placeholder {total_dur:.3f}s ok")
             else:
                 print(f"[ERROR] black placeholder failed: {_r.stderr[-300:]}", file=sys.stderr)
@@ -1764,6 +1911,8 @@ def main() -> None:
                     ], capture_output=True, text=True)
                     if _r.returncode == 0:
                         _clip_files.append(_cpath)
+                        _clip_durs.append(_sdur)
+                        _clip_trans.append(_seg.get("transition") or "none")
                     continue
 
                 if _stype == "image":
@@ -1802,26 +1951,26 @@ def main() -> None:
                     ], capture_output=True, text=True)
                     if _r2.returncode == 0:
                         _clip_files.append(_cpath)
+                        _clip_durs.append(_sdur)
+                        _clip_trans.append(_seg.get("transition") or "none")
                         print(f"  [warn] seg {_si}: black fallback")
                     continue
 
                 _clip_files.append(_cpath)
+                _clip_durs.append(_sdur)
+                _clip_trans.append(_seg.get("transition") or "none")
                 print(f"  [clip] seg {_si}: {_stype} {_sdur:.3f}s ok")
 
         if not _clip_files:
             print("[ERROR] No clips generated.", file=sys.stderr)
             sys.exit(1)
 
-        # ── 6. Concatenate clips ─────────────────────────────────────────────
-        _concat_list  = _tmp / "concat.txt"
+        # ── 6. Concatenate clips (with optional transitions) ─────────────────
         _concat_video = _tmp / "concat.mp4"
-        with open(_concat_list, "w") as _cf:
-            for _cp in _clip_files:
-                _cf.write(f"file '{_cp}'\n")
-        _result = subprocess.run([
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", str(_concat_list), "-c", "copy", str(_concat_video)
-        ], capture_output=True, text=True)
+        _result = _concat_with_transitions(
+            _clip_files, _clip_durs, _clip_trans,
+            _concat_video, _tmp, FPS, W, H, SAMPLE_RATE,
+        )
         if _result.returncode != 0:
             print(f"[ERROR] concat failed: {_result.stderr[-500:]}", file=sys.stderr)
             sys.exit(1)
