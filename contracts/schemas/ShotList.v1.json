@@ -155,20 +155,6 @@
           ],
           "description": "DEPRECATED — use vo_item_ids (array) instead. Single item_id from AssetManifest.{locale}.vo_items[]. Retained for backward compatibility with ShotLists produced before vo_item_ids was introduced. Plan builders should prefer vo_item_ids; if only vo_item_id is present, treat it as vo_item_ids: [vo_item_id]."
         },
-        "sfx_item_ids": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "Ordered list of item_id values from AssetManifest.shared.sfx_items[] for this shot. One entry per sfx_tag. Format: 'sfx-{shot_id}-{NNN}' (NNN zero-padded). Use an empty array when the shot has no SFX. Carried into RenderPlan.shots[].sfx_asset_ids[] by the plan builder."
-        },
-        "music_item_id": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "item_id from AssetManifest.shared.music_items[] for this shot's background music. Format: 'music-{shot_id}'. Null when music_mood is null. Carried into RenderPlan.shots[].music_asset_id by the plan builder."
-        },
         "vo_speaker_id": {
           "type": [
             "string",

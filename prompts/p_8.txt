@@ -167,7 +167,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
     "project_id":          "{{PROJECT_SLUG}}",
     "episode_id":          "{{EPISODE_ID}}",
     "locale":              "<locale>",
-    "locale_scope":        "locale",
+    "locale_scope":        "merged",
     "shared_ref":          "AssetManifest.shared.json",
     "shotlist_ref":        "ShotList.json",
     "character_packs":     [],
@@ -290,7 +290,7 @@ For each locale OTHER than "{{PRIMARY_LOCALE}}":
       • Faithful meaning takes absolute priority over exact timing
       • Do NOT pad with meaningless syllables or invented content
 
-  ⚠️  DO NOT include: music_items, sfx_items — those live in the shared manifest.
+  ⚠️  DO NOT include: music_items, sfx_items — those are no longer in the manifest; music and SFX assignments are owned by MusicPlan/SfxPlan.
   ⚠️  DO NOT translate: search_prompt, ai_prompt, motion.description.
 
   **canon_diff**: added_characters[].role,

@@ -368,12 +368,16 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
     missing_music = 0
     any_timing_missing = False
 
-    # Pre-compute render_id for each shot (for shot-continuity fade decisions)
+    # Pre-compute render_id for each shot (for shot-continuity fade decisions).
+    # Check music_item_id_override FIRST so that user assignments made before
+    # "Confirm" (no MusicPlan.json on disk yet) are honoured even when
+    # music_item_id is still empty (VOPlan has no music_items seeding the index).
     def _resolve_render_id(entry):
+        override = entry.get("music_item_id_override")
+        if override:
+            return override
         mid = entry.get("music_item_id")
-        if not mid:
-            return None
-        return entry.get("music_item_id_override", mid)
+        return mid if mid else None
 
     render_ids = [_resolve_render_id(e) for e in timeline_shots]
 
@@ -560,58 +564,65 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
 
 # ── Override application ─────────────────────────────────────────────────────
 
-def apply_music_plan_overrides(timeline_shots, override_list, source_name, vo_shot_map):
-    """Apply a list of MusicPlan shot_override dicts to timeline_shots in-place.
+def apply_music_plan_overrides(timeline_shots, segment_list, source_name, vo_shot_map):
+    """Apply a list of MusicPlan music_segment dicts to timeline_shots in-place.
+
+    Each segment is matched to a timeline entry by episode-absolute start_sec/end_sec
+    overlap (v2 schema).  No shot_id or item_id lookups are performed.
 
     Parameters
     ----------
     timeline_shots : list[dict]  — in-memory timeline built by build_timeline()
-    override_list  : list[dict]  — shot_overrides array from MusicPlan.json or payload
+    segment_list   : list[dict]  — shot_overrides array from MusicPlan.json or payload
+                                   Each entry has episode-absolute start_sec / end_sec.
     source_name    : str         — label used in log messages ("MusicPlan.json", etc.)
     vo_shot_map    : dict        — {shot_id: [vo_item, …]} for duck-interval recompute
     """
-    ovr_by_shot = {o["shot_id"]: o
-                   for o in override_list
-                   if "shot_id" in o}
-    ovr_by_item = {o["item_id"]: o
-                   for o in override_list
-                   if "item_id" in o}
     applied = 0
-    for entry in timeline_shots:
-        shot_id = entry.get("shot_id", "")
-        music_item_id = entry.get("music_item_id", "")
-        ovr = ovr_by_shot.get(shot_id) or ovr_by_item.get(music_item_id)
-        if ovr is not None:
-            if "duck_db" in ovr:
-                entry["duck_db"] = float(ovr["duck_db"])
-            if "fade_sec" in ovr:
-                entry["fade_sec"] = float(ovr["fade_sec"])
-            if "start_sec" in ovr:
-                # MusicPlan stores episode-absolute coords; convert to within-shot
-                _shot_offset = float(entry.get("offset_sec", 0.0))
-                entry["start_sec"] = max(0.0, float(ovr["start_sec"]) - _shot_offset)
-            if "end_sec" in ovr:
-                # MusicPlan stores episode-absolute coords; convert to within-shot.
+    for seg in segment_list:
+        seg_start = float(seg.get("start_sec", 0.0))
+        seg_end   = float(seg.get("end_sec", 0.0))
+
+        # Find the timeline entry whose episode window overlaps this segment.
+        for entry in timeline_shots:
+            entry_start = float(entry.get("offset_sec", 0.0))
+            entry_end   = entry_start + float(entry.get("duration_sec", 0.0))
+            if seg_start >= entry_end or seg_end <= entry_start:
+                continue
+
+            shot_id = entry.get("shot_id", "")
+            _shot_offset = float(entry.get("offset_sec", 0.0))
+
+            if "duck_db" in seg:
+                entry["duck_db"] = float(seg["duck_db"])
+            if "fade_sec" in seg:
+                entry["fade_sec"] = float(seg["fade_sec"])
+            # start_sec and end_sec in the segment are episode-absolute;
+            # convert to within-shot coordinates for the renderer.
+            if "start_sec" in seg:
+                entry["start_sec"] = max(0.0, seg_start - _shot_offset)
+            if "end_sec" in seg:
                 # Store as music_end_sec (separate from shot duration_sec to avoid
                 # corruption).
-                _shot_offset = float(entry.get("offset_sec", 0.0))
-                entry["music_end_sec"] = max(0.0, float(ovr["end_sec"]) - _shot_offset)
-            if "music_asset_id" in ovr:
+                entry["music_end_sec"] = max(0.0, seg_end - _shot_offset)
+            if "music_asset_id" in seg:
                 # Store override separately — keep original music_item_id intact.
                 # Renderer uses _override for audio selection.
-                entry["music_item_id_override"] = ovr["music_asset_id"]
+                entry["music_item_id_override"] = seg["music_asset_id"]
             # Recompute duck intervals only if fade_sec changed (which affects
             # the margin around each VO line). Use manifest vo_items timing.
-            if "fade_sec" in ovr:
+            if "fade_sec" in seg:
                 _new_fade = float(entry.get("fade_sec", DEFAULT_FADE_SEC))
                 _vo_items = vo_shot_map.get(shot_id, [])
                 if _vo_items:
                     entry["duck_intervals"] = compute_duck_intervals(
                         _vo_items, _new_fade,
-                        shot_start_offset_sec=float(entry.get("offset_sec", 0.0)))
+                        shot_start_offset_sec=_shot_offset)
             applied += 1
+            break  # one segment → one timeline entry
+
     if applied:
-        print(f"  [INFO] Applied {applied} user override(s) from {source_name}")
+        print(f"  [INFO] Applied {applied} user segment(s) from {source_name}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -629,7 +640,7 @@ def parse_args():
                         "Default: assets/music/MusicReviewPack/ under the episode.")
     p.add_argument("--overrides", default=None, metavar="PATH",
                    help="JSON file with user overrides (shot_overrides array). "
-                        "Each entry: {item_id, duck_db, fade_sec, start_sec, music_asset_id}. "
+                        "Each entry: {start_sec, end_sec, duck_db, fade_sec, music_asset_id}. "
                         "Applied on top of manifest values before rendering.")
     p.add_argument("--preview-only", action="store_true",
                    help="Only regenerate preview_audio.wav (skip timeline.txt).")
@@ -685,12 +696,9 @@ def main():
         if sid:
             vo_shot_map.setdefault(sid, []).append(vo)
 
-    # Index music_items by shot_id
+    # music_items no longer stored in VOPlan manifest; MusicPlan is the source of truth.
+    # music_index starts empty — music bars only appear after a MusicPlan is created.
     music_index = {}
-    for mi in manifest.get("music_items", []):
-        sid = mi.get("shot_id", "")
-        if sid:
-            music_index[sid] = mi
 
     # Load loop candidates (optional)
     episode_dir = PIPE_DIR / "projects" / project_id / "episodes" / episode_id
@@ -739,9 +747,9 @@ def main():
         try:
             with open(music_plan_path, encoding="utf-8") as f:
                 _loaded_music_plan = json.load(f)
-            plan_overrides = _loaded_music_plan.get("shot_overrides", [])
-            if plan_overrides:
-                apply_music_plan_overrides(timeline_shots, plan_overrides, "MusicPlan.json", vo_shot_map)
+            plan_segments = _loaded_music_plan.get("shot_overrides", [])
+            if plan_segments:
+                apply_music_plan_overrides(timeline_shots, plan_segments, "MusicPlan.json", vo_shot_map)
         except Exception as exc:
             print(f"  [WARN] Could not read MusicPlan.json: {exc}", file=sys.stderr)
 

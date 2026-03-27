@@ -378,22 +378,37 @@ def main():
         return
 
     # ── Respect Music-tab user assignments (MusicPlan.json) ──────────────────
-    # If the user has already assigned custom clips to shots via the Music tab,
-    # skip those shots entirely so gen_music_clip does not overwrite their work.
+    # If the user has already assigned custom clips to segments via the Music tab,
+    # skip the overlapping music_items so gen_music_clip does not overwrite their work.
+    # v2 schema: shot_overrides[] with episode-absolute start_sec/end_sec.
     _user_assigned_items: set = set()
     _music_plan_path = out_dir.parent / "MusicPlan.json"
     if _music_plan_path.exists() and not getattr(args, "ignore_music_plan", False):
         try:
             with open(_music_plan_path, encoding="utf-8") as _mpf:
                 _music_plan = json.load(_mpf)
-            for _ovr in _music_plan.get("shot_overrides", []):
-                _iid = _ovr.get("item_id")
-                if _iid:
-                    _user_assigned_items.add(_iid)
+            _segments = _music_plan.get("shot_overrides", [])
+            # A segment with music_asset_id, clip_start_sec, or clip_duration_sec
+            # represents a user-assigned clip.  Mark all music_items whose
+            # episode-absolute window overlaps such a segment as user-assigned.
+            _assigned_segments = [
+                s for s in _segments
+                if s.get("music_asset_id") or s.get("clip_start_sec") is not None
+                   or s.get("clip_duration_sec") is not None
+            ]
+            for _mi in music_items:
+                _item_start = float(_mi.get("start_sec", 0.0))
+                _item_end   = _item_start + float(_mi.get("duration_sec", 0.0))
+                for _seg in _assigned_segments:
+                    _seg_start = float(_seg.get("start_sec", 0.0))
+                    _seg_end   = float(_seg.get("end_sec", 0.0))
+                    if _seg_start < _item_end and _seg_end > _item_start:
+                        _user_assigned_items.add(_mi["item_id"])
+                        break
             if _user_assigned_items:
                 print(
                     f"  [INFO] MusicPlan.json found — "
-                    f"{len(_user_assigned_items)} shot(s) have user-assigned clips "
+                    f"{len(_user_assigned_items)} item(s) have user-assigned clips "
                     f"and will be skipped.  Pass --ignore-music-plan to override."
                 )
         except Exception as _exc:

@@ -786,6 +786,9 @@ for N in 1 2 3 4 5 6 7 8 9; do
         echo "  [3.5c] Checking TTS accuracy with Whisper…"
         python3 "${code_dir}/whisper_compare.py" "${EP_DIR}" "${_s35_primary}" 2>&1 | tee -a "$_s35_log" || true
         # || true — Whisper failure must never block the pipeline
+        # Contract validation — warn only (Stage 3.5 is a preview pass)
+        python3 "contracts/tools/verify_contracts.py" \
+          "${EP_DIR}/VOPlan.${_s35_primary}.json" || true
 
         echo ""
         echo "══════════════════════════════════════════════════════════════"
@@ -830,6 +833,9 @@ for N in 1 2 3 4 5 6 7 8 9; do
           --scaffold "${EP_DIR}/ShotList_scaffold.json" \
           --output   "${EP_DIR}/ShotList.json" \
           --fix
+        # Contract validation — hard stop (downstream stages are meaningless with a broken ShotList)
+        python3 "contracts/tools/verify_contracts.py" "${EP_DIR}/ShotList.json" || {
+          echo "✗ ShotList.json failed contract validation — aborting"; exit 1; }
         # Patch duration_sec from approved VO timings (replaces LLM placeholder 0s)
         _s4_primary="${PRIMARY_LOCALE:-en}"
         if python3 "${code_dir}/check_vo_approved.py" "${EP_DIR}" "${_s4_primary}"; then
@@ -885,6 +891,10 @@ for N in 1 2 3 4 5 6 7 8 9; do
             python3 "${code_dir}/patch_vo_draft_timings.py" \
               "${EP_DIR}" --locale "${_s5_locale}" || true
           fi
+          # Contract validation — hard stop (catches writer bugs before TTS/render stages)
+          python3 "contracts/tools/verify_contracts.py" \
+            "${EP_DIR}/VOPlan.${_s5_locale}.json" || {
+            echo "✗ VOPlan.${_s5_locale}.json failed contract validation — aborting"; exit 1; }
         done
         # Patch sfx/music/video-search duration fields from authoritative ShotList
         echo "  [5] Patching AssetManifest.shared.json duration fields from ShotList.json…"

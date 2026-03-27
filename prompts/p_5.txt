@@ -80,9 +80,6 @@ Required top-level fields:
   vo_items        : []   ← always empty; VO lives in locale manifests
   character_packs : [...]
   backgrounds     : [...]
-  sfx_items       : [...]   ← optional; include if any SFX in ShotList
-  music_items     : [...]   ← optional; include if any music in ShotList
-
 Derive directly from ShotList.json:
   character_packs : one entry per unique character across all shots
   backgrounds     : one entry per unique background_id across all shots
@@ -325,47 +322,6 @@ Never rename, abbreviate, or reformat them.
   Characters:  { "type": "walk|idle|gesture|...", "description": "...",
                  "participants": ["<char_id>"], "duration_sec": <n>, "style": "..." }
 
-#### sfx_items[] — one entry per (shot, sfx_tag) pair
-
-Derive from ShotList.shots[].audio_intent.sfx_item_ids.
-For each shot, iterate sfx_item_ids in order (parallel with sfx_tags[]):
-
-Required fields per entry:
-  item_id      : the id from sfx_item_ids (e.g. "sfx-s01-sh01-001")
-  shot_id      : the shot's shot_id
-  tag          : expand the corresponding sfx_tags[] string into a full
-                 natural-language description suitable for an audio
-                 generation model — add acoustic context from the scene
-                 (e.g. "stone scraping" → "stone scraping echoing in an
-                 ancient stone chamber with distant torchlight ambience")
-  duration_sec : copy from shot.duration_sec
-  license_type : "commercial_reusable"
-
-Skip shots where sfx_item_ids is absent or [].
-
-#### music_items[] — one entry per shot with non-null music_item_id
-
-Derive from ShotList.shots[].audio_intent.music_item_id.
-For each shot where music_item_id is not null:
-
-Required fields per entry:
-  item_id      : the shot's music_item_id (e.g. "music-s01-sh02")
-  shot_id      : the shot's shot_id
-  music_mood   : copy from shot.audio_intent.music_mood
-  duration_sec : copy from shot.duration_sec
-  license_type : "commercial_reusable"
-
-Optional timing fields per entry (author these with editorial intent):
-  start_sec    : when music starts within the shot, in seconds — almost always 0.0
-  duck_db      : music attenuation in dB during VO (e.g. -12.0; deeper = -18.0 for
-                 intimate scenes; 0 = no ducking for action/ambience-only shots)
-  fade_sec     : ramp duration at each duck boundary (e.g. 0.15)
-
-Note: duck_intervals are NOT included here — they are computed by manifest_merge.py
-after post_tts_analysis.py has measured actual WAV durations.
-
-Skip shots where music_item_id is null or absent.
-
 ---
 
 ### File 2: AssetManifest.{{PRIMARY_LOCALE}}.json  (primary locale — VO only)
@@ -450,8 +406,6 @@ Print validation result:
 AssetManifest.shared.json  →  VALID ✓
   character_packs : <count>
   backgrounds     : <count>
-  sfx_items       : <count>
-  music_items     : <count>
 
 AssetManifest.{{PRIMARY_LOCALE}}.json  →  VALID ✓
   vo_items        : <count>

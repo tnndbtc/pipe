@@ -77,15 +77,6 @@ Print: `▶ [4/9] Stage 4-C — ShotList creative fill  …`
   One concise phrase describing the music direction, e.g. `"tense strings, low drone"`.
   Set to `null` only when no underscoring is needed (e.g. an isolated SFX moment).
 
-**`audio_intent.sfx_item_ids`**
-  Derive from `sfx_tags` count. Format: `"sfx-{shot_id}-{NNN}"` (NNN zero-padded).
-  Must be parallel with `sfx_tags[]` — same count, same order.
-  Use `[]` when `sfx_tags` is `[]`.
-
-**`audio_intent.music_item_id`**
-  `"music-{shot_id}"` when `music_mood` is not null.
-  `null` when `music_mood` is null.
-
 ### Fields you MUST NOT change
 
 **Top-level fields** — copy verbatim from the scaffold, do not alter:

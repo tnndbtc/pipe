@@ -3,7 +3,7 @@
   "title": "SfxPlan",
   "description": "User-selected SFX assignments with per-shot timing. Written by /api/sfx_save_all when the user clicks 'Save SFX Selections' in the SFX tab. Consumed by gen_render_plan.py (injected as sfx_plan_entries per shot) and render_video.py (mixed into the shot audio at the specified delay/trim).",
   "type": "object",
-  "required": ["schema_id", "schema_version", "sfx_entries"],
+  "required": ["schema_id", "schema_version"],
   "additionalProperties": false,
   "properties": {
     "schema_id": {
@@ -12,7 +12,7 @@
     },
     "schema_version": {
       "type": "string",
-      "enum": ["1.0", "1.1", "1.2"]
+      "enum": ["1.0"]
     },
     "saved_at": {
       "type": "string",
@@ -22,56 +22,42 @@
       "type": "string",
       "description": "Coordinate system for start_sec / end_sec. Always 'episode_absolute'."
     },
-    "sfx_entries": {
+    "shot_overrides": {
       "type": "array",
-      "description": "One entry per selected SFX, one per item_id. Multiple entries for the same shot_id are allowed (stack multiple SFX on one shot).",
+      "description": "One entry per SFX segment, keyed by time range. Multiple entries for the same time range are allowed (stack multiple SFX).",
       "items": {
         "type": "object",
-        "required": ["item_id", "shot_id", "source_file", "start_sec"],
+        "required": ["start_sec", "end_sec", "source_file"],
         "additionalProperties": false,
         "properties": {
-          "item_id": {
-            "type": "string",
-            "pattern": "^sfx-",
-            "description": "SFX item ID from AssetManifest (e.g. 'sfx-sc01-sh01')"
-          },
-          "shot_id": {
-            "type": "string",
-            "description": "Shot this SFX is assigned to (e.g. 'sh-sc01-sh01'). Must match a shot_id in the ShotList."
-          },
-          "source_file": {
-            "type": "string",
-            "description": "Absolute local path to the downloaded SFX audio file (MP3 or WAV). Written under {ep_dir}/assets/sfx/{item_id}/{item_id}.mp3 by sfx_save_all."
-          },
-          "candidate_idx": {
-            "type": "integer",
-            "minimum": 0,
-            "description": "Index into the sfx_search_results.json candidates[] array for this item_id. Used by the UI on reload to restore the selected candidate dropdown."
-          },
           "start_sec": {
             "type": "number",
             "minimum": 0,
-            "description": "Shot-relative delay in seconds: when to start playing this SFX within the shot. Applied as adelay in render_video.py."
+            "description": "Episode-absolute start time in seconds: when to start playing this SFX."
           },
           "end_sec": {
-            "type": ["number", "null"],
+            "type": "number",
             "minimum": 0,
-            "description": "Shot-relative stop time in seconds. The SFX plays for (end_sec - start_sec) seconds. null or omitted means play the full clip from start_sec to natural end (capped at shot duration)."
+            "description": "Episode-absolute end time in seconds. The SFX plays for (end_sec - start_sec) seconds."
+          },
+          "source_file": {
+            "type": "string",
+            "description": "Absolute local path to the downloaded SFX audio file (MP3 or WAV)."
           },
           "volume_db": {
-            "type": ["number", "null"],
+            "type": "number",
             "minimum": -18,
             "maximum": 0,
             "description": "Per-item dB offset on top of SFX_DB (-3). Range: -18..0."
           },
           "duck_db": {
-            "type": ["number", "null"],
+            "type": "number",
             "minimum": -30,
             "maximum": 0,
             "description": "Additional attenuation, additive with volume_db. Range: -30..0."
           },
           "fade_sec": {
-            "type": ["number", "null"],
+            "type": "number",
             "minimum": 0,
             "maximum": 3,
             "description": "Symmetric fade-in/out duration in seconds. Range: 0..3."

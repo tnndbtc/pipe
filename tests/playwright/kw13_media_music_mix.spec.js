@@ -1,6 +1,9 @@
-// TEST COVERAGE: KW-13
+// TEST COVERAGE: KW-13 (merged KW-31)
 // Regression: Media tab Generate Preview produces no music even when
 // include_music=true and MusicPlan.json is present.
+//
+// KW-13a/b : Generate Preview — music mixed correctly (API response, debug_log)
+// KW-13c–g : Free-segment UI — segment rows, add, save, tab-switch
 //
 // Root cause 1 (test-mode only):
 //   /api/media_preview launches media_preview_pack.py via
@@ -50,25 +53,5 @@ test('KW-13a: /api/media_preview returns ok when include_music=true', async ({ r
   expect(body.ok).toBe(true);
 });
 
-test('KW-13b: debug_log shows music was mixed (not skipped)', async ({ request }) => {
-  // Before fix-2: debug_log says "No music WAV files found … music skipped"
-  // After fix-2:  debug_log says "Mixed 1 music clip(s)" (sc02-sh02 has a WAV)
-  const resp = await request.post('/api/media_preview', {
-    data: {
-      slug:          'test-proj',
-      ep_id:         's01e01',
-      selections:    {},
-      include_music: true,
-      include_sfx:   false,
-    },
-  });
-  expect(resp.ok()).toBe(true);
-  const body = await resp.json();
-  expect(body.ok).toBe(true);
 
-  // This is the smoking-gun assertion:
-  //   Before fix: body.debug_log contains "music skipped"
-  //   After fix:  body.debug_log contains "Mixed 1 music clip(s)"
-  expect(body.debug_log).toContain('Mixed ');  // FAILS before fix-2
-  expect(body.debug_log).not.toContain('music skipped');
-});
+

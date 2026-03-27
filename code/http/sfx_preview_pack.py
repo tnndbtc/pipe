@@ -245,12 +245,9 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
     """
     pipe_root = str(PIPE_DIR.resolve())
 
-    # Build music_index: { shot_id: music_item } — needed for music mixing
+    # music_items no longer stored in VOPlan manifest; MusicPlan is the source of truth.
+    # music_index starts empty — music mixing is driven solely by MusicPlan data below.
     music_index = {}
-    for mi in manifest.get("music_items", []):
-        sid = mi.get("shot_id", "")
-        if sid:
-            music_index[sid] = mi
 
     # Allocate buffer — total_dur is from ShotList which already bakes in
     # scene tails (last shot of each scene carries the tail duration).
@@ -270,43 +267,39 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
 
     loop_selections = music_plan.get("loop_selections", {})
     shot_overrides_list = music_plan.get("shot_overrides", [])
-    shot_overrides = {o["item_id"]: o for o in shot_overrides_list if "item_id" in o}
+    # Index shot_overrides by start_sec for O(1) lookup; keep full list for range queries.
+    shot_overrides_by_start = {seg["start_sec"]: seg for seg in shot_overrides_list if "start_sec" in seg}
     track_volumes = music_plan.get("track_volumes", {})
     clip_volumes = music_plan.get("clip_volumes", {})
 
-    # Build sfx_index: { shot_id: [sel_entry] }
-    print(f"  [SFX] Building sfx_index from {len(sfx_selections)} selection(s): {list(sfx_selections.keys())}")
-    sfx_index = {}
-    for item_id, sel in sfx_selections.items():
-        source_file = sel.get("source_file")
+    # Build sfx_ready_list from SfxPlan v2 sfx_entries[].
+    # Each segment carries start_sec/end_sec/source_file directly (no shot_id/item_id).
+    sfx_entries_input = sfx_selections if isinstance(sfx_selections, list) else []
+    print(f"  [SFX] Building sfx_ready_list from {len(sfx_entries_input)} segment(s)")
+    sfx_ready_list: list[dict] = []
+    for idx_seg, seg in enumerate(sfx_entries_input):
+        source_file = seg.get("source_file")
         if not source_file:
-            print(f"  [SKIP] {item_id}: no local audio file (source_file is null)")
+            print(f"  [SKIP] segment[{idx_seg}]: no source_file")
             continue
         # Path security
         p = Path(source_file).resolve()
         if not str(p).startswith(pipe_root + os.sep) and str(p) != pipe_root:
-            print(f"  [SKIP] {item_id}: path outside project root: {p}")
+            print(f"  [SKIP] segment[{idx_seg}]: path outside project root: {p}")
             continue
         if not p.is_file():
-            print(f"  [SKIP] {item_id}: file not found: {p}")
+            print(f"  [SKIP] segment[{idx_seg}]: file not found: {p}")
             continue
-        # Find shot_id for this sfx item
-        sfx_meta = next((s for s in manifest.get("sfx_items", []) if s.get("item_id") == item_id), None)
-        if not sfx_meta:
-            print(f"  [SKIP] {item_id}: not found in manifest sfx_items")
-            continue
-        shot_id = sfx_meta.get("shot_id", "")
-        sfx_index.setdefault(shot_id, []).append({
-            "item_id":       item_id,
+        sfx_ready_list.append({
+            "item_id":       seg.get("clip_id") or f"seg{idx_seg}",
             "source_file":   str(p),
-            "start":         float(sel.get("start", 0)),
-            "end":           sel.get("end"),  # None = auto
-            "duration_sec":  float(sfx_meta.get("duration_sec", 0)),
-            "volume_db":     float(sel.get("volume_db",     0) or 0),   # NEW
-            "duck_db":       float(sel.get("duck_db",       0) or 0),   # NEW
-            "fade_sec":      float(sel.get("fade_sec",      0) or 0),   # NEW
-            "clip_volume_db":float(sel.get("clip_volume_db",0) or 0),   # NEW
-            "is_cut_clip":   bool(sel.get("is_cut_clip", False)),       # NEW
+            "start":         float(seg.get("start_sec", 0)),
+            "end":           seg.get("end_sec"),  # None = auto
+            "volume_db":     float(seg.get("volume_db",     0) or 0),
+            "duck_db":       float(seg.get("duck_db",       0) or 0),
+            "fade_sec":      float(seg.get("fade_sec",      0) or 0),
+            "clip_volume_db":0.0,
+            "is_cut_clip":   bool(seg.get("clip_path")),
         })
 
     # Timeline data collections
@@ -386,67 +379,20 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
                 "shot_id": shot_id,
             })
 
-        # ── Place SFX ──
-        for sel in sfx_index.get(shot_id, []):
-            # SfxPlan stores episode-absolute times — use directly as buffer
-            # position. Do NOT add scene_shift: music is also placed without
-            # scene_shift, so both tracks stay aligned in the preview.
-            abs_start       = float(sel.get("start", 0))
-            sfx_end_ep      = sel.get("end")
-            sfx_duration    = (float(sfx_end_ep) - abs_start) if sfx_end_ep is not None else None
-            sfx_end_in_shot = sfx_duration  # repurposed: now means clip duration cap
-
-            try:
-                print(f"  [SFX] Reading {sel['item_id']} from {sel['source_file']}")
-                sfx_data = read_wav_mono_or_stereo(sel["source_file"], SAMPLE_RATE)
-                print(f"  [SFX] Read OK: {len(sfx_data)} samples ({len(sfx_data)/SAMPLE_RATE:.2f}s)")
-            except Exception as e:
-                print(f"  [WARN] SFX read failed {sel['source_file']}: {e}")
-                continue
-
-            if sfx_end_in_shot is not None:
-                max_samples = max(0, int(float(sfx_end_in_shot) * SAMPLE_RATE))
-            else:
-                max_samples = len(sfx_data)  # no cap — use full clip
-
-            sfx_data = sfx_data[:max_samples]
-            _sfx_vol_db  = float(sel.get("volume_db",     0) or 0)
-            _sfx_duck_db = float(sel.get("duck_db",       0) or 0)
-            _sfx_clip_db = float(sel.get("clip_volume_db",0) or 0)
-            sfx_data = sfx_data * (10 ** ((SFX_DB + _sfx_vol_db + _sfx_duck_db + _sfx_clip_db) / 20.0))
-
-            _sfx_fade_sec = float(sel.get("fade_sec", 0) or 0)
-            if _sfx_fade_sec > 0 and len(sfx_data) > 0:
-                fade_n = int(_sfx_fade_sec * SAMPLE_RATE)   # SAMPLE_RATE = 48000 (module constant)
-                if fade_n > 0:
-                    in_n  = min(fade_n, len(sfx_data))
-                    out_n = min(fade_n, len(sfx_data))
-                    sfx_data[:in_n]  *= np.linspace(0.0, 1.0, in_n).reshape(-1, 1) if sfx_data.ndim == 2 else np.linspace(0.0, 1.0, in_n)
-                    sfx_data[-out_n:] *= np.linspace(1.0, 0.0, out_n).reshape(-1, 1) if sfx_data.ndim == 2 else np.linspace(1.0, 0.0, out_n)
-
-            s = int(abs_start * SAMPLE_RATE)
-            e2 = min(s + len(sfx_data), n_samples)
-            if s < n_samples and e2 > s:
-                buf[s:e2] += sfx_data[:e2 - s]
-
-            tl_sfx_out.append({
-                "item_id": sel["item_id"],
-                "start_sec": round(abs_start, 3),
-                # end_sec represents the user's intended window (from SfxPlan start/end),
-                # not the physical clip length.  If the clip is shorter the audio simply
-                # ends early inside that window; if longer it is capped.  Either way
-                # the bar must span the full intended window so the timeline matches
-                # what the user set — use sfx_end_ep when available.
-                "end_sec": round(float(sfx_end_ep), 3) if sfx_end_ep is not None
-                           else round(abs_start + len(sfx_data) / SAMPLE_RATE, 3),
-                "shot_id": shot_id,
-                "tag": next((x.get("tag","") for x in manifest.get("sfx_items",[]) if x.get("item_id")==sel["item_id"]), ""),
-            })
-
         # ── Place Music ──
-        if include_music and entry.get("music_item_id"):
-            mid = entry["music_item_id"]
-            ovr = shot_overrides.get(mid, {})
+        # Use range-overlap (not point-in-range) to match segments: a shot at
+        # offset=0 dur=28s must match a segment [5, 20] even though 0 < 5.
+        # Mirror music_review_pack.apply_music_plan_overrides overlap logic.
+        if include_music:
+            _shot_end = shot_offset + shot_dur
+            ovr = next(
+                (seg for seg in shot_overrides_list
+                 if not (float(seg.get("start_sec", 0)) >= _shot_end
+                         or float(seg.get("end_sec", 0)) <= shot_offset)),
+                {},
+            )
+            mid = entry.get("music_item_id") or ovr.get("music_asset_id", "")
+        if include_music and mid:
             clip_id = ovr.get("music_clip_id", "")
 
             # Manifest music item carries duck_db / fade_sec authored by the LLM.
@@ -457,7 +403,7 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
             manifest_fade_sec = float(manifest_music_item.get("fade_sec", DEFAULT_FADE_SEC))
             duck_db  = float(ovr.get("duck_db",  manifest_duck_db))
             fade_sec = float(ovr.get("fade_sec", manifest_fade_sec))
-            # MusicPlan stores episode-absolute coords; convert to within-shot
+            # shot_overrides carry episode-absolute coords; convert to within-shot
             music_start_sec = max(0.0, float(ovr["start_sec"]) - shot_offset) if "start_sec" in ovr else 0.0
             music_end_sec   = max(0.0, float(ovr["end_sec"]) - shot_offset)   if "end_sec"   in ovr else shot_dur
 
@@ -467,9 +413,9 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
             base_db += track_volumes.get(stem, 0)
             base_db += clip_volumes.get(mid, clip_volumes.get(clip_id, 0))
 
-            # Resolve actual WAV asset id — MusicPlan shot_override carries
+            # Resolve actual WAV asset id — MusicPlan music_segment carries
             # music_asset_id (e.g. "cher1_43_8s-51_9s") which is the filename stem.
-            # Fall back to mid (music_item_id) if no override exists.
+            # Fall back to mid (music_item_id) if no segment matches.
             music_asset_id = ovr.get("music_asset_id", mid)
             # Find music WAV: prefer loop variant, then clip WAV by asset_id, then by item_id
             music_path = music_dir / f"{music_asset_id}.loop.wav"
@@ -535,6 +481,57 @@ def render_sfx_preview(timeline_shots, total_dur, manifest, manifest_path,
                         "music_mood": entry.get("music_mood", ""),
                     })
 
+    # ── Place SFX (v2: iterate sfx_entries directly, episode-absolute timing) ──
+    # Each segment from SfxPlan v2 carries start_sec/end_sec/source_file directly.
+    # No shot_id lookup — place each segment at its episode-absolute start_sec.
+    for sel in sfx_ready_list:
+        abs_start    = float(sel.get("start", 0))
+        sfx_end_ep   = sel.get("end")
+        sfx_duration = (float(sfx_end_ep) - abs_start) if sfx_end_ep is not None else None
+
+        try:
+            print(f"  [SFX] Reading {sel['item_id']} from {sel['source_file']}")
+            sfx_data = read_wav_mono_or_stereo(sel["source_file"], SAMPLE_RATE)
+            print(f"  [SFX] Read OK: {len(sfx_data)} samples ({len(sfx_data)/SAMPLE_RATE:.2f}s)")
+        except Exception as e:
+            print(f"  [WARN] SFX read failed {sel['source_file']}: {e}")
+            continue
+
+        if sfx_duration is not None:
+            max_samples = max(0, int(float(sfx_duration) * SAMPLE_RATE))
+        else:
+            max_samples = len(sfx_data)  # no cap — use full clip
+
+        sfx_data = sfx_data[:max_samples]
+        _sfx_vol_db  = float(sel.get("volume_db",     0) or 0)
+        _sfx_duck_db = float(sel.get("duck_db",       0) or 0)
+        _sfx_clip_db = float(sel.get("clip_volume_db",0) or 0)
+        sfx_data = sfx_data * (10 ** ((SFX_DB + _sfx_vol_db + _sfx_duck_db + _sfx_clip_db) / 20.0))
+
+        _sfx_fade_sec = float(sel.get("fade_sec", 0) or 0)
+        if _sfx_fade_sec > 0 and len(sfx_data) > 0:
+            fade_n = int(_sfx_fade_sec * SAMPLE_RATE)
+            if fade_n > 0:
+                in_n  = min(fade_n, len(sfx_data))
+                out_n = min(fade_n, len(sfx_data))
+                sfx_data[:in_n]  *= np.linspace(0.0, 1.0, in_n).reshape(-1, 1) if sfx_data.ndim == 2 else np.linspace(0.0, 1.0, in_n)
+                sfx_data[-out_n:] *= np.linspace(1.0, 0.0, out_n).reshape(-1, 1) if sfx_data.ndim == 2 else np.linspace(1.0, 0.0, out_n)
+
+        s = int(abs_start * SAMPLE_RATE)
+        e2 = min(s + len(sfx_data), n_samples)
+        if s < n_samples and e2 > s:
+            buf[s:e2] += sfx_data[:e2 - s]
+
+        tl_sfx_out.append({
+            "item_id": sel["item_id"],
+            "start_sec": round(abs_start, 3),
+            # end_sec represents the user's intended window (start_sec→end_sec from SfxPlan),
+            # not the physical clip length.  If the clip is shorter the audio simply ends early
+            # inside that window; if longer it is capped.  Use sfx_end_ep when available.
+            "end_sec": round(float(sfx_end_ep), 3) if sfx_end_ep is not None
+                       else round(abs_start + len(sfx_data) / SAMPLE_RATE, 3),
+        })
+
     # Trim buffer to total_dur (which already includes pause_after_ms of the last VO item).
     # Do NOT use last_vo_sec + 5: that ignores pause_after_ms (e.g. 10s tail on last item)
     # and would cut the preview short.  total_dur = max(end_sec + pause_after_ms/1000) from
@@ -592,8 +589,13 @@ def main():
 
     ep_dir = PIPE_DIR / "projects" / project_id / "episodes" / episode_id
 
-    # Load sfx_selections
-    sfx_selections = json.loads(Path(args.sfx_selections).read_text(encoding="utf-8"))
+    # Load sfx_selections — v2: the file is a SfxPlan JSON; extract sfx_entries[].
+    _sfx_raw = json.loads(Path(args.sfx_selections).read_text(encoding="utf-8"))
+    if isinstance(_sfx_raw, dict):
+        sfx_selections = _sfx_raw.get("shot_overrides", [])
+    else:
+        # Already a bare list (legacy callers)
+        sfx_selections = _sfx_raw
 
     # Path security: validate all source_file paths are under PIPE_DIR
     pipe_root = str(PIPE_DIR.resolve())

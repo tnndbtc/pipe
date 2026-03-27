@@ -932,8 +932,10 @@ class AiAskRequest(BaseModel):
 
 class AppendRequest(BaseModel):
     ai_prompt:        str                  # search query for this item
-    n_img:            Optional[int] = None # number of new image candidates to fetch
-    n_vid:            Optional[int] = None # number of new video candidates to fetch
+    n_img:            Optional[int] = None # number of new image candidates to fetch (may be page-math inflated)
+    n_vid:            Optional[int] = None # number of new video candidates to fetch (may be page-math inflated)
+    n_img_requested:  Optional[int] = None # original user-requested image count — caps merge
+    n_vid_requested:  Optional[int] = None # original user-requested video count — caps merge
     sources_override: Optional[list] = None
 
 
@@ -1229,6 +1231,10 @@ async def append_to_batch(
             for src, lims in (state.get("source_limits_override") or {}).items()
         } or None,
     )
+    # Store the original user-requested counts so poll_append can cap the merge.
+    store.patch(tmp_batch_id,
+                n_img_requested=body.n_img_requested,
+                n_vid_requested=body.n_vid_requested)
     await batch_queue.put(tmp_batch_id)
 
     log.info("append_to_batch: created tmp batch %s for %s/%s", tmp_batch_id, batch_id, item_id)
@@ -1323,6 +1329,14 @@ async def poll_append(
 
     new_images_deduped = [e for e in new_images if _is_new_img(e)]
     new_videos_deduped = [e for e in new_videos if _is_new_vid(e)]
+
+    # Cap to the original user-requested count (not the page-math inflated value).
+    img_limit = tmp_state.get("n_img_requested")
+    vid_limit = tmp_state.get("n_vid_requested")
+    if img_limit is not None:
+        new_images_deduped = new_images_deduped[:img_limit]
+    if vid_limit is not None:
+        new_videos_deduped = new_videos_deduped[:vid_limit]
 
     # Move files from tmp batch dir to target batch dir (same relative structure)
     target_batch_dir = store.batch_dir(state["project"], state["episode_id"], batch_id)
@@ -2125,6 +2139,14 @@ async def _run_batch(batch_id: str) -> None:
         sf     = item.get("search_filters") or {}
         mt     = sf.get("media_type", "mixed")
         prefer = {"image": "image", "video": "video"}.get(mt, "both")
+        # Override prefer from the explicit n_img/n_vid request so that
+        # "add 12 images" is never blocked by a manifest media_type="video".
+        if n_img > 0 and n_vid == 0:
+            prefer = "image"
+        elif n_vid > 0 and n_img == 0:
+            prefer = "video"
+        elif n_img > 0 and n_vid > 0:
+            prefer = "both"
 
         # Inject Pixabay dimension constraints
         src_filters = dict(item.get("source_filters") or {})

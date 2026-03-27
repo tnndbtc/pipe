@@ -157,26 +157,15 @@ function resetKW13() {
   if (fs.existsSync(packDir)) fs.rmSync(packDir, { recursive: true, force: true });
 }
 
-// KW-2g: VOPlan with music_items present, NO MusicPlan.
-// Sentinel: two shots (sc01-sh01, sc02-sh02) carry item_id in VOPlan.music_items.
-// The API must fall back to VOPlan.music_items when MusicPlan.json is absent.
-// FAILS today: API builds music_index only from MusicPlan.shot_overrides → empty →
-//   all shots get music_item_id="" → Shot Overrides section shows nothing.
-// PASSES with fix: API reads VOPlan.music_items as fallback → shots get music_item_id.
+// KW-2g: No MusicPlan present.
+// Invariant: /api/music_timeline must return all shots with empty music_item_id.
+// VOPlan and AssetManifest no longer carry music_items; MusicPlan is the sole source.
+// When MusicPlan.json is absent the timeline shows no music bars — this is correct.
 function resetKW2g() {
   const ep = getEpDir();
-  const vp = JSON.parse(fs.readFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), 'utf8'));
-  vp.music_items = [
-    { shot_id: 'sc01-sh01', item_id: 'music-sc01-sh01' },
-    { shot_id: 'sc02-sh02', item_id: 'music-sc02-sh02' },
-  ];
-  fs.writeFileSync(path.join(ep, 'VOPlan.en.json'), JSON.stringify(vp, null, 2));
-  // Restore canonical ShotList so timing is correct
-  fs.copyFileSync(
-    path.join(FIXTURE_EP, 'ShotList.json'),
-    path.join(ep, 'ShotList.json')
-  );
-  // No MusicPlan — this is the exact state that triggers the bug
+  fs.copyFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), path.join(ep, 'VOPlan.en.json'));
+  fs.copyFileSync(path.join(FIXTURE_EP, 'ShotList.json'),  path.join(ep, 'ShotList.json'));
+  // No MusicPlan — timeline must show no music bars
   const mp = path.join(ep, 'MusicPlan.json');
   if (fs.existsSync(mp)) fs.unlinkSync(mp);
 }
@@ -211,25 +200,6 @@ function resetKW15() {}
 function resetKW16() {}
 function resetKW17() {}
 
-// KW-18 Music: VOPlan present but with NO music_items + committed MusicPlan 1.1.
-// The real regression: /api/music_timeline returns 200 with shots where
-// music_item_id="" (no music_items in VOPlan). The broken code checks
-// (_musicTimeline && _musicTimeline.shots) which is truthy → takes timeline path
-// → filters to 0 shots → 0 blocks. The fix checks _tlShots.length > 0 so
-// when timeline has no music shots, it falls through to the MusicPlan fallback.
-function resetKW18Music() {
-  const ep = getEpDir();
-  // VOPlan with NO music_items → timeline returns 200 but all music_item_id=""
-  // This is the exact condition that hid the fallback path in the broken code.
-  fs.copyFileSync(
-    path.join(__dirname, '..', 'fixtures', 'projects', 'test-proj', 'episodes', 's01e01', 'VOPlan.en.json'),
-    path.join(ep, 'VOPlan.en.json')
-  );
-  fs.copyFileSync(
-    path.join(FIXTURE_EP, 'MusicPlan.json'),
-    path.join(ep, 'MusicPlan.json')
-  );
-}
 
 // KW-19c: VOPlan with NO music_items + MusicPlan whose overrides have NO shot_id.
 //
@@ -296,19 +266,128 @@ function resetKW19c() {
   if (fs.existsSync(packDir)) fs.rmSync(packDir, { recursive: true, force: true });
 }
 
-// KW-18 SFX: VOPlan with sfx_items (for shot timeline) + no MusicPlan/SfxPlan.
-// Forces SFX tab to build shot timeline purely from ShotList + VOPlan sfx_items.
-// If _sfxShotTimeline is not built or sfx_items not mapped, blockCount = 0 → fails.
-function resetKW18Sfx() {
+// resetKW29 — MusicPlan with two shot_overrides (free-segment UI fixture)
+function resetKW29() {
   const ep = getEpDir();
   fs.copyFileSync(
     path.join(FIXTURE_EP, 'VOPlan.en.json'),
     path.join(ep, 'VOPlan.en.json')
   );
-  const mp = path.join(ep, 'MusicPlan.json');
-  if (fs.existsSync(mp)) fs.unlinkSync(mp);
-  const sfxPlan = path.join(ep, 'SfxPlan.json');
-  if (fs.existsSync(sfxPlan)) fs.unlinkSync(sfxPlan);
+  const plan = {
+    schema_id: 'MusicPlan',
+    schema_version: '1.1',
+    loop_selections: {},
+    track_volumes: {},
+    clip_volumes: {},
+    shot_overrides: [
+      {
+        start_sec: 5.0,
+        end_sec: 20.0,
+        music_asset_id: 'cher2',
+        music_clip_id: 'cher2:114.0s-142.1s',
+        clip_start_sec: 114.0,
+        clip_duration_sec: 28.1,
+        duck_db: -12.0,
+        fade_sec: 0.15,
+      },
+      {
+        start_sec: 30.0,
+        end_sec: 55.0,
+        music_asset_id: 'cher1',
+        music_clip_id: 'cher1:126.0s-155.6s',
+        clip_start_sec: 126.0,
+        clip_duration_sec: 29.6,
+        duck_db: 0.0,
+        fade_sec: 0.15,
+      },
+    ],
+  };
+  fs.writeFileSync(path.join(ep, 'MusicPlan.json'), JSON.stringify(plan, null, 2));
+}
+
+// resetKW30 — SfxPlan with two shot_overrides (free-segment UI fixture)
+function resetKW30() {
+  const ep = getEpDir();
+  fs.copyFileSync(
+    path.join(FIXTURE_EP, 'VOPlan.en.json'),
+    path.join(ep, 'VOPlan.en.json')
+  );
+  const plan = {
+    schema_id: 'SfxPlan',
+    schema_version: '1.0',
+    timing_format: 'episode_absolute',
+    shot_overrides: [
+      {
+        start_sec: 5.0,
+        end_sec: 10.0,
+        source_file: 'assets/sfx/sfx-sc01-sh01-001/ai_1773848083082.mp3',
+        volume_db: 0.0,
+        duck_db: 0.0,
+        fade_sec: 0.0,
+        clip_id: null,
+        clip_path: null,
+      },
+      {
+        start_sec: 35.0,
+        end_sec: 40.0,
+        source_file: 'assets/sfx/sfx-sc02-sh02-001/sfx-sc02-sh02-001.mp3',
+        volume_db: 0.0,
+        duck_db: 0.0,
+        fade_sec: 0.0,
+        clip_id: null,
+        clip_path: null,
+      },
+    ],
+    cut_clips: [],
+    cut_assign: {},
+  };
+  fs.writeFileSync(path.join(ep, 'SfxPlan.json'), JSON.stringify(plan, null, 2));
+}
+
+// resetKW31 — MediaPlan with two shot_overrides (free-segment UI fixture)
+function resetKW31() {
+  const ep = getEpDir();
+  fs.copyFileSync(
+    path.join(FIXTURE_EP, 'VOPlan.en.json'),
+    path.join(ep, 'VOPlan.en.json')
+  );
+  const plan = {
+    schema_id: 'MediaPlan',
+    schema_version: '1.0',
+    shot_overrides: [
+      {
+        type: 'image',
+        url: 'https://example.com/bg-reactor.jpg',
+        path: 'assets/media/bg-reactor-control-room-night.jpg',
+        clip_id: 'bg-reactor-control-room-night',
+        hold_sec: 28.0,
+        animation_type: 'none',
+      },
+      {
+        type: 'video',
+        url: 'https://example.com/chernobyl-exterior.mp4',
+        path: 'assets/media/chernobyl-exterior.mp4',
+        clip_id: 'chernobyl-exterior-clip',
+        clip_in: 0.0,
+        clip_out: 37.0,
+      },
+    ],
+  };
+  fs.writeFileSync(path.join(ep, 'MediaPlan.json'), JSON.stringify(plan, null, 2));
+}
+
+// resetKW32 — vo_timeline sentinel: last vo_item.end_sec patched to 80.0
+// (ShotList total is 65.348s) — any tab reading ShotList for duration will show
+// wrong value; any tab reading vo_timeline will show >= 80.0
+function resetKW32() {
+  const ep = getEpDir();
+  const vp = JSON.parse(fs.readFileSync(path.join(FIXTURE_EP, 'VOPlan.en.json'), 'utf8'));
+  vp.vo_items[vp.vo_items.length - 1].end_sec = 80.0;
+  fs.writeFileSync(path.join(ep, 'VOPlan.en.json'), JSON.stringify(vp, null, 2));
+  ['MusicPlan.json', 'SfxPlan.json', 'MediaPlan.json'].forEach(f => {
+    const p = path.join(ep, f);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  });
 }
 
 // KW-22: VOPlan.en.json exists but VOPlan.zh-Hans.json does NOT yet exist.
@@ -407,12 +486,14 @@ module.exports = {
   resetKW15,
   resetKW16,
   resetKW17,
-  resetKW18Music,
-  resetKW18Sfx,
   resetKW19c,
   resetKW22,
   resetKW24,
   resetKW26,
+  resetKW29,
+  resetKW30,
+  resetKW31,
+  resetKW32,
   resetKW80,
   // EP_DIR kept for backward compat — resolves dynamically via getEpDir()
   get EP_DIR() { return getEpDir(); },

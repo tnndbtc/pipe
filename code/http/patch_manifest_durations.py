@@ -22,14 +22,6 @@
 # Writes (in-place, atomic):
 #   AssetManifest.shared.json      — three field groups patched:
 #
-#     sfx_items[].duration_sec           ← ShotList[shot_id].duration_sec
-#       Clip length passed to SFX generation model (AudioGen). If wrong, the
-#       SFX clip cuts off early or plays into dead silence during the shot.
-#
-#     music_items[].duration_sec         ← ShotList[shot_id].duration_sec
-#       Track length passed to music generation model (MusicGen). If wrong,
-#       music clips wrong length → audible looping or abrupt cut.
-#
 #     backgrounds[].search_filters.min_duration_sec
 #       Only patched for backgrounds that have media_type="video" in their
 #       search_filters (i.e. they require a video clip, not a photo).
@@ -76,22 +68,14 @@ def save_json(data: dict, path: Path) -> None:
 def patch(
     shared: dict,
     shotlist: dict,
-) -> tuple[int, int, int, list[str]]:
+) -> tuple[int, list[str]]:
     """
     Patch AssetManifest.shared.json duration fields in-place.
 
     Returns:
-        (sfx_patched, music_patched, bg_patched, warnings)
+        (bg_patched, warnings)
     """
     warnings: list[str] = []
-
-    # Build shot_id → duration_sec map from ShotList
-    shot_dur: dict[str, float] = {}
-    for shot in shotlist.get("shots", []):
-        sid = shot.get("shot_id", "")
-        dur = shot.get("duration_sec", 0)
-        if sid:
-            shot_dur[sid] = float(dur)
 
     # Build background_id → max(duration_sec) across all shots using it
     bg_dur: dict[str, float] = {}
@@ -100,50 +84,6 @@ def patch(
         dur   = float(shot.get("duration_sec", 0))
         if bg_id and dur > 0:
             bg_dur[bg_id] = max(bg_dur.get(bg_id, 0.0), dur)
-
-    # ── sfx_items ─────────────────────────────────────────────────────────────
-    sfx_patched = 0
-    for sfx in shared.get("sfx_items", []):
-        item_id = sfx.get("item_id", "?")
-        shot_id = sfx.get("shot_id", "")
-        if not shot_id:
-            warnings.append(f"sfx {item_id}: missing shot_id — skipped")
-            continue
-        if shot_id not in shot_dur:
-            warnings.append(f"sfx {item_id}: shot_id {shot_id!r} not found in ShotList — skipped")
-            continue
-        new_dur = round(shot_dur[shot_id], 3)
-        old_dur = sfx.get("duration_sec", 0)
-        if new_dur == 0:
-            print(f"  [SKIP-SFX] {item_id:30s}  shot={shot_id}  duration=0 (no approved timing)")
-            continue
-        sfx["duration_sec"] = new_dur
-        sfx_patched += 1
-        change = "PATCH" if abs(new_dur - old_dur) > 0.01 else "OK   "
-        print(f"  [{change}-SFX  ] {item_id:30s}  shot={shot_id:20s}  "
-              f"old={old_dur:7.3f}s → new={new_dur:7.3f}s")
-
-    # ── music_items ───────────────────────────────────────────────────────────
-    music_patched = 0
-    for music in shared.get("music_items", []):
-        item_id = music.get("item_id", "?")
-        shot_id = music.get("shot_id", "")
-        if not shot_id:
-            warnings.append(f"music {item_id}: missing shot_id — skipped")
-            continue
-        if shot_id not in shot_dur:
-            warnings.append(f"music {item_id}: shot_id {shot_id!r} not found in ShotList — skipped")
-            continue
-        new_dur = round(shot_dur[shot_id], 3)
-        old_dur = music.get("duration_sec", 0)
-        if new_dur == 0:
-            print(f"  [SKIP-MUSIC] {item_id:30s}  shot={shot_id}  duration=0 (no approved timing)")
-            continue
-        music["duration_sec"] = new_dur
-        music_patched += 1
-        change = "PATCH" if abs(new_dur - old_dur) > 0.01 else "OK   "
-        print(f"  [{change}-MUSIC] {item_id:30s}  shot={shot_id:20s}  "
-              f"old={old_dur:7.3f}s → new={new_dur:7.3f}s")
 
     # ── backgrounds — search_filters.min_duration_sec (video only) ────────────
     bg_patched = 0
@@ -168,7 +108,7 @@ def patch(
         print(f"  [{change}-BG  ] {asset_id:30s}  "
               f"min_dur old={old_min:7.3f}s → new={new_min:7.3f}s  (max={new_max:.3f}s)")
 
-    return sfx_patched, music_patched, bg_patched, warnings
+    return bg_patched, warnings
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -225,10 +165,8 @@ def main() -> None:
         sys.exit(1)
     shared = load_json(shared_path)
 
-    shot_count  = len(shotlist.get("shots", []))
-    sfx_count   = len(shared.get("sfx_items", []))
-    music_count = len(shared.get("music_items", []))
-    bg_count    = sum(
+    shot_count = len(shotlist.get("shots", []))
+    bg_count   = sum(
         1 for bg in shared.get("backgrounds", [])
         if bg.get("search_filters", {}).get("media_type") == "video"
     )
@@ -237,17 +175,13 @@ def main() -> None:
     print("  patch_manifest_durations")
     print(f"  Episode : {ep_dir}")
     print(f"  Shots   : {shot_count}")
-    print(f"  SFX     : {sfx_count} items")
-    print(f"  Music   : {music_count} items")
     print(f"  BG-video: {bg_count} backgrounds with media_type=video")
     print("=" * 60)
 
-    sfx_p, music_p, bg_p, warnings = patch(shared, shotlist)
+    bg_p, warnings = patch(shared, shotlist)
 
     print(f"\n{'=' * 60}")
     print("  SUMMARY")
-    print(f"  SFX patched   : {sfx_p}")
-    print(f"  Music patched : {music_p}")
     print(f"  BG patched    : {bg_p}")
     if warnings:
         print(f"  Warnings      : {len(warnings)}")

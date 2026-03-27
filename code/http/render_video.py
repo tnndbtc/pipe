@@ -53,12 +53,15 @@
 import argparse
 import datetime
 import hashlib
+import math
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -98,6 +101,10 @@ PROFILES: dict[str, dict] = {
 }
 DEFAULT_PROFILE = "preview_local"
 
+# ── Audio constants ────────────────────────────────────────────────────────────
+SAMPLE_RATE = 44100
+CHANNELS    = 2
+
 # Flags applied to all encoding passes for determinism
 BITEXACT_FLAGS = ["-fflags", "+bitexact", "-flags:v", "+bitexact", "-map_metadata", "-1"]
 
@@ -130,6 +137,27 @@ _VO_TAIL_MS = 2000  # fallback tail when scene tail cannot be derived from ShotL
 def build_asset_map(source: dict) -> dict[str, dict]:
     """Build {asset_id → resolved_asset} from resolved_assets[]."""
     return {item["asset_id"]: item for item in source.get("resolved_assets", [])}
+
+
+def _find_music_segment(segments: list, shot_start_sec: float, shot_end_sec: float) -> dict:
+    """Return the first shot_overrides[] entry whose window overlaps the shot's time range.
+
+    A segment overlaps a shot when seg.start_sec < shot_end_sec and
+    (seg.end_sec is None or seg.end_sec > shot_start_sec).
+    Returns {} when no segment overlaps.
+    """
+    for seg in segments:
+        seg_start = seg.get("start_sec")
+        seg_end   = seg.get("end_sec")
+        if seg_start is None:
+            continue
+        seg_start = float(seg_start)
+        if seg_start >= shot_end_sec:
+            continue
+        if seg_end is not None and float(seg_end) <= shot_start_sec:
+            continue
+        return seg
+    return {}
 
 
 def build_media_map(media: dict) -> dict:
@@ -189,7 +217,7 @@ def build_episode_timeline(
     shotlist: dict,
     media_map: dict,
     vo_items: list,
-    music_plan_overrides: dict,
+    music_plan_overrides: list,
     scene_tails: dict | None = None,
     ref_dur_map: dict | None = None,
 ) -> list:
@@ -259,14 +287,11 @@ def build_episode_timeline(
             if cid and cid in media_map:
                 char_ids.append(media_map[cid]["asset_id"])
 
-        # ── music_asset_id from MusicPlan override ───────────────────────────
-        # Primary key: shot_id.  Fallback: music_item_id from audio_intent,
-        # which matches MusicPlans that store item_id instead of shot_id.
-        _ovr = music_plan_overrides.get(shot_id, {})
-        if not _ovr:
-            _music_item_id = shot.get("audio_intent", {}).get("music_item_id", "")
-            if _music_item_id:
-                _ovr = music_plan_overrides.get(_music_item_id, {})
+        # ── music_asset_id from MusicPlan shot_overrides[] ───────────────────
+        # v2 schema: segments carry episode-absolute start_sec/end_sec; find
+        # the first segment whose window overlaps this shot's time range.
+        _shot_end_sec = shot_start + duration_sec
+        _ovr = _find_music_segment(music_plan_overrides, shot_start, _shot_end_sec)
         music_asset_id = _ovr.get("music_asset_id")
 
         # ── duration_ms — three-condition formula ─────────────────────────────
@@ -656,6 +681,24 @@ def render_shot(
             seg_path = uri_to_path(seg_uri)
             seg_type = seg.get("media_type", "image")
 
+            # ── Segment field guards ──────────────────────────────────────────
+            if seg_type == "image":
+                _hold_guard = seg.get("hold_sec")
+                if _hold_guard is None or float(_hold_guard) <= 0:
+                    raise ValueError(
+                        f"render_shot: {shot_id} bg_segments[{si}] is an image segment "
+                        f"with hold_sec={_hold_guard!r} — must be > 0"
+                    )
+            else:
+                _ci_guard = seg.get("clip_in") if seg.get("clip_in") is not None else seg.get("start_sec")
+                _co_guard = seg.get("clip_out") if seg.get("clip_out") is not None else seg.get("end_sec")
+                if _ci_guard is None or _co_guard is None or float(_co_guard) <= float(_ci_guard):
+                    raise ValueError(
+                        f"render_shot: {shot_id} bg_segments[{si}] is a video segment "
+                        f"with clip_in={_ci_guard!r} clip_out={_co_guard!r} — "
+                        "clip_out must be > clip_in and neither may be None"
+                    )
+
             if seg_type == "video" and seg_path and seg_path.exists():
                 # duration_override_sec: user-specified trim (play first N seconds).
                 # Falls back to natural duration_sec, then full shot dur_sec.
@@ -709,10 +752,47 @@ def render_shot(
                 filter_parts.append(f"[{seg_idx}:v]copy[seg{si}]")
             seg_labels.append(f"[seg{si}]")
 
-        # Concat all segments into [bg]
+        # Compute cumulative durations to determine total media duration vs episode.
+        # duration[i] = hold_sec (image) or clip_out - clip_in (video)
+        # start[i]    = sum(duration[0..i-1])
+        # end[i]      = start[i] + duration[i]
+        _seg_durations: list[float] = []
+        for _sd_seg in bg_segments:
+            _sd_type = _sd_seg.get("media_type", "image")
+            if _sd_type == "image":
+                _sd_dur = float(_sd_seg.get("hold_sec", 0))
+            else:
+                _sd_ci = _sd_seg.get("clip_in") if _sd_seg.get("clip_in") is not None else _sd_seg.get("start_sec", 0)
+                _sd_co = _sd_seg.get("clip_out") if _sd_seg.get("clip_out") is not None else _sd_seg.get("end_sec", 0)
+                _sd_dur = max(0.0, float(_sd_co) - float(_sd_ci))
+            _seg_durations.append(_sd_dur)
+        _total_media_dur = sum(_seg_durations)
+
+        if _total_media_dur < dur_sec - 0.001:
+            # Total media shorter than episode: append black fill to reach dur_sec
+            _fill_dur = dur_sec - _total_media_dur
+            _fill_idx = add_input(
+                ["-f", "lavfi"],
+                f"color=c=black:size={W}x{H}:rate={fps}:duration={_fill_dur:.3f}",
+            )
+            filter_parts.append(f"[{_fill_idx}:v]copy[seg_fill]")
+            seg_labels.append("[seg_fill]")
+            print(f"  [render] {shot_id}: media {_total_media_dur:.3f}s < shot {dur_sec:.3f}s — "
+                  f"black fill {_fill_dur:.3f}s appended")
+
+        # Concat all segments (+ optional fill) into [bg_raw]
         n_segs = len(seg_labels)
         concat_in = "".join(seg_labels)
-        filter_parts.append(f"{concat_in}concat=n={n_segs}:v=1:a=0[bg]")
+        concat_lbl = "bg_raw" if _total_media_dur > dur_sec + 0.001 else "bg"
+        filter_parts.append(f"{concat_in}concat=n={n_segs}:v=1:a=0[{concat_lbl}]")
+
+        if _total_media_dur > dur_sec + 0.001:
+            # Total media longer than episode: trim at episode end
+            filter_parts.append(
+                f"[bg_raw]trim=duration={dur_sec:.3f},setpts=PTS-STARTPTS[bg]"
+            )
+            print(f"  [render] {shot_id}: media {_total_media_dur:.3f}s > shot {dur_sec:.3f}s — "
+                  f"trimmed at {dur_sec:.3f}s")
 
     elif bg_path and bg_path.exists() and not bg_info.get("is_placeholder", True):
         # ── Single background (existing code, unchanged) ──
@@ -990,15 +1070,14 @@ def render_shot(
         if _loop_path.exists():
             music_path = _loop_path
 
-    # --- MusicPlan override lookup ---
+    # --- MusicPlan override lookup (v2: shot_overrides[], episode-absolute) ---
     _pd = music_plan_data or {}
-    _shot_id_key = shot.get("shot_id") or shot.get("id", "")
-    _plan_ovr = _pd.get("plan_overrides", {}).get(_shot_id_key, {})
-    # Fallback: look up by music_asset_id for plans keyed by item_id not shot_id
-    if not _plan_ovr:
-        _music_id_fb = shot.get("music_asset_id", "")
-        if _music_id_fb:
-            _plan_ovr = _pd.get("plan_overrides", {}).get(_music_id_fb, {})
+    _shot_start_sec = shot.get("start_sec", 0.0)
+    _shot_dur_sec   = dur_ms / 1000.0
+    _shot_end_sec   = _shot_start_sec + _shot_dur_sec
+    _plan_ovr = _find_music_segment(
+        _pd.get("shot_overrides", []), _shot_start_sec, _shot_end_sec
+    )
 
     _plan_music_id = _plan_ovr.get("music_asset_id") or music_id
     _plan_provided_music = False
@@ -1049,7 +1128,7 @@ def render_shot(
         if _plan_end_sec is not None:
             shot["music_end_sec"] = max(0.0, float(_plan_end_sec) - shot.get("start_sec", 0.0))
 
-        print(f"  [{_shot_id_key}] Using MusicPlan overrides — approved timing.")
+        print(f"  [{shot_id}] Using MusicPlan overrides — approved timing.")
 
     # duck_intervals: use value computed in build_episode_timeline() (unchanged)
 
@@ -1208,6 +1287,249 @@ def concat_to_mp4(
     run_ffmpeg(cmd)
 
 
+# ── MediaPlan-mode helpers ─────────────────────────────────────────────────────
+# Used by the ShotList-free render path (main below).
+
+def resolve_media_path(seg: dict, ep_dir: Path) -> str:
+    """Return the best local filesystem path for a MediaPlan segment."""
+    p = seg.get("path", "")
+    if p:
+        if os.path.isabs(p):
+            if os.path.exists(p):
+                return p
+        else:
+            c = ep_dir / p
+            if c.exists():
+                return str(c)
+    url = seg.get("url", "")
+    if url.startswith("file://"):
+        return unquote(urlparse(url).path)
+    return url
+
+
+def build_silent_audio(duration_sec: float, out_path: Path) -> None:
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi",
+        "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+        "-t", str(duration_sec), str(out_path)
+    ], capture_output=True, check=True)
+
+
+def _anim_vf(anim_type: str, clip_dur: float) -> str:
+    """Return ffmpeg zoompan filter string for the given animation type."""
+    d = max(1, round(clip_dur * FPS))
+    if anim_type == "zoom_in":
+        return (f"zoompan=z='1+0.3*on/{d}':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2'"
+                f":d={d}:s={W}x{H}:fps={FPS}")
+    if anim_type == "zoom_out":
+        return (f"zoompan=z='1.3-0.3*on/{d}':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2'"
+                f":d={d}:s={W}x{H}:fps={FPS}")
+    if anim_type == "pan_lr":
+        return (f"zoompan=z='1.1':x='(iw-iw/zoom)*on/{d}':y='(ih-ih/zoom)/2'"
+                f":d={d}:s={W}x{H}:fps={FPS}")
+    if anim_type == "pan_rl":
+        return (f"zoompan=z='1.1':x='(iw-iw/zoom)*(1-on/{d})':y='(ih-ih/zoom)/2'"
+                f":d={d}:s={W}x{H}:fps={FPS}")
+    if anim_type == "pan_up":
+        return (f"zoompan=z='1.1':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(1-on/{d})'"
+                f":d={d}:s={W}x{H}:fps={FPS}")
+    if anim_type == "ken_burns":
+        return (f"zoompan=z='1+0.25*on/{d}'"
+                f":x='(iw-iw/zoom)*0.3*on/{d}':y='(ih-ih/zoom)*0.3*on/{d}'"
+                f":d={d}:s={W}x{H}:fps={FPS}")
+    return ""
+
+
+def _mp_seg_dur(seg: dict) -> float:
+    """Duration in seconds of one MediaPlan segment."""
+    seg_type = seg.get("type", "image")
+    if seg_type != "image":
+        ci = float(seg.get("clip_in") or 0)
+        co = seg.get("clip_out")
+        if co is not None and float(co) > ci:
+            return float(co) - ci
+        dur = seg.get("duration_sec")
+        if dur:
+            return float(dur)
+        return 0.0
+    hold = seg.get("hold_sec")
+    if hold:
+        return float(hold)
+    dur = seg.get("duration_sec")
+    if dur:
+        return float(dur)
+    return 3.0   # default image hold
+
+
+def _scene_id_from_item_id(item_id: str) -> str:
+    """'vo-sc01-001' → 'sc01'"""
+    m = re.search(r'(sc\d+)', item_id)
+    return m.group(1) if m else ""
+
+
+def build_scene_timeline(
+    vo_items: list,
+    scene_heads: dict,
+    voplan_total_dur: float,
+) -> tuple:
+    """Derive scene slots from VOPlan.
+
+    Returns:
+      scene_slots      : { scene_id: (start_sec, dur_sec) }  episode-absolute
+      video_total_dur  : float
+      vo_head_offsets  : { scene_id: float }  ms offset for VO delay adjustment
+    """
+    scene_first_vo: dict = {}
+    for vi in sorted(vo_items, key=lambda v: v.get("start_sec", 0)):
+        scid = _scene_id_from_item_id(vi.get("item_id", ""))
+        if scid and scid not in scene_first_vo:
+            scene_first_vo[scid] = vi
+
+    scenes_in_order = sorted(
+        scene_first_vo.keys(),
+        key=lambda s: scene_first_vo[s]["start_sec"]
+    )
+
+    _aware = not any(
+        scene_first_vo[scid]["start_sec"] < (head - 0.1)
+        for scid, head in scene_heads.items()
+        if scid in scene_first_vo
+    )
+    print(f"  [scene_heads] mode: {'aware' if _aware else 'unaware'}")
+
+    scene_slots: dict     = {}
+    vo_head_offsets: dict = {}
+
+    if _aware:
+        for i, scid in enumerate(scenes_in_order):
+            head     = scene_heads.get(scid, 0.0)
+            sc_start = max(0.0, scene_first_vo[scid]["start_sec"] - head)
+            if i + 1 < len(scenes_in_order):
+                next_scid = scenes_in_order[i + 1]
+                next_head = scene_heads.get(next_scid, 0.0)
+                sc_end    = max(sc_start, scene_first_vo[next_scid]["start_sec"] - next_head)
+            else:
+                sc_end = voplan_total_dur
+            scene_slots[scid]     = (sc_start, max(0.0, sc_end - sc_start))
+            vo_head_offsets[scid] = 0.0
+        video_total_dur = voplan_total_dur
+    else:
+        ep_cursor      = 0.0
+        cum_head_added = 0.0
+        for i, scid in enumerate(scenes_in_order):
+            head     = scene_heads.get(scid, 0.0)
+            sc_start = ep_cursor
+            cum_head_added += head
+            vo_head_offsets[scid] = cum_head_added
+            if i + 1 < len(scenes_in_order):
+                next_scid   = scenes_in_order[i + 1]
+                natural_dur = (scene_first_vo[next_scid]["start_sec"]
+                               - scene_first_vo[scid]["start_sec"])
+            else:
+                natural_dur = voplan_total_dur - scene_first_vo[scid]["start_sec"]
+            sc_dur = natural_dur + head
+            scene_slots[scid] = (sc_start, max(0.0, sc_dur))
+            ep_cursor = sc_start + sc_dur
+        video_total_dur = ep_cursor
+
+    for scid in scenes_in_order:
+        s, d = scene_slots[scid]
+        print(f"  [scene] {scid}: {s:.3f}s – {s+d:.3f}s  dur={d:.3f}s  "
+              f"head={scene_heads.get(scid, 0.0):.1f}s  vo_offset={vo_head_offsets[scid]:.1f}s")
+
+    return scene_slots, video_total_dur, vo_head_offsets
+
+
+def write_srt_from_voplan(vo_items: list, srt_path: Path, subs_path: Path) -> None:
+    """Write SRT + subs.json directly from VOPlan items (episode-absolute timing)."""
+    lines: list[str] = []
+    subs:  list[dict] = []
+    seq = 1
+    for vi in sorted(vo_items, key=lambda v: v.get("start_sec", 0)):
+        text = vi.get("text", "").strip()
+        if not text:
+            continue
+        abs_in  = round(vi["start_sec"] * 1000)
+        abs_out = round(vi["end_sec"]   * 1000)
+        timecode = f"{ms_to_srt_ts(abs_in)} --> {ms_to_srt_ts(abs_out)}"
+        lines += [str(seq), timecode, text, ""]
+        subs.append({
+            "line_id":  vi.get("item_id", ""),
+            "timecode": timecode,
+            "text":     text,
+        })
+        seq += 1
+    srt_path.write_text("\n".join(lines), encoding="utf-8")
+    subs_path.write_text(json.dumps(subs, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_license_manifest_flat(
+    segments: list,
+    output_dir: Path,
+    locale: str,
+) -> "Path | None":
+    """Write licenses.json from flat MediaPlan.shot_overrides[] segments.
+
+    Each entry carries timing in the final video (computed from segment ORDER,
+    not from start_sec), plus full license/attribution metadata from the
+    segment's 'source' block.
+    """
+    entries: list[dict] = []
+    cursor = 0.0
+    for seg in segments:
+        seg_type = seg.get("type", "image")
+        seg_dur  = _mp_seg_dur(seg)
+        source   = seg.get("source") or {}
+
+        video_start = round(cursor, 6)
+        video_end   = round(cursor + seg_dur, 6)
+
+        entry: dict = {
+            "locale":               locale,
+            "video_start_sec":      video_start,
+            "video_end_sec":        video_end,
+            "video_duration_sec":   round(seg_dur, 6),
+            "media_type":           seg_type,
+            "url":                  seg.get("url", ""),
+            "clip_start_sec":       float(seg.get("clip_in")  or 0.0),
+            "clip_end_sec":         float(seg.get("clip_out") or 0.0),
+            "hold_sec":             float(seg.get("hold_sec") or 0.0) if seg_type == "image" else None,
+            "animation_type":       seg.get("animation_type"),
+            # attribution / license from source block
+            "title":                source.get("title"),
+            "photographer":         source.get("photographer"),
+            "attribution_text":     source.get("attribution_text"),
+            "attribution_required": source.get("attribution_required"),
+            "license_summary":      source.get("license_summary"),
+            "license_url":          source.get("license_url"),
+            "asset_page_url":       source.get("asset_page_url"),
+            "file_url":             source.get("file_url"),
+            "source_site":          source.get("source_site"),
+            "width":                source.get("width"),
+            "height":               source.get("height"),
+            "tags":                 source.get("tags"),
+        }
+        entry = {k: v for k, v in entry.items() if v is not None}
+        entries.append(entry)
+        cursor += seg_dur
+
+    if not entries:
+        return None
+
+    manifest = {
+        "schema_id":      "license_manifest",
+        "schema_version": "1.0.0",
+        "locale":         locale,
+        "generated_at":   datetime.datetime.utcnow().isoformat() + "Z",
+        "total_segments": len(entries),
+        "segments":       entries,
+    }
+    out_path = output_dir / "licenses.json"
+    out_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"  [license] Wrote {len(entries)} segment(s) → {out_path}")
+    return out_path
+
+
 # ── SRT writer ────────────────────────────────────────────────────────────────
 
 def ms_to_srt_ts(ms: int) -> str:
@@ -1309,6 +1631,9 @@ def parse_args() -> argparse.Namespace:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+# MediaPlan-mode renderer: VOPlan is the single source of truth for timing.
+# Segments come from MediaPlan.json shot_overrides[] in ORDER (no start_sec needed).
+# ShotList.json is NOT read.
 
 def main() -> None:
     args = parse_args()
@@ -1339,583 +1664,436 @@ def main() -> None:
                   (episode_dir / "renders" / locale)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    shots_dir = output_dir / ".shots"
-    shots_dir.mkdir(parents=True, exist_ok=True)
-
-    # ── Load ShotList.json ───────────────────────────────────────────────────
-    _shotlist_path = episode_dir / "ShotList.json"
-    if not _shotlist_path.exists():
-        print(f"[ERROR] ShotList.json not found: {_shotlist_path}", file=sys.stderr)
-        sys.exit(1)
-    shotlist = load_json(_shotlist_path)
-
-    # ── Plan-hash cache invalidation (keyed on ShotList timing_lock_hash) ───
-    _plan_hash = (shotlist.get("timing_lock_hash")
-                  or hashlib.md5(json.dumps(shotlist, sort_keys=True).encode()).hexdigest())
-    _hash_file = shots_dir / ".plan_hash"
-    if _hash_file.exists() and _hash_file.read_text().strip() != _plan_hash:
-        print(f"  [render] ShotList changed — clearing cached shots")
-        shutil.rmtree(shots_dir)
-        shots_dir.mkdir(parents=True, exist_ok=True)
-    _hash_file.write_text(_plan_hash)
-
-    fps          = FPS
     profile_name = args.profile or DEFAULT_PROFILE
     profile      = PROFILES.get(profile_name, PROFILES[DEFAULT_PROFILE])
+    crf          = profile["crf"]
+    preset_str   = profile["preset"]
 
-    # ── EN locale reference floor (--reference-approval) ────────────────────
-    _ref_dur_map: dict = {}
-    if args.reference_approval:
-        _ref_path = Path(args.reference_approval).resolve()
-        if not _ref_path.exists():
-            print(f"[ERROR] --reference-approval file not found: {_ref_path}", file=sys.stderr)
-            sys.exit(1)
-        try:
-            _ref_voplan  = load_json(_ref_path)
-            _ref_vo      = _ref_voplan.get("vo_items", [])
-            _ref_shotlist_path = _ref_path.parent / "ShotList.json"
-            _ref_shotlist = load_json(_ref_shotlist_path) if _ref_shotlist_path.exists() else shotlist
-            # Build ref duration_ms for each shot using same three-condition formula
-            _ref_vo_lookup = {v["item_id"]: v for v in _ref_vo}
-            _ref_scene_tails = _ref_voplan.get("scene_tails")
-            _ref_cumulative_sec = 0.0
-            for _rs in _ref_shotlist.get("shots", []):
-                _rs_id   = _rs["shot_id"]
-                _rs_dur  = _rs.get("duration_sec", 0.0)
-                _rs_vids = _rs.get("audio_intent", {}).get("vo_item_ids", [])
-                _rs_vo   = [_ref_vo_lookup[i] for i in _rs_vids
-                            if i in _ref_vo_lookup and _ref_vo_lookup[i].get("end_sec") is not None]
-                _rs_base = round(_rs_dur * 1000)
-                if _rs_vo:
-                    _rs_last = round((max(v["end_sec"] for v in _rs_vo) - _ref_cumulative_sec) * 1000)
-                    _rs_tail = _VO_TAIL_MS
-                    if _rs_dur:
-                        _d = round(_rs_dur * 1000) - _rs_last
-                        if _d > 0:
-                            _rs_tail = _d
-                    if _ref_scene_tails:
-                        _sc = _rs.get("scene_id", "")
-                        _rs_tail = int(_ref_scene_tails.get(_sc, _ref_scene_tails.get(_rs_id, _rs_tail)))
-                    _ref_dur_map[_rs_id] = max(_rs_last + _rs_tail, _rs_base)
-                else:
-                    _ref_dur_map[_rs_id] = _rs_base
-                _ref_cumulative_sec += round(_ref_dur_map.get(_rs_id, round(_rs_dur * 1000)) * FPS / 1000) / FPS
-            print(f"  [render] EN floor loaded from {_ref_path.name} — {len(_ref_dur_map)} shots")
-        except Exception as _ref_err:
-            print(f"  [render] WARNING: Could not load --reference-approval: {_ref_err}")
-
-    # ── Build shots list from ShotList + VOPlan + MusicPlan ─────────────────
-    # (MusicPlan is loaded first so music_asset_id is available per shot)
-
-    # --- Load MusicPlan.json (replaces MusicApprovalSnapshot.json) ---
-    _mp_doc               = {}   # pre-init so resolve block below can always reference it
-    _music_plan_overrides = {}
-    _music_clip_volumes   = {}
-    _music_track_volumes  = {}
-    _mp_path = os.path.join(episode_dir, "MusicPlan.json")
-    if os.path.isfile(_mp_path):
-        try:
-            _mp_doc = json.loads(open(_mp_path, encoding="utf-8").read())
-            # Index by shot_id when present; fall back to item_id for MusicPlans
-            # written before the shot_id migration (avoids silently dropping all
-            # overrides when shot_id is absent).
-            _music_plan_overrides = {}
-            for _o in _mp_doc.get("shot_overrides", []):
-                _key = _o.get("shot_id") or _o.get("item_id")
-                if _key:
-                    _music_plan_overrides[_key] = _o
-            _music_clip_volumes  = _mp_doc.get("clip_volumes",  {})
-            _music_track_volumes = _mp_doc.get("track_volumes", {})
-            if not _music_plan_overrides and _mp_doc.get("shot_overrides"):
-                print("[render] WARNING: MusicPlan overrides have neither shot_id "
-                      "nor item_id — overrides cannot be applied.")
-            print(f"[render] MusicPlan loaded — {len(_music_plan_overrides)} shot overrides")
-        except Exception as _mpe:
-            print(f"[render] WARNING: MusicPlan.json load failed: {_mpe}")
-    else:
-        print("[render] WARNING: MusicPlan.json not found — music timing is approximate.")
-
-    # ── Load SfxPlan.json (once) — live user selections from SFX tab ────────
-    # Read directly at render time so edits made in the SFX tab are honoured
-    # without requiring a gen_render_plan re-run (mirrors MusicPlan override logic).
-    _sfx_plan_data: dict = {}   # pre-init so resolve block below can always reference it
-    _sfx_plan_path = os.path.join(episode_dir, "SfxPlan.json")
-    _sfx_plan_by_shot: dict = {}   # shot_id -> list[sfx_entry]
-    if os.path.isfile(_sfx_plan_path):
-        try:
-            _sfx_plan_data = json.loads(open(_sfx_plan_path, encoding="utf-8").read())
-            # v1.2+: volume lives on cut_clips[].volume_db; build lookup for render_shot
-            _sfx_clip_vol_map = {
-                cl["clip_id"]: float(cl.get("volume_db", 0) or 0)
-                for cl in _sfx_plan_data.get("cut_clips", [])
-                if cl.get("clip_id")
-            }
-            for _se in _sfx_plan_data.get("sfx_entries", []):
-                _sid = _se.get("shot_id", "")
-                if _sid:
-                    # Inject clip_volume_db from cut_clips if absent (new schema v1.2+)
-                    _se_out = dict(_se)
-                    if not _se_out.get("clip_volume_db"):
-                        _se_out["clip_volume_db"] = _sfx_clip_vol_map.get(
-                            _se_out.get("clip_id", ""), 0.0)
-                    _sfx_plan_by_shot.setdefault(_sid, []).append(_se_out)
-            _n_sfx = sum(len(v) for v in _sfx_plan_by_shot.values())
-            print(f"  [render] SfxPlan.json loaded — {_n_sfx} entr{'y' if _n_sfx == 1 else 'ies'} "
-                  f"across {len(_sfx_plan_by_shot)} shot(s)")
-        except Exception as _sfx_err:
-            print(f"  [render] WARNING: Could not load SfxPlan.json: {_sfx_err}")
-    # If SfxPlan.json is absent, _sfx_plan_by_shot stays {} and no SFX is mixed.
-
-    # ── Build media_map + asset_map via in-memory asset resolution ───────────
-    # Source of truth: AssetManifest.shared.json (characters, backgrounds, sfx/music
-    # asset IDs) + VOPlan (vo_items, locale) + MusicPlan / SfxPlan already loaded above.
-    # This replaces reading the pre-computed resolved_assets[] field from VOPlan so that
-    # render_video never depends on a stale pipeline-time snapshot baked into VOPlan.
-    _am_shared_path = episode_dir / "AssetManifest.shared.json"
-    _am_shared: dict = {}
-    if _am_shared_path.exists():
-        try:
-            _am_shared = load_json(_am_shared_path)
-            print(f"  [render] AssetManifest.shared.json loaded (project_id={_am_shared.get('project_id','')})")
-        except Exception as _am_err:
-            print(f"  [render] WARNING: AssetManifest.shared.json load failed: {_am_err}")
-    else:
-        print("  [render] WARNING: AssetManifest.shared.json not found — "
-              "falling back to VOPlan character/background lists")
-
-    # Assemble a minimal merged manifest for resolve_all() — only the fields it reads.
-    # character_packs / backgrounds / sfx_items / music_items come from the shared manifest
-    # (authoritative, locale-independent).  vo_items come from the locale-specific VOPlan.
-    # Falls back to VOPlan fields when shared manifest is absent (older project layouts).
-    _virtual_merged: dict = {
-        "locale":          locale,
-        "project_id":      _am_shared.get("project_id",      voplan.get("project_id", "")),
-        "character_packs": _am_shared.get("character_packs", voplan.get("character_packs", [])),
-        "backgrounds":     _am_shared.get("backgrounds",     voplan.get("backgrounds", [])),
-        "vo_items":        voplan.get("vo_items", []),
-        # sfx_items: AssetManifest is authoritative; SfxPlan has entries but not the full list
-        "sfx_items":       _am_shared.get("sfx_items",  voplan.get("sfx_items", [])),
-        # music_items: AssetManifest is authoritative; MusicPlan has shot_overrides, not items
-        "music_items":     _am_shared.get("music_items", voplan.get("music_items", [])),
+    # ── 1. VOPlan — single source of truth for timing ────────────────────────
+    vo_items = [v for v in voplan.get("vo_items", []) if v.get("end_sec") is not None]
+    scene_heads = {
+        k: float(v) for k, v in voplan.get("scene_heads", {}).items() if float(v) > 0
     }
-    _assets_root = episode_dir / "assets"
-    print(f"  [render] resolve_all() — in-memory resolution from authoritative sources")
-    _ra_items  = _ra_resolve_all(_virtual_merged, _assets_root, selections=None, no_hires=True)
-    media_map  = build_media_map({"items": _ra_items})
-    asset_map  = build_asset_map({"resolved_assets": _ra_items})
-    print(f"  [render] resolve_all() → {len(_ra_items)} items")
-
-    # ── Load VO timing from VOPlan + ShotList (for render_shot subtitle track) ─
-    _manifest_path = episode_dir / f"VOPlan.{locale}.json"
-    _vo_timing_by_shot = load_vo_timing(_manifest_path, _shotlist_path)
-
-    # ── Build shot dicts from ShotList + VOPlan + MusicPlan ──────────────────
-    shots = build_episode_timeline(
-        shotlist           = shotlist,
-        media_map          = media_map,
-        vo_items           = voplan.get("vo_items", []),
-        music_plan_overrides = _music_plan_overrides,
-        scene_tails        = voplan.get("scene_tails"),
-        ref_dur_map        = _ref_dur_map if _ref_dur_map else None,
+    if not vo_items:
+        print("[ERROR] VOPlan has no vo_items with end_sec.", file=sys.stderr)
+        sys.exit(1)
+    voplan_total_dur = max(
+        v["end_sec"] + (v.get("pause_after_ms") or 0) / 1000.0
+        for v in vo_items
     )
 
-    # ── Load confirmed media selections (CHANGE 5) ───────────────────────────
-    def _url_to_path(url: str) -> str:
-        """Return a URI that uri_to_path() can resolve.
-
-        MediaPlan.json stores file:// URIs.  The previous implementation stripped
-        the 'file://' prefix, producing a bare absolute path which uri_to_path()
-        cannot handle (it requires the file:// scheme).  Now we preserve the scheme.
-        Plain absolute paths are wrapped so they also work downstream.
-        """
-        if url.startswith("file://"):
-            return url          # keep intact — uri_to_path() requires the file:// prefix
-        if url and Path(url).is_absolute():
-            return Path(url).as_uri()   # /abs/path → file:///abs/path
-        # Relative path (should not appear in practice but handle gracefully)
-        if url:
-            return (_sel_path.parent / url).resolve().as_uri()
-        return url
-
-    _sel_path = episode_dir / "MediaPlan.json"
-    _shot_to_segments = None   # None = no MediaPlan; {} = file present but empty
-
-    if _sel_path.exists():
-        try:
-            _sel_data = json.loads(_sel_path.read_text(encoding="utf-8"))
-            _shot_to_segments = {}
-            if "shot_overrides" in _sel_data:
-                # New format: shot_overrides {shot_id: {clip_id, clip_in, clip_out}}
-                # (MediaPlan.v1.json schema: clip_in/clip_out are trim bounds in seconds)
-                # Detected by key presence — no schema_version bump.
-                # Resolve clip_id → absolute file path via media_cut_clips.json
-                _clips_path = episode_dir / "assets" / "media_library" / "media_cut_clips.json"
-                _clip_map = {}   # clip_id → clip record
-                if _clips_path.exists():
-                    try:
-                        _clip_map = {c["clip_id"]: c
-                                     for c in json.loads(_clips_path.read_text(encoding="utf-8"))
-                                     if "clip_id" in c}
-                    except Exception as _ce:
-                        print(f"  [media] WARNING: Failed to load media_cut_clips.json: {_ce}")
-
-                for _shot_id, _ovr in _sel_data.get("shot_overrides", {}).items():
-                    # New path: Shot Overrides UI saves a segments array directly
-                    if _ovr.get("segments"):
-                        _shot_to_segments[_shot_id] = _ovr["segments"]
-                        continue
-                    # Legacy path: single clip_id entry (primary clip dropdown)
-                    _clip_id = _ovr.get("clip_id")
-                    if not _clip_id or _clip_id not in _clip_map:
-                        continue
-                    _abs = (episode_dir / _clip_map[_clip_id]["path"]).resolve()
-                    _seg = {
-                        "url":        _abs.as_uri(),       # file:// URI — required by _url_to_path()
-                        "media_type": "video",
-                        # Prefer clip_in/clip_out (MediaPlan.v1 schema); fall back to
-                        # start_sec/end_sec for backward compat with older saved plans.
-                        "start_sec":  float(_ovr.get("clip_in")  if _ovr.get("clip_in")  is not None else (_ovr.get("start_sec") or 0.0)),
-                        "end_sec":    _ovr.get("clip_out") if _ovr.get("clip_out") is not None else _ovr.get("end_sec"),
-                    }
-                    _shot_to_segments[_shot_id] = [_seg]
-            else:
-                # Old format: selections {bg_id: {per_shot: {shot_id: {segments: [...]}}}}
-                for _bg_id, _bg_data in _sel_data.get("selections", {}).items():
-                    if not isinstance(_bg_data, dict):
-                        continue
-                    for _shot_id, _shot_data in _bg_data.get("per_shot", {}).items():
-                        _shot_to_segments[_shot_id] = _shot_data.get("segments", [])
-            # Locale mismatch warning
-            _confirmed_locale = _sel_data.get("confirmed_locale")
-            if _confirmed_locale and _confirmed_locale != locale:
-                print(
-                    f"INFO: Media selections confirmed in locale '{_confirmed_locale}' "
-                    f"but rendering locale '{locale}'. "
-                    "Re-confirm selections in this locale if timing is incorrect."
-                )
-            print(f"  [media] Loaded confirmed selections: {len(_shot_to_segments)} shots")
-        except Exception as _exc:
-            print(f"  [media] WARNING: Failed to load MediaPlan.json: {_exc}")
-            _shot_to_segments = None
-    else:
-        print(
-            "WARNING: No confirmed media selections found (MediaPlan.json missing).\n"
-            "         Video trim offsets (start_sec/end_sec from Confirm Selections) are NOT applied.\n"
-            "         To apply confirmed trims, run 'Confirm Selections' in the Media tab first."
-        )
-
     print("=" * 60)
-    print("  render_video")
+    print("  render_video  [MediaPlan mode — ShotList-free]")
     print(f"  Plan    : {plan_path.name}")
     print(f"  Locale  : {locale}")
-    print(f"  Shots   : {len(shots)}")
-    print(f"  Profile : {profile_name}  (CRF {profile['crf']}, {profile['preset']})")
+    print(f"  Profile : {profile_name}  (CRF {crf}, {preset_str})")
     print(f"  Output  : {output_dir}")
+    print(f"  [dur] voplan_total_dur={voplan_total_dur:.3f}s  scene_heads={scene_heads}")
     print("=" * 60)
 
-    # ── Pre-compute music continuity params ─────────────────────────────────
-    # music_start_sec: where in the WAV to seek (for same-music continuation)
-    # music_apply_fadeout: True when next shot has different/no music
-    music_offset: dict[str, float] = {}  # {music_asset_id → accumulated_sec}
-    shot_music_params: list[tuple[float, bool]] = []
+    # ── 2. Build scene timeline from VOPlan ───────────────────────────────────
+    scene_slots, video_total_dur, vo_head_offsets = build_scene_timeline(
+        vo_items, scene_heads, voplan_total_dur
+    )
 
-    for i, shot in enumerate(shots):
-        mid = shot.get("music_asset_id")
-        if mid is None:
-            shot_music_params.append((0.0, False))
-            continue
+    # ── 3. Read MediaPlan.json segments ───────────────────────────────────────
+    media_plan_path = episode_dir / "MediaPlan.json"
+    media_segments: list = []
+    if media_plan_path.exists():
+        _mp_data       = load_json(media_plan_path)
+        media_segments = _mp_data.get("shot_overrides", [])
+        print(f"  [media] {len(media_segments)} segment(s) from MediaPlan.json")
+    else:
+        print("  [media] MediaPlan.json not found — rendering black background")
 
-        start_sec = music_offset.get(mid, 0.0)
+    # ── 4. Compute total duration ─────────────────────────────────────────────
+    if media_segments:
+        _seg_total = sum(_mp_seg_dur(s) for s in media_segments)
+        print(f"  [dur] seg_total={_seg_total:.3f}s  voplan={voplan_total_dur:.3f}s")
+    # Snap to frame boundary so ffmpeg never rounds the last partial frame up.
+    # e.g. 34.997s × 24fps = 839.928 → 840 frames → 35.000s without this snap.
+    total_dur = math.floor(voplan_total_dur * FPS) / FPS
+    print(f"  [dur] total_dur={total_dur:.3f}s")
 
-        next_shot = shots[i + 1] if i + 1 < len(shots) else None
-        next_mid  = next_shot.get("music_asset_id") if next_shot else None
-        apply_fo  = (next_mid != mid)   # different or absent → fade out
+    _scale_pad = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                  f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1")
 
-        shot_music_params.append((start_sec, apply_fo))
+    with tempfile.TemporaryDirectory() as _tmp_dir:
+        _tmp = Path(_tmp_dir)
+        _clip_files: list = []
 
-        # Advance offset for next shot with same music_asset_id
-        music_offset[mid] = start_sec + shot["duration_ms"] / 1000.0
-
-    # ── Per-shot render ─────────────────────────────────────────────────────
-    print()
-    shot_mkv_pairs: list[tuple[dict, Path]] = []
-    placeholder_count = 0
-
-    for i, shot in enumerate(shots):
-        # CHANGE 5: override bg_segments from confirmed selections if present
-        _shot_id_cur = shot.get("shot_id", "")
-        if _shot_to_segments is not None:
-            if _shot_id_cur in _shot_to_segments:
-                _confirmed_segs = _shot_to_segments[_shot_id_cur]
-                shot = dict(shot)  # shallow copy — do not mutate shots list
-                def _seg_uri(seg):
-                    # Prefer filesystem path (avoids /serve_media proxy URL)
-                    p = seg.get("path") or ""
-                    if p:
-                        return _url_to_path(p)
-                    return _url_to_path(seg.get("url", ""))
-
-                def _seg_start(seg):
-                    # clip_in (new schema) takes priority over start_sec (old schema)
-                    v = seg.get("clip_in") if seg.get("clip_in") is not None else seg.get("start_sec")
-                    return float(v or 0.0)
-
-                def _seg_dur(seg):
-                    start = _seg_start(seg)
-                    # Video: use clip_out or end_sec
-                    end_raw = seg.get("clip_out") if seg.get("clip_out") is not None else seg.get("end_sec")
-                    if end_raw is not None:
-                        return max(0.0, float(end_raw) - start)
-                    # Image: use hold_sec then duration_sec
-                    hold = seg.get("hold_sec")
-                    if hold:
-                        return float(hold)
-                    dur = seg.get("duration_sec")
-                    if dur:
-                        return float(dur)
-                    return 0.0
-
-                shot["background_segments"] = [
-                    {
-                        "uri":                   _seg_uri(seg),
-                        # media_type (new) or type (old) — default image
-                        "media_type":            seg.get("media_type") or seg.get("type") or "image",
-                        # animation_type (new) or animation (old)
-                        "animation_type":        seg.get("animation_type") or seg.get("animation") or None,
-                        "start_sec":             _seg_start(seg),
-                        "duration_override_sec": _seg_dur(seg),
-                        "hold_sec":              float(seg.get("hold_sec") or 0.0),
-                    }
-                    for seg in _confirmed_segs
-                ]
-                print(f"  [{_shot_id_cur}] Using confirmed media selections — overriding computed bg.")
+        # ── 5. Build video clips from segments ──────────────────────────────
+        if not media_segments:
+            _bp = _tmp / "clip_0000_black.mp4"
+            _r = subprocess.run([
+                "ffmpeg", "-y", "-f", "lavfi",
+                "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={total_dur:.3f}",
+                "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest", str(_bp)
+            ], capture_output=True, text=True)
+            if _r.returncode == 0:
+                _clip_files.append(_bp)
+                print(f"  [clip] black placeholder {total_dur:.3f}s ok")
             else:
-                # MediaPlan.json present but shot not confirmed → black background
-                shot = dict(shot)
-                shot["background_segments"] = []
-                print(f"  [{_shot_id_cur}] No confirmed selection — rendering black background.")
-        # else: _shot_to_segments is None → use bg_segments from build_episode_timeline (no change)
+                print(f"[ERROR] black placeholder failed: {_r.stderr[-300:]}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            for _si, _seg in enumerate(media_segments):
+                _stype    = _seg.get("type", "image")
+                _sdur     = _mp_seg_dur(_seg)
+                _anim     = (_seg.get("animation_type") or _seg.get("animation") or "none").lower()
+                _mpath    = resolve_media_path(_seg, episode_dir)
+                _cpath    = _tmp / f"clip_{_si:04d}.mp4"
 
-        m_start, m_fadeout = shot_music_params[i]
-        mkv = render_shot(
-            shot=shot,
-            vo_lines=_vo_timing_by_shot.get(shot.get("shot_id", ""), []),
-            asset_map=asset_map,
-            shot_index=i,
-            shots_dir=shots_dir,
-            fps=fps,
-            profile=profile,
-            music_start_sec=m_start,
-            music_apply_fadeout=m_fadeout,
-            music_fadeout_sec=args.music_fadeout_sec,
-            no_music=args.no_music,
-            verbose=args.verbose,
-            music_plan_data={
-                "plan_overrides": _music_plan_overrides,
-                "clip_volumes":   _music_clip_volumes,
-                "track_volumes":  _music_track_volumes,
-            },
-            sfx_plan_override=_sfx_plan_by_shot or None,
-        )
-        shot_mkv_pairs.append((shot, mkv))
+                print(f"  [seg] {_si} type={_stype} dur={_sdur:.3f}s "
+                      f"path={str(_mpath)[:80] if _mpath else 'MISSING'}")
 
-        # Count placeholders in this shot
-        for asset_id in [shot.get("background_asset_id")] \
-                        + shot.get("character_asset_ids", []) \
-                        + shot.get("sfx_asset_ids", []):
-            if asset_id and asset_map.get(asset_id, {}).get("is_placeholder", True):
-                placeholder_count += 1
-        if shot.get("music_asset_id") and \
-           asset_map.get(shot["music_asset_id"], {}).get("is_placeholder", True):
-            placeholder_count += 1
+                if _sdur <= 0:
+                    print(f"  [warn] seg {_si}: duration 0 — skipped")
+                    continue
 
-    # ── Scene-boundary black frame ──────────────────────────────────────────
-    black_frame = generate_black_frame(shots_dir, fps)
-    frame_ms    = round(1000 / fps)
+                if not _mpath or not Path(_mpath).exists():
+                    print(f"  [warn] seg {_si}: media not found '{_mpath}' — black")
+                    _r = subprocess.run([
+                        "ffmpeg", "-y", "-f", "lavfi",
+                        "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={_sdur:.3f}",
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-t", f"{_sdur:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-shortest", str(_cpath)
+                    ], capture_output=True, text=True)
+                    if _r.returncode == 0:
+                        _clip_files.append(_cpath)
+                    continue
 
-    # ── Concat list ─────────────────────────────────────────────────────────
-    concat_list = shots_dir / "concat.txt"
-    total_ms    = 0
-    n_scenes    = 0
+                if _stype == "image":
+                    _zoompan = _anim_vf(_anim, _sdur)
+                    _vf      = (_scale_pad + "," + _zoompan) if _zoompan else _scale_pad
+                    _cmd     = [
+                        "ffmpeg", "-y",
+                        "-loop", "1", "-framerate", str(FPS),
+                        "-t", f"{_sdur:.3f}", "-i", _mpath,
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-vf", _vf, "-r", str(FPS), "-pix_fmt", "yuv420p",
+                        "-t", f"{_sdur:.3f}", "-c:v", "libx264", "-c:a", "aac",
+                        "-shortest", str(_cpath)
+                    ]
+                else:
+                    _seg_start_t = float(_seg.get("clip_in") or 0)
+                    _cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", f"{_seg_start_t:.3f}", "-t", f"{_sdur:.3f}",
+                        "-i", _mpath,
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-vf", _scale_pad, "-r", str(FPS), "-pix_fmt", "yuv420p",
+                        "-t", f"{_sdur:.3f}", "-c:v", "libx264", "-c:a", "aac",
+                        "-shortest", str(_cpath)
+                    ]
 
-    with open(concat_list, "w", encoding="utf-8") as f:
-        for idx, (shot, mkv) in enumerate(shot_mkv_pairs):
-            f.write(f"file '{mkv}'\n")
-            total_ms += shot["duration_ms"]   # VO-ceiling authoritative duration
+                _r = subprocess.run(_cmd, capture_output=True, text=True)
+                if _r.returncode != 0:
+                    print(f"  [warn] seg {_si} ({_stype}) failed: {_r.stderr[-300:]}")
+                    _r2 = subprocess.run([
+                        "ffmpeg", "-y", "-f", "lavfi",
+                        "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={_sdur:.3f}",
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-t", f"{_sdur:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-shortest", str(_cpath)
+                    ], capture_output=True, text=True)
+                    if _r2.returncode == 0:
+                        _clip_files.append(_cpath)
+                        print(f"  [warn] seg {_si}: black fallback")
+                    continue
 
-            if idx < len(shot_mkv_pairs) - 1:
-                next_shot = shot_mkv_pairs[idx + 1][0]
-                if next_shot.get("scene_id") != shot.get("scene_id"):
-                    f.write(f"file '{black_frame}'\n")
-                    total_ms += frame_ms
-                    n_scenes += 1
+                _clip_files.append(_cpath)
+                print(f"  [clip] seg {_si}: {_stype} {_sdur:.3f}s ok")
 
-    print(f"\n  Scene boundaries (black frames inserted): {n_scenes}")
+        if not _clip_files:
+            print("[ERROR] No clips generated.", file=sys.stderr)
+            sys.exit(1)
 
-    # ── Concat + loudnorm → output.mp4 ─────────────────────────────────────
-    final_mp4 = output_dir / "output.mp4"
-    concat_to_mp4(concat_list, final_mp4, profile)
+        # ── 6. Concatenate clips ─────────────────────────────────────────────
+        _concat_list  = _tmp / "concat.txt"
+        _concat_video = _tmp / "concat.mp4"
+        with open(_concat_list, "w") as _cf:
+            for _cp in _clip_files:
+                _cf.write(f"file '{_cp}'\n")
+        _result = subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(_concat_list), "-c", "copy", str(_concat_video)
+        ], capture_output=True, text=True)
+        if _result.returncode != 0:
+            print(f"[ERROR] concat failed: {_result.stderr[-500:]}", file=sys.stderr)
+            sys.exit(1)
 
-    # ── SRT + subtitle sidecar ───────────────────────────────────────────────
+        # ── 7. Build VO audio (episode-absolute from VOPlan) ─────────────────
+        _vo_dir    = episode_dir / "assets" / locale / "audio" / "vo"
+        _vo_audio  = _tmp / "vo_mix.wav"
+        _vo_inputs: list = []
+        _vo_delays: list = []
+
+        for _vi in sorted(vo_items, key=lambda v: v.get("start_sec", 0)):
+            _wav = _vo_dir / f"{_vi['item_id']}.wav"
+            if not _wav.exists():
+                continue
+            _scid    = _scene_id_from_item_id(_vi.get("item_id", ""))
+            _head_off = vo_head_offsets.get(_scid, 0.0)
+            _delay_ms = int((_vi["start_sec"] + _head_off) * 1000)
+            if _delay_ms < 0:
+                continue
+            _vo_inputs.append(str(_wav))
+            _vo_delays.append(_delay_ms)
+
+        if _vo_inputs:
+            _vf_parts = [f"[{i}]adelay={d}|{d}[d{i}]" for i, d in enumerate(_vo_delays)]
+            _vmix_ins = "".join(f"[d{i}]" for i in range(len(_vo_inputs)))
+            _vf_str   = (";".join(_vf_parts)
+                         + f";{_vmix_ins}amix=inputs={len(_vo_inputs)}:normalize=0,"
+                         f"apad=pad_dur={total_dur:.3f}[out]")
+            _cmd = ["ffmpeg", "-y"]
+            for _inp in _vo_inputs:
+                _cmd += ["-i", _inp]
+            _cmd += ["-filter_complex", _vf_str, "-map", "[out]",
+                     "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+                     "-t", str(total_dur), str(_vo_audio)]
+            _result = subprocess.run(_cmd, capture_output=True, text=True)
+            if _result.returncode != 0:
+                print(f"  [warn] VO mix failed: {_result.stderr[-300:]}")
+                build_silent_audio(total_dur, _vo_audio)
+            else:
+                print(f"  [vo] Mixed {len(_vo_inputs)} VO line(s)")
+        else:
+            print("  [vo] No VO WAV files — silent VO track")
+            build_silent_audio(total_dur, _vo_audio)
+
+        # ── 8. Build music audio (from MusicPlan.json) ───────────────────────
+        _music_audio = None
+        if not args.no_music:
+            _mus_path = episode_dir / "MusicPlan.json"
+            if _mus_path.exists():
+                _mus_doc    = load_json(_mus_path)
+                _clip_vol   = _mus_doc.get("clip_volumes",  {})
+                _track_vol  = _mus_doc.get("track_volumes", {})
+                _BASE_MDB   = -6.0
+                _mi, _md, _mv, _mcd = [], [], [], []
+                for _ovr in _mus_doc.get("shot_overrides", []):
+                    _asset = _ovr.get("music_asset_id", "")
+                    _mst   = _ovr.get("start_sec")
+                    _men   = _ovr.get("end_sec")
+                    if _mst is None:
+                        continue
+                    _mdms  = max(0.0, float(_mst)) * 1000
+                    _mcdur = (max(0.0, float(_men) - float(_mst))
+                              if _men is not None else None)
+                    _wl    = episode_dir / "assets" / "music" / f"{_asset}.loop.wav"
+                    _wb    = episode_dir / "assets" / "music" / f"{_asset}.wav"
+                    _wav   = (str(_wl) if _wl.exists()
+                              else str(_wb) if _wb.exists() else "")
+                    if not _wav:
+                        print(f"  [WARN] music wav not found: {_asset}")
+                        continue
+                    _stem   = re.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _asset)
+                    _db_off = _track_vol.get(_stem, 0.0) + _clip_vol.get(_asset, 0.0)
+                    _vol    = 10 ** ((_BASE_MDB + _db_off) / 20.0)
+                    _mi.append(_wav)
+                    _md.append(_mdms)
+                    _mv.append(_vol)
+                    _mcd.append(_mcdur)
+                    print(f"  [music] {_asset}: delay={_mdms:.0f}ms clip_dur={_mcdur}")
+                if _mi:
+                    _music_audio = _tmp / "music_mix.wav"
+                    _mf_parts = []
+                    for _idx, (_d, _v, _cd) in enumerate(zip(_md, _mv, _mcd)):
+                        if _cd is not None:
+                            _mf_parts.append(
+                                f"[{_idx}]atrim=duration={_cd:.3f},volume={_v:.4f},"
+                                f"adelay={_d:.0f}|{_d:.0f}[m{_idx}]")
+                        else:
+                            _mf_parts.append(
+                                f"[{_idx}]adelay={_d:.0f}|{_d:.0f},volume={_v:.4f}[m{_idx}]")
+                    _mmix_ins = "".join(f"[m{i}]" for i in range(len(_mi)))
+                    _mf_str   = (";".join(_mf_parts)
+                                 + f";{_mmix_ins}amix=inputs={len(_mi)}:normalize=0,"
+                                 f"apad=pad_dur={total_dur:.3f}[out]")
+                    _cmd = ["ffmpeg", "-y"]
+                    for _inp in _mi:
+                        _cmd += ["-i", _inp]
+                    _cmd += ["-filter_complex", _mf_str, "-map", "[out]",
+                             "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+                             "-t", str(total_dur), str(_music_audio)]
+                    _res = subprocess.run(_cmd, capture_output=True, text=True)
+                    if _res.returncode != 0:
+                        print(f"  [warn] Music mix failed: {_res.stderr[-300:]}")
+                        _music_audio = None
+                    else:
+                        print(f"  [music] Mixed {len(_mi)} music clip(s)")
+                else:
+                    print("  [music] No music WAVs found — music skipped")
+            else:
+                print("  [music] MusicPlan.json not found — music skipped")
+
+        # ── 9. Build SFX audio (from SfxPlan.json) ───────────────────────────
+        _sfx_audio = None
+        _sfx_path  = episode_dir / "SfxPlan.json"
+        if _sfx_path.exists():
+            _sfx_plan = load_json(_sfx_path)
+            _cut_abs: dict = {}
+            for _cc in _sfx_plan.get("cut_clips", []):
+                _cid  = _cc.get("clip_id", "")
+                _crel = _cc.get("path", "")
+                if _cid and _crel:
+                    _cabs = Path(_crel) if Path(_crel).is_absolute() else episode_dir / _crel
+                    _cut_abs[_cid] = str(_cabs)
+            _si2, _sd2, _sdur2 = [], [], []
+            for _se in _sfx_plan.get("shot_overrides", []):
+                _src = _se.get("source_file") or _se.get("local_path") or ""
+                if _src and not Path(_src).exists():
+                    _src = _cut_abs.get(_src, _src)
+                if _src and Path(_src).exists():
+                    _ss2   = float(_se.get("start_sec", 0))
+                    _se_e  = _se.get("end_sec")
+                    _si2.append(_src)
+                    _sd2.append(max(0.0, _ss2) * 1000)
+                    _sdur2.append(max(0.0, float(_se_e) - _ss2)
+                                  if _se_e is not None else None)
+            if _si2:
+                _sfx_audio = _tmp / "sfx_mix.wav"
+                _sf_parts  = [
+                    (f"[{i}]atrim=duration={dur:.3f},adelay={d:.0f}|{d:.0f}[s{i}]" if dur
+                     else f"[{i}]adelay={d:.0f}|{d:.0f}[s{i}]")
+                    for i, (d, dur) in enumerate(zip(_sd2, _sdur2))
+                ]
+                _smix_ins = "".join(f"[s{i}]" for i in range(len(_si2)))
+                _sf_str   = (";".join(_sf_parts)
+                             + f";{_smix_ins}amix=inputs={len(_si2)}:normalize=0,"
+                             f"apad=pad_dur={total_dur:.3f}[out]")
+                _cmd = ["ffmpeg", "-y"]
+                for _inp in _si2:
+                    _cmd += ["-i", _inp]
+                _cmd += ["-filter_complex", _sf_str, "-map", "[out]",
+                         "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+                         "-t", str(total_dur), str(_sfx_audio)]
+                _res = subprocess.run(_cmd, capture_output=True, text=True)
+                if _res.returncode != 0:
+                    print(f"  [warn] SFX mix failed: {_res.stderr[-300:]}")
+                    _sfx_audio = None
+                else:
+                    print(f"  [sfx] Mixed {len(_si2)} SFX clip(s)")
+            else:
+                print("  [sfx] No SFX WAVs found — SFX skipped")
+        else:
+            print("  [sfx] SfxPlan.json not found — SFX skipped")
+
+        # ── 10. Combine audio tracks ─────────────────────────────────────────
+        _extra = [a for a in [_music_audio, _sfx_audio] if a and Path(a).exists()]
+        if _extra:
+            _final_audio = _tmp / "final_audio.wav"
+            _all_t = [str(_vo_audio)] + [str(a) for a in _extra]
+            _nt    = len(_all_t)
+            _amix  = "".join(f"[{i}]" for i in range(_nt))
+            _af    = (f"{_amix}amix=inputs={_nt}:normalize=0,"
+                      f"apad=pad_dur={total_dur:.3f}[out]")
+            _cmd = ["ffmpeg", "-y"]
+            for _t in _all_t:
+                _cmd += ["-i", _t]
+            _cmd += ["-filter_complex", _af, "-map", "[out]",
+                     "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS),
+                     "-t", str(total_dur), str(_final_audio)]
+            _res = subprocess.run(_cmd, capture_output=True, text=True)
+            if _res.returncode != 0:
+                print(f"  [warn] Audio combine failed: {_res.stderr[-300:]}")
+                _final_audio = _vo_audio
+            else:
+                print(f"  [audio] Combined {_nt} track(s): VO"
+                      + (" + Music" if _music_audio else "")
+                      + (" + SFX"   if _sfx_audio   else ""))
+        else:
+            _final_audio = _vo_audio
+
+        # ── 11. Mux video + audio with quality profile ───────────────────────
+        final_mp4 = output_dir / "output.mp4"
+        _result = subprocess.run([
+            "ffmpeg", "-y",
+            "-i", str(_concat_video),
+            "-i", str(_final_audio),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "libx264", "-crf", str(crf), "-preset", preset_str,
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-t", str(total_dur),
+            str(final_mp4)
+        ], capture_output=True, text=True)
+        if _result.returncode != 0:
+            print(f"[ERROR] final mux failed: {_result.stderr[-500:]}", file=sys.stderr)
+            sys.exit(1)
+        print(f"  [mux] {final_mp4}")
+
+    # ── 12. SRT + subtitle sidecar ───────────────────────────────────────────
     srt_path  = output_dir / f"output.{locale}.srt"
     subs_path = output_dir / "output.subs.json"
-    write_srt(shots, srt_path, subs_path, fps, vo_timing_by_shot=_vo_timing_by_shot)
+    write_srt_from_voplan(vo_items, srt_path, subs_path)
     print(f"  SRT:  {srt_path}")
     print(f"  Subs: {subs_path}")
 
-    # ── render_output.json ──────────────────────────────────────────────────
-    render_output = {
-        "schema_id":        "render_output",
-        "schema_version":   "1.0.0",
-        "producer":         PRODUCER,
-        "plan_id":          voplan.get("plan_id", voplan.get("manifest_id", "")),
-        "locale":           locale,
-        "output_video":     str(final_mp4),
-        "output_srt":       str(srt_path),
-        "output_subs":      str(subs_path),
-        "total_shots":      len(shots),
+    # ── 13. render_output.json  (contract: RenderOutput.v1.json) ────────────
+    total_ms  = round(total_dur * 1000)
+    _plan_id  = voplan.get("plan_id", voplan.get("manifest_id", ""))
+    _ro = {
+        # ── required by RenderOutput.v1.json ──────────────────────────────
+        "schema_id":      "render_output",
+        "schema_version": "1.0.0",
+        "output_id":      f"{_plan_id}-{locale}" if _plan_id else f"render-{locale}",
+        "video_uri":      final_mp4.as_uri(),
+        "captions_uri":   srt_path.as_uri(),
+        "hashes": {
+            "video_sha256":    hashlib.sha256(final_mp4.read_bytes()).hexdigest()
+                               if final_mp4.exists() else None,
+            "captions_sha256": hashlib.sha256(srt_path.read_bytes()).hexdigest()
+                               if srt_path.exists() else None,
+        },
+        # ── extra fields ──────────────────────────────────────────────────
+        "producer":          PRODUCER,
+        "plan_id":           _plan_id,
+        "locale":            locale,
+        "output_video":      str(final_mp4),
+        "output_srt":        str(srt_path),
+        "output_subs":       str(subs_path),
+        "total_segments":    len(media_segments),
         "total_duration_ms": total_ms,
-        "placeholder_count": placeholder_count,
-        "profile":          profile_name,
+        "profile":           profile_name,
     }
-    save_json(render_output, output_dir / "render_output.json")
+    _ro_path = output_dir / "render_output.json"
+    save_json(_ro, _ro_path)
 
-    # ── License manifest ─────────────────────────────────────────────────────
-    if _shot_to_segments is not None:
-        _license_path = write_license_manifest(
-            shot_mkv_pairs=shot_mkv_pairs,
-            shot_to_segments=_shot_to_segments,
-            fps=fps,
-            output_dir=output_dir,
-            locale=locale,
+    # ── Contract verification ─────────────────────────────────────────────────
+    _verify_py = Path(__file__).parent.parent.parent / "contracts" / "tools" / "verify_contracts.py"
+    _schemas_dir = Path(__file__).parent.parent.parent / "contracts" / "schemas"
+    if _verify_py.exists():
+        _vr = subprocess.run(
+            [sys.executable, str(_verify_py), str(_ro_path), "RenderOutput",
+             "--schemas-dir", str(_schemas_dir)],
+            capture_output=True, text=True
         )
-        if _license_path:
-            print(f"  Licenses : {_license_path}")
+        _vout = (_vr.stdout + _vr.stderr).strip()
+        if _vr.returncode == 0:
+            print(f"  [contract] render_output.json  ✓ PASS")
+        else:
+            print(f"  [contract] render_output.json  ✗ FAIL — {_vout}")
+    else:
+        print(f"  [contract] verify_contracts.py not found — skipped")
+
+    # ── 14. License manifest ─────────────────────────────────────────────────
+    _lic_path = write_license_manifest_flat(
+        segments=media_segments,
+        output_dir=output_dir,
+        locale=locale,
+    )
+    if _lic_path:
+        print(f"  Licenses : {_lic_path}")
 
     print(f"\n  [OK] {final_mp4}")
-    print(f"  Placeholders : {placeholder_count}")
-    print(f"  Duration     : {total_ms / 1000:.1f} s")
-
-    # ── Cleanup intermediates ───────────────────────────────────────────────
-    if not args.keep_intermediates:
-        shutil.rmtree(shots_dir, ignore_errors=True)
-        print(f"  Cleaned .shots/ scratch directory")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# License manifest
-# ─────────────────────────────────────────────────────────────────────────────
-
-def write_license_manifest(
-    shot_mkv_pairs: list,
-    shot_to_segments: dict,
-    fps: float,
-    output_dir: "Path",
-    locale: str,
-) -> "Path | None":
-    """Write licenses.json to output_dir.
-
-    One entry per confirmed media segment, each with:
-      - Timing in the final video (video_start_sec / video_end_sec)
-      - Clip offsets within the source file (start_sec / end_sec)
-      - Full license / attribution metadata from MediaPlan.json
-    """
-    entries: list[dict] = []
-    total_sec = 0.0
-    frame_sec = 1.0 / fps
-
-    for idx, (shot, _mkv) in enumerate(shot_mkv_pairs):
-        shot_id   = shot.get("shot_id", "")
-        scene_id  = shot.get("scene_id", "")
-        shot_dur  = shot.get("duration_ms", 0) / 1000.0
-        shot_start = total_sec
-
-        raw_segs = shot_to_segments.get(shot_id, [])
-        if raw_segs:
-            seg_cursor = 0.0           # cursor within this shot (seconds)
-            for seg in raw_segs:
-                media_type = seg.get("media_type", "image")
-
-                # Duration of this segment as it appears in the video
-                if media_type == "image":
-                    seg_dur = float(seg.get("hold_sec") or 0.0)
-                else:
-                    # video clip: end_sec - start_sec
-                    s_start = float(seg.get("start_sec") or 0.0)
-                    s_end   = float(seg.get("end_sec") or 0.0)
-                    seg_dur = max(0.0, s_end - s_start)
-
-                video_start = round(shot_start + seg_cursor, 6)
-                video_end   = round(video_start + seg_dur,   6)
-
-                # Pull the full source/license block from the raw segment
-                source: dict = seg.get("source") or {}
-
-                entry: dict = {
-                    # ── Identity ─────────────────────────────────────────
-                    "shot_id":            shot_id,
-                    "scene_id":           scene_id,
-                    "locale":             locale,
-                    # ── Position in final video ───────────────────────────
-                    "video_start_sec":    video_start,
-                    "video_end_sec":      video_end,
-                    "video_duration_sec": round(seg_dur, 6),
-                    # ── Media file info ───────────────────────────────────
-                    "media_type":         media_type,
-                    "url":                seg.get("url", ""),
-                    "clip_start_sec":     float(seg.get("start_sec") or 0.0),
-                    "clip_end_sec":       float(seg.get("end_sec") or 0.0),
-                    "hold_sec":           float(seg.get("hold_sec") or 0.0)
-                                          if media_type == "image" else None,
-                    "animation_type":     seg.get("animation_type"),
-                    # ── License / attribution ─────────────────────────────
-                    "title":              source.get("title"),
-                    "photographer":       source.get("photographer"),
-                    "attribution_text":   source.get("attribution_text"),
-                    "attribution_required": source.get("attribution_required"),
-                    "license_summary":    source.get("license_summary"),
-                    "license_url":        source.get("license_url"),
-                    "asset_page_url":     source.get("asset_page_url"),
-                    "file_url":           source.get("file_url"),
-                    "source_site":        source.get("source_site"),
-                    # ── Media dimensions / tags ───────────────────────────
-                    "width":              source.get("width"),
-                    "height":             source.get("height"),
-                    "tags":               source.get("tags"),
-                }
-                # Strip keys whose value is None to keep the file concise
-                entry = {k: v for k, v in entry.items() if v is not None}
-                entries.append(entry)
-
-                seg_cursor += seg_dur
-
-        # Advance global clock
-        total_sec += shot_dur
-
-        # Black frame between scene boundaries
-        if idx < len(shot_mkv_pairs) - 1:
-            next_shot = shot_mkv_pairs[idx + 1][0]
-            if next_shot.get("scene_id") != scene_id:
-                total_sec += frame_sec
-
-    if not entries:
-        return None
-
-    manifest = {
-        "schema_id":      "license_manifest",
-        "schema_version": "1.0.0",
-        "locale":         locale,
-        "generated_at":   datetime.datetime.utcnow().isoformat() + "Z",
-        "total_segments": len(entries),
-        "segments":       entries,
-    }
-    out_path = Path(output_dir) / "licenses.json"
-    out_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    print(f"  [license] Wrote {len(entries)} segment(s) → {out_path}")
-    return out_path
+    print(f"  Duration : {total_dur:.3f}s")
+    print(f"  Segments : {len(media_segments)}")
 
 
 if __name__ == "__main__":

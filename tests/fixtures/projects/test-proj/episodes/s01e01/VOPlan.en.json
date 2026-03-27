@@ -5,7 +5,7 @@
   "project_id": "test-proj",
   "episode_id": "s01e01",
   "locale": "en",
-  "locale_scope": "locale",
+  "locale_scope": "merged",
   "shared_ref": "AssetManifest.shared.json",
   "shotlist_ref": "ShotList.json",
   "character_packs": [],

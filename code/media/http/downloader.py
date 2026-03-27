@@ -2104,18 +2104,18 @@ def _pexels_search_images(
     headers = {"Authorization": api_key}
     q = " ".join(query.splitlines())
     n_requested = per_page
-    page_size = min(n_requested, 80)
+    _terms = _kw_terms(q)
+    # When kw-filtering, fetch the API maximum per page so the filter has
+    # enough candidates per call.  Without filtering, cap at n_requested.
+    page_size = 80 if _terms else min(n_requested, 80)
 
     results: list[dict] = []
     page = 1
     while len(results) < n_requested:
-        # Always-on Pexels image defaults
         params: dict = {
-            "query":       q,
-            "per_page":    page_size,
-            "page":        page,
-            "orientation": "landscape",
-            "size":        "large",
+            "query":    q,
+            "per_page": page_size,
+            "page":     page,
         }
         # Merge caller-supplied overrides (source_filters["pexels"])
         if extra_params:
@@ -2136,10 +2136,6 @@ def _pexels_search_images(
             q, page, page_size, extra_params,
         )
         raw = _with_backoff(call, backoff)
-        # Keyword pre-filter: keep only photos whose alt text or URL slug
-        # contains at least one query term.  Skipped when query has no
-        # identifiable keywords (terms=[]).
-        _terms = _kw_terms(q)
         if _terms:
             page_results = [
                 p for p in raw
@@ -2186,7 +2182,8 @@ def _pexels_search_videos(
     headers = {"Authorization": api_key}
     q = " ".join(query.splitlines())
     n_requested = per_page
-    page_size = min(n_requested, 80)
+    _terms = _kw_terms(q)
+    page_size = 80 if _terms else min(n_requested, 80)
 
     results: list[dict] = []
     page = 1
@@ -2214,8 +2211,6 @@ def _pexels_search_videos(
             q, page, page_size, extra_params,
         )
         raw = _with_backoff(call, backoff)
-        # Keyword pre-filter: Pexels videos have no tags; check URL slug only.
-        _terms = _kw_terms(q)
         if _terms:
             page_results = [
                 v for v in raw
@@ -2271,17 +2266,19 @@ def _pixabay_search_images(
 
     q           = " ".join(query.splitlines())[:100]
     n_requested = per_page
-    page_size   = max(3, min(n_requested, 200))  # Pixabay hard minimum: per_page < 3 → HTTP 400
+    _terms      = _kw_terms(q)
+    # When kw-filtering, use the API maximum so the filter has enough candidates
+    # per call.  Pixabay hard minimum: per_page < 3 → HTTP 400.
+    page_size   = 200 if _terms else max(3, min(n_requested, 200))
 
     # Base params shared across pages (no "page" key yet)
     base_params: dict = {
-        "key":         api_key,
-        "q":           q,
-        "image_type":  "photo",
-        "orientation": "horizontal",
-        "safesearch":  "true",
-        "order":       "popular",
-        "per_page":    page_size,
+        "key":        api_key,
+        "q":          q,
+        "image_type": "photo",
+        "safesearch": "true",
+        "order":      "popular",
+        "per_page":   page_size,
     }
     # Merge caller-supplied overrides (source_filters["pixabay"])
     if extra_params:
@@ -2305,8 +2302,6 @@ def _pixabay_search_images(
         log.info("Pixabay search images  q=%r page=%d page_size=%d extra=%s",
                  q, page, page_size, extra_params)
         raw = _with_backoff(call, backoff)
-        # Keyword pre-filter: Pixabay has reliable tags + URL slug.
-        _terms = _kw_terms(q)
         if _terms:
             page_results = [
                 h for h in raw
@@ -2351,7 +2346,8 @@ def _pixabay_search_videos(
 
     q           = " ".join(query.splitlines())[:100]
     n_requested = per_page
-    page_size   = max(3, min(n_requested, 200))  # Pixabay hard minimum: per_page < 3 → HTTP 400
+    _terms      = _kw_terms(q)
+    page_size   = 200 if _terms else max(3, min(n_requested, 200))
 
     # Base params shared across pages (no "page" key yet)
     base_params: dict = {
@@ -2384,8 +2380,6 @@ def _pixabay_search_videos(
         log.info("Pixabay search videos  q=%r page=%d page_size=%d extra=%s",
                  q, page, page_size, extra_params)
         raw = _with_backoff(call, backoff)
-        # Keyword pre-filter: Pixabay has reliable tags + URL slug.
-        _terms = _kw_terms(q)
         if _terms:
             page_results = [
                 h for h in raw

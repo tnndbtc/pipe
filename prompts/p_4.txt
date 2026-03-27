@@ -184,8 +184,6 @@ the same background_id.
   "vo_speaker_id": "<character_id or null>",
   "vo_text"      : "<verbatim dialogue line or null>",
   "vo_item_ids"  : ["vo-<scene_id>-<NNN>", ...],
-  "sfx_item_ids" : ["sfx-<shot_id>-001", "sfx-<shot_id>-002"],
-  "music_item_id": "music-<shot_id>"
 }
 ```
 
@@ -200,17 +198,6 @@ vo_item_ids rules:
   • Before writing the file: count total dialogue actions in Script.json,
     then count total IDs across all vo_item_ids arrays — they MUST be equal.
     If not, find the missing IDs and add them before proceeding.
-
-sfx_item_ids rules:
-  • One entry per tag in sfx_tags[]. Order must match sfx_tags[].
-  • Format: "sfx-{shot_id}-{NNN}" (NNN zero-padded, e.g. sfx-s01-sh01-001).
-  • Use [] if the shot has no SFX (sfx_tags is empty).
-  • These IDs are the explicit shot→SFX links consumed by Stage 5 and Stage 9.
-
-music_item_id rules:
-  • "music-{shot_id}" when music_mood is not null.
-  • null when music_mood is null.
-  • This ID is the explicit shot→music link consumed by Stage 5 and Stage 9.
 
 ### timing_lock_hash
 Compute in Python:

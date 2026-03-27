@@ -6,8 +6,8 @@
 # Reads a MusicPlan.json (validated against MusicPlan.v1.json schema) and:
 #   1. For each loop_selection: extracts a segment from the source track,
 #      concatenates N copies with crossfade, writes {stem}.loop.wav
-#   2. For each shot_override: updates matching music_items[] fields in the
-#      merged locale manifest
+#   2. For each music_segment: updates matching music_items[] fields in the
+#      merged locale manifest (matched by episode-absolute start_sec/end_sec)
 #
 # Usage:
 #   python apply_music_plan.py \
@@ -238,15 +238,15 @@ def generate_loop_wav(
     return out_path
 
 
-# ── Shot override application ────────────────────────────────────────────────
+# ── Music segment application ────────────────────────────────────────────────
 
 BASE_MUSIC_DB = -6.0   # music un-ducked level (mirrors render_video.py)
 
-OVERRIDE_FIELDS = {
-    "duck_db", "fade_sec", "start_sec", "end_sec",
+SEGMENT_FIELDS = {
+    "duck_db", "fade_sec",
     "music_asset_id", "crossfade_sec",
     "clip_start_sec", "clip_duration_sec",
-    "base_db",          # per-shot base level (future use); track-level handled separately
+    "base_db",          # per-segment base level (future use); track-level handled separately
 }
 
 
@@ -260,7 +260,7 @@ def extract_clip_from_source(
     """
     Extract a clip from a source track and write it to out_path.
 
-    Used when a shot override's music_asset_id is a source track stem
+    Used when a music_segment's music_asset_id is a source track stem
     rather than an existing clip item_id.
     """
     import soundfile as sf
@@ -297,79 +297,74 @@ def extract_clip_from_source(
 
 def apply_shot_overrides(
     manifest: dict,
-    overrides: list[dict],
+    segments: list[dict],
     resources_dir: Path | None = None,
     assets_music_dir: Path | None = None,
 ) -> int:
     """
-    Apply shot overrides to music_items in the manifest.
+    Apply shot_overrides to music_items in the manifest.
 
-    When music_asset_id is a source track stem (not an existing clip item_id),
-    extracts a new clip from the source track into assets/music/.
+    Each segment is matched to a music_item by episode-absolute start_sec/end_sec
+    overlap.  When music_asset_id is a source track stem (not an existing clip
+    item_id), extracts a new clip from the source track into assets/music/.
 
     Returns the number of items updated.
     """
-    if not overrides:
+    if not segments:
         return 0
 
-    # Index music_items by shot_id
-    music_index: dict[str, dict] = {
-        m["shot_id"]: m
-        for m in manifest.get("music_items", [])
-        if "shot_id" in m
-    }
-
-    # Collect existing clip filenames for stem detection
-    existing_clips: set[str] = set()
-    if assets_music_dir and assets_music_dir.is_dir():
-        for f in assets_music_dir.iterdir():
-            if f.suffix in SUPPORTED_EXTS:
-                existing_clips.add(f.stem)
-                # Also match without .loop suffix
-                if f.stem.endswith(".loop"):
-                    existing_clips.add(f.stem[:-5])
+    music_items = manifest.get("music_items", [])
 
     updated = 0
-    for override in overrides:
-        shot_id = override.get("shot_id") or override.get("item_id", "")
-        item = music_index.get(shot_id)
+    for seg in segments:
+        seg_start = float(seg.get("start_sec", 0.0))
+        seg_end   = float(seg.get("end_sec", 0.0))
+
+        # Match the music_item whose episode-absolute window overlaps this segment.
+        # A music_item covers [item_start_sec, item_start_sec + item_duration_sec).
+        item = None
+        for mi in music_items:
+            item_start = float(mi.get("start_sec", 0.0))
+            item_end   = item_start + float(mi.get("duration_sec", 0.0))
+            # Overlap: segment starts before item ends AND segment ends after item starts
+            if seg_start < item_end and seg_end > item_start:
+                item = mi
+                break
+
         if item is None:
-            print(f"  [WARN] shot_id/item_id '{shot_id}' not found in manifest "
-                  "— skipping override", file=sys.stderr)
+            print(f"  [WARN] No music_item found overlapping segment "
+                  f"[{seg_start}s–{seg_end}s] — skipping", file=sys.stderr)
             continue
 
+        item_id = item.get("item_id", f"{seg_start}s-{seg_end}s")
+
         # Check if music_asset_id is a source stem (not an existing clip)
-        new_asset_id = override.get("music_asset_id")
-        if new_asset_id and new_asset_id not in music_index and assets_music_dir:
+        new_asset_id = seg.get("music_asset_id")
+        existing_item_ids = {mi.get("item_id", "") for mi in music_items}
+        if new_asset_id and new_asset_id not in existing_item_ids and assets_music_dir:
             # First check if it's a pre-cut WAV already in assets/music/
             pre_cut_wav = assets_music_dir / f"{new_asset_id}.wav"
             if pre_cut_wav.exists():
-                # Copy/symlink pre-cut clip over the target item WAV
-                out_wav = assets_music_dir / f"{shot_id}.wav"
+                out_wav = assets_music_dir / f"{item_id}.wav"
                 if pre_cut_wav != out_wav:
                     import shutil as _shutil
                     _shutil.copy2(str(pre_cut_wav), str(out_wav))
-                    print(f"  [PRE-CUT→CLIP] {new_asset_id}.wav → {shot_id}.wav")
+                    print(f"  [PRE-CUT→CLIP] {new_asset_id}.wav → {item_id}.wav")
             elif resources_dir and resources_dir.is_dir():
-                # It's a source stem — extract a new clip from resources/music/
+                # It's a source stem — use clip_start_sec and clip_duration_sec directly
                 source_path = find_source_track(new_asset_id, resources_dir)
                 if source_path:
-                    clip_start = override.get("clip_start_sec",
-                                              override.get("start_sec",
-                                              item.get("start_sec", 0.0)))
-                    _o_end_sec = override.get("end_sec")
-                    clip_dur = override.get("clip_duration_sec") or (
-                        float(_o_end_sec) - float(clip_start)
-                        if _o_end_sec is not None else None
-                    ) or item.get("duration_sec", 30.0)
-                    out_wav = assets_music_dir / f"{shot_id}.wav"
+                    clip_start = float(seg.get("clip_start_sec", 0.0))
+                    clip_dur   = float(seg.get("clip_duration_sec",
+                                               seg_end - seg_start))
+                    out_wav = assets_music_dir / f"{item_id}.wav"
                     ok = extract_clip_from_source(
                         new_asset_id, resources_dir, out_wav,
-                        start_sec=float(clip_start),
-                        duration_sec=float(clip_dur),
+                        start_sec=clip_start,
+                        duration_sec=clip_dur,
                     )
                     if ok:
-                        print(f"  [SOURCE→CLIP] {new_asset_id} → {shot_id}")
+                        print(f"  [SOURCE→CLIP] {new_asset_id} → {item_id}")
                 else:
                     print(f"  [WARN] Source stem '{new_asset_id}' not found in "
                           f"{resources_dir}", file=sys.stderr)
@@ -378,14 +373,14 @@ def apply_shot_overrides(
                       f"assets/music/ or resources/music/", file=sys.stderr)
 
         changes = []
-        for field in OVERRIDE_FIELDS:
-            if field in override:
-                old_val = item.get(field, "<unset>")
-                item[field] = override[field]
-                changes.append(f"{field}={override[field]}")
+        for field in SEGMENT_FIELDS:
+            if field in seg:
+                item[field] = seg[field]
+                changes.append(f"{field}={seg[field]}")
 
         if changes:
-            print(f"  [OVERRIDE] {shot_id}: {', '.join(changes)}")
+            print(f"  [SEGMENT] {item_id} [{seg_start}s–{seg_end}s]: "
+                  f"{', '.join(changes)}")
             updated += 1
 
     return updated
@@ -467,7 +462,7 @@ def main():
     print(f"  Resources : {resources_dir}")
     print(f"  Output    : {assets_music_dir}")
     print(f"  Loops     : {len(loop_selections)}")
-    print(f"  Overrides : {len(shot_overrides)}")
+    print(f"  Segments  : {len(shot_overrides)}")
     print("=" * 60)
 
     # ── Compute max shot duration for loop length ────────────────────────────
@@ -505,12 +500,12 @@ def main():
                 else:
                     loop_fail += 1
 
-    # ── Apply shot overrides ─────────────────────────────────────────────────
-    override_count = 0
+    # ── Apply music segments ─────────────────────────────────────────────────
+    segment_count = 0
 
     if shot_overrides:
-        print(f"\n── Shot overrides ({len(shot_overrides)} items) ──")
-        override_count = apply_shot_overrides(
+        print(f"\n── Music segments ({len(shot_overrides)} items) ──")
+        segment_count = apply_shot_overrides(
             manifest, shot_overrides,
             resources_dir=resources_dir,
             assets_music_dir=assets_music_dir,
@@ -518,7 +513,7 @@ def main():
 
     # ── Apply per-track volume offsets (track_volumes) ───────────────────────
     # Must run AFTER apply_shot_overrides() so music_asset_id is populated.
-    # Per-shot base_db (set via shot_overrides) takes priority — skip those.
+    # Per-segment base_db (set via shot_overrides) takes priority — skip those.
     track_volumes = plan.get("track_volumes", {})
     if track_volumes:
         print(f"\n── Track volume offsets ({len(track_volumes)} track(s)) ──")
@@ -565,16 +560,24 @@ def main():
 
         # Pass 2: clip_id → item_id via shot_overrides (user-cut clips)
         # shot_overrides[].music_clip_id holds the clip_id when a user-cut clip
-        # is assigned to a shot.
-        item_to_music_clip: dict[str, str] = {
-            o.get("shot_id", o.get("item_id", "")): o["music_clip_id"]
-            for o in shot_overrides
-            if "music_clip_id" in o
-        }
+        # is assigned to a segment.
+        item_to_music_clip: dict[str, str] = {}
+        for seg in shot_overrides:
+            if "music_clip_id" not in seg:
+                continue
+            seg_start = float(seg.get("start_sec", 0.0))
+            seg_end   = float(seg.get("end_sec", 0.0))
+            for mi in music_items:
+                item_start = float(mi.get("start_sec", 0.0))
+                item_end   = item_start + float(mi.get("duration_sec", 0.0))
+                if seg_start < item_end and seg_end > item_start:
+                    item_to_music_clip[mi["item_id"]] = seg["music_clip_id"]
+                    break
+
         for mi in music_items:
             if mi.get("base_db") is not None:
                 continue
-            clip_id = item_to_music_clip.get(mi.get("shot_id", mi.get("item_id", "")), "")
+            clip_id = item_to_music_clip.get(mi.get("item_id", ""), "")
             if not clip_id:
                 continue
             offset = clip_volumes.get(clip_id)
@@ -593,11 +596,23 @@ def main():
         print(f"  Applied clip_volumes to {applied} music_item(s).")
 
     # ── Resolve duck_db for items without an explicit override.
-    #    Priority: explicit shot_override duck_db > track_type lookup > DEFAULT_DUCK_DB.
-    overridden_ids = {o.get("shot_id", o.get("item_id", "")) for o in shot_overrides if "duck_db" in o}
+    #    Priority: explicit music_segment duck_db > track_type lookup > DEFAULT_DUCK_DB.
+    #    A music_item is "overridden" if any segment overlapping it specifies duck_db.
+    _all_music_items = manifest.get("music_items", [])
+    overridden_ids: set[str] = set()
+    for seg in shot_overrides:
+        if "duck_db" not in seg:
+            continue
+        seg_start = float(seg.get("start_sec", 0.0))
+        seg_end   = float(seg.get("end_sec", 0.0))
+        for mi in _all_music_items:
+            item_start = float(mi.get("start_sec", 0.0))
+            item_end   = item_start + float(mi.get("duration_sec", 0.0))
+            if seg_start < item_end and seg_end > item_start:
+                overridden_ids.add(mi.get("item_id", ""))
     duck_reset = 0
     for mi in manifest.get("music_items", []):
-        if mi.get("shot_id", mi.get("item_id", "")) not in overridden_ids:
+        if mi.get("item_id", "") not in overridden_ids:
             resolved = _resolve_duck_db(mi)
             old = mi.get("duck_db")
             if old != resolved:
@@ -619,7 +634,7 @@ def main():
     print(f"  Loops generated : {loop_ok}/{len(loop_selections)}")
     if loop_fail:
         print(f"  Loops failed    : {loop_fail}")
-    print(f"  Shot overrides  : {override_count}/{len(shot_overrides)}")
+    print(f"  Music segments  : {segment_count}/{len(shot_overrides)}")
     print(f"  Manifest        : {manifest_path}")
 
 

@@ -720,7 +720,7 @@ continuity_hints:   {group_id, palette_target, motion_budget, camera_energy, all
 **Locale AssetManifest structure (critical — different from shared/en):**
 ```json
 {
-  "locale_scope": "locale",
+  "locale_scope": "merged",
   "locale": "zh-Hans",
   "shared_ref": "AssetManifest.shared.json",
   "character_packs": [],        ← ALWAYS empty

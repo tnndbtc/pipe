@@ -147,19 +147,6 @@ Print: `▶ [5/9] Stage 5-C — Shared manifest creative fill  …`
     `"night"`            — dark scene; moonlight or firelight only
     `"dramatic"`         — strong directional light with high contrast; cinematic
 
-#### sfx_items[] entries
-
-**`tag`**
-  Expand the short sfx_tags[] string from ShotList into a full natural-language
-  description suitable for an audio generation model. Add acoustic context from
-  the scene (reverb, distance, environment texture).
-  Example: `"wind_gentle"` → `"gentle wind rustling through dry desert scrub,
-  sparse and airy, no echo, open-air ambience"`
-
-**`search_queries`**
-  Array of 2–3 search phrases for finding this SFX in a stock audio library.
-  Example: `["gentle desert wind ambient", "soft breeze outdoor nature sound"]`
-
 #### element_images[] entries
 
 You must CREATE the entire `element_images` array from scratch (the scaffold value is
@@ -223,7 +210,7 @@ For EACH shot in ShotList.shots[]:
 Do NOT modify any pre-filled field. The following are locked:
   `asset_id`, `type`, `license_type`, `motion_level`, `cinematic_role`,
   `search_filters`, `source_filters`, `motion`, `description`,
-  all `music_items[]` fields, all `character_packs[]` fields,
+  all `character_packs[]` fields,
   all `vo_items[]` fields, all top-level manifest metadata fields,
   all `element_images[]` fields (once Stage 5-C has filled them — no field should be
   left as `__FILL__` in the final output).
@@ -270,8 +257,6 @@ Print validation result:
 ── Stage 5-C validation ─────────────────────────────────────
 AssetManifest.shared.json  →  VALID ✓
   backgrounds     : <count>
-  sfx_items       : <count>
-  music_items     : <count>
   character_packs : <count>
   element_images  : <count>
 ────────────────────────────────────────────────────────────

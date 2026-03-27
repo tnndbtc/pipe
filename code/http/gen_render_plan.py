@@ -156,10 +156,6 @@ def build_vo_map(merged: dict) -> dict[str, dict]:
     return {v["item_id"]: v for v in merged.get("vo_items", [])}
 
 
-def build_music_map(merged: dict) -> dict[str, dict]:
-    """Build {item_id → music_item} for duck_intervals lookup."""
-    return {m["item_id"]: m for m in merged.get("music_items", [])}
-
 
 def load_vo_approved_timing(manifest_path: Path) -> dict[str, dict]:
     """Load approved VO timing from VOPlan.{locale}.json vo_items[].
@@ -230,13 +226,12 @@ def build_shot(
     shot:              dict,
     media_map:         dict[str, dict],
     vo_map:            dict[str, dict],
-    music_map:         dict[str, dict],
     override_map:      dict[str, float],
     story_format:      str = "episodic",
     ref_dur_map:       dict | None = None,
     tts_chunk_info:    dict | None = None,
     scene_tails:       dict | None = None,
-    sfx_plan_by_shot:  dict | None = None,
+    sfx_plan_segments: list | None = None,
 ) -> dict:
     """
     Build one RenderedShot entry for RenderPlan.shots[].
@@ -383,42 +378,12 @@ def build_shot(
     if _vo_items_for_shot:
         duration_ms = max(duration_ms, last_vo_out_ms + tail_ms)
 
-    # sfx_asset_ids — skip placeholder SFX
+    # sfx_asset_ids — populated from SfxPlan only (sfx_item_ids no longer used)
     sfx_asset_ids: list[str] = []
-    for sid in audio_intent.get("sfx_item_ids", []):
-        media_item = media_map.get(sid)
-        if media_item and not media_item.get("is_placeholder", True):
-            sfx_asset_ids.append(media_item["asset_id"])
 
-    # music_asset_id + ducking fields
-    #
-    # duck_intervals are computed from AssetManifest vo_items timing (start_sec / end_sec),
-    # converted to shot-relative offsets using shot_start_sec.
-    # The merged manifest's duck_intervals use episode-cumulative VO offsets;
-    # recomputing here gives correct shot-relative values.
+    # music_asset_id — populated from MusicPlan only (music_item_id no longer used)
     music_asset_id: str | None = None
     music_extra: dict = {}
-    mid = audio_intent.get("music_item_id")
-    if mid:
-        music_media = media_map.get(mid)
-        if music_media and not music_media.get("is_placeholder", True):
-            music_asset_id = music_media["asset_id"]
-            music_item = music_map.get(mid, {})
-            # duck_db and fade_sec from the merged manifest (correct)
-            duck_db  = music_item.get("duck_db",  -12.0)
-            fade_sec = music_item.get("fade_sec",  0.15)
-            base_db  = music_item.get("base_db",  BASE_MUSIC_DB)  # per-track vol offset
-            fade_ms  = round(fade_sec * 1000)
-            # Compute shot-relative duck_intervals from AssetManifest vo_items timing
-            duck_ivs = compute_duck_intervals_from_vo(_vo_items_for_shot, fade_ms, shot_start_sec)
-            music_extra["duck_intervals"] = duck_ivs
-            music_extra["duck_db"]        = duck_db
-            music_extra["music_fade_sec"] = fade_sec
-            music_extra["base_db"]        = base_db
-            # start_sec: delay before music begins within the shot (from MusicPlan override)
-            _music_start = music_item.get("start_sec", 0.0)
-            if _music_start:
-                music_extra["music_delay_sec"] = float(_music_start)
 
     # ── Dynamic ceiling for narrative formats (EXEC STEP 3 / Proposal 3) ────────
     #
@@ -468,7 +433,9 @@ def build_shot(
     # ── end EN reference floor ────────────────────────────────────────────────
 
     # sfx_plan_entries: user-selected SFX from SfxPlan.json (with timing)
-    sfx_plan_entries = (sfx_plan_by_shot or {}).get(shot_id, [])
+    # v2 schema: sfx_entries[] are episode-absolute; pass them all through unchanged.
+    # render_video.py filters them to the correct window using start_sec/end_sec.
+    sfx_plan_entries = list(sfx_plan_segments or [])
 
     rendered: dict = {
         "shot_id":                shot_id,
@@ -505,7 +472,6 @@ def build_plan(
 
     media_map    = build_media_map(media)
     vo_map       = build_vo_map(merged)
-    music_map    = build_music_map(merged)
     override_map = build_override_map(merged)
 
     # Phase 3, Step 10: load TTS chunk info (retained for future use / logging).
@@ -515,21 +481,17 @@ def build_plan(
         if tts_chunk_info:
             print(f"  [CHUNK-DEFERRED] {len(tts_chunk_info)} items have chunk WAV references")
 
-    # Load SfxPlan.json — user-selected SFX with timing from the SFX tab.
-    # Keyed by shot_id so build_shot() can inject sfx_plan_entries per shot.
-    sfx_plan_by_shot: dict[str, list] = {}
+    # Load SfxPlan.json — user-selected SFX with episode-absolute timing.
+    # v2 schema: sfx_entries[] each carries start_sec/end_sec/source_file directly.
+    # No shot_id / item_id — segments are placed by absolute time, not by shot.
+    sfx_plan_segments: list[dict] = []
     if episode_dir is not None:
         sfx_plan_path = episode_dir / "SfxPlan.json"
         if sfx_plan_path.exists():
             try:
                 sfx_plan = json.load(sfx_plan_path.open(encoding="utf-8"))
-                for entry in sfx_plan.get("sfx_entries", []):
-                    sid = entry.get("shot_id", "")
-                    if sid:
-                        sfx_plan_by_shot.setdefault(sid, []).append(entry)
-                n_sfx_entries = sum(len(v) for v in sfx_plan_by_shot.values())
-                print(f"  [SFX-PLAN] {n_sfx_entries} entries across "
-                      f"{len(sfx_plan_by_shot)} shot(s)")
+                sfx_plan_segments = sfx_plan.get("shot_overrides", [])
+                print(f"  [SFX-PLAN] {len(sfx_plan_segments)} segment(s) loaded")
             except Exception as e:
                 print(f"  [WARN] Could not load SfxPlan.json: {e}", file=sys.stderr)
 
@@ -572,9 +534,9 @@ def build_plan(
     # shots: one RenderedShot per ShotList shot
     scene_tails = merged.get("scene_tails", {})
     shots = [
-        build_shot(shot, media_map, vo_map, music_map, override_map,
+        build_shot(shot, media_map, vo_map, override_map,
                    story_format, ref_dur_map or {}, tts_chunk_info,
-                   scene_tails, sfx_plan_by_shot)
+                   scene_tails, sfx_plan_segments)
         for shot in shotlist.get("shots", [])
     ]
 

@@ -426,34 +426,40 @@ def _load_selections(selections_path: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
 
     if "shot_overrides" in data:
-        ep_dir     = selections_path.parent   # MediaPlan.json lives at ep_dir/MediaPlan.json
-        clips_path = ep_dir / "assets" / "media_library" / "media_cut_clips.json"
-        clip_map: dict[str, dict] = {}
-        if clips_path.exists():
-            try:
-                clip_map = {c["clip_id"]: c
-                            for c in json.loads(clips_path.read_text(encoding="utf-8"))
-                            if "clip_id" in c}
-            except Exception as e:
-                print(f"  [WARN] Could not load media_cut_clips.json: {e}", file=sys.stderr)
+        ep_dir = selections_path.parent   # MediaPlan.json lives at ep_dir/MediaPlan.json
 
-        for shot_id, ovr in data.get("shot_overrides", {}).items():
-            clip_id = ovr.get("clip_id")
-            if not clip_id or clip_id not in clip_map:
+        for seg_idx, seg in enumerate(data.get("shot_overrides", [])):
+            media_type = seg.get("type") or seg.get("media_type", "image")
+            url        = seg.get("url", "")
+            rel_path   = seg.get("path", "")
+            clip_id    = seg.get("clip_id", "")
+
+            # Resolve absolute path
+            if url.startswith("file://"):
+                abs_path = Path(url[len("file://"):]).resolve()
+            elif rel_path:
+                abs_path = (ep_dir / rel_path).resolve()
+            else:
+                print(f"  [WARN] shot_overrides[{seg_idx}]: no url or path — skipped",
+                      file=sys.stderr)
                 continue
-            abs_path = (ep_dir / clip_map[clip_id]["path"]).resolve()
-            seg: dict = {
+
+            # Build resolved entry keyed by clip_id (or synthetic index when absent)
+            key = clip_id or f"__seg_{seg_idx}"
+            resolved: dict = {
+                "media_type": media_type,
+                "abs_path":   abs_path,
                 "url":        abs_path.as_uri(),
-                "media_type": "video",
-                "start_sec":  float(ovr.get("clip_in") if ovr.get("clip_in") is not None else (ovr.get("start_sec") or 0.0)),
+                "start_sec":  seg.get("start_sec"),
+                "end_sec":    seg.get("end_sec"),
             }
-            _clip_out = ovr.get("clip_out") if ovr.get("clip_out") is not None else ovr.get("end_sec")
-            if _clip_out is not None:
-                seg["end_sec"] = float(_clip_out)
-            # Use clip_id as synthetic asset_id; per_shot segments format matches v1 reader
-            if clip_id not in out:
-                out[clip_id] = {"per_shot": {}}
-            out[clip_id]["per_shot"][shot_id] = {"segments": [seg]}
+            if media_type == "image":
+                resolved["hold_sec"] = seg.get("hold_sec")
+            else:
+                resolved["clip_in"]  = seg.get("clip_in")
+                resolved["clip_out"] = seg.get("clip_out")
+
+            out[key] = resolved
 
         return out   # early return — skip v1 parse loop entirely
 
@@ -650,33 +656,6 @@ def resolve_all(
             n_found += 1
         else:
             items.append(_placeholder(aid, "vo"))
-            n_missing += 1
-
-    # ── 4. SFX ───────────────────────────────────────────────────────────────
-    # Path: assets/sfx/{item_id}.ext
-    sfx_dir = assets_root / "sfx"
-    for sfx in merged.get("sfx_items", []):
-        aid = sfx["item_id"]
-        f   = search_dirs([sfx_dir], aid, AUDIO_EXTS)
-        if f:
-            items.append(_resolved_sfx(aid, f, sfx))
-            n_found += 1
-        else:
-            items.append(_placeholder(aid, "sfx"))
-            n_missing += 1
-
-    # ── 5. Music ─────────────────────────────────────────────────────────────
-    # Path: assets/music/{item_id}.ext
-    music_dir = assets_root / "music"
-    for music in merged.get("music_items", []):
-        aid = music["item_id"]
-        lt  = music.get("license_type", "generated_local")
-        f   = search_dirs([music_dir], aid, AUDIO_EXTS)
-        if f:
-            items.append(_resolved(aid, "music", f, lt))
-            n_found += 1
-        else:
-            items.append(_placeholder(aid, "music"))
             n_missing += 1
 
     print(f"  Total items   : {len(items)}")

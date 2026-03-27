@@ -174,9 +174,8 @@ def merge_manifests(
     """
     Merge shared + locale manifests into a single resolved view.
 
-    - Shared contributes: character_packs, backgrounds, sfx_items, music_items
+    - Shared contributes: character_packs, backgrounds
     - Locale contributes: vo_items (with start_sec/end_sec), background_overrides
-    - duck_intervals computed here and injected into each music_item
     - timing_lock_hash computed from locale-adjusted shot durations
     - locale_scope set to "merged"
 
@@ -196,7 +195,6 @@ def merge_manifests(
         # Shared assets
         "character_packs":     shared.get("character_packs", []),
         "backgrounds":         shared.get("backgrounds", []),
-        "sfx_items":           shared.get("sfx_items", []),
         # Locale VO
         "vo_items":            locale.get("vo_items", []),
         # Background overrides from locale (post_tts_analysis.py populated these)
@@ -214,55 +212,9 @@ def merge_manifests(
     if locale.get("vo_approval"):
         merged["vo_approval"] = locale["vo_approval"]
 
-    # Deep-copy music_items from shared so we can add duck_intervals
-    music_items = json.loads(json.dumps(shared.get("music_items", [])))
-
-    # Patch duration_sec for shots that overflowed (locale VO longer than shot).
-    # background_overrides carries the extended duration; the music clip must
-    # match so it doesn't end before the shot does.
-    override_durations: dict[str, float] = {
-        o["shot_id"]: float(o["duration_sec"])
-        for o in merged["background_overrides"]
-        if o.get("shot_id") and o.get("duration_sec") is not None
-    }
-    for music_item in music_items:
-        sid = music_item.get("shot_id", "")
-        if sid in override_durations:
-            old_dur = music_item.get("duration_sec")
-            music_item["duration_sec"] = override_durations[sid]
-            print(f"  [OVERFLOW PATCH] {music_item['item_id']}: "
-                  f"duration_sec {old_dur} → {override_durations[sid]}")
-
-    # Index vo_items by shot_id for duck interval computation.
-    # vo_items in the locale manifest may not carry a shot_id field; use the
-    # ShotList-derived reverse mapping (vo_shot_map) as the authoritative source.
-    _map = vo_shot_map or {}
-    vo_by_shot: dict[str, list[dict]] = {}
-    for item in merged["vo_items"]:
-        item_id = item.get("item_id", "")
-        sid = _map.get(item_id) or item.get("shot_id") or "__no_shot__"
-        vo_by_shot.setdefault(sid, []).append(item)
-
-    for music_item in music_items:
-        shot_id  = music_item.get("shot_id", "")
-        fade_sec = float(music_item.get("fade_sec", 0.15))
-        vo_lines = vo_by_shot.get(shot_id, [])
-        music_item["duck_intervals"] = compute_duck_intervals(vo_lines, fade_sec)
-
-    merged["music_items"] = music_items
-
     # Compute per-locale timing_lock_hash
     # Use background_overrides to get locale-adjusted durations.
-    # For non-overriding shots, we need durations from the ShotList.
-    # We include what we can: override durations are explicit; others are
-    # filled in from shared manifest's music_items.duration_sec as a proxy
-    # (music_items have one entry per shot with the shot's duration).
     shot_durations: dict[str, float] = {}
-    for mi in shared.get("music_items", []):
-        sid = mi.get("shot_id")
-        dur = mi.get("duration_sec")
-        if sid and dur is not None:
-            shot_durations[sid] = float(dur)
     for override in merged["background_overrides"]:
         sid = override.get("shot_id")
         dur = override.get("duration_sec")
@@ -387,18 +339,9 @@ def main():
     # Print stats
     print(f"\n  character_packs   : {len(merged.get('character_packs', []))}")
     print(f"  backgrounds       : {len(merged.get('backgrounds', []))}")
-    print(f"  sfx_items         : {len(merged.get('sfx_items', []))}")
-    print(f"  music_items       : {len(merged.get('music_items', []))}")
     print(f"  vo_items          : {len(merged.get('vo_items', []))}")
     print(f"  background_overrides: {len(merged.get('background_overrides', []))}")
     print(f"  timing_lock_hash  : {merged.get('timing_lock_hash', '')[:16]}…")
-
-    # Duck intervals summary
-    shots_with_duck = sum(
-        1 for mi in merged.get("music_items", [])
-        if mi.get("duck_intervals")
-    )
-    print(f"  shots with duck   : {shots_with_duck}")
 
     # Write
     save_manifest(merged, out_path)

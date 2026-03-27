@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract verification tool — two modes in one script.
+"""Contract verification tool — three modes in one script.
 
 MODE 1 — Schema validation (no positional argument):
     Validates every *.v1.json file in contracts/schemas/ as a well-formed
@@ -18,6 +18,14 @@ MODE 2 — Data file validation (positional argument given):
 
     python contracts/tools/verify_contracts.py path/to/AssetManifest.en.json
     python contracts/tools/verify_contracts.py path/to/data.json AssetManifest
+
+MODE 3 — Behavioural self-test (--self-test flag):
+    Runs a fixed set of known-good and known-bad sample documents against
+    MusicPlan, SfxPlan, and MediaPlan schemas and asserts expected outcomes.
+    Covers CV-M1–M7, CV-S1–S6, CV-P1/P2/P5/P6.
+
+    python contracts/tools/verify_contracts.py --self-test
+    python contracts/tools/verify_contracts.py --self-test --schemas-dir PATH
 
 Exit codes:
     0 — all checks passed
@@ -147,6 +155,175 @@ def validate_data_file(
     return [e.message for e in errors]
 
 
+# ── Mode 3: behavioural self-test ─────────────────────────────────────────────
+
+# Each entry: (case_id, schema_name, doc, expect_valid, description)
+# schema_name must match the base name of a *.v1.json file in schemas_dir.
+# MusicPlan/SfxPlan use Draft 7; MediaPlan uses Draft 2020-12.
+_SELF_TEST_CASES: list[tuple[str, str, dict, bool, str]] = [
+    # ── MusicPlan ──────────────────────────────────────────────────────────────
+    ("CV-M1", "MusicPlan", {
+        "schema_id": "MusicPlan", "schema_version": "1.0",
+        "loop_selections": {}, "track_volumes": {}, "clip_volumes": {},
+        "shot_overrides": [{"start_sec": 5.0, "end_sec": 20.0,
+                             "music_asset_id": "cher2",
+                             "music_clip_id": "cher2:114.0s-142.1s",
+                             "clip_start_sec": 114.0, "clip_duration_sec": 28.1,
+                             "duck_db": -12.0, "fade_sec": 0.15}],
+    }, True, "valid MusicPlan with shot_overrides passes schema"),
+
+    ("CV-M2", "MusicPlan", {
+        "schema_id": "MusicPlan", "schema_version": "1.0",
+        "music_segments": [{"start_sec": 5.0, "end_sec": 20.0}],
+    }, False, "MusicPlan with old music_segments field fails schema (additionalProperties)"),
+
+    ("CV-M3", "MusicPlan", {
+        "schema_id": "MusicPlan", "schema_version": "1.0",
+        "shot_overrides": [{"end_sec": 20.0}],
+    }, False, "MusicPlan shot_override missing start_sec fails schema (required)"),
+
+    ("CV-M4", "MusicPlan", {
+        "schema_id": "MusicPlan", "schema_version": "1.0",
+        "shot_overrides": [{"start_sec": 5.0}],
+    }, False, "MusicPlan shot_override missing end_sec fails schema (required)"),
+
+    ("CV-M5", "MusicPlan", {
+        "schema_id": "MusicPlan", "schema_version": "1.0",
+        "shot_overrides": [{"start_sec": 5.0, "end_sec": 20.0,
+                             "shot_id": "sc01-sh01"}],
+    }, False, "MusicPlan shot_override with shot_id fails schema (additionalProperties)"),
+
+    ("CV-M6", "MusicPlan", {
+        "schema_id": "MusicPlan", "schema_version": "1.0",
+        "shot_overrides": [{"start_sec": 5.0, "end_sec": 20.0,
+                             "item_id": "music-sc01-sh01"}],
+    }, False, "MusicPlan shot_override with item_id fails schema (additionalProperties)"),
+
+    ("CV-M7", "MusicPlan", {
+        "schema_id": "MusicPlan", "schema_version": "1.0",
+        "loop_selections": {"cher1": {"start_sec": 0, "duration_sec": 30}},
+        "track_volumes": {"cher1": -3},
+        "clip_volumes": {"cher1:126.0s-155.6s": 2},
+        "shot_overrides": [{"start_sec": 30.0, "end_sec": 55.0}],
+    }, True, "MusicPlan with loop_selections/track_volumes/clip_volumes and shot_overrides passes schema"),
+
+    # ── SfxPlan ────────────────────────────────────────────────────────────────
+    ("CV-S1", "SfxPlan", {
+        "schema_id": "SfxPlan", "schema_version": "1.0",
+        "timing_format": "episode_absolute",
+        "shot_overrides": [{"start_sec": 5.0, "end_sec": 10.0,
+                             "source_file": "assets/sfx/sfx-sc01-sh01-001/ai.mp3",
+                             "volume_db": 0.0, "duck_db": 0.0, "fade_sec": 0.0,
+                             "clip_id": None, "clip_path": None}],
+        "cut_clips": [], "cut_assign": {},
+    }, True, "valid SfxPlan with shot_overrides passes schema"),
+
+    ("CV-S2", "SfxPlan", {
+        "schema_id": "SfxPlan", "schema_version": "1.0",
+        "sfx_segments": [{"start_sec": 5.0, "end_sec": 10.0,
+                           "source_file": "some.mp3"}],
+    }, False, "SfxPlan with old sfx_segments field fails schema (additionalProperties)"),
+
+    ("CV-S3", "SfxPlan", {
+        "schema_id": "SfxPlan", "schema_version": "1.0",
+        "shot_overrides": [{"end_sec": 10.0,
+                             "source_file": "assets/sfx/sfx-sc01-sh01-001/ai.mp3"}],
+    }, False, "SfxPlan shot_override missing start_sec fails schema (required)"),
+
+    ("CV-S4", "SfxPlan", {
+        "schema_id": "SfxPlan", "schema_version": "1.0",
+        "shot_overrides": [{"start_sec": 5.0, "end_sec": 10.0,
+                             "source_file": "assets/sfx/sfx-sc01-sh01-001/ai.mp3",
+                             "shot_id": "sc01-sh01"}],
+    }, False, "SfxPlan shot_override with shot_id fails schema (additionalProperties)"),
+
+    ("CV-S5", "SfxPlan", {
+        "schema_id": "SfxPlan", "schema_version": "1.0",
+        "shot_overrides": [{"start_sec": 5.0, "end_sec": 10.0,
+                             "source_file": "assets/sfx/sfx-sc01-sh01-001/ai.mp3",
+                             "item_id": "sfx-sc01-sh01-001"}],
+    }, False, "SfxPlan shot_override with item_id fails schema (additionalProperties)"),
+
+    ("CV-S6", "SfxPlan", {
+        "schema_id": "SfxPlan", "schema_version": "1.0",
+        "timing_format": "episode_absolute",
+        "shot_overrides": [{"start_sec": 5.0, "end_sec": 10.0,
+                             "source_file": "assets/sfx/sfx-sc01-sh01-001/ai.mp3",
+                             "volume_db": 0.0, "duck_db": 0.0, "fade_sec": 0.0,
+                             "clip_id": "sfx-sc01-sh01-001:0.0s-5.0s",
+                             "clip_path": "assets/sfx/sfx-sc01-sh01-001/cut.wav"}],
+        "cut_clips": [{"clip_id": "sfx-sc01-sh01-001:0.0s-5.0s",
+                        "item_id": "sfx-sc01-sh01-001",
+                        "start_sec": 0.0, "end_sec": 5.0,
+                        "path": "assets/sfx/sfx-sc01-sh01-001/cut.wav"}],
+        "cut_assign": {"sfx-sc01-sh01-001": "sfx-sc01-sh01-001:0.0s-5.0s"},
+    }, True, "SfxPlan with shot_overrides, cut_clips and cut_assign passes schema"),
+
+    # ── MediaPlan (draft 2020-12) ───────────────────────────────────────────────
+    ("CV-P1", "MediaPlan", {
+        "schema_id": "MediaPlan", "schema_version": "1.0",
+        "shot_overrides": [{"type": "image",
+                             "url": "https://example.com/bg-reactor.jpg",
+                             "path": "assets/media/bg-reactor-control-room-night.jpg",
+                             "clip_id": "bg-reactor-control-room-night",
+                             "hold_sec": 28.0, "animation_type": "none"}],
+    }, True, "valid MediaPlan with shot_overrides passes schema"),
+
+    ("CV-P2", "MediaPlan", {
+        "schema_id": "MediaPlan", "schema_version": "1.0",
+        "media_segments": [{"type": "image", "hold_sec": 28.0}],
+    }, False, "MediaPlan with old media_segments field fails schema (additionalProperties)"),
+
+    ("CV-P5", "MediaPlan", {
+        "schema_id": "MediaPlan", "schema_version": "1.0",
+        "shot_overrides": [{"url": "https://example.com/bg-reactor.jpg",
+                             "hold_sec": 28.0}],
+    }, False, "MediaPlan shot_override missing type fails schema (required)"),
+
+    ("CV-P6", "MediaPlan", {
+        "schema_id": "MediaPlan", "schema_version": "1.0",
+        "slug": "test-proj",
+        "shot_overrides": [],
+    }, False, "MediaPlan with old top-level slug field fails schema (additionalProperties)"),
+]
+
+# Schemas that use JSON Schema draft 2020-12 (all others use draft 7).
+_DRAFT_2020_SCHEMAS = {"MediaPlan"}
+
+
+def run_self_tests(schemas_dir: Path) -> tuple[list[str], int]:
+    """Run all behavioural self-test cases.  Returns (failures, total)."""
+    failures: list[str] = []
+
+    for case_id, schema_name, doc, expect_valid, description in _SELF_TEST_CASES:
+        schema_path = schemas_dir / f"{schema_name}.v1.json"
+        try:
+            schema = json.loads(schema_path.read_bytes())
+        except FileNotFoundError:
+            msg = f"{case_id}: SCHEMA_NOT_FOUND {schema_path}"
+            print(f"FAIL   {msg}")
+            failures.append(msg)
+            continue
+
+        if schema_name in _DRAFT_2020_SCHEMAS:
+            validator_cls = jsonschema.Draft202012Validator
+        else:
+            validator_cls = jsonschema.Draft7Validator
+
+        is_valid = validator_cls(schema).is_valid(doc)
+
+        if is_valid == expect_valid:
+            print(f"PASS   {case_id}: {description}")
+        else:
+            outcome = "valid" if is_valid else "invalid"
+            expected = "valid" if expect_valid else "invalid"
+            msg = f"{case_id}: expected {expected}, got {outcome} — {description}"
+            print(f"FAIL   {msg}")
+            failures.append(msg)
+
+    return failures, len(_SELF_TEST_CASES)
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -174,9 +351,25 @@ def main() -> None:
         metavar="PATH",
         help="Path to schemas directory (default: auto-detected from script location).",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="(Mode 3) Run behavioural self-tests against MusicPlan, SfxPlan, "
+             "and MediaPlan schemas using hardcoded known-good/known-bad samples.",
+    )
     args = parser.parse_args()
 
     schemas_dir: Path = args.schemas_dir
+
+    # ── Mode 3: behavioural self-test ─────────────────────────────────────────
+    if args.self_test:
+        failures, total = run_self_tests(schemas_dir)
+        if failures:
+            print(f"RESULT: FAIL ({len(failures)} failure(s) across {total} cases)")
+            sys.exit(1)
+        else:
+            print(f"RESULT: PASS ({total}/{total} cases)")
+            sys.exit(0)
 
     # ── Mode 2: data file given ────────────────────────────────────────────────
     if args.data_file:

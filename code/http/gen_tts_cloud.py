@@ -3876,7 +3876,7 @@ def build_manifest_from_script(
         "project_id":           project_id,
         "episode_id":           episode_id,
         "locale":               locale,
-        "locale_scope":         "locale",
+        "locale_scope":         "merged",
         "shared_ref":           "AssetManifest.shared.json",
         "shotlist_ref":         "ShotList.json",
         "character_packs":      [],

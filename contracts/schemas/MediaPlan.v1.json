@@ -2,40 +2,68 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:pipe:MediaPlan.v1",
   "title": "MediaPlan",
-  "description": "Confirmed media clip selections per shot, written by the VC editor Media tab and read by render_video.py and media_preview_pack.py.",
+  "description": "Confirmed media clip selections, written by the VC editor Media tab and read by render_video.py and media_preview_pack.py.",
   "type": "object",
-  "required": ["slug", "episode_id", "shot_overrides"],
+  "required": ["schema_id", "schema_version"],
+  "additionalProperties": false,
   "properties": {
-    "batch_id":         { "type": "string" },
-    "slug":             { "type": "string" },
-    "episode_id":       { "type": "string" },
-    "version":          { "type": "integer", "minimum": 1 },
-    "confirmed_locale": { "type": "string" },
+    "schema_id": {
+      "type": "string",
+      "const": "MediaPlan"
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
     "shot_overrides": {
-      "type": "object",
-      "description": "Keys are shot_id. Values are override objects with optional clip_id and segments list.",
-      "additionalProperties": {
+      "type": "array",
+      "description": "Ordered list of media segments. Sequential order is play order — no start_sec/end_sec on items.",
+      "items": {
         "type": "object",
+        "required": ["type"],
+        "additionalProperties": false,
         "properties": {
-          "clip_id": { "type": ["string", "null"] },
-          "clip_in": { "type": ["number", "null"], "description": "Video trim in-point (seconds). Video only." },
-          "clip_out": { "type": ["number", "null"], "description": "Video trim out-point (seconds). Video only." },
-          "segments": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "required": ["type", "url"],
-              "properties": {
-                "type":         { "type": "string", "enum": ["image", "video"] },
-                "url":          { "type": "string" },
-                "path":         { "type": "string" },
-                "clip_id":      { "type": ["string", "null"] },
-                "duration_sec": { "type": ["number", "null"] },
-                "hold_sec":     { "type": ["number", "null"] },
-                "clip_in":      { "type": ["number", "null"], "description": "Video trim in-point (seconds). Video segments only." },
-                "clip_out":     { "type": ["number", "null"], "description": "Video trim out-point (seconds). Video segments only." }
-              }
-            }
+          "type": {
+            "type": "string",
+            "enum": ["image", "video"],
+            "description": "Media type: 'image' for still frames, 'video' for motion clips."
+          },
+          "url": {
+            "type": "string",
+            "description": "Remote URL of the media asset."
+          },
+          "path": {
+            "type": ["string", "null"],
+            "description": "Local filesystem path to the downloaded media asset. null if not yet downloaded."
+          },
+          "clip_id": {
+            "type": ["string", "null"],
+            "description": "Assigned clip identifier. null if not yet assigned."
+          },
+          "hold_sec": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Image only. Duration to hold this still frame (seconds)."
+          },
+          "animation_type": {
+            "type": "string",
+            "default": "none",
+            "description": "Image only. Pan/zoom animation style applied to the still (e.g. 'none', 'ken_burns')."
+          },
+          "clip_in": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Video only. Trim in-point within the source clip (seconds)."
+          },
+          "clip_out": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Video only. Trim out-point within the source clip (seconds). null = play to natural end."
+          },
+          "duration_sec": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Rendered duration of this segment (seconds). null = derive from clip or hold_sec."
           }
         }
       }

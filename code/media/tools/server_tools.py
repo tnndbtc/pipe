@@ -377,9 +377,11 @@ def cmd_append_to_batch(args):
     # ── POST to media server ──────────────────────────────────────────────────
     url     = f"{MEDIA_URL}/batches/{args.batch_id}/items/{args.item_id}/append"
     payload = {
-        "ai_prompt": args.prompt,
-        "n_img":     n_img_adjusted,
-        "n_vid":     args.n_vid,
+        "ai_prompt":     args.prompt,
+        "n_img":         n_img_adjusted,
+        "n_vid":         args.n_vid,
+        "n_img_requested": args.n_img,   # original user count — server caps merge to this
+        "n_vid_requested": args.n_vid,   # same for videos
     }
     if args.sources:
         payload["sources_override"] = args.sources

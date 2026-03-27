@@ -255,219 +255,143 @@ def main():
         vo_items, scene_heads, voplan_total_dur
     )
 
-    # ── 3. Shot list and per-shot durations ───────────────────────────────────
-    # Shots come from selections keys; ordering inferred from shot_id naming.
-    all_shot_ids = sorted(selections.keys(), key=_shot_sort_key)
+    # ── 3. Load media segments from POST body (DOM state) ────────────────────
+    # Segments come from _mediaSegments (live DOM state) sent by the frontend.
+    # MediaPlan.json on disk is NOT read here — the caller sends current UI state.
+    media_segments = cfg.get("media_segments", [])
+    print(f"  [media] {len(media_segments)} segment(s) from POST body")
 
-    if shot_ids_filter is not None:
-        _fs          = set(shot_ids_filter)
-        all_shot_ids = [s for s in all_shot_ids if s in _fs]
-        print(f"  [filter] Rendering shots: {all_shot_ids}")
+    # ── 4. Compute total video duration ───────────────────────────────────────
+    window_start = 0.0
 
-    # Group shots by scene; split scene slot equally among shots in that scene.
-    shots_by_scene: dict = defaultdict(list)
-    for sid in all_shot_ids:
-        scid = _scene_id_from_shot_id(sid)
-        shots_by_scene[scid].append(sid)
+    def _mp_seg_dur(seg: dict) -> float:
+        """Duration of one MediaPlan segment in seconds."""
+        seg_type = seg.get("type", "image")
+        if seg_type == "video":
+            ci = float(seg.get("clip_in") or 0)
+            co = seg.get("clip_out")
+            if co is not None and float(co) > ci:
+                return float(co) - ci
+            dur = seg.get("duration_sec")
+            if dur:
+                return float(dur)
+            return 0.0
+        # image
+        hold = seg.get("hold_sec")
+        if hold:
+            return float(hold)
+        dur = seg.get("duration_sec")
+        if dur:
+            return float(dur)
+        return 3.0  # default hold
 
-    shot_dur_sec: dict = {}
-    for scid, shot_list in shots_by_scene.items():
-        if scid not in scene_slots:
-            print(f"  [warn] No scene slot for scene '{scid}' — shots {shot_list} skipped")
-            continue
-        _, sc_dur = scene_slots[scid]
-        per_shot  = sc_dur / len(shot_list)
-        for sid in shot_list:
-            shot_dur_sec[sid] = per_shot
-
-    ordered_shots = [s for s in all_shot_ids if s in shot_dur_sec]
-
-    # Fallback: selections was empty — create one black placeholder shot per scene
-    # so audio tracks (VO, music, SFX) still render correctly.
-    if not ordered_shots:
-        for scid in sorted(scene_slots.keys(), key=lambda s: scene_slots[s][0]):
-            pid = f"{scid}-sh01"
-            shot_dur_sec[pid] = scene_slots[scid][1]
-            ordered_shots.append(pid)
-        print(f"  [shots] No selections — rendering {len(ordered_shots)} black placeholder shot(s)")
-
-    if not ordered_shots:
-        print("ERROR: No renderable shots.")
-        sys.exit(1)
-
-    for sid in ordered_shots:
-        print(f"  [shot] {sid}: {shot_dur_sec[sid]:.3f}s")
-
-    # ── 4. Total duration for filtered (per-scene) preview ────────────────────
-    if shot_ids_filter is not None and ordered_shots:
-        _starts = [scene_slots[_scene_id_from_shot_id(s)][0] for s in ordered_shots]
-        _ends   = [scene_slots[_scene_id_from_shot_id(s)][0]
-                   + scene_slots[_scene_id_from_shot_id(s)][1] for s in ordered_shots]
-        window_start    = min(_starts)
-        video_total_dur = max(_ends) - window_start
-        print(f"  [filter] window_start={window_start:.3f}s  total_dur={video_total_dur:.3f}s")
+    if media_segments:
+        seg_total = sum(_mp_seg_dur(s) for s in media_segments)
+        total_dur = max(seg_total, voplan_total_dur)
+        print(f"  [dur] seg_total={seg_total:.3f}s  voplan={voplan_total_dur:.3f}s  total_dur={total_dur:.3f}s")
     else:
-        window_start = 0.0
-
-    total_dur = video_total_dur
+        total_dur = video_total_dur  # from VOPlan scene timeline
     print(f"  [dur] total_dur (video)={total_dur:.3f}s")
 
-    # ── 5. Build per-shot video clips ─────────────────────────────────────────
-    vo_dir = ep_dir / "assets" / locale / "audio" / "vo"
+    # ── 5. Build video clips from flat MediaPlan segments ─────────────────────
+    vo_dir    = ep_dir / "assets" / locale / "audio" / "vo"
+    scale_pad = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                 f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp        = Path(tmp_dir)
         clip_files = []
 
-        for i, shot_id in enumerate(ordered_shots):
-            dur_sec   = shot_dur_sec[shot_id]
-            segs      = selections.get(shot_id, [])
-            scale_pad = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
-                         f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1")
-            clip_path = tmp / f"clip_{i:04d}_{shot_id}.mp4"
+        if not media_segments:
+            # No MediaPlan — single black clip for the full duration
+            black_path = tmp / "clip_0000_black.mp4"
+            cmd = [
+                "ffmpeg", "-y", "-f", "lavfi",
+                "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={total_dur:.3f}",
+                "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest", str(black_path)
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode == 0:
+                clip_files.append(black_path)
+                print(f"  [clip] black placeholder {total_dur:.3f}s ok")
+            else:
+                print(f"ERROR: black placeholder failed: {r.stderr[-300:]}")
+                sys.exit(1)
+        else:
+            for seg_idx, seg in enumerate(media_segments):
+                seg_type   = seg.get("type", "image")
+                seg_dur    = _mp_seg_dur(seg)
+                anim_type  = (seg.get("animation_type") or seg.get("animation") or "none").lower()
+                media_path = resolve_media_path(seg, ep_dir)
+                clip_path  = tmp / f"clip_{seg_idx:04d}.mp4"
 
-            if not segs:
-                cmd = [
-                    "ffmpeg", "-y", "-f", "lavfi",
-                    "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={dur_sec:.3f}",
-                    "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-                    "-t", f"{dur_sec:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-shortest", str(clip_path)
-                ]
+                print(f"  [seg] {seg_idx} type={seg_type} dur={seg_dur:.3f}s "
+                      f"path={str(media_path)[:80] if media_path else 'MISSING'}")
+
+                if seg_dur <= 0:
+                    print(f"  [warn] seg {seg_idx}: duration 0 — skipped")
+                    continue
+
+                if not media_path or not Path(media_path).exists():
+                    print(f"  [warn] seg {seg_idx}: media not found '{media_path}' — black")
+                    cmd = [
+                        "ffmpeg", "-y", "-f", "lavfi",
+                        "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={seg_dur:.3f}",
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-t", f"{seg_dur:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-shortest", str(clip_path)
+                    ]
+                    r = subprocess.run(cmd, capture_output=True, text=True)
+                    if r.returncode == 0:
+                        clip_files.append(clip_path)
+                    continue
+
+                if seg_type == "image":
+                    zoompan = _anim_vf(anim_type, seg_dur)
+                    vf      = (scale_pad + "," + zoompan) if zoompan else scale_pad
+                    cmd     = [
+                        "ffmpeg", "-y",
+                        "-loop", "1", "-framerate", str(FPS),
+                        "-t", f"{seg_dur:.3f}", "-i", media_path,
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-vf", vf, "-r", str(FPS), "-pix_fmt", "yuv420p",
+                        "-t", f"{seg_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
+                        "-shortest", str(clip_path)
+                    ]
+                else:
+                    seg_start = float(seg.get("clip_in") or 0)
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", f"{seg_start:.3f}", "-t", f"{seg_dur:.3f}",
+                        "-i", media_path,
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-vf", scale_pad, "-r", str(FPS), "-pix_fmt", "yuv420p",
+                        "-t", f"{seg_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
+                        "-shortest", str(clip_path)
+                    ]
+
                 r = subprocess.run(cmd, capture_output=True, text=True)
                 if r.returncode != 0:
-                    print(f"  [warn] black clip failed for {shot_id}: {r.stderr[-200:]}")
-                    continue
-                clip_files.append(clip_path)
-                print(f"  [clip] {shot_id}: {dur_sec:.3f}s ok (black)")
-
-            else:
-                sub_clip_paths = []
-                remaining      = dur_sec
-                segs_rendered  = 0
-
-                for seg_idx, seg in enumerate(segs):
-                    media_path = resolve_media_path(seg, ep_dir)
-                    media_type = seg.get("media_type", "image")
-                    seg_start  = float(seg.get("clip_in") if seg.get("clip_in") is not None
-                                       else (seg.get("start_sec") or 0))
-                    anim_type  = (seg.get("animation_type") or "none").lower()
-                    seg_dur    = _seg_display_dur(seg)
-                    print(f"  [seg] {shot_id} seg{seg_idx} type={media_type} "
-                          f"hold_sec={seg.get('hold_sec')} clip_in={seg.get('clip_in')} "
-                          f"clip_out={seg.get('clip_out')} duration_sec={seg.get('duration_sec')} "
-                          f"→ seg_dur={seg_dur:.3f}s")
-
-                    if seg_dur <= 0:
-                        print(f"  [warn] {shot_id} seg {seg_idx}: duration 0 — skipped")
-                        continue
-                    if remaining <= 0:
-                        print(f"  [warn] {shot_id} seg {seg_idx}: no remaining shot time — skipped")
-                        break
-                    if seg_dur > remaining + 0.001:
-                        print(f"  [warn] {shot_id} seg {seg_idx}: {seg_dur:.3f}s > remaining {remaining:.3f}s — capped")
-                        seg_dur = remaining
-
-                    sub_clip = tmp / f"clip_{i:04d}_{shot_id}_s{seg_idx}.mp4"
-
-                    if media_type == "image":
-                        zoompan = _anim_vf(anim_type, seg_dur)
-                        vf      = (scale_pad + "," + zoompan) if zoompan else scale_pad
-                        cmd     = [
-                            "ffmpeg", "-y",
-                            "-loop", "1", "-framerate", str(FPS),
-                            "-t", f"{seg_dur:.3f}", "-i", media_path,
-                            "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-                            "-vf", vf, "-r", str(FPS), "-pix_fmt", "yuv420p",
-                            "-t", f"{seg_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
-                            "-shortest", str(sub_clip)
-                        ]
-                    else:
-                        cmd = [
-                            "ffmpeg", "-y",
-                            "-ss", f"{seg_start:.3f}", "-t", f"{seg_dur:.3f}",
-                            "-i", media_path,
-                            "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-                            "-vf", scale_pad, "-r", str(FPS), "-pix_fmt", "yuv420p",
-                            "-t", f"{seg_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
-                            "-shortest", str(sub_clip)
-                        ]
-
-                    r = subprocess.run(cmd, capture_output=True, text=True)
-                    if r.returncode != 0:
-                        print(f"  [warn] seg {seg_idx} ({media_type}) failed: {r.stderr[-300:]}")
-                        cmd2 = [
-                            "ffmpeg", "-y", "-f", "lavfi",
-                            "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={seg_dur:.3f}",
-                            "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-                            "-t", f"{seg_dur:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                            "-c:a", "aac", "-shortest", str(sub_clip)
-                        ]
-                        r2 = subprocess.run(cmd2, capture_output=True, text=True)
-                        if r2.returncode != 0:
-                            print(f"  [warn] {shot_id} seg {seg_idx}: black fallback failed — skipped")
-                            continue
-                        print(f"  [warn] {shot_id} seg {seg_idx}: black fallback used")
-
-                    sub_clip_paths.append(sub_clip)
-                    remaining     -= seg_dur
-                    segs_rendered += 1
-
-                # Fill remaining shot time with black
-                if remaining > 0.05:
-                    fill_clip = tmp / f"clip_{i:04d}_{shot_id}_fill.mp4"
-                    cmd_fill  = [
+                    print(f"  [warn] seg {seg_idx} ({seg_type}) failed: {r.stderr[-300:]}")
+                    cmd2 = [
                         "ffmpeg", "-y", "-f", "lavfi",
-                        "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={remaining:.3f}",
+                        "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={seg_dur:.3f}",
                         "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-                        "-t", f"{remaining:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                        "-c:a", "aac", "-shortest", str(fill_clip)
+                        "-t", f"{seg_dur:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-shortest", str(clip_path)
                     ]
-                    r_fill = subprocess.run(cmd_fill, capture_output=True, text=True)
-                    if r_fill.returncode == 0:
-                        sub_clip_paths.append(fill_clip)
-                        print(f"  [fill] {shot_id}: black fill {remaining:.3f}s")
+                    r2 = subprocess.run(cmd2, capture_output=True, text=True)
+                    if r2.returncode == 0:
+                        clip_files.append(clip_path)
+                        print(f"  [warn] seg {seg_idx}: black fallback")
                     else:
-                        print(f"  [warn] {shot_id}: black fill failed: {r_fill.stderr[-200:]}")
-
-                if not sub_clip_paths:
-                    print(f"  [skip] {shot_id}: all segments failed")
+                        print(f"  [warn] seg {seg_idx}: black fallback also failed — skipped")
                     continue
 
-                if len(sub_clip_paths) == 1:
-                    clip_path = sub_clip_paths[0]
-                else:
-                    sub_list = tmp / f"sublist_{i:04d}.txt"
-                    with open(sub_list, "w") as f:
-                        for sc in sub_clip_paths:
-                            f.write(f"file '{sc}'\n")
-                    r = subprocess.run([
-                        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                        "-i", str(sub_list),
-                        "-c:v", "libx264", "-r", str(FPS), "-pix_fmt", "yuv420p",
-                        "-c:a", "aac", str(clip_path)
-                    ], capture_output=True, text=True)
-                    if r.returncode != 0:
-                        print(f"  [warn] sub-concat failed for {shot_id}: {r.stderr[-400:]}")
-                        cmd_blk = [
-                            "ffmpeg", "-y", "-f", "lavfi",
-                            "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={dur_sec:.3f}",
-                            "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-                            "-t", f"{dur_sec:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                            "-c:a", "aac", "-shortest", str(clip_path)
-                        ]
-                        r_blk = subprocess.run(cmd_blk, capture_output=True, text=True)
-                        if r_blk.returncode != 0:
-                            print(f"  [warn] {shot_id}: fallback also failed — shot skipped")
-                            continue
-                        print(f"  [warn] {shot_id}: sub-concat fallback — showing black")
-
                 clip_files.append(clip_path)
-                segs_used  = dur_sec - remaining
-                skipped    = len(segs) - segs_rendered
-                skip_note  = f" ({skipped} skipped)" if skipped else ""
-                print(f"  [clip] {shot_id}: {segs_rendered} seg(s){skip_note} "
-                      f"{segs_used:.3f}s media + {remaining:.3f}s fill = {dur_sec:.3f}s ok")
+                print(f"  [clip] seg {seg_idx}: {seg_type} {seg_dur:.3f}s ok")
 
         if not clip_files:
             print("ERROR: No clips generated.")
@@ -532,8 +456,8 @@ def main():
             build_silent_audio(total_dur, vo_audio)
 
         # ── 8. Build music audio ───────────────────────────────────────────────
-        # MusicPlan shot_overrides carry episode-absolute start_sec/end_sec.
-        # No shot_id resolution needed — iterate overrides directly.
+        # MusicPlan shot_overrides[] carry episode-absolute start_sec/end_sec.
+        # No shot_id resolution needed — iterate segments directly.
         music_audio = None
         if include_music:
             music_path = ep_dir / "MusicPlan.json"
@@ -611,9 +535,24 @@ def main():
             sfx_path = ep_dir / "SfxPlan.json"
             if sfx_path.exists():
                 sfx_plan = load_json(sfx_path)
+                # Build clip_id → absolute path lookup from cut_clips.
+                # source_file in shot_overrides may be a bare clip_id string (e.g.
+                # "ambulance_1.2s-3.5s") rather than a filesystem path — the SFX tab
+                # stores the dropdown value (clip_id) there, not the WAV path.
+                _cut_clip_abs = {}
+                for _cc in sfx_plan.get("cut_clips", []):
+                    _cid  = _cc.get("clip_id", "")
+                    _crel = _cc.get("path", "")
+                    if _cid and _crel:
+                        _cabs = Path(_crel) if Path(_crel).is_absolute() else ep_dir / _crel
+                        _cut_clip_abs[_cid] = str(_cabs)
+
                 s_inputs, s_delays, s_durs = [], [], []
-                for entry in sfx_plan.get("sfx_entries", sfx_plan.get("entries", [])):
+                for entry in sfx_plan.get("shot_overrides", []):
                     src = entry.get("source_file") or entry.get("local_path") or ""
+                    # Resolve clip_id → absolute path when src is not a valid file path
+                    if src and not Path(src).exists():
+                        src = _cut_clip_abs.get(src, src)
                     if src and Path(src).exists():
                         start_sfx = float(entry.get("start_sec", 0))
                         end_sfx   = entry.get("end_sec")

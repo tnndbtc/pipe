@@ -12,8 +12,7 @@
     },
     "schema_version": {
       "type": "string",
-      "enum": ["1.0", "1.1"],
-      "description": "1.0 = original. 1.1 = shot_id required in shot_overrides items."
+      "enum": ["1.0"]
     },
     "loop_selections": {
       "type": "object",
@@ -70,34 +69,37 @@
     },
     "shot_overrides": {
       "type": "array",
-      "description": "Per-shot overrides for ducking, continuity, and track assignment. Only include shots that need changes — omitted shots keep their original values.",
+      "description": "Time-based music segment assignments. Each entry specifies a time window and optional music source/mix parameters.",
       "items": {
         "type": "object",
-        "required": ["item_id", "shot_id"],
+        "required": ["start_sec", "end_sec"],
         "additionalProperties": false,
         "properties": {
-          "shot_id": {
-            "type": "string",
-            "description": "Shot ID from ShotList.json (e.g. 'sc01-sh01'). Direct lookup key — no prefix stripping needed. Written by /api/music_plan_save (from VOPlan music_items, or by stripping 'music-' prefix as fallback). Required since schema_version 1.1."
-          },
-          "item_id": {
-            "type": "string",
-            "pattern": "^music-",
-            "description": "Music asset item ID from VOPlan music_items (e.g. 'music-sc01-sh01'). Follows the convention item_id = 'music-' + shot_id."
-          },
-          "music_asset_id": {
-            "type": "string",
-            "description": "Override the music asset used for this shot. Can be an existing clip item_id (e.g. 'music-s01e01_sh01') OR a source track stem (e.g. 'djokovic_bg_climax') — when a source stem is used, apply_music_plan will extract a new clip from that source track."
-          },
           "start_sec": {
             "type": "number",
-            "minimum": 0,
-            "description": "Music play start offset within the shot (seconds from shot start). 0 = music begins at the shot's first frame."
+            "description": "Segment start time in seconds (episode-absolute)."
           },
           "end_sec": {
             "type": "number",
+            "description": "Segment end time in seconds (episode-absolute). Must be > start_sec."
+          },
+          "music_asset_id": {
+            "type": "string",
+            "description": "Override the music asset used for this segment. Can be an existing clip item_id or a source track stem."
+          },
+          "music_clip_id": {
+            "type": "string",
+            "description": "Display label for the selected clip (e.g. 'djokovic_bg_calm:19.4s-40.3s'). Used by the UI to restore dropdown selection."
+          },
+          "clip_start_sec": {
+            "type": "number",
             "minimum": 0,
-            "description": "Music play end offset within the shot (seconds from shot start). Must be > start_sec. Downstream components compute duration as end_sec - start_sec."
+            "description": "When using a source stem as music_asset_id, start position within the source track to extract the clip from (seconds)."
+          },
+          "clip_duration_sec": {
+            "type": "number",
+            "minimum": 1,
+            "description": "When using a source stem as music_asset_id, duration of the clip to extract from the source track (seconds)."
           },
           "duck_db": {
             "type": "number",
@@ -108,31 +110,6 @@
             "type": "number",
             "minimum": 0,
             "description": "Override duck ramp duration (seconds). 0.15 = standard, 0.8-1.5 = cinematic."
-          },
-          "music_clip_id": {
-            "type": "string",
-            "description": "Display label for the selected clip (e.g. 'djokovic_bg_calm:19.4s-40.3s'). Used by the UI to restore dropdown selection."
-          },
-          "clip_start_sec": {
-            "type": "number",
-            "minimum": 0,
-            "description": "When using a source stem as music_asset_id, start position within the source track to extract the clip from (seconds)"
-          },
-          "clip_duration_sec": {
-            "type": "number",
-            "minimum": 1,
-            "description": "When using a source stem as music_asset_id, duration of the clip to extract from the source track (seconds)"
-          },
-          "crossfade_sec": {
-            "type": "number",
-            "minimum": 0,
-            "description": "Crossfade duration at shot boundaries when music changes (seconds)"
-          },
-          "base_db": {
-            "type": "number",
-            "minimum": -30,
-            "maximum": 0,
-            "description": "Absolute un-ducked music level in dB for this shot (e.g. -12.0). Written by apply_music_plan.py when a clip_volumes offset is resolved; overrides BASE_MUSIC_DB for this shot only."
           }
         }
       }

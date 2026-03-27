@@ -543,7 +543,7 @@ def build_manifest(
         "project_id": project_id,
         "episode_id": episode_id,
         "locale": locale,
-        "locale_scope": "locale",
+        "locale_scope": "merged",
         "shared_ref": "AssetManifest.shared.json",
         "shotlist_ref": shotlist_ref,
         "character_packs": [],

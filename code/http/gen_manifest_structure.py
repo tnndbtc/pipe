@@ -204,81 +204,6 @@ def build_backgrounds(shots: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# SFX items builder
-# ---------------------------------------------------------------------------
-def build_sfx_items(shots: list[dict]) -> list[dict]:
-    """
-    Build sfx_items[] — one entry per sfx_item_id across all shots.
-
-    item_id and shot linkage are deterministic; tag and search_queries are
-    __FILL__ for the LLM.
-    """
-    items: list[dict] = []
-    seen: set[str] = set()
-
-    for shot in shots:
-        shot_id = shot.get("shot_id", "")
-        duration_sec = shot.get("duration_sec", 0)
-        audio = shot.get("audio_intent", {})
-        sfx_item_ids = audio.get("sfx_item_ids", [])
-
-        for item_id in sfx_item_ids:
-            if not item_id or item_id in seen:
-                continue
-            seen.add(item_id)
-            items.append({
-                "item_id":      item_id,
-                "type":         "sfx",
-                "shot_id":      shot_id,
-                "duration_sec": duration_sec,
-                "license_type": "proprietary_cleared",
-                "tag":            "__FILL__: natural language sound effect description",
-                "search_queries": "__FILL__: list of 2-3 search phrase strings",
-            })
-
-    return items
-
-
-# ---------------------------------------------------------------------------
-# Music items builder
-# ---------------------------------------------------------------------------
-def build_music_items(shots: list[dict]) -> list[dict]:
-    """
-    Build music_items[] — one entry per shot with a non-null music_item_id.
-
-    music_mood is copied from shot.audio_intent.music_mood.
-    Timing fields (start_sec, duck_db, fade_sec) are set to safe defaults.
-    """
-    items: list[dict] = []
-    seen: set[str] = set()
-
-    for shot in shots:
-        shot_id = shot.get("shot_id", "")
-        duration_sec = shot.get("duration_sec", 0)
-        audio = shot.get("audio_intent", {})
-        music_item_id = audio.get("music_item_id")
-        music_mood = audio.get("music_mood")
-
-        if not music_item_id or music_item_id in seen:
-            continue
-        seen.add(music_item_id)
-
-        items.append({
-            "item_id":      music_item_id,
-            "type":         "music",
-            "shot_id":      shot_id,
-            "music_mood":   music_mood,
-            "duration_sec": duration_sec,
-            "start_sec":    0.0,
-            "duck_db":      -12.0,
-            "fade_sec":     0.15,
-            "license_type": "proprietary_cleared",
-        })
-
-    return items
-
-
-# ---------------------------------------------------------------------------
 # Character packs builder
 # ---------------------------------------------------------------------------
 def build_character_packs(
@@ -329,8 +254,6 @@ def build_manifest(
 ) -> dict:
     """Assemble the full AssetManifest.shared.json scaffold."""
     backgrounds     = build_backgrounds(shots)
-    sfx_items       = build_sfx_items(shots)
-    music_items     = build_music_items(shots)
     character_packs = build_character_packs(shots, cast_genders)
 
     manifest: dict = {
@@ -344,8 +267,6 @@ def build_manifest(
         "vo_items":       [],
         "character_packs": character_packs,
         "backgrounds":    backgrounds,
-        "sfx_items":      sfx_items,
-        "music_items":    music_items,
         "element_images":  "__FILL__: array of per-shot element image objects — Stage 5-C creates from scratch",
     }
 
@@ -468,18 +389,13 @@ def main() -> int:
     save_json(manifest, out_path)
 
     n_bg       = len(manifest["backgrounds"])
-    n_sfx      = len(manifest["sfx_items"])
-    n_music    = len(manifest["music_items"])
     n_packs    = len(manifest["character_packs"])
     n_elements = len(manifest.get("element_images", [])) if isinstance(manifest.get("element_images"), list) else "FILL"
 
     print(f"  backgrounds     : {n_bg}")
-    print(f"  sfx_items       : {n_sfx}")
-    print(f"  music_items     : {n_music}")
     print(f"  character_packs : {n_packs}")
     print(f"  element_images  : {n_elements}")
-    print(f"✓ AssetManifest.shared.json scaffold written "
-          f"({n_bg} backgrounds, {n_sfx} sfx, {n_music} music)")
+    print(f"✓ AssetManifest.shared.json scaffold written ({n_bg} backgrounds)")
 
     return 0
 
