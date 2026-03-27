@@ -1434,16 +1434,36 @@ def concat_to_mp4(
 # Used by the ShotList-free render path (main below).
 
 def resolve_media_path(seg: dict, ep_dir: Path) -> str:
-    """Return the best local filesystem path for a MediaPlan segment."""
+    """Return the best local filesystem path for a MediaPlan segment.
+
+    Priority: 'path' field (absolute or ep_dir-relative) → file:// url → url.
+    When 'path' is set but the file is missing and 'url' is an HTTP URL,
+    downloads the file to 'path' so the renderer can use it directly.
+    """
     p = seg.get("path", "")
     if p:
         if os.path.isabs(p):
             if os.path.exists(p):
                 return p
+            # File missing — try to download from url
+            url = seg.get("url", "")
+            if url and not url.startswith("/serve_media") and (url.startswith("http://") or url.startswith("https://")):
+                try:
+                    import urllib.request as _urlreq
+                    Path(p).parent.mkdir(parents=True, exist_ok=True)
+                    print(f"  [resolve] downloading missing asset → {Path(p).name}")
+                    _urlreq.urlretrieve(url, p)
+                    if os.path.exists(p):
+                        print(f"  [resolve] download ok: {p}")
+                        return p
+                except Exception as _dl_exc:
+                    print(f"  [resolve] download failed ({url}): {_dl_exc}")
+            return p  # missing — caller's existence check will log it
         else:
             c = ep_dir / p
             if c.exists():
                 return str(c)
+            return str(c)
     url = seg.get("url", "")
     if url.startswith("file://"):
         return unquote(urlparse(url).path)

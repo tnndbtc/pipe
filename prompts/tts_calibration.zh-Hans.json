@@ -96,6 +96,18 @@
       "en_rate": "0%",
       "normal_cps": 3.65,
       "normal_n": 22
+    },
+    {
+      "run_id": "script/s01e01",
+      "date": "2026-03-27",
+      "voice": "zh-CN-YunxiNeural",
+      "style": null,
+      "rate": "0%",
+      "en_voice": "en-US-DavisNeural",
+      "en_style": null,
+      "en_rate": "0%",
+      "normal_cps": 4.123,
+      "normal_n": 7
     }
   ],
   "defaults": {

@@ -12694,12 +12694,11 @@ placeholder="Enter your story here"></textarea>
       if (n === 10) {
         // Stage 9: numbered Run / Run→11 buttons matching the main stage button style
         const LOCALE_STEPS = [
-          { num: 5,  step: 'manifest_merge',   label: '5 — merge',
-            cmd: 'manifest_merge.py --shared AssetManifest.shared.json --locale AssetManifest.{locale}.json --out VOPlan.{locale}.json' },
-          { num: 6,  step: 'gen_tts',          label: '6 — tts',
-            cmd: 'gen_tts_cloud.py --manifest VOPlan.{locale}.json' },
-          { num: 7,  step: 'post_tts',         label: '7 — post_tts',
-            cmd: 'post_tts_analysis.py --manifest VOPlan.{locale}.json' },
+          { num: 5,  step: 'manifest_merge',
+            labelPrimary:    '5 — merge',
+            labelTranslated: '5 — prepare locale',
+            cmdPrimary:    'manifest_merge.py --shared AssetManifest.shared.json --locale VOPlan.{locale}.json --out VOPlan.{locale}.json',
+            cmdTranslated: 'manifest_merge → gen_tts_cloud → polish_locale_vo → post_tts_analysis' },
           { num: 8,  step: 'apply_music_plan', label: '8 — music plan',
             cmd: 'apply_music_plan.py --plan MusicPlan.json --manifest VOPlan.{locale}.json  (skipped if Music disabled)' },
           { num: 9,  step: 'resolve_assets',   label: '9 — resolve',
@@ -12804,32 +12803,29 @@ placeholder="Enter your story here"></textarea>
             detailEl.appendChild(hdr);
 
             const lsteps = localeStepsMap[locale] || {};
-            LOCALE_STEPS.forEach(({ num, step, label, cmd }) => {
+            const _voByLocale = _approvals.vo_by_locale || {};
+            const _isPrimary  = locale === (locales[0] || 'en');
+            LOCALE_STEPS.forEach(({ num, step, label, labelPrimary, labelTranslated, cmd, cmdPrimary, cmdTranslated }) => {
               const done = (lsteps[step] || {}).done || false;
               const row  = document.createElement('div');
               row.className = 'pipe-substep-row';
               row.dataset.step = step;
-              // Only grey steps that are actually skipped in run.sh when approved.
-              // gen_tts + post_tts:
-              //   Primary locale  → always greyed (VO is authored in VO tab, never re-run from Stage 9).
-              //   Non-primary     → greyed only when VO is approved for that locale.
-              // apply_music_plan: skipped when music is approved (render_video reads
-              //   MusicApprovalSnapshot directly — manifest update is redundant).
-              const _voByLocale    = _approvals.vo_by_locale || {};
-              const _isPrimary     = locale === (locales[0] || 'en');
+              // Grey step 5 (manifest_merge) for non-primary locales when VO is approved
+              // (compound step skipped — mirrors run.sh [6b] guard).
+              // apply_music_plan: greyed out when music is approved (loop WAVs already
+              // generated; renderer reads MusicPlan.json directly — not per-locale).
               const _localeApproved =
-                ((step === 'gen_tts' || step === 'post_tts') && (_isPrimary || !!_voByLocale[locale])) ||
+                (step === 'manifest_merge' && !_isPrimary && !!_voByLocale[locale]) ||
                 (step === 'apply_music_plan' && !!_approvals.music);
               const _localeReadyToRender = (step === 'render_video' && _approvals.all && !_rpStale[locale]);
               const _renderPlanStale     = (step === 'gen_render_plan' && !!_rpStale[locale]);
               if (_localeApproved && !_renderPlanStale) {
                 row.classList.add('step-approved');
                 row.title = step === 'apply_music_plan'
-                  ? 'Music already approved — will be skipped when Stage 9 runs'
-                  : 'VO already approved — will be skipped when Stage 9 runs';
+                  ? 'Music already approved — loop WAVs shared across locales, will be skipped'
+                  : 'VO already approved — compound step will be skipped when Stage 9 runs';
               }
               if (_renderPlanStale) {
-                // VO was re-approved after this RenderPlan was generated
                 row.style.cssText = 'outline:1px solid #c06000;background:#2a1500';
                 row.title = '⚠️ VO approval is newer than RenderPlan — re-run this step to update SRT timestamps and shot durations';
               }
@@ -12840,12 +12836,18 @@ placeholder="Enter your story here"></textarea>
               row.appendChild(Object.assign(document.createElement('span'), {
                 innerHTML: statusIcon(done), style: 'flex-shrink:0'
               }));
-              // step label + sample command
-              const cmdDisplay = cmd.replace(/\{locale\}/g, locale);
+              // step label + sample command (locale-aware for compound step 5)
+              const _label = _isPrimary
+                ? (labelPrimary || label)
+                : (labelTranslated || label);
+              const _cmd = (_isPrimary
+                ? (cmdPrimary || cmd)
+                : (cmdTranslated || cmd)) || '';
+              const cmdDisplay = _cmd.replace(/\{locale\}/g, locale);
               const nameSpan = document.createElement('span');
               nameSpan.className = 'pipe-substep-locale';
               nameSpan.style.cssText = 'min-width:0;flex:1';
-              nameSpan.innerHTML = escHtml(label) +
+              nameSpan.innerHTML = escHtml(_label) +
                 '<br><span style="font-family:var(--mono);font-size:0.72em;color:var(--dim)">' +
                 escHtml(cmdDisplay) + '</span>';
               row.appendChild(nameSpan);
@@ -14190,13 +14192,28 @@ def _step_is_done(step: str, slug: str, ep_id: str, locale: str) -> bool:
     def check(*paths): return all(os.path.isfile(p) for p in paths)
 
     if step == "manifest_merge":
-        # Done when VOPlan.{locale}.json exists with locale_scope == "merged".
+        # Primary locale: done when VOPlan.{locale}.json exists with locale_scope=="merged".
+        # Non-primary locale (compound step): also requires WAVs and VO timing populated.
         _path = os.path.join(ep_dir, f"VOPlan.{locale}.json")
         if not os.path.isfile(_path):
             return False
         try:
             with open(_path, encoding="utf-8") as _f:
-                return json.load(_f).get("locale_scope") == "merged"
+                _doc = json.load(_f)
+            if _doc.get("locale_scope") != "merged":
+                return False
+            _vo_items = _doc.get("vo_items", [])
+            if _vo_items:
+                # If any item is missing timing, post_tts hasn't run yet
+                if any(v.get("start_sec") is None for v in _vo_items):
+                    return False
+                # WAVs must exist (gen_tts ran)
+                _vo_dir = os.path.join(ep_dir, "assets", locale, "audio", "vo")
+                if not os.path.isdir(_vo_dir) or not any(
+                    f.endswith(".wav") for f in os.listdir(_vo_dir)
+                ):
+                    return False
+            return True
         except Exception:
             return False
     elif step == "apply_music_plan":
@@ -14263,6 +14280,15 @@ def _delete_step_output(step: str, slug: str, ep_id: str, locale: str) -> None:
                     _mf.write("\n")
             except Exception:
                 pass   # leave file untouched on error
+        # For non-primary locales, step 5 is compound (manifest_merge + gen_tts +
+        # polish + post_tts). Also wipe WAVs so gen_tts re-runs from scratch.
+        _wav_dir = os.path.join(ep_dir, "assets", locale, "audio", "vo")
+        if locale and os.path.isdir(_wav_dir):
+            import shutil as _shutil_del
+            try:
+                _shutil_del.rmtree(_wav_dir)
+            except Exception:
+                pass
         return
 
     if step == "resolve_assets":
@@ -14441,12 +14467,31 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
             "--asset_type",  "sfx",
         ]
     elif step == "manifest_merge":
-        return [
+        # Use VOPlan.{locale}.json as input when it already exists (in-place re-run,
+        # preserves vo_approval block). Fall back to AssetManifest.{locale}.json on
+        # first run (Stage 8 produces AssetManifest.zh-Hans.json, not VOPlan.zh-Hans.json).
+        _voplan_in = ep(f"VOPlan.{locale}.json")
+        _locale_in = _voplan_in if os.path.isfile(_voplan_in) else ep(f"AssetManifest.{locale}.json")
+        _mm_cmd = [
             "python3", os.path.join(code_dir, "manifest_merge.py"),
             "--shared", ep("AssetManifest.shared.json"),
-            "--locale", ep(f"VOPlan.{locale}.json"),
+            "--locale", _locale_in,
             "--out",    ep(f"VOPlan.{locale}.json"),
         ]
+        # Pass --primary so translated locales inherit scene_heads/scene_tails from
+        # the primary locale. Use _get_primary_locale (reads meta.json) — pipeline_vars.sh
+        # does not have a PRIMARY_LOCALE field.
+        if _VO_UTILS_AVAILABLE:
+            try:
+                from pathlib import Path as _Pmm
+                _primary_loc_mm = _get_primary_locale(_Pmm(ep_dir))
+            except Exception:
+                _primary_loc_mm = ""
+        else:
+            _primary_loc_mm = ""
+        if _primary_loc_mm:
+            _mm_cmd += ["--primary", ep(f"VOPlan.{_primary_loc_mm}.json")]
+        return _mm_cmd
     elif step == "gen_tts":
         cmd = [
             "python3", os.path.join(code_dir, "gen_tts_cloud.py"),
@@ -14479,6 +14524,22 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
         return [
             "python3", os.path.join(code_dir, "post_tts_analysis.py"),
             "--manifest", ep(f"VOPlan.{locale}.json"),
+        ]
+    elif step == "polish_locale_vo":
+        # Alignment + calibration loop for non-primary locale (run.sh step [6b]).
+        _primary_pvo = "en"
+        if _VO_UTILS_AVAILABLE:
+            try:
+                from pathlib import Path as _Ppvo
+                _primary_pvo = _get_primary_locale(_Ppvo(ep_dir))
+            except Exception:
+                pass
+        return [
+            "python3", os.path.join(code_dir, "polish_locale_vo.py"),
+            "--manifest",       ep(f"VOPlan.{locale}.json"),
+            "--locale",         locale,
+            "--ep-dir",         ep_dir,
+            "--primary-locale", _primary_pvo,
         ]
     elif step == "apply_music_plan":
         music_plan = os.path.join(ep_dir, "MusicPlan.json")
@@ -15721,7 +15782,67 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
 
                 proc.wait()
-                self.wfile.write(sse("done", str(proc.returncode)))
+
+                if proc.returncode != 0:
+                    self.wfile.write(sse("done", str(proc.returncode)))
+                    self.wfile.flush()
+                    return
+
+                # ── Compound step 5: after manifest_merge for non-primary locale,
+                # run gen_tts → polish_locale_vo → post_tts (mirrors run.sh [6][6b][7]).
+                # Only when VO is not yet approved — same guard as /run_locale.
+                _rs_primary = "en"
+                if locale and _VO_UTILS_AVAILABLE:
+                    try:
+                        from pathlib import Path as _Prs
+                        _rs_primary = _get_primary_locale(
+                            _Prs(os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)))
+                    except Exception:
+                        pass
+                if (step == "manifest_merge"
+                        and locale and locale != _rs_primary
+                        and not _step_vo_ok):
+                    for _rs_sub in ("gen_tts", "polish_locale_vo", "post_tts"):
+                        _rs_cmd = _build_step_cmd(
+                            _rs_sub, slug, ep_id, locale, profile, no_music)
+                        if _rs_cmd is None:
+                            self.wfile.write(sse("error_line",
+                                f"Unknown sub-step: {_rs_sub!r}"))
+                            self.wfile.write(sse("done", "1"))
+                            self.wfile.flush()
+                            return
+                        if _rs_cmd == []:
+                            self.wfile.write(sse("line",
+                                f"  ✓ {_rs_sub} — skipped (no plan file)"))
+                            self.wfile.flush()
+                            continue
+                        self.wfile.write(sse("line",
+                            f"\n── {_rs_sub} ────────────────────────────────────────"))
+                        self.wfile.flush()
+                        _rs_proc = subprocess.Popen(
+                            _rs_cmd,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                        )
+                        with _lock:
+                            _procs[client] = _rs_proc
+                        for _rs_line in _rs_proc.stdout:
+                            self.wfile.write(sse("line", _rs_line.rstrip("\n")))
+                            self.wfile.flush()
+                        _rs_proc.wait()
+                        with _lock:
+                            _procs.pop(client, None)
+                        if _rs_proc.returncode != 0:
+                            self.wfile.write(sse("error_line",
+                                f"✗ {_rs_sub} failed (exit {_rs_proc.returncode})"))
+                            self.wfile.write(sse("done", str(_rs_proc.returncode)))
+                            self.wfile.flush()
+                            return
+                        self.wfile.write(sse("line", f"✓ {_rs_sub}"))
+                        self.wfile.flush()
+                # ─────────────────────────────────────────────────────────────────
+
+                self.wfile.write(sse("done", "0"))
                 self.wfile.flush()
 
             except (BrokenPipeError, ConnectionResetError):
@@ -15763,7 +15884,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 return
 
-            LOCALE_STEPS = ["manifest_merge", "gen_tts", "post_tts",
+            LOCALE_STEPS = ["manifest_merge",
                             "apply_music_plan", "resolve_assets",
                             "gen_render_plan", "render_video"]
             # Honour optional from= param — start from a specific step
@@ -15792,11 +15913,46 @@ class Handler(BaseHTTPRequestHandler):
                 _rl_ep_dir    = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
                 _rl_vo_ok     = _is_vo_approved(_rl_ep_dir, locale) if _VO_UTILS_AVAILABLE else False
                 _rl_music_ok  = os.path.isfile(os.path.join(_rl_ep_dir, "MusicPlan.json"))
+                # Determine primary locale for compound step 5 guard.
+                _rl_primary = "en"
+                if _VO_UTILS_AVAILABLE:
+                    try:
+                        from pathlib import Path as _Prl
+                        _rl_primary = _get_primary_locale(_Prl(_rl_ep_dir))
+                    except Exception:
+                        pass
                 _rl_locale_approved = {
-                    "gen_tts":          _rl_vo_ok,
-                    "post_tts":         _rl_vo_ok,
+                    # Compound step 5 (manifest_merge): skip for non-primary when VO approved.
+                    # Primary locale manifest_merge is fast and safe to re-run always.
+                    # apply_music_plan: skip when MusicPlan.json exists — loop WAVs are shared
+                    # across locales; renderer reads MusicPlan.json directly, not per-locale.
+                    "manifest_merge":   _rl_vo_ok and (locale != _rl_primary),
                     "apply_music_plan": _rl_music_ok,
                 }
+
+                def _rl_run_sub(sub_step):
+                    """Run a single sub-command, streaming output. Returns returncode."""
+                    _sub_cmd = _build_step_cmd(sub_step, slug, ep_id, locale, profile, no_music)
+                    if _sub_cmd is None:
+                        write_log("E", f"Unknown sub-step: {sub_step!r}")
+                        return 1
+                    if _sub_cmd == []:
+                        write_log("O", f"  ✓ {sub_step} — skipped (no plan file)")
+                        return 0
+                    write_log("O", f"\n── {sub_step} ────────────────────────────────────────")
+                    _sp = subprocess.Popen(
+                        _sub_cmd,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                    )
+                    with _lock:
+                        _procs[client] = _sp
+                    for _rl in _sp.stdout:
+                        write_log("O", _rl.rstrip("\n"))
+                    _sp.wait()
+                    with _lock:
+                        _procs.pop(client, None)
+                    return _sp.returncode
 
                 for step in LOCALE_STEPS[from_idx:]:
                     # Approval skip — takes priority over force_run
@@ -15842,6 +15998,17 @@ class Handler(BaseHTTPRequestHandler):
 
                     write_log("O", f"✓ {step}")
 
+                    # ── Compound step 5: for non-primary locales, follow manifest_merge
+                    # with gen_tts → polish_locale_vo → post_tts (mirrors run.sh [6][6b][7]).
+                    if step == "manifest_merge" and locale != _rl_primary and not _rl_vo_ok:
+                        for _sub in ("gen_tts", "polish_locale_vo", "post_tts"):
+                            _rc = _rl_run_sub(_sub)
+                            if _rc != 0:
+                                write_log("E", f"✗ {_sub} failed (exit {_rc})")
+                                write_log("D", str(_rc))
+                                return
+                            write_log("O", f"✓ {_sub}")
+
                 write_log("O", f"\n✓ [{locale}] All post-processing steps complete")
                 _append_tts_usage_to_status_report(slug, ep_id, write_log)
                 write_log("D", "0")
@@ -15883,7 +16050,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             _SHARED_STEPS = ["gen_music_clip", "gen_characters", "gen_backgrounds", "gen_sfx"]
-            _LOCALE_STEPS_ALL = ["manifest_merge", "gen_tts", "post_tts",
+            _LOCALE_STEPS_ALL = ["manifest_merge",
                                   "apply_music_plan", "resolve_assets",
                                   "gen_render_plan", "render_video"]
             from_idx = _SHARED_STEPS.index(from_step) if from_step in _SHARED_STEPS else 0
@@ -15971,8 +16138,9 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
 
-                # Steps to skip for primary locale when sentinel is valid (INVARIANT I)
-                _TTS_STEPS_TO_SKIP = {"manifest_merge", "gen_tts", "post_tts"}
+                # Step to skip for primary locale when sentinel is valid (INVARIANT I).
+                # gen_tts and post_tts are now compound sub-steps inside manifest_merge.
+                _TTS_STEPS_TO_SKIP = {"manifest_merge"}
 
                 for _locale in _locales_s10:
                     write_log("O", f"\n── locale: {_locale} ────────────────────────────────")
@@ -15987,17 +16155,28 @@ class Handler(BaseHTTPRequestHandler):
                             if _sentinel_valid_for_locale:
                                 write_log("O",
                                     f"  ✓ Sentinel valid for primary locale {_locale!r} — "
-                                    "skipping manifest_merge, gen_tts, post_tts"
+                                    "skipping manifest_merge (compound)"
                                 )
                         except Exception as _sv_exc:
                             write_log("O", f"  [warn] Sentinel check error: {_sv_exc}")
 
+                    # VO approved for non-primary? skip compound step 5 entirely.
+                    _s10_vo_ok = (_is_vo_approved(_ep_dir_s10_full, _locale)
+                                  if _VO_UTILS_AVAILABLE else False)
+
                     for _step in _LOCALE_STEPS_ALL:
-                        # Skip manifest_merge/gen_tts/post_tts for primary locale
-                        # if sentinel is valid (INVARIANT I)
+                        # Skip manifest_merge for primary locale if sentinel valid
                         if _sentinel_valid_for_locale and _step in _TTS_STEPS_TO_SKIP:
                             write_log("O",
                                 f"  ✓ {_step} [{_locale}] — skipped (VO approved, sentinel valid)"
+                            )
+                            continue
+                        # Skip compound step 5 for non-primary when VO approved
+                        if (_step == "manifest_merge"
+                                and _locale != _primary_locale_s10
+                                and _s10_vo_ok):
+                            write_log("O",
+                                f"  ✓ {_step} [{_locale}] — skipped (VO already approved)"
                             )
                             continue
 
@@ -16016,6 +16195,30 @@ class Handler(BaseHTTPRequestHandler):
                             write_log("D", str(_rc))
                             return
                         write_log("O", f"✓ {_step} [{_locale}]")
+
+                        # ── Compound step 5: after manifest_merge for non-primary locale,
+                        # run gen_tts → polish_locale_vo → post_tts (mirrors run.sh [6][6b][7]).
+                        if (_step == "manifest_merge"
+                                and _locale != _primary_locale_s10
+                                and not _s10_vo_ok):
+                            for _sub in ("gen_tts", "polish_locale_vo", "post_tts"):
+                                write_log("O", f"\n── {_sub} [{_locale}] ────────────────────────")
+                                _sub_cmd = _build_step_cmd(
+                                    _sub, slug, ep_id, _locale, profile, no_music)
+                                if _sub_cmd is None:
+                                    write_log("E", f"Unknown sub-step: {_sub!r}")
+                                    write_log("D", "1")
+                                    return
+                                if _sub_cmd == []:
+                                    write_log("O", f"  ✓ {_sub} — skipped (no plan file)")
+                                    continue
+                                _sub_rc = _run_cmd(_sub_cmd)
+                                if _sub_rc != 0:
+                                    write_log("E", f"✗ {_sub} [{_locale}] failed (exit {_sub_rc})")
+                                    write_log("D", str(_sub_rc))
+                                    return
+                                write_log("O", f"✓ {_sub} [{_locale}]")
+
                     write_log("O", f"✓ [{_locale}] all locale steps complete")
 
                 # ── Step 12: gen_cross_srt (episode-level, after all locales) ─────

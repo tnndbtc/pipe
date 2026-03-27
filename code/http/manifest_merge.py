@@ -259,6 +259,11 @@ def parse_args():
                    help="Output path for merged manifest. "
                         "Default: VOPlan.{locale}.json "
                         "in the same directory as the locale manifest.")
+    p.add_argument("--primary", default=None, metavar="PATH",
+                   help="Path to the primary-locale VOPlan (e.g. VOPlan.en.json). "
+                        "When provided and the locale being merged is NOT the primary, "
+                        "scene_heads and scene_tails are copied from this file so "
+                        "translated locales inherit the same structural pauses.")
     return p.parse_args()
 
 
@@ -311,6 +316,8 @@ def main():
     print(f"  Shared   : {shared_path.name}")
     print(f"  Locale   : {locale_path.name}  ({locale_tag})")
     print(f"  Output   : {out_path}")
+    if args.primary:
+        print(f"  Primary  : {Path(args.primary).name}")
     print("=" * 60)
 
     # Check vo_items have start_sec/end_sec
@@ -335,6 +342,31 @@ def main():
 
     # Merge
     merged = merge_manifests(shared, locale, vo_shot_map=vo_shot_map)
+
+    # Inherit scene_heads / scene_tails from primary locale VOPlan when:
+    #   --primary is given  AND  this locale is NOT the primary locale
+    # (If this IS the primary locale, its own scene_heads are already in the
+    #  locale manifest and must not be overwritten.)
+    if args.primary:
+        primary_path = Path(args.primary).resolve()
+        primary_locale_tag = primary_path.stem.split(".", 1)[-1]  # VOPlan.<tag>.json
+        if locale_tag != primary_locale_tag:
+            if primary_path.exists():
+                try:
+                    primary_plan = load_manifest(primary_path)
+                    for field in ("scene_heads", "scene_tails"):
+                        val = primary_plan.get(field)
+                        if val:
+                            merged[field] = val
+                            print(f"  [{field}] copied from primary ({primary_locale_tag}): {val}")
+                        else:
+                            print(f"  [{field}] not present in primary — skipped")
+                except Exception as exc:
+                    print(f"[WARN] Could not read primary VOPlan {primary_path}: {exc}")
+            else:
+                print(f"[WARN] --primary path not found: {primary_path} — scene_heads/scene_tails not inherited")
+        else:
+            print(f"  [primary] locale_tag matches primary ({primary_locale_tag}) — scene_heads/scene_tails not overwritten")
 
     # Print stats
     print(f"\n  character_packs   : {len(merged.get('character_packs', []))}")
