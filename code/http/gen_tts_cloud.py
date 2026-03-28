@@ -3843,6 +3843,17 @@ def build_manifest_from_script(
                 if val is not None:
                     tts_prompt[field] = val
 
+            # Per-line tts hints from Script.json action.tts override VoiceCast defaults
+            action_tts = action.get("tts") or {}
+            if action_tts.get("style") is not None:
+                tts_prompt["azure_style"] = action_tts["style"]
+            if action_tts.get("degree") is not None:
+                tts_prompt["azure_style_degree"] = action_tts["degree"]
+            if action_tts.get("rate") is not None:
+                tts_prompt["azure_rate"] = action_tts["rate"]
+            if action_tts.get("pitch") is not None:
+                tts_prompt["azure_pitch"] = action_tts["pitch"]
+
             vo_items.append({
                 "item_id":    item_id,
                 "speaker_id": speaker_id,

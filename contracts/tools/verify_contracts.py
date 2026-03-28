@@ -95,17 +95,23 @@ def run_checks(schemas_dir: Path) -> tuple[list[str], int]:
 
 # ── Mode 2: data file validation ───────────────────────────────────────────────
 
-def _detect_schema_name(data_path: Path, data: dict) -> str | None:
+def _detect_schema_name(data_path: Path, data: dict,
+                        schemas_dir: Path = SCHEMAS_DIR) -> str | None:
     """Infer the schema name for *data_path* without an explicit hint.
 
     Priority:
-      1. "schema_id" field in the data document.
+      1. "schema_id" field in the data document (case-insensitive match
+         against actual *.v1.json files so "script" resolves to "Script").
       2. First dot-separated component of the filename
          (e.g. "AssetManifest.en.json" → "AssetManifest").
     """
     schema_id = data.get("schema_id")
     if schema_id and isinstance(schema_id, str):
-        return schema_id
+        # Case-insensitive match against actual schema files on disk
+        for f in schemas_dir.glob("*.v1.json"):
+            if f.name.split(".")[0].lower() == schema_id.lower():
+                return f.name.split(".")[0]
+        return schema_id  # fallback: use as-is (will produce SCHEMA_NOT_FOUND)
 
     # e.g. "AssetManifest.en.json" → ["AssetManifest", "en", "json"]
     stem_parts = data_path.name.split(".")
@@ -135,7 +141,7 @@ def validate_data_file(
 
     # Resolve schema name
     if not schema_name:
-        schema_name = _detect_schema_name(data_path, data)
+        schema_name = _detect_schema_name(data_path, data, schemas_dir)
     if not schema_name:
         return [f"SCHEMA_UNKNOWN: cannot detect schema for {data_path.name} "
                 "(no schema_id field and filename does not start with a known name)"]

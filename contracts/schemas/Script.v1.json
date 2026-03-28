@@ -123,6 +123,29 @@
                     "sentence_id": {
                       "type": "string",
                       "description": "Optional legacy field. Not read by TTS or VO pipeline."
+                    },
+                    "tts": {
+                      "type": "object",
+                      "description": "Optional per-line Azure TTS rendering hints. Override VoiceCast defaults for this line only.",
+                      "additionalProperties": false,
+                      "properties": {
+                        "style": {
+                          "type": "string",
+                          "description": "Azure express-as style, e.g. sad, cheerful, angry, whispering, shouting."
+                        },
+                        "degree": {
+                          "type": "string",
+                          "description": "Style intensity 0.01–2.0, e.g. '1.5'. Only applies when style is set."
+                        },
+                        "rate": {
+                          "type": "string",
+                          "description": "Prosody rate, e.g. '-10%', '+20%', 'slow', 'fast', 'x-slow'."
+                        },
+                        "pitch": {
+                          "type": "string",
+                          "description": "Prosody pitch, e.g. '-5%', '+10%', 'low', 'high'."
+                        }
+                      }
                     }
                   }
                 }

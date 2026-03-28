@@ -2455,7 +2455,7 @@ placeholder="Enter your story here"></textarea>
                   font-size:0.82em; font-family:var(--mono); color:var(--dim);
                   user-select:none;"
            title="Include background music in renders — uncheck to render VO + SFX only">
-      <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()"
+      <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()" checked
              style="width:14px; height:14px; cursor:pointer; accent-color:var(--gold);">
       🎵 Music
     </label>
@@ -4211,6 +4211,7 @@ placeholder="Enter your story here"></textarea>
     };
 
     let cursor = 0.0;
+    const _itemTimings = {}; // item_id → {start_sec, end_sec}
     sceneOrder.forEach((sc, scIdx) => {
       const scIdE = sc.replace(/[^a-zA-Z0-9_-]/g, '_');
 
@@ -4229,12 +4230,14 @@ placeholder="Enter your story here"></textarea>
 
       // Accumulate each item's trimmed duration + pause
       (itemsByScene[sc] || []).forEach(it => {
+        const itemStart = cursor;
         // duration_sec: prefer live data-dur attribute (updated after re-synth)
         const row = document.getElementById('vo-row-' + it.item_id);
         const dur = row ? (parseFloat(row.dataset.dur) || 0) : (it.duration_sec || 0);
         // pause_after_ms: read live from the input so typing updates immediately
         const pauseEl = document.getElementById('vo-pause-' + it.item_id);
         const pauseMs = pauseEl ? (parseFloat(pauseEl.value) || 0) : (it.pause_after_ms || 300);
+        _itemTimings[it.item_id] = { start_sec: itemStart, end_sec: itemStart + dur };
         cursor += dur + pauseMs / 1000.0;
       });
 
@@ -4242,6 +4245,15 @@ placeholder="Enter your story here"></textarea>
       const lbl = document.getElementById('vo-scene-time-' + scIdE);
       if (lbl) lbl.textContent = `${fmt(sceneStart)} – ${fmt(sceneEnd)}`;
     });
+
+    // Live-update the preview bar to match DOM-computed positions
+    if (_voVisTlData && _voVisTlData.vo_items && _voVisTlData.vo_items.length) {
+      const updatedItems = _voVisTlData.vo_items.map(v => {
+        const t = _itemTimings[v.item_id];
+        return t ? { ...v, start_sec: t.start_sec, end_sec: t.end_sec } : v;
+      });
+      _tlRender('vo-vis', { ..._voVisTlData, vo_items: updatedItems, total_dur_sec: cursor }, 'vo-tl-audio');
+    }
   }
 
   // ── Shared timeline merger ───────────────────────────────────────────────────
@@ -4289,20 +4301,21 @@ placeholder="Enter your story here"></textarea>
   // ── VO visual timeline ───────────────────────────────────────────────────────
 
   let _voVisTlData = null;
-  async function _voVisLoadTimeline(sceneHeads, previewClips) {
+  async function _voVisLoadTimeline(sceneHeads, previewClips, previewTotalSec) {
     const slug = window._voSlug, epId = window._voEpId;
     if (!slug || !epId) return;
     try {
       _voVisTlData = await _loadAndMergeTl(slug, epId, sceneHeads);
       // If previewClips are supplied (from a just-completed Generate Preview),
       // replace vo_items positions with the DOM-based clip timing rather than
-      // the stale VOPlan-on-disk start_sec values.  This ensures bars match
-      // the audio preview even when the user has not clicked Save.
+      // the stale VOPlan-on-disk start_sec values.  Also update total_dur_sec
+      // from the actual preview duration so the bar scale matches the audio.
       if (previewClips && previewClips.length) {
         const clipMap = {};
         for (const c of previewClips) clipMap[c.item_id] = c;
         _voVisTlData = {
           ..._voVisTlData,
+          total_dur_sec: (previewTotalSec != null) ? previewTotalSec : _voVisTlData.total_dur_sec,
           vo_items: _voVisTlData.vo_items.map(v => {
             const c = clipMap[v.item_id];
             if (!c) return v;
@@ -4639,13 +4652,29 @@ placeholder="Enter your story here"></textarea>
       const v = parseFloat(el.value);
       if (!isNaN(v)) sceneHeadsFromDom[scene] = v;
     });
+    // Collect unsaved pause_after_ms values (keyed by item_id)
+    const pausesFromDom = {};
+    document.querySelectorAll('input[id^="vo-pause-"]').forEach(el => {
+      const itemId = el.id.replace(/^vo-pause-/, '');
+      const v = parseFloat(el.value);
+      if (!isNaN(v)) pausesFromDom[itemId] = v;
+    });
+    // Collect unsaved inter-scene tail values (keyed by scene_id)
+    const sceneTailsFromDom = {};
+    document.querySelectorAll('input[id^="vo-tail-"]').forEach(el => {
+      const scene = el.id.replace(/^vo-tail-/, '');
+      const v = parseFloat(el.value);
+      if (!isNaN(v)) sceneTailsFromDom[scene] = v;
+    });
 
     const btn = document.getElementById('vo-preview-all-btn');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Building…'; }
     try {
       const resp = await fetch(
         `/api/vo_preview_concat?ep_dir=${encodeURIComponent(epDir)}&locale=${encodeURIComponent(locale)}` +
-        `&scene_heads=${encodeURIComponent(JSON.stringify(sceneHeadsFromDom))}`
+        `&scene_heads=${encodeURIComponent(JSON.stringify(sceneHeadsFromDom))}` +
+        `&pauses=${encodeURIComponent(JSON.stringify(pausesFromDom))}` +
+        `&scene_tails=${encodeURIComponent(JSON.stringify(sceneTailsFromDom))}`
       );
       if (!resp.ok) throw new Error(await resp.text());
       const data = await resp.json();
@@ -4653,7 +4682,7 @@ placeholder="Enter your story here"></textarea>
       // Reload timeline bars AFTER preview is built, passing both the DOM
       // scene_heads AND the preview clips so bar positions come from the
       // DOM-based preview timing rather than stale VOPlan-on-disk values.
-      _voVisLoadTimeline(sceneHeadsFromDom, data.clips);
+      _voVisLoadTimeline(sceneHeadsFromDom, data.clips, data.total_sec);
     } catch(e) {
       alert('Preview error: ' + e.message);
     } finally {
@@ -14840,6 +14869,25 @@ class Handler(BaseHTTPRequestHandler):
                             scene_heads = {**scene_heads, **_sh_override}
                     except Exception:
                         pass
+                # pause_after_ms overrides from DOM (keyed by item_id)
+                _pauses_override: dict = {}
+                _pauses_param = unquote_plus(params.get("pauses", [""])[0]).strip()
+                if _pauses_param:
+                    try:
+                        _po = json.loads(_pauses_param)
+                        if isinstance(_po, dict):
+                            _pauses_override = {k: int(float(v)) for k, v in _po.items()}
+                    except Exception:
+                        pass
+                # scene_tails overrides from DOM (keyed by scene_id)
+                _tails_param = unquote_plus(params.get("scene_tails", [""])[0]).strip()
+                if _tails_param:
+                    try:
+                        _to = json.loads(_tails_param)
+                        if isinstance(_to, dict):
+                            scene_tails = {**scene_tails, **{k: int(float(v)) for k, v in _to.items()}}
+                    except Exception:
+                        pass
                 vo_dir = os.path.join(full_ep, "assets", locale, "audio", "vo")
 
                 # Detect sample rate from the first available WAV so the output
@@ -14925,8 +14973,8 @@ class Handler(BaseHTTPRequestHandler):
                     })
                     pcm_chunks.append(_pcm)
                     current_sec += _dur
-                    # pause_after_ms gap
-                    _pause_ms = int(_it.get("pause_after_ms", 300))
+                    # pause_after_ms gap — DOM override takes precedence over VOPlan
+                    _pause_ms = _pauses_override.get(_iid, int(_it.get("pause_after_ms", 300)))
                     if _pause_ms > 0:
                         _sil = b'\x00' * ((_pause_ms * BYTES_PER_SEC // 1000 // 2) * 2)
                         pcm_chunks.append(_sil)
@@ -19276,7 +19324,7 @@ class Handler(BaseHTTPRequestHandler):
             _script_data = None
             try:
                 _parsed_sj = json.loads(story)
-                if isinstance(_parsed_sj, dict) and _parsed_sj.get("schema_id") == "Script":
+                if isinstance(_parsed_sj, dict) and _parsed_sj.get("schema_id", "").lower() == "script":
                     _sj_title   = _parsed_sj.get("title", "")
                     _sj_proj_id = _parsed_sj.get("project_id", "")
                     # project_id is already a validated slug (^[a-z0-9-]+$); prefer it
