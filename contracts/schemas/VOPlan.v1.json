@@ -33,8 +33,7 @@
     },
     "episode_id": {
       "type": "string",
-      "description": "Episode identifier (e.g. s01e02). Together with project_id forms the canonical asset path: projects/{project_id}/episodes/{episode_id}/",
-      "pattern": "^s[0-9]{2}e[0-9]{2}$"
+      "description": "Episode identifier (e.g. s01e02, or a named special like 'trailor'). Together with project_id forms the canonical asset path: projects/{project_id}/episodes/{episode_id}/"
     },
     "shotlist_ref": {
       "type": "string"
@@ -419,11 +418,10 @@
             },
             "duration_sec": {
               "type": "number",
-              "minimum": 0.5
+              "minimum": 0
             },
             "style": {
-              "type": "string",
-              "enum": ["slow", "normal", "fast"]
+              "type": "string"
             }
           }
         }
@@ -448,7 +446,7 @@
         "locale":             { "type": "string" },
         "azure_voice":        { "type": "string" },
         "azure_style":        { "type": "string" },
-        "azure_style_degree": { "type": "number", "minimum": 1.0, "maximum": 2.0 },
+        "azure_style_degree": { "type": "number", "minimum": 0.0, "maximum": 2.8 },
         "azure_rate":         { "type": "string" },
         "azure_pitch":        { "type": "string" },
         "azure_break_ms":     { "type": "integer", "minimum": 0, "maximum": 5000 }

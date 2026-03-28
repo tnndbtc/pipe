@@ -70,6 +70,31 @@ class BatchStore:
                     )
                     log.info("marked interrupted batch %s (%d items done)", bid, items_done)
 
+                # Prune ranked entries whose files no longer exist on disk.
+                # Paths in images_ranked/videos_ranked are relative to the batch directory
+                # (the parent of batch_state.json).
+                batch_dir = state_file.parent
+                pruned = False
+                for item in data.get("items", {}).values():
+                    for key in ("images_ranked", "videos_ranked"):
+                        original = item.get(key)
+                        if not original:
+                            continue
+                        kept = [
+                            e for e in original
+                            if e.get("path") and (batch_dir / e["path"]).exists()
+                        ]
+                        if len(kept) != len(original):
+                            removed = len(original) - len(kept)
+                            log.info(
+                                "startup_scan: pruned %d missing %s entr%s from batch %s",
+                                removed, key, "y" if removed == 1 else "ies", bid,
+                            )
+                            item[key] = kept
+                            pruned = True
+                if pruned:
+                    self._write_atomic(state_file, data)
+
                 self._batches[bid] = data
 
             except Exception as exc:  # noqa: BLE001

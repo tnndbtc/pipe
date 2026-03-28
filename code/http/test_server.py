@@ -3325,6 +3325,7 @@ placeholder="Enter your story here"></textarea>
   let _vcPendingTo     = null;   // if set, Continue runs stages 1 → _vcPendingTo
   let _vcActiveLocale  = null;   // MIN-R7: init from voiceCast.locales, not hardcoded
   let _vcData          = null;   // in-memory VoiceCast.json content
+  let _vcEpCast        = null;   // Set<character_id> for the current episode (from Script.json cast); null = show all
   let _vcPresets       = {};     // voice → preset[]; loaded once on editor open
   let _voiceIndex      = null;   // index.json voices object; loaded once on editor open
   let _vcPlayingAudio  = null;   // Audio object currently playing (for pause support)
@@ -4804,7 +4805,7 @@ placeholder="Enter your story here"></textarea>
                                                           patch.azure_rate         = rate;
     const pitch  = g('vo-pitch-'  + itemId); if (pitch && pitch !== '0%')
                                                           patch.azure_pitch        = pitch;
-    const deg    = g('vo-degree-' + itemId); if (deg)    patch.azure_style_degree = deg;
+    const deg    = g('vo-degree-' + itemId); if (deg)    patch.azure_style_degree = parseFloat(deg) || 1.0;
     const voice  = g('vo-voice-'  + itemId); if (voice)  patch.azure_voice        = voice;
     return patch;
   }
@@ -7804,6 +7805,15 @@ placeholder="Enter your story here"></textarea>
         if (st) st.textContent = '💬 Request: ' + ask.prompt + '\n' + resp;
       }
       if (status === 'done' || status === 'completed') {
+        // Re-fetch full batch detail to update _mediaResults (batch card view).
+        // Without this, _mediaResults stays stale after an ai_ask append completes.
+        if (d.items && Object.keys(d.items).length > 0) {
+          // The /api/media_batch_status response already contains the full batch
+          // detail (images, videos, top_n) when the batch is done — reuse it.
+          _mediaResults      = d.items || {};
+          _mediaResults._topN = d.top_n || 5;
+          _mediaItemIds       = Object.keys(_mediaResults).filter(k => k !== '_topN');
+        }
         await mediaLoadLibrary();
       } else if (status === 'running' || status === 'pending') {
         if (st && !d.last_ai_ask) st.textContent = 'Still running… try again later';
@@ -10104,6 +10114,9 @@ placeholder="Enter your story here"></textarea>
       await loadVoicePresets();
       await loadVoiceIndex();
       _vcData    = status.voice_cast;
+      _vcEpCast  = (status.ep_cast && status.ep_cast.length)
+        ? new Set(status.ep_cast)
+        : null;
       _vcLocales = status.locales_str
         ? status.locales_str.split(',').map(l => l.trim()).filter(Boolean)
         : (status.locales || []);
@@ -10251,7 +10264,12 @@ placeholder="Enter your story here"></textarea>
       ?? Object.keys(_voiceCatalog)[0];
     const voiceList = _voiceCatalog[localeGroup] || [];
 
-    (_vcData.characters || []).forEach(char => {
+    // Filter to episode cast when Script.json is available; show all if not yet generated
+    const charsToShow = _vcEpCast
+      ? (_vcData.characters || []).filter(c => _vcEpCast.has(c.character_id))
+      : (_vcData.characters || []);
+
+    charsToShow.forEach(char => {
       let charLoc = char[locale];
 
       // Role-based defaults — defined here (outside if-block) so the voiceSel
@@ -12547,6 +12565,10 @@ placeholder="Enter your story here"></textarea>
     }
 
     // Always reload VoiceCast when switching episodes — never use stale data
+    // Store episode-specific cast filter (characters appearing in this episode's Script.json)
+    _vcEpCast = (meta.ep_cast && meta.ep_cast.length)
+      ? new Set(meta.ep_cast)
+      : null;  // null = no Script.json yet → show all characters
     if (voiceCast) {
       if (!_voiceCatalog)                  await loadVoiceCatalog();
       if (!Object.keys(_vcPresets).length) await loadVoicePresets();
@@ -14162,6 +14184,28 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         except Exception:
             pass
 
+    # ── ep_cast: character_ids appearing in this episode's Script.json ───
+    ep_cast: list[str] = []
+    _script_path = os.path.join(ep_dir, "Script.json")
+    if os.path.isfile(_script_path):
+        try:
+            with open(_script_path, encoding="utf-8") as _f:
+                _script = json.load(_f)
+            # Prefer the top-level cast array if present
+            if _script.get("cast"):
+                ep_cast = [c["character_id"] for c in _script["cast"] if c.get("character_id")]
+            else:
+                # Fall back: collect unique speaker_ids from dialogue actions
+                _seen: set[str] = set()
+                for _scene in (_script.get("scenes") or []):
+                    for _act in (_scene.get("actions") or []):
+                        _sid = _act.get("speaker_id")
+                        if _sid and _sid not in _seen:
+                            _seen.add(_sid)
+                            ep_cast.append(_sid)
+        except Exception:
+            pass
+
     # ── Metadata: prefer meta.json (user-saved), fall back to pipeline_vars.*.sh ─
     meta_title  = ""
     meta_genre  = ""
@@ -14247,6 +14291,7 @@ def _pipeline_status(slug: str, ep_id: str) -> dict:
         "ready_dubbed": ready_dubbed,
         "story_file": story_file_detected,
         "voice_cast": voice_cast,
+        "ep_cast":    ep_cast,
         "title":          meta_title,
         "genre":          meta_genre,
         "story_format":   meta_format,

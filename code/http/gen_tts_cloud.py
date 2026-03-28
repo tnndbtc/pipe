@@ -3810,8 +3810,32 @@ def build_manifest_from_script(
     else:
         print(f"  [WARN] VoiceCast.json not found: {voicecast_path}")
 
+    # Load existing VOPlan (if any) and build a (scene_id, text) → [vo_item, ...]
+    # lookup so manually-tuned tts_prompt / volume_db values are preserved for
+    # unchanged lines when the script is updated with new content.
+    ep_dir_for_lookup = script_path.resolve().parent
+    existing_manifest_path = ep_dir_for_lookup / f"VOPlan.{locale}.json"
+    # keyed by (scene_id, text) → deque of existing items (FIFO — handles duplicate texts)
+    from collections import defaultdict, deque as _deque
+    _existing_by_key: dict[tuple, _deque] = defaultdict(_deque)
+    if existing_manifest_path.exists():
+        try:
+            _existing_data = json.loads(
+                existing_manifest_path.read_text(encoding="utf-8")
+            )
+            for _ev in _existing_data.get("vo_items", []):
+                _scn = (_ev.get("item_id", "").split("-")[1]
+                        if "-" in _ev.get("item_id", "") else "")
+                _key = (_scn, (_ev.get("text") or "").strip())
+                _existing_by_key[_key].append(_ev)
+            print(f"  [SCRIPT-MODE] Loaded existing VOPlan ({len(_existing_data.get('vo_items',[]))} items) — "
+                  f"will preserve tuned tts_prompt/volume_db for unchanged lines")
+        except Exception as _exc:
+            print(f"  [WARN] Could not read existing VOPlan for tuning preservation: {_exc}")
+
     # Build vo_items from Script.json scenes[].actions where type="dialogue"
     vo_items = []
+    _preserved = 0
     for scene in script.get("scenes", []):
         scene_id = scene.get("scene_id", "sc01")
         counter = 1
@@ -3833,36 +3857,57 @@ def build_manifest_from_script(
                 or ""
             )
 
-            # Build tts_prompt from VoiceCast.json character[locale]
-            vc_char        = voice_cast_map.get(speaker_id, {})
-            vc_locale_entry = vc_char.get(locale, {})
-            tts_prompt: dict = {"locale": locale}
-            for field in ("azure_voice", "azure_style", "azure_style_degree",
-                          "azure_rate", "azure_pitch", "azure_break_ms"):
-                val = vc_locale_entry.get(field)
-                if val is not None:
-                    tts_prompt[field] = val
+            # Check if an existing tuned item matches (scene_id, text).
+            # If so, carry forward its tts_prompt and volume_db instead of
+            # rebuilding from VoiceCast defaults — preserves VO tab edits and
+            # avoids unnecessary Azure TTS re-billing for unchanged lines.
+            _lookup_key = (scene_id, text.strip())
+            _existing_item = None
+            if _lookup_key in _existing_by_key and _existing_by_key[_lookup_key]:
+                _existing_item = _existing_by_key[_lookup_key].popleft()
 
-            # Per-line tts hints from Script.json action.tts override VoiceCast defaults
-            action_tts = action.get("tts") or {}
-            if action_tts.get("style") is not None:
-                tts_prompt["azure_style"] = action_tts["style"]
-            if action_tts.get("degree") is not None:
-                tts_prompt["azure_style_degree"] = action_tts["degree"]
-            if action_tts.get("rate") is not None:
-                tts_prompt["azure_rate"] = action_tts["rate"]
-            if action_tts.get("pitch") is not None:
-                tts_prompt["azure_pitch"] = action_tts["pitch"]
+            if _existing_item is not None:
+                tts_prompt = dict(_existing_item.get("tts_prompt") or {"locale": locale})
+                _preserved += 1
+            else:
+                # Build tts_prompt from VoiceCast.json character[locale]
+                vc_char         = voice_cast_map.get(speaker_id, {})
+                vc_locale_entry = vc_char.get(locale, {})
+                tts_prompt = {"locale": locale}
+                for field in ("azure_voice", "azure_style", "azure_style_degree",
+                              "azure_rate", "azure_pitch", "azure_break_ms"):
+                    val = vc_locale_entry.get(field)
+                    if val is not None:
+                        tts_prompt[field] = val
 
-            vo_items.append({
-                "item_id":    item_id,
-                "speaker_id": speaker_id,
-                "text":       text,
+                # Per-line tts hints from Script.json action.tts override VoiceCast defaults
+                action_tts = action.get("tts") or {}
+                if action_tts.get("style") is not None:
+                    tts_prompt["azure_style"] = action_tts["style"]
+                if action_tts.get("degree") is not None:
+                    tts_prompt["azure_style_degree"] = action_tts["degree"]
+                if action_tts.get("rate") is not None:
+                    tts_prompt["azure_rate"] = action_tts["rate"]
+                if action_tts.get("pitch") is not None:
+                    tts_prompt["azure_pitch"] = action_tts["pitch"]
+
+            new_item: dict = {
+                "item_id":      item_id,
+                "speaker_id":   speaker_id,
+                "text":         text,
                 "license_type": "commercial_reusable",
-                "tts_prompt": tts_prompt,
-            })
+                "tts_prompt":   tts_prompt,
+            }
+            # Carry forward volume_db from existing item (omit when zero)
+            if _existing_item is not None:
+                _vdb = float(_existing_item.get("volume_db", 0.0) or 0.0)
+                if _vdb != 0.0:
+                    new_item["volume_db"] = _vdb
+            vo_items.append(new_item)
 
-    print(f"  [SCRIPT-MODE] Built {len(vo_items)} vo_items from Script.json")
+    print(f"  [SCRIPT-MODE] Built {len(vo_items)} vo_items from Script.json "
+          f"({_preserved} preserved from existing VOPlan, "
+          f"{len(vo_items) - _preserved} new/reset)")
 
     # Infer project_id / episode_id from script_path
     # Expected path: …/projects/{project_id}/episodes/{episode_id}/Script.json

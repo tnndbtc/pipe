@@ -1205,7 +1205,11 @@ async def append_to_batch(
         state["episode_id"],
         top_n            = state.get("top_n", 5),
         backgrounds      = {item_id: {
-            **state["items"][item_id],          # inherit scoring_hints, cinematic_role, search_filters, etc.
+            **{k: v for k, v in state["items"][item_id].items()
+               if k != "source_filters"},       # inherit scoring_hints, cinematic_role, search_filters, etc.
+                                                # but drop source_filters — per-source API params (e.g. pexels
+                                                # color/orientation) are specific to the original batch search
+                                                # and must not restrict this targeted append search.
             "asset_id":      item_id,
             "ai_prompt":     body.ai_prompt,
             "search_prompt": body.ai_prompt,    # worker reads search_prompt for API queries
@@ -2357,6 +2361,16 @@ def _add_urls(ranked: list[dict], state: dict, item_id: str) -> list[dict]:
     base_url        = config.get("base_url", "").rstrip("/")
     file_mount_root = config.get("file_mount_root", "").rstrip("/")
 
+    batch_dir = (
+        PROJECTS_ROOT
+        / project
+        / "episodes"
+        / episode_id
+        / "assets"
+        / "media"
+        / batch_id
+    )
+
     out = []
     for r in ranked:
         r2      = dict(r)
@@ -2370,6 +2384,12 @@ def _add_urls(ranked: list[dict], state: dict, item_id: str) -> list[dict]:
             idx    = rel.find(marker)
             if idx != -1:
                 rel = rel[idx + len(marker):]
+
+        # Skip entries whose file no longer exists on disk
+        abs_path = (batch_dir / rel).resolve() if rel else None
+        if abs_path is None or not abs_path.exists():
+            log.debug("_add_urls: skipping missing file %s", abs_path)
+            continue
 
         ep_path = f"{project}/episodes/{episode_id}/assets/media/{batch_id}/{rel}"
 
