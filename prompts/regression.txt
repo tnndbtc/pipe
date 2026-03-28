@@ -1663,7 +1663,37 @@ ShotList.shots[].audio_intent.music_item_id = "music-{shot_id}" | null
 - `background_overrides[]` is ONLY written by `post_tts_analysis.py`
 - `duck_intervals` are initially computed by `manifest_merge.py`; `gen_render_plan.py` may clamp their endpoints for narrative-format shots when the shot duration is shortened by the ceiling rule — this is intentional and not a violation of this invariant
 
-### 6. VoiceCast.json is append-only per project
+### 6. Timeline authority: ShotList vs vo_timeline
+
+**ShotList.json is ONLY used by the VO tab.** It is the structural scaffold — shot_ids,
+scene_ids, durations, audio_intent — written at Stage 4. After VO approval, ShotList
+durations may be updated by `vo_approve`, but it is NOT the source of truth for timing
+in any downstream tab or render.
+
+**After VO approval, `/api/vo_timeline` is the hard truth for all episode timing.**
+`vo_timeline` reads ShotList for shot structure and VOPlan for approved `start_sec`/`end_sec`
+on every `vo_item`, then returns a unified timeline with scene_heads applied.
+
+**Rule by tab:**
+- **VO tab** — reads ShotList.json directly (only tab allowed to do so)
+- **Music tab** — gets timeline from `/api/vo_timeline`; VO item timing for duck intervals
+  comes from `VOPlan.{locale}.json → vo_items[].start_sec/end_sec` (approved, locked).
+  The `/api/music_review_pack` backend maps VO items to music shots by episode-absolute
+  time overlap — NOT by ShotList `audio_intent.vo_item_ids`.
+- **SFX tab** — gets timeline from `/api/vo_timeline`; same rule as Music.
+- **Media tab** — gets shot durations from `/api/vo_timeline`; ShotList is fetched only
+  as a fallback for background_id → shot_id mapping when vo_timeline is unavailable.
+- **Final render (`render_video.py`)** — does NOT use ShotList for timing. All timing
+  comes from: `VOPlan.{locale}.json` (VO timing, scene_tails), `MusicPlan.json` (music
+  segments, duck_db, fade_sec), `SfxPlan.json` (SFX placement), `MediaPlan.json`
+  (background segments). ShotList is not read by render_video.py.
+
+**Regression rule:** Any code outside the VO tab that builds a timing map by iterating
+`ShotList.shots[].audio_intent.vo_item_ids` is wrong. That mapping is unreliable —
+projects may assign VO items to virtual/overflow shots with zero or negative duration.
+Use episode-absolute `start_sec`/`end_sec` from the approved VOPlan instead.
+
+### 7. VoiceCast.json is append-only per project
 - Stage 0 reads VoiceCast.json first, then only adds characters not already present
 - Existing character entries are NEVER modified by Stage 0
 - This preserves voice consistency across all episodes of the same project
@@ -1725,7 +1755,10 @@ Must NOT be reordered:
 - Sent to media server via `POST /batches` `top_n` field and to browser via `{{MEDIA_SERVER_URL}}` placeholder
 
 ### 14. Per-shot media selection (multi-segment v3)
-- JS fetches `ShotList.json` via `GET /api/episode_file` to build `_mediaShotMap` (bg_id → [shot_id, ...]) and `_mediaShotDur` (shot_id → duration_sec)
+- JS fetches `/api/vo_timeline` to build `_mediaShotDur` (shot_id → duration_sec) — this is
+  the authoritative source of shot durations (scene_heads-adjusted, post-approval)
+- JS fetches `ShotList.json` via `GET /api/episode_file` only to build `_mediaShotMap`
+  (bg_id → [shot_id, ...]) for background grouping — NOT for timing
 - If ShotList not available (404), `_mediaShotMap = null` → single-selection mode (backward compatible)
 - Per-shot mode (v3): clicking thumbnails appends a segment to the first shot with remaining gap; multiple clips/images stack until shot duration is filled
 - ⚡ Auto-assign stacks candidates per shot: videos use probed `duration_sec`, images auto-fill remaining gap with `hold_sec`
@@ -3004,7 +3037,7 @@ Fix: soft penalty after CLIP scoring:
 
 **What the UI does with the response**:
 - Stores timeline in `_musicTimeline`
-- Re-fetches `ShotList.json` to overlay authoritative shot timing
+- Re-fetches `/api/vo_timeline` to overlay authoritative shot timing (scene_heads-adjusted)
 - Renders the music body (candidates, overrides, waveform)
 - Enables the "✔ Confirm Plan" button
 
@@ -3018,7 +3051,7 @@ Fix: soft penalty after CLIP scoring:
    wrong manifests accepted or correct ones rejected.
 2. `music_items` not populated in VOPlan (manifest_merge not run) → timeline has no music →
    preview renders silence → user sees empty timeline.
-3. ShotList re-fetch in JS overwrites timeline timing with wrong values → shot bars misaligned.
+3. `/api/vo_timeline` re-fetch fails or returns stale data → shot bars misaligned.
 4. `shot_overrides: undefined` serialized differently → backend receives null instead of []
    (currently safe: `payload.get("shot_overrides", [])` handles missing key).
 
@@ -3051,13 +3084,14 @@ Fix: soft penalty after CLIP scoring:
   manifest_merge reads the shared + locale AssetManifest pair, not VOPlan
 - `render_video.py` reads `vo_approval` block to get final timing
 - `check_vo_approved.py` reads `vo_approval` block — gates Stage 9 TTS re-synthesis skip
-- `ShotList.json` duration changes affect music/sfx timeline placement
+- Music/SFX/Media tabs read timing from `/api/vo_timeline` (not ShotList directly);
+  ShotList duration update is reflected via vo_timeline on next tab load
 
 **Regression risks**:
 1. `start_sec`/`end_sec` written to manifest in wrong coordinate space
    (episode-absolute vs shot-relative) → music ducking and render timing wrong.
 2. `ShotList.json` duration update uses wrong scene boundary calculation →
-   shots drift, music/SFX desync.
+   vo_timeline returns wrong shot windows → music/SFX duck intervals misaligned.
 3. `vo_approved_cache` not refreshed after re-approval → stale WAVs used in render.
 4. `pause_after_ms` not written back → inter-line gaps revert to defaults on next load.
 
@@ -3143,13 +3177,15 @@ or clicks "Run" on individual steps through to render_video.
 5. `resolved_assets[]` non-empty in `VOPlan.{locale}.json` (resolve_assets step ran)
 
 **What render_video.py reads**:
-- `VOPlan.{locale}.json` — VO timing, music_items, sfx_items, resolved_assets, scene_tails
-- `MusicPlan.json` — loop selections, shot volume overrides
+- `VOPlan.{locale}.json` — VO timing (start_sec/end_sec locked at approval), music_items,
+  sfx_items, resolved_assets, scene_tails. This is the timing authority for the render.
+- `MusicPlan.json` — music segment assignments, duck_db, fade_sec, loop selections
 - `SfxPlan.json` — SFX placement
-- `ShotList.json` — shot boundaries and durations
+- `MediaPlan.json` — background segment assignments (if present)
 - WAV files: `assets/{locale}/audio/vo/{item_id}.wav`
 - Music WAVs: `assets/music/{stem}.wav` or `resources/music/{stem}.mp3`
 - SFX WAVs: `assets/sfx/{uuid}.wav`
+- **ShotList.json is NOT read by render_video.py.** Shot timing comes from VOPlan.
 
 **Output**:
 - `renders/{locale}/output.mp4`
@@ -3297,7 +3333,7 @@ primary data source (VOPlan timeline) is unavailable or empty.
 This test specifically exercises the **fallback code paths** that are bypassed
 during the normal happy-path flow. It would have caught every regression introduced
 to the load/render path during the KW-18 debug session (fallback filter key change,
-`_musicShotMap` population, `_sfxShotTimeline` build from ShotList).
+`_musicShotMap` population, `_sfxShotTimeline` build from `/api/vo_timeline`).
 
 ### Files involved
 - `code/http/test_server.py` — `_musicRenderBody()`, `_musicLoadExisting()`,
@@ -3315,8 +3351,8 @@ With no VOPlan, `/api/music_timeline` returns 500 → `_musicTimeline = null` �
 
 **KW-18b/d (SFX shot timeline path):**
 `resetKW18Sfx()` — installs `VOPlan.en.json` (with `sfx_items`), removes
-`MusicPlan.json` and `SfxPlan.json`. SFX tab must build shot timeline purely
-from ShotList.json + VOPlan sfx_items.
+`MusicPlan.json` and `SfxPlan.json`. SFX tab must build shot timeline from
+`/api/vo_timeline` + VOPlan sfx_items. ShotList is NOT the timing source.
 
 ### Invariants that must hold
 - KW-18a: `#music-body .music-shot-block` count ≥ 2 via MusicPlan fallback
