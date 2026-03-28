@@ -849,6 +849,7 @@ def main() -> None:
         _vo_audio  = _tmp / "vo_mix.wav"
         _vo_inputs: list = []
         _vo_delays: list = []
+        _vo_volumes: list = []
 
         for _vi in sorted(vo_items, key=lambda v: v.get("start_sec", 0)):
             _wav = _vo_dir / f"{_vi['item_id']}.wav"
@@ -861,9 +862,15 @@ def main() -> None:
                 continue
             _vo_inputs.append(str(_wav))
             _vo_delays.append(_delay_ms)
+            _vo_volumes.append(float(_vi.get("volume_db", 0.0) or 0.0))
 
         if _vo_inputs:
-            _vf_parts = [f"[{i}]adelay={d}|{d}[d{i}]" for i, d in enumerate(_vo_delays)]
+            _vf_parts = []
+            for i, (d, vdb) in enumerate(zip(_vo_delays, _vo_volumes)):
+                if vdb != 0.0:
+                    _vf_parts.append(f"[{i}]volume={vdb}dB,adelay={d}|{d}[d{i}]")
+                else:
+                    _vf_parts.append(f"[{i}]adelay={d}|{d}[d{i}]")
             _vmix_ins = "".join(f"[d{i}]" for i in range(len(_vo_inputs)))
             _vf_str   = (";".join(_vf_parts)
                          + f";{_vmix_ins}amix=inputs={len(_vo_inputs)}:normalize=0,"

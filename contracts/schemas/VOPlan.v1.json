@@ -253,6 +253,13 @@
           "pause_after_ms": {
             "type": "number",
             "description": "Silence gap in milliseconds appended after this VO item before the next begins. Written by post_tts_analysis.py."
+          },
+          "volume_db": {
+            "type": "number",
+            "minimum": -20.0,
+            "maximum": 20.0,
+            "default": 0.0,
+            "description": "Mix-time gain in dB applied to this VO item during audio render. 0.0 = no change. Omitted from file when 0.0. Does not modify the .wav file on disk — purely a mix-time parameter written by /api/vo_save."
           }
         },
         "not": {

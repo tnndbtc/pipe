@@ -2999,6 +2999,7 @@ placeholder="Enter your story here"></textarea>
       <span style="width:52px;flex-shrink:0">rate</span>
       <span style="width:52px;flex-shrink:0">pitch</span>
       <span style="width:44px;flex-shrink:0">deg</span>
+      <span style="width:80px;flex-shrink:0">vol</span>
       <span style="width:52px;flex-shrink:0;text-align:right">dur</span>
       <span style="width:214px;flex-shrink:0"></span>
     </div>
@@ -4121,6 +4122,10 @@ placeholder="Enter your story here"></textarea>
           <input  class="vo-field vo-degree" id="vo-degree-${iidE}"
                   value="${origDegree}" placeholder="deg" title="azure_style_degree"
                   oninput='_voParamChanged(${iidJ})'/>
+          <input  class="vo-field vo-vol${(it.volume_db??0)!==0?' vo-vol-active':''}" id="vo-vol-${iidE}" type="number"
+                  min="-20" max="20" step="0.5" value="${it.volume_db ?? 0}"
+                  title="Volume trim (dB). Applied at mix time — does not modify the .wav file."
+                  oninput='_voParamChanged(${iidJ})'/>
           <span   class="vo-dur${staleClass}" id="vo-dur-${iidE}"
                   title="Trimmed duration | Pause after (INVARIANT E: not summed)">${escHtml(durLabel)}</span>
           <div class="vo-btn-group">
@@ -4391,9 +4396,11 @@ placeholder="Enter your story here"></textarea>
 
     for (const clip of clips) {
       if (window._voSeqAbort) break;
+      const _seqVol = parseFloat(document.getElementById('vo-vol-' + clip.item_id)?.value ?? '0') || 0;
+      const _seqVolParam = _seqVol !== 0 ? `&volume_db=${encodeURIComponent(_seqVol)}` : '';
       const url = `/api/vo_audio?ep_dir=${encodeURIComponent(clip.epDir)}`
                 + `&locale=${encodeURIComponent(clip.locale)}`
-                + `&item_id=${encodeURIComponent(clip.item_id)}`;
+                + `&item_id=${encodeURIComponent(clip.item_id)}${_seqVolParam}`;
       // Highlight the item row
       const previewBtn = document.getElementById('vo-preview-' + clip.item_id);
       if (previewBtn) { previewBtn.textContent = '■'; previewBtn.classList.add('playing'); }
@@ -4666,6 +4673,13 @@ placeholder="Enter your story here"></textarea>
       const v = parseFloat(el.value);
       if (!isNaN(v)) sceneTailsFromDom[scene] = v;
     });
+    // Collect unsaved volume_db values from DOM (keyed by item_id)
+    const volumesFromDom = {};
+    document.querySelectorAll('input[id^="vo-vol-"]').forEach(el => {
+      const itemId = el.id.replace(/^vo-vol-/, '');
+      const v = parseFloat(el.value);
+      if (!isNaN(v) && v !== 0) volumesFromDom[itemId] = v;
+    });
 
     const btn = document.getElementById('vo-preview-all-btn');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Building…'; }
@@ -4674,7 +4688,8 @@ placeholder="Enter your story here"></textarea>
         `/api/vo_preview_concat?ep_dir=${encodeURIComponent(epDir)}&locale=${encodeURIComponent(locale)}` +
         `&scene_heads=${encodeURIComponent(JSON.stringify(sceneHeadsFromDom))}` +
         `&pauses=${encodeURIComponent(JSON.stringify(pausesFromDom))}` +
-        `&scene_tails=${encodeURIComponent(JSON.stringify(sceneTailsFromDom))}`
+        `&scene_tails=${encodeURIComponent(JSON.stringify(sceneTailsFromDom))}` +
+        `&volumes=${encodeURIComponent(JSON.stringify(volumesFromDom))}`
       );
       if (!resp.ok) throw new Error(await resp.text());
       const data = await resp.json();
@@ -4737,9 +4752,11 @@ placeholder="Enter your story here"></textarea>
     if (paramsUnchanged) {
       // Fast path — params match the saved manifest; existing WAV on disk is current.
       const epDir = `projects/${slug}/episodes/${epId}`;
+      const _fpVol = parseFloat(document.getElementById('vo-vol-' + itemId)?.value ?? '0') || 0;
+      const _fpVolParam = _fpVol !== 0 ? `&volume_db=${encodeURIComponent(_fpVol)}` : '';
       const url = `/api/vo_audio?ep_dir=${encodeURIComponent(epDir)}`
                 + `&locale=${encodeURIComponent(locale)}`
-                + `&item_id=${encodeURIComponent(itemId)}`;
+                + `&item_id=${encodeURIComponent(itemId)}${_fpVolParam}`;
       _voPlayUrl(url, itemId, btn);
       return;
     }
@@ -4765,10 +4782,12 @@ placeholder="Enter your story here"></textarea>
       _voUpdateDur(itemId, data.trimmed_duration_sec);
       _voMarkSentinelInvalid();
       // Play the newly written WAV via /api/vo_audio
+      const _psVol = parseFloat(document.getElementById('vo-vol-' + itemId)?.value ?? '0') || 0;
+      const _psVolParam = _psVol !== 0 ? `&volume_db=${encodeURIComponent(_psVol)}` : '';
       const wavUrl = `/api/vo_audio?ep_dir=${encodeURIComponent(epDir)}`
                    + `&locale=${encodeURIComponent(locale)}`
                    + `&item_id=${encodeURIComponent(itemId)}`
-                   + `&t=${Date.now()}`;
+                   + `&t=${Date.now()}${_psVolParam}`;
       _voPlayUrl(wavUrl, itemId, btn);
     } catch (e) {
       if (btn) { btn.textContent = '▶'; btn.disabled = false; }
@@ -4856,10 +4875,11 @@ placeholder="Enter your story here"></textarea>
       const rate   = (document.getElementById('vo-rate-'   + itemId)?.value ?? '').trim() || '0%';
       const pitch  = (document.getElementById('vo-pitch-'  + itemId)?.value ?? '').trim();
       const degree = parseFloat(document.getElementById('vo-degree-' + itemId)?.value ?? '1.5');
+      const vol    = parseFloat(document.getElementById('vo-vol-'    + itemId)?.value ?? '0') || 0;
       const data = await _voPost('/api/vo_save', {
         ep_dir: epDir, locale, item_id: itemId,
         text, voice, style, rate, pitch, style_degree: degree,
-        keep_audio: keepAudio,
+        keep_audio: keepAudio, volume_db: vol,
       }, itemId);
       delete window._voKeepAudio[itemId];
       if (btn) { btn.textContent = '✓ Saved'; setTimeout(() => { if (btn) btn.textContent = '💾 Save'; }, 2500); }
@@ -5209,8 +5229,10 @@ placeholder="Enter your story here"></textarea>
         const row     = document.getElementById('vo-row-'   + it.item_id);
         const pauseEl = document.getElementById('vo-pause-' + it.item_id);
         const textEl  = document.getElementById('vo-text-'  + it.item_id);
+        const volEl   = document.getElementById('vo-vol-'   + it.item_id);
         const dur     = row     ? (parseFloat(row.dataset.dur)    || 0)   : (it.duration_sec   || 0);
         const pauseMs = pauseEl ? (parseInt(pauseEl.value,   10)  || 300) : (it.pause_after_ms || 300);
+        const volDb   = volEl   ? (parseFloat(volEl.value)        || 0)   : (it.volume_db      || 0);
         const startSec = parseFloat(_approveCursor.toFixed(6));
         const endSec   = parseFloat((_approveCursor + dur).toFixed(6));
         _approveItems.push({
@@ -5221,6 +5243,7 @@ placeholder="Enter your story here"></textarea>
           pause_after_ms: pauseMs,
           start_sec:      startSec,
           end_sec:        endSec,
+          volume_db:      volDb,
         });
         _approveCursor += dur + pauseMs / 1000.0;
       });
@@ -14812,7 +14835,13 @@ class Handler(BaseHTTPRequestHandler):
             ep_dir  = unquote_plus(params.get("ep_dir",  [""])[0]).strip()
             locale  = unquote_plus(params.get("locale",  [""])[0]).strip()
             item_id = unquote_plus(params.get("item_id", [""])[0]).strip()
-            _log.info("[vo_preview_item] item=%s  locale=%s  ep=%s", item_id, locale, ep_dir)
+            _vdb_str = params.get("volume_db", ["0"])[0].strip()
+            try:
+                _vdb = float(_vdb_str)
+            except (ValueError, TypeError):
+                _vdb = 0.0
+            _log.info("[vo_preview_item] item=%s  locale=%s  ep=%s  volume_db=%s",
+                      item_id, locale, ep_dir, _vdb)
             if not ep_dir or not locale or not item_id or ".." in item_id:
                 self.send_response(400); self.end_headers(); return
             full_ep = os.path.join(PIPE_DIR, ep_dir) \
@@ -14820,8 +14849,33 @@ class Handler(BaseHTTPRequestHandler):
             wav_p = os.path.join(full_ep, "assets", locale, "audio", "vo",
                                  item_id + ".wav")
             if os.path.isfile(wav_p):
-                with open(wav_p, "rb") as _wf:
-                    data = _wf.read()
+                if _vdb != 0.0:
+                    # Pipe through ffmpeg to apply volume gain on-the-fly
+                    import tempfile as _tf
+                    _tmp_out = _tf.NamedTemporaryFile(suffix=".wav", delete=False)
+                    _tmp_out.close()
+                    _vcmd = [
+                        "ffmpeg", "-y", "-i", wav_p,
+                        "-af", f"volume={_vdb}dB",
+                        "-ar", "24000", "-ac", "1",
+                        _tmp_out.name,
+                    ]
+                    _vr = subprocess.run(_vcmd, capture_output=True, timeout=15)
+                    if _vr.returncode == 0:
+                        with open(_tmp_out.name, "rb") as _wf:
+                            data = _wf.read()
+                    else:
+                        _log.warning("[vo_audio] ffmpeg volume failed rc=%d — serving raw",
+                                     _vr.returncode)
+                        with open(wav_p, "rb") as _wf:
+                            data = _wf.read()
+                    try:
+                        os.unlink(_tmp_out.name)
+                    except OSError:
+                        pass
+                else:
+                    with open(wav_p, "rb") as _wf:
+                        data = _wf.read()
                 self.send_response(200)
                 self.send_header("Content-Type", "audio/wav")
                 self.send_header("Content-Length", str(len(data)))
@@ -14886,6 +14940,16 @@ class Handler(BaseHTTPRequestHandler):
                         _to = json.loads(_tails_param)
                         if isinstance(_to, dict):
                             scene_tails = {**scene_tails, **{k: int(float(v)) for k, v in _to.items()}}
+                    except Exception:
+                        pass
+                # volume_db overrides from DOM (keyed by item_id) — only non-zero entries sent
+                _volumes_override: dict = {}
+                _volumes_param = unquote_plus(params.get("volumes", [""])[0]).strip()
+                if _volumes_param:
+                    try:
+                        _vo2 = json.loads(_volumes_param)
+                        if isinstance(_vo2, dict):
+                            _volumes_override = {k: float(v) for k, v in _vo2.items()}
                     except Exception:
                         pass
                 vo_dir = os.path.join(full_ep, "assets", locale, "audio", "vo")
@@ -14964,6 +15028,16 @@ class Handler(BaseHTTPRequestHandler):
                                 _dst[_ri] = round(
                                     _src[_lo] * (1 - _frac) + _src[_hi] * _frac)
                             _pcm = bytes(_dst)
+                    # Apply volume_db gain from DOM (preview only — does not touch .wav)
+                    _vdb_preview = _volumes_override.get(_iid, 0.0)
+                    if _vdb_preview != 0.0:
+                        import array as _arr
+                        _gain = 10 ** (_vdb_preview / 20.0)
+                        _samps = _arr.array('h', _pcm)
+                        _samps = _arr.array('h', [
+                            max(-32768, min(32767, round(s * _gain))) for s in _samps
+                        ])
+                        _pcm = bytes(_samps)
                     clips_meta.append({
                         "item_id":      _iid,
                         "scene_id":     _scn,
@@ -18205,6 +18279,7 @@ class Handler(BaseHTTPRequestHandler):
                     _mpath = os.path.join(full_ep, f"VOPlan.{locale}.json")
                     with open(_mpath, encoding="utf-8") as _df:
                         _unified_m = json.load(_df)
+                    _vdb_new = float(req.get("volume_db", 0.0) or 0.0)
                     for _dit in _unified_m.get("vo_items", []):
                         if _dit.get("item_id") == item_id:
                             _dit["text"] = new_text
@@ -18213,6 +18288,11 @@ class Handler(BaseHTTPRequestHandler):
                             _tp["azure_style"]        = new_style
                             _tp["azure_style_degree"] = new_style_degree
                             _tp["azure_rate"]         = new_rate
+                            # volume_db: omit when zero to keep VOPlan file clean
+                            if _vdb_new != 0.0:
+                                _dit["volume_db"] = _vdb_new
+                            else:
+                                _dit.pop("volume_db", None)
                             if not keep_audio:
                                 # Clear stale timing — new WAV needs re-measurement
                                 _dit.pop("start_sec", None)
@@ -18719,6 +18799,7 @@ class Handler(BaseHTTPRequestHandler):
                             _start    = float(_it["start_sec"]) if "start_sec" in _it else 0.0
                             _end      = float(_it["end_sec"])   if "end_sec"   in _it else _start + _dur
                             _pause_ms = int(_it.get("pause_after_ms", 300))
+                            _vdb_it   = float(_it.get("volume_db", 0.0) or 0.0)
                             _approval_items.append({
                                 "item_id":        _it["item_id"],
                                 "speaker_id":     _it.get("speaker_id", ""),
@@ -18727,6 +18808,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "pause_after_ms": _pause_ms,
                                 "start_sec":      round(_start, 6),
                                 "end_sec":        round(_end, 6),
+                                "volume_db":      _vdb_it,
                             })
                         _items_measured = len(_approval_items)
                     else:
@@ -18803,6 +18885,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "pause_after_ms": a["pause_after_ms"],
                                 "start_sec":      a["start_sec"],
                                 "end_sec":        a["end_sec"],
+                                "volume_db":      a.get("volume_db", 0.0),
                             }
                             for a in _approval_items
                         }
@@ -18817,6 +18900,12 @@ class Handler(BaseHTTPRequestHandler):
                                 _mitem["start_sec"]      = _approved_lookup[_miid]["start_sec"]
                                 _mitem["end_sec"]        = _approved_lookup[_miid]["end_sec"]
                                 _mitem.pop("duration_sec", None)  # prohibited by schema
+                                # volume_db: omit when zero (keep file clean)
+                                _vdb_approved = _approved_lookup[_miid]["volume_db"]
+                                if _vdb_approved != 0.0:
+                                    _mitem["volume_db"] = _vdb_approved
+                                else:
+                                    _mitem.pop("volume_db", None)
                         _mani_tmp = _mani_path + ".tmp"
                         with open(_mani_tmp, "w", encoding="utf-8") as _mf2:
                             json.dump(_mani2, _mf2, indent=2, ensure_ascii=False)

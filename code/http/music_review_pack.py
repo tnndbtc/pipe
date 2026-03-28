@@ -384,6 +384,10 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
             missing_vo += 1
             continue
         _vd = read_wav_mono_or_stereo(_wp)
+        _vdb = float(_vo.get("volume_db", 0.0) or 0.0)
+        if _vdb != 0.0:
+            _gain = 10 ** (_vdb / 20.0)
+            _vd = _vd * _gain
         _s = int(_start * SAMPLE_RATE)
         _e = min(_s + len(_vd), n_samples)
         _l = _e - _s

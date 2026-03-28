@@ -216,6 +216,10 @@ def render_sfx_preview(manifest, manifest_path,
         except Exception as _ve:
             print(f"  [WARN] VO read failed {_vp}: {_ve}")
             continue
+        _vdb = float(_vo.get("volume_db", 0.0) or 0.0)
+        if _vdb != 0.0:
+            _gain = 10 ** (_vdb / 20.0)
+            _vd = _vd * _gain
         _s = int(_start * SAMPLE_RATE)
         _e2 = min(_s + len(_vd), n_samples)
         if _s < n_samples and _e2 > _s:

@@ -2105,13 +2105,13 @@ def _pexels_search_images(
     q = " ".join(query.splitlines())
     n_requested = per_page
     _terms = _kw_terms(q)
-    # When kw-filtering, fetch the API maximum per page so the filter has
-    # enough candidates per call.  Without filtering, cap at n_requested.
+    # When kw-filtering, always use the API maximum (80) per page so the filter
+    # has enough candidates per call.  Without filtering, respect n_requested.
     page_size = 80 if _terms else min(n_requested, 80)
 
     results: list[dict] = []
     page = 1
-    while len(results) < n_requested:
+    while True:
         params: dict = {
             "query":    q,
             "per_page": page_size,
@@ -2138,8 +2138,8 @@ def _pexels_search_images(
         raw = _with_backoff(call, backoff)
         if _terms:
             page_results = [
-                p for p in raw
-                if _kw_hit(_terms, p.get("alt", ""), _slug_text(p.get("url", "")))
+                ph for ph in raw
+                if _kw_hit(_terms, ph.get("alt", ""), _slug_text(ph.get("url", "")))
             ]
             log.debug("Pexels images kw-filter q=%r page=%d raw=%d kept=%d",
                       q, page, len(raw), len(page_results))
@@ -2149,10 +2149,14 @@ def _pexels_search_images(
         if len(raw) < page_size:
             break  # API has no more pages
         page += 1
-        if _terms and page > _KW_FILTER_PAGE_CAP:
-            log.info("Pexels images kw-filter q=%r: page cap %d reached, stopping",
-                     q, _KW_FILTER_PAGE_CAP)
-            break
+        if _terms:
+            if page > _KW_FILTER_PAGE_CAP:
+                log.info("Pexels images kw-filter q=%r: page cap %d reached, stopping",
+                         q, _KW_FILTER_PAGE_CAP)
+                break
+        else:
+            if len(results) >= n_requested:
+                break  # have enough results without filtering
 
     result = results[:n_requested]
     _search_cache[key] = result
@@ -2183,11 +2187,13 @@ def _pexels_search_videos(
     q = " ".join(query.splitlines())
     n_requested = per_page
     _terms = _kw_terms(q)
+    # When kw-filtering, always use the API maximum (80) per page so the filter
+    # has enough candidates per call.  Without filtering, respect n_requested.
     page_size = 80 if _terms else min(n_requested, 80)
 
     results: list[dict] = []
     page = 1
-    while len(results) < n_requested:
+    while True:
         params: dict = {
             "query":    q,
             "per_page": page_size,
@@ -2213,8 +2219,8 @@ def _pexels_search_videos(
         raw = _with_backoff(call, backoff)
         if _terms:
             page_results = [
-                v for v in raw
-                if _kw_hit(_terms, _slug_text(v.get("url", "")))
+                vd for vd in raw
+                if _kw_hit(_terms, vd.get("url", ""), _slug_text(vd.get("url", "")))
             ]
             log.debug("Pexels videos kw-filter q=%r page=%d raw=%d kept=%d",
                       q, page, len(raw), len(page_results))
@@ -2224,10 +2230,14 @@ def _pexels_search_videos(
         if len(raw) < page_size:
             break  # API has no more pages
         page += 1
-        if _terms and page > _KW_FILTER_PAGE_CAP:
-            log.info("Pexels videos kw-filter q=%r: page cap %d reached, stopping",
-                     q, _KW_FILTER_PAGE_CAP)
-            break
+        if _terms:
+            if page > _KW_FILTER_PAGE_CAP:
+                log.info("Pexels videos kw-filter q=%r: page cap %d reached, stopping",
+                         q, _KW_FILTER_PAGE_CAP)
+                break
+        else:
+            if len(results) >= n_requested:
+                break  # have enough results without filtering
 
     result = results[:n_requested]
     _search_cache[key] = result

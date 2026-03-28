@@ -464,6 +464,7 @@ def main():
         vo_audio  = tmp / "vo_mix.wav"
         vo_inputs = []
         vo_delays = []
+        vo_volumes = []
         window_start_ms = int(window_start * 1000)
 
         for vi in sorted(vo_items, key=lambda v: v.get("start_sec", 0)):
@@ -477,9 +478,15 @@ def main():
                 continue  # before the filtered window
             vo_inputs.append(str(wav_path))
             vo_delays.append(delay_ms)
+            vo_volumes.append(float(vi.get("volume_db", 0.0) or 0.0))
 
         if vo_inputs:
-            f_parts    = [f"[{idx}]adelay={d}|{d}[d{idx}]" for idx, d in enumerate(vo_delays)]
+            f_parts = []
+            for idx, (d, vdb) in enumerate(zip(vo_delays, vo_volumes)):
+                if vdb != 0.0:
+                    f_parts.append(f"[{idx}]volume={vdb}dB,adelay={d}|{d}[d{idx}]")
+                else:
+                    f_parts.append(f"[{idx}]adelay={d}|{d}[d{idx}]")
             mix_inputs = "".join(f"[d{i}]" for i in range(len(vo_inputs)))
             f_str      = (";".join(f_parts)
                           + f";{mix_inputs}amix=inputs={len(vo_inputs)}:normalize=0,"
