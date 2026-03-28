@@ -11259,10 +11259,28 @@ placeholder="Enter your story here"></textarea>
       // ── Segment cards ─────────────────────────────────────────────────────
       const segKeys = Object.keys(_musicOverrides);
       let segsHtml = '';
-      segKeys.forEach(k => {
+      // Pre-compute sum of durations (end_sec - start_sec) for all segments
+      // except the last, so the last item's end_sec is capped at:
+      //   totalSec - sumPrevDur + last_item.start_sec
+      let _sumPrevDur = 0;
+      for (let _i = 0; _i < segKeys.length - 1; _i++) {
+        const _s = _musicOverrides[segKeys[_i]];
+        _sumPrevDur += ((_s.end_sec || 0) - (_s.start_sec || 0));
+      }
+      const _lastMaxEndBase = (totalSec > 0 && segKeys.length > 0)
+        ? (totalSec - _sumPrevDur) : null;
+      segKeys.forEach((k, idx) => {
+        const isLast = idx === segKeys.length - 1;
         const seg = _musicOverrides[k];
         const sk  = String(k).replace(/[^a-z0-9]/gi, '_');
         const currentClipId = seg.music_clip_id || seg.music_asset_id || '';
+        // For the last segment, enforce max end = totalSec - sumPrevDur + start_sec
+        const _lastMaxEnd = (isLast && _lastMaxEndBase !== null)
+          ? parseFloat((_lastMaxEndBase + (seg.start_sec || 0)).toFixed(3)) : null;
+        const endMaxAttr = _lastMaxEnd !== null
+          ? ' max="' + _lastMaxEnd + '"' : '';
+        const endClamp = _lastMaxEnd !== null
+          ? ';(function(el){var m=' + _lastMaxEnd + ';var v=parseFloat(el.value);if(v>m){el.value=m.toFixed(3);_musicSetOverride(' + k + ',\'end_sec\',m);}})(this)' : '';
         segsHtml += '<div class="music-segment-row" style="border:1px solid var(--border);border-radius:5px;padding:8px 10px;margin-bottom:6px">'
           // clip selector
           + '<div class="music-shot-clip" style="margin-bottom:6px">'
@@ -11282,7 +11300,8 @@ placeholder="Enter your story here"></textarea>
           + ' style="width:72px">'
           + '<label title="Episode-absolute end time (seconds)">\u23f9 end</label>'
           + '<input type="number" step="0.001" value="' + (seg.end_sec != null ? seg.end_sec.toFixed(3) : '0.000') + '"'
-          + ' class="music-seg-end" oninput="_musicSetOverride(' + k + ',\'end_sec\',parseFloat(this.value)||0)" onchange="_musicSetOverride(' + k + ',\'end_sec\',parseFloat(this.value)||0)" onblur="_musicPreviewOverrides()"'
+          + endMaxAttr
+          + ' class="music-seg-end" oninput="_musicSetOverride(' + k + ',\'end_sec\',parseFloat(this.value)||0)' + endClamp + '" onchange="_musicSetOverride(' + k + ',\'end_sec\',parseFloat(this.value)||0)' + endClamp + '" onblur="_musicPreviewOverrides()"'
           + ' style="width:72px">'
           + '<label title="Attenuation in dB (0 = full volume)">\uD83D\uDD09 duck</label>'
           + '<input type="number" step="1" min="-30" max="0" value="' + (seg.duck_db != null ? seg.duck_db : 0) + '"'
@@ -12816,13 +12835,17 @@ placeholder="Enter your story here"></textarea>
               // generated; renderer reads MusicPlan.json directly — not per-locale).
               const _localeApproved =
                 (step === 'manifest_merge' && !_isPrimary && !!_voByLocale[locale]) ||
-                (step === 'apply_music_plan' && !!_approvals.music);
+                (step === 'apply_music_plan' && !!_approvals.music) ||
+                (step === 'resolve_assets') ||
+                (step === 'gen_render_plan');
               const _localeReadyToRender = (step === 'render_video' && _approvals.all && !_rpStale[locale]);
-              const _renderPlanStale     = (step === 'gen_render_plan' && !!_rpStale[locale]);
-              if (_localeApproved && !_renderPlanStale) {
+              const _renderPlanStale     = false; // gen_render_plan no longer in use
+              if (_localeApproved) {
                 row.classList.add('step-approved');
                 row.title = step === 'apply_music_plan'
                   ? 'Music already approved — loop WAVs shared across locales, will be skipped'
+                  : step === 'resolve_assets' || step === 'gen_render_plan'
+                  ? 'Not used — renderer reads VOPlan directly'
                   : 'VO already approved — compound step will be skipped when Stage 9 runs';
               }
               if (_renderPlanStale) {
@@ -17070,28 +17093,29 @@ class Handler(BaseHTTPRequestHandler):
                                 _ent_mtl["base_db"] = (
                                     _ent_mtl.get("base_db", _MRP_BASE_DB_MTL) + _db_mtl)
 
-                # Derive flat music_items list from processed shots for the
-                # _loadAndMergeTl() merger (and for the KW-24 API assertion).
-                # sh.start_sec / sh.music_end_sec are shot-relative after
-                # apply_music_plan_overrides; add offset_sec for episode-absolute.
+                # Derive flat music_items list directly from MusicPlan shot_overrides
+                # (episode-absolute coords) so the visual bars match the audio renderer.
+                # The old approach re-added shot offset to clamped-to-boundary values,
+                # producing bars that ended at the ShotList shot boundary instead of the
+                # MusicPlan end_sec (e.g. 32s instead of 35s for the last segment).
                 _music_items_flat: list = []
-                for _ent_flat in _tls_mtl:
-                    _mid_flat = (_ent_flat.get("music_item_id_override")
-                                 or _ent_flat.get("music_item_id"))
-                    if not _mid_flat:
-                        continue
-                    _shoff_flat = float(_ent_flat.get("offset_sec", 0))
-                    _ms_flat    = _shoff_flat + float(_ent_flat.get("start_sec", 0))
-                    _me_raw     = _ent_flat.get("music_end_sec")
-                    _me_flat    = (_shoff_flat + float(_me_raw)) if _me_raw is not None \
-                                  else (_shoff_flat + float(_ent_flat.get("duration_sec", 0)))
-                    _music_items_flat.append({
-                        "item_id":    _mid_flat,
-                        "start_sec":  round(_ms_flat, 3),
-                        "end_sec":    round(_me_flat, 3),
-                        "shot_id":    _ent_flat.get("shot_id", ""),
-                        "music_mood": _ent_flat.get("music_mood", ""),
-                    })
+                if _lmp_mtl:
+                    for _seg_flat in _lmp_mtl.get("shot_overrides", []):
+                        _mid_flat = (_seg_flat.get("music_asset_id")
+                                     or _seg_flat.get("music_clip_id") or "")
+                        if not _mid_flat:
+                            continue
+                        _ms_flat = float(_seg_flat.get("start_sec", 0))
+                        _me_flat = float(_seg_flat.get("end_sec",   0))
+                        if _me_flat <= _ms_flat:
+                            continue
+                        _music_items_flat.append({
+                            "item_id":    _mid_flat,
+                            "start_sec":  round(_ms_flat, 3),
+                            "end_sec":    round(_me_flat, 3),
+                            "shot_id":    "",
+                            "music_mood": "",
+                        })
 
                 _json_resp(self, {
                     "episode_id":         ep_id,
@@ -20060,11 +20084,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 # ── Direct in-process render ─────────────────────────────────
                 import sfx_preview_pack as _sfx_pack_mod
-                from sfx_preview_pack import (
-                    load_shotlist as _sfx_load_sl,
-                    build_shot_timeline as _sfx_build_tl,
-                    render_sfx_preview as _sfx_render,
-                )
+                from sfx_preview_pack import render_sfx_preview as _sfx_render
                 # sfx_preview_pack.PIPE_DIR is set at module-load time from __file__
                 # (always the repo root).  In test mode PIPE_DIR here is overridden
                 # to the tmp fixture dir, so we must sync it before the path-security
@@ -20073,57 +20093,8 @@ class Handler(BaseHTTPRequestHandler):
 
                 _sfx_manifest = json.loads(
                     open(manifest_path, encoding="utf-8").read())
-                # When the VOPlan is pre-merge (locale_scope != "merged") it does
-                # not carry sfx_items — those live in AssetManifest.shared.json.
-                # Augment the manifest so render_sfx_preview can map item_id → shot_id.
-                if not _sfx_manifest.get("sfx_items"):
-                    _shared_ref = _sfx_manifest.get("shared_ref", "AssetManifest.shared.json")
-                    _shared_path = os.path.join(ep_dir, _shared_ref)
-                    if os.path.isfile(_shared_path):
-                        try:
-                            _shared = json.loads(open(_shared_path, encoding="utf-8").read())
-                            if _shared.get("sfx_items"):
-                                _sfx_manifest["sfx_items"] = _shared["sfx_items"]
-                        except Exception as _e_shared:
-                            print(f"  [WARN] sfx_preview: could not load shared sfx_items: {_e_shared}")
                 _sfx_locale = (_sfx_manifest.get("locale", "")
                                or os.path.basename(manifest_path).split(".")[-2])
-                _sfx_shots = _sfx_load_sl(_sfx_manifest, Path(manifest_path))
-
-                _sfx_vid2shot = {}
-                for _s in _sfx_shots:
-                    for _vid in _s.get("audio_intent", {}).get("vo_item_ids", []):
-                        _sfx_vid2shot[_vid] = _s["shot_id"]
-                _sfx_vsm = {}
-                for _vo in _sfx_manifest.get("vo_items", []):
-                    _sid = (_sfx_vid2shot.get(_vo.get("item_id", ""))
-                            or _vo.get("shot_id", ""))
-                    if _sid:
-                        _sfx_vsm.setdefault(_sid, []).append(_vo)
-                _sfx_midx = {
-                    mi["shot_id"]: mi
-                    for mi in _sfx_manifest.get("music_items", [])
-                    if mi.get("shot_id")
-                }
-                # Fallback: VOPlan has no music_items → seed from MusicPlan
-                if not _sfx_midx:
-                    _sfx_mp_fb = os.path.join(ep_dir, "MusicPlan.json")
-                    if os.path.isfile(_sfx_mp_fb):
-                        try:
-                            _sfx_mp_fb_d = json.load(open(_sfx_mp_fb, encoding="utf-8"))
-                            _sfx_midx = {
-                                o["shot_id"]: {"item_id": o["item_id"], "shot_id": o["shot_id"]}
-                                for o in _sfx_mp_fb_d.get("shot_overrides", [])
-                                if o.get("shot_id") and o.get("item_id")
-                            }
-                        except Exception as _e_fb_sfx:
-                            print(f"  [WARN] sfx_preview: MusicPlan fallback: {_e_fb_sfx}")
-
-                # RenderPlan is eliminated — ShotList.duration_sec is the authoritative floor.
-                # _sfx_shots already uses ShotList durations; no patching needed.
-
-                _sfx_tl, _sfx_dur = _sfx_build_tl(
-                    _sfx_shots, _sfx_manifest, _sfx_vsm, _sfx_midx, {})
 
                 _sfx_out_wav = Path(ep_dir) / "assets" / "sfx" / "SfxPreviewPack" / "preview_audio.wav"
                 _sfx_out_wav.parent.mkdir(parents=True, exist_ok=True)
@@ -20168,7 +20139,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 try:
                     _tl_doc = _sfx_render(
-                        _sfx_tl, _sfx_dur, _sfx_manifest, Path(manifest_path),
+                        _sfx_manifest, Path(manifest_path),
                         Path(ep_dir), _sfx_locale, _sfx_sel_list, _sfx_out_wav,
                         include_music=include_music,
                     )
@@ -21319,17 +21290,29 @@ class Handler(BaseHTTPRequestHandler):
                 if not _shots:
                     raise ValueError("ShotList not found — cannot build music timeline.")
 
-                _vo_id_to_shot = {
-                    vid: s["shot_id"]
-                    for s in _shots
-                    for vid in s.get("audio_intent", {}).get("vo_item_ids", [])
-                }
+                # Build shot time windows from ShotList (cumulative durations only —
+                # no audio_intent.vo_item_ids used; VO mapping is by episode-absolute
+                # time overlap using approved timing from the manifest vo_items).
+                _shot_windows = []
+                _cum_mrp = 0.0
+                for _s in _shots:
+                    _d = float(_s.get("duration_sec") or 0.0)
+                    if _d > 0:
+                        _shot_windows.append((_s["shot_id"], _cum_mrp, _cum_mrp + _d))
+                        _cum_mrp += _d
+
+                # Map each approved VO item to the shot whose time window it overlaps.
+                # vo_timeline is the hard truth: start_sec/end_sec are locked after approval.
                 _vo_shot_map = {}
                 for _vo in _manifest.get("vo_items", []):
-                    _sid = (_vo_id_to_shot.get(_vo.get("item_id", ""))
-                            or _vo.get("shot_id", ""))
-                    if _sid:
-                        _vo_shot_map.setdefault(_sid, []).append(_vo)
+                    _vs = _vo.get("start_sec")
+                    _ve = _vo.get("end_sec")
+                    if _vs is None or _ve is None:
+                        continue
+                    for _sid, _t0, _t1 in _shot_windows:
+                        if float(_ve) > _t0 and float(_vs) < _t1:
+                            _vo_shot_map.setdefault(_sid, []).append(_vo)
+                            break
 
                 _music_index = {
                     mi["shot_id"]: mi
@@ -21403,9 +21386,18 @@ class Handler(BaseHTTPRequestHandler):
                 if not _TEST_MODE:
                     _prev_dir = os.path.join(ep_dir, "assets", "music", "MusicReviewPack")
                     os.makedirs(_prev_dir, exist_ok=True)
+                    # Build the merged music plan: payload takes precedence over disk.
+                    # _track_vols / _clip_vols are already resolved above (payload > disk).
+                    _merged_music_plan = {
+                        "shot_overrides": shot_overrides if shot_overrides
+                                          else (_loaded_mp or {}).get("shot_overrides", []),
+                        "track_volumes":  _track_vols or {},
+                        "clip_volumes":   _clip_vols  or {},
+                    }
                     _mrp_render(
                         _tl_shots, _total_dur, _manifest, Path(manifest_path),
-                        Path(_prev_dir) / "preview_audio.wav")
+                        Path(_prev_dir) / "preview_audio.wav",
+                        music_plan=_merged_music_plan)
 
                 body = json.dumps({
                     "ok": True,

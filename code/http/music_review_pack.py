@@ -252,10 +252,12 @@ def build_timeline(shots, manifest, vo_shot_map, music_index, loop_info):
     # item can end beyond the ShotList shot total (e.g. 70.3s > 55.6s).
     # total_duration_sec must cover the full VO extent so callers (JS ruler,
     # preview audio trim) know the true content length.
+    # Use ALL manifest vo_items for last_vo_end — not vo_shot_map — because some
+    # vo_items may fall outside real shot windows (e.g. after the last shot ends)
+    # and would be absent from vo_shot_map after the time-overlap mapping fix.
     last_vo_end = max(
         ((vo.get("end_sec") or 0.0) + (vo.get("pause_after_ms") or 0) / 1000
-         for sh_vos in vo_shot_map.values()
-         for vo in sh_vos),
+         for vo in manifest.get("vo_items", [])),
         default=0.0,
     )
     total_dur = max(round(cumulative_sec, 3), last_vo_end)
@@ -315,7 +317,8 @@ def write_timeline_txt(timeline_shots, total_dur, episode_id, out_path):
 
 # ── Preview audio renderer ───────────────────────────────────────────────────
 
-def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out_path):
+def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out_path,
+                         music_plan=None):
     """
     Render a VO + music mix WAV with ducking applied.
     No SFX, no video — purely for music review listening.
@@ -350,9 +353,8 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
         _prev_scene_id = _scn
     n_samples += int(_shift_acc * SAMPLE_RATE)
     max_pause_sec = max(
-        ((vl.get("pause_after_ms") or 0) / 1000
-         for entry in timeline_shots
-         for vl in entry.get("vo_lines", [])),
+        ((vo.get("pause_after_ms") or 0) / 1000
+         for vo in manifest.get("vo_items", [])),
         default=0.0,
     )
     n_samples += int(max_pause_sec * SAMPLE_RATE)
@@ -368,168 +370,149 @@ def render_preview_audio(timeline_shots, total_dur, manifest, manifest_path, out
     missing_music = 0
     any_timing_missing = False
 
-    # Pre-compute render_id for each shot (for shot-continuity fade decisions).
-    # Check music_item_id_override FIRST so that user assignments made before
-    # "Confirm" (no MusicPlan.json on disk yet) are honoured even when
-    # music_item_id is still empty (VOPlan has no music_items seeding the index).
-    def _resolve_render_id(entry):
-        override = entry.get("music_item_id_override")
-        if override:
-            return override
-        mid = entry.get("music_item_id")
-        return mid if mid else None
-
-    render_ids = [_resolve_render_id(e) for e in timeline_shots]
-
-    for idx, entry in enumerate(timeline_shots):
-        offset_samples = int(entry["offset_sec"] * SAMPLE_RATE)
-
-        # ── Place VO lines ──────────────────────────────────────────────────
-        vo_cursor = 0.0
-        has_timing = any(v.get("start_sec") is not None for v in entry["vo_lines"])
-        if not has_timing and entry["vo_lines"]:
+    # ── Place VO — direct from manifest.vo_items (no shot decomposition) ──────
+    # vo_items carry episode-absolute start_sec/end_sec baked by the approve flow.
+    # No shot context needed — place each item directly at its start_sec position.
+    for _vo in manifest.get("vo_items", []):
+        _start = _vo.get("start_sec")
+        if _start is None:
             any_timing_missing = True
+            continue
+        _iid = _vo.get("item_id", "")
+        _wp = vo_dir / f"{_iid}.wav"
+        if not _wp.exists():
+            missing_vo += 1
+            continue
+        _vd = read_wav_mono_or_stereo(_wp)
+        _s = int(_start * SAMPLE_RATE)
+        _e = min(_s + len(_vd), n_samples)
+        _l = _e - _s
+        if _l > 0:
+            buf[_s:_e] += _vd[:_l]
 
-        for vo in entry["vo_lines"]:
-            item_id = vo["item_id"]
-            wav_path = vo_dir / f"{item_id}.wav"
-            if not wav_path.exists():
-                missing_vo += 1
-                if not has_timing:
-                    vo_cursor += DEFAULT_PAUSE_SEC
-                continue
+    # ── Place music — segment-direct from MusicPlan ─────────────────────────
+    # Iterate shot_overrides at episode-absolute coords — no shot decomposition.
+    # seg_start_sec IS the buffer write position; no shot offset cancellation needed.
+    # music_plan is passed by the caller (already merged: disk + payload overrides).
+    # Fall back to disk only when called from the CLI (music_plan=None).
+    if music_plan is None:
+        _ep_dir = manifest_path.parent
+        _music_plan: dict = {}
+        _mp_path = _ep_dir / "MusicPlan.json"
+        if _mp_path.exists():
+            try:
+                _music_plan = json.loads(_mp_path.read_text(encoding="utf-8"))
+            except Exception as _mp_err:
+                print(f"  [WARN] MusicPlan load failed: {_mp_err}")
+    else:
+        _music_plan = music_plan
 
-            vo_data = read_wav_mono_or_stereo(wav_path)
-            vo_dur = len(vo_data) / SAMPLE_RATE
+    _track_volumes = _music_plan.get("track_volumes", {})
+    _clip_volumes  = _music_plan.get("clip_volumes",  {})
 
-            if has_timing:
-                # start_sec is episode-absolute (scene tails already baked in
-                # by the approve flow) — use directly, no extra shift needed.
-                start = vo.get("start_sec", 0.0)
-                s = int(start * SAMPLE_RATE)
-            else:
-                start = vo_cursor
-                vo_cursor += vo_dur + DEFAULT_PAUSE_SEC
-                # vo_cursor is shot-relative; add shot offset to get global pos
-                s = offset_samples + int(start * SAMPLE_RATE)
-            e = min(s + len(vo_data), n_samples)
-            length = e - s
-            if length > 0:
-                buf[s:e] += vo_data[:length]  # VO at 0 dB
+    for _seg in _music_plan.get("shot_overrides", []):
+        _seg_start = float(_seg.get("start_sec", 0.0))
+        _seg_end   = float(_seg.get("end_sec",   0.0))
+        _asset_id  = _seg.get("music_asset_id", "")
+        _clip_id   = _seg.get("music_clip_id", "")
+        _duck_db   = float(_seg.get("duck_db",  DEFAULT_DUCK_DB))
+        _fade_sec  = float(_seg.get("fade_sec", DEFAULT_FADE_SEC))
 
-        # ── Place music with shot-boundary envelope ─────────────────────────
-        render_id = render_ids[idx]
-        if not render_id:
+        if not _asset_id or _seg_end <= _seg_start:
             continue
 
-        # Resolve music file path
-        music_path = music_dir / f"{render_id}.loop.wav"
-        if not music_path.exists():
-            music_path = music_dir / f"{render_id}.wav"
-        if not music_path.exists():
-            resources_music = PIPE_DIR / "projects" / project_id / "resources" / "music"
-            found_source = False
-            if resources_music.is_dir():
-                for ext in (".mp3", ".wav", ".flac", ".ogg"):
-                    candidate = resources_music / f"{render_id}{ext}"
-                    if candidate.exists():
-                        music_path = candidate
-                        found_source = True
+        # Resolve music WAV path (same search order as before)
+        _music_path = music_dir / f"{_asset_id}.loop.wav"
+        if not _music_path.exists():
+            _music_path = music_dir / f"{_asset_id}.wav"
+        if not _music_path.exists():
+            _resources_music = PIPE_DIR / "projects" / project_id / "resources" / "music"
+            _seg_found = False
+            if _resources_music.is_dir():
+                for _ext in (".mp3", ".wav", ".flac", ".ogg"):
+                    _cand = _resources_music / f"{_asset_id}{_ext}"
+                    if _cand.exists():
+                        _music_path = _cand
+                        _seg_found = True
                         break
-            if not found_source:
+            if not _seg_found:
                 missing_music += 1
                 continue
 
-        music_data = read_wav_mono_or_stereo(music_path)
-
-        # start_sec: how many seconds into the shot before music begins
-        start_sec = float(entry.get("start_sec", 0.0))
-        music_offset_samples = int(start_sec * SAMPLE_RATE)
-        # Music fills from its start point to the end of the shot (or overridden music end)
-        shot_samples = max(0, int((entry.get("music_end_sec", entry["duration_sec"]) - start_sec) * SAMPLE_RATE))
-
-        # Truncate or tile music to fill the remaining shot duration
-        if shot_samples == 0:
+        _seg_samples = max(0, int((_seg_end - _seg_start) * SAMPLE_RATE))
+        if _seg_samples == 0:
             continue
-        if len(music_data) >= shot_samples:
-            music_data = music_data[:shot_samples]
+
+        _music_data = read_wav_mono_or_stereo(_music_path)
+        if len(_music_data) >= _seg_samples:
+            _music_data = _music_data[:_seg_samples]
         else:
-            repeats = (shot_samples // len(music_data)) + 1
-            music_data = np.tile(music_data, (repeats, 1))[:shot_samples]
+            _reps = (_seg_samples // len(_music_data)) + 1
+            _music_data = np.tile(_music_data, (_reps, 1))[:_seg_samples]
 
-        # Shot-boundary fades: skip fade when same track continues across boundary
-        prev_id = render_ids[idx - 1] if idx > 0 else None
-        next_id = render_ids[idx + 1] if idx < len(render_ids) - 1 else None
-        do_fade_in  = (prev_id != render_id)
-        do_fade_out = (next_id != render_id)
+        # base_db from track/clip volumes
+        _stem    = _clip_id.split(":")[0] if _clip_id else ""
+        _base_db = BASE_MUSIC_DB
+        _base_db += _track_volumes.get(_stem, 0)
+        _base_db += _clip_volumes.get(_asset_id, _clip_volumes.get(_clip_id, 0))
 
-        duck_db      = float(entry.get("duck_db", 0))
-        base_db      = float(entry.get("base_db", BASE_MUSIC_DB))
-        fade_sec     = float(entry.get("fade_sec", DEFAULT_FADE_SEC))
-        duck_intervals_shot = entry.get("duck_intervals", [])  # shot-relative seconds
-
-        # Build shot-boundary envelope (fade in/out at track boundaries).
-        # Holds at base_db level — duck_db is applied separately below,
-        # only during VO intervals.
-        envelope = build_shot_envelope(
-            len(music_data), base_db, fade_sec,
-            fade_in=do_fade_in, fade_out=do_fade_out,
+        # Segment-boundary envelope (always fade in/out at edges)
+        _envelope = build_shot_envelope(
+            _seg_samples, _base_db, _fade_sec, fade_in=True, fade_out=True
         )
 
-        # Apply per-VO ducking envelope — mirrors render_video.py's build_duck_expr.
-        # duck_intervals are shot-relative; music_data starts at start_sec within the shot,
-        # so subtract start_sec to convert to music-buffer-relative time.
-        if duck_intervals_shot and duck_db != 0:
-            base_amp  = 10 ** (base_db / 20.0)
-            duck_amp  = base_amp * (10 ** (duck_db / 20.0))
-            n         = len(music_data)
-            t_arr     = (np.arange(n) / SAMPLE_RATE)  # time within music_data (0-based)
-            # music_data t=0 corresponds to shot time start_sec
-            duck_env  = np.full(n, base_amp, dtype=np.float64)
-            for t0_shot, t1_shot in duck_intervals_shot:
-                t0 = t0_shot - start_sec   # convert to music-buffer-relative
-                t1 = t1_shot - start_sec
-                if t1 <= 0:
-                    continue   # duck interval ends before music starts — skip
-                t0 = max(t0, 0.0)
-                fade = min(fade_sec, max(0.0, (t1 - t0) / 2.0))
-                t_fi_end   = t0 + fade
-                t_fo_start = t1 - fade
-                in_interval = (t_arr >= t0) & (t_arr <= t1)
-                # Fade in: t0 → t0+fade  (base_amp → duck_amp)
-                fade_in_mask = in_interval & (t_arr <= t_fi_end) & (fade > 0)
-                duck_env[fade_in_mask] = base_amp + (duck_amp - base_amp) * \
-                    (t_arr[fade_in_mask] - t0) / fade
-                # Hold: t0+fade → t1-fade
-                duck_env[in_interval & (t_arr > t_fi_end) & (t_arr < t_fo_start)] = duck_amp
-                # Fade out: t1-fade → t1  (duck_amp → base_amp)
-                fade_out_mask = in_interval & (t_arr >= t_fo_start) & (fade > 0)
-                duck_env[fade_out_mask] = duck_amp + (base_amp - duck_amp) * \
-                    (t_arr[fade_out_mask] - t_fo_start) / fade
-            # Combine: shot-boundary envelope × duck envelope / base_amp
-            # (shot envelope already encodes base_amp level; divide to avoid double-applying)
-            envelope = envelope * (duck_env / base_amp)
+        # Duck intervals from manifest VO items overlapping this segment
+        _seg_vo = [
+            vo for vo in manifest.get("vo_items", [])
+            if vo.get("start_sec") is not None and vo.get("end_sec") is not None
+            and float(vo["end_sec"]) > _seg_start
+            and float(vo["start_sec"]) < _seg_end
+        ]
+        if _seg_vo and _duck_db != 0:
+            _base_amp = 10 ** (_base_db / 20.0)
+            _duck_amp = _base_amp * (10 ** (_duck_db / 20.0))
+            _t_arr    = np.arange(_seg_samples) / SAMPLE_RATE
+            # compute_duck_intervals subtracts shot_start_offset_sec → segment-relative t0/t1
+            _duck_ivs = compute_duck_intervals(
+                _seg_vo, _fade_sec, shot_start_offset_sec=_seg_start
+            )
+            _duck_env = np.full(_seg_samples, _base_amp, dtype=np.float64)
+            for _t0, _t1 in _duck_ivs:
+                if _t1 <= 0:
+                    continue
+                _t0 = max(_t0, 0.0)
+                _fade = min(_fade_sec, max(0.0, (_t1 - _t0) / 2.0))
+                _t_fi_end   = _t0 + _fade
+                _t_fo_start = _t1 - _fade
+                _in_iv = (_t_arr >= _t0) & (_t_arr <= _t1)
+                _fi_mask = _in_iv & (_t_arr <= _t_fi_end) & (_fade > 0)
+                _duck_env[_fi_mask] = _base_amp + (_duck_amp - _base_amp) * \
+                    (_t_arr[_fi_mask] - _t0) / _fade
+                _duck_env[_in_iv & (_t_arr > _t_fi_end) & (_t_arr < _t_fo_start)] = _duck_amp
+                _fo_mask = _in_iv & (_t_arr >= _t_fo_start) & (_fade > 0)
+                _duck_env[_fo_mask] = _duck_amp + (_base_amp - _duck_amp) * \
+                    (_t_arr[_fo_mask] - _t_fo_start) / _fade
+            _envelope = _envelope * (_duck_env / _base_amp)
 
-        # Apply envelope (stereo)
-        music_data = music_data * envelope[:, np.newaxis]
-
-        # Place in buffer at shot start + start_sec offset
-        s = offset_samples + music_offset_samples
-        e = min(s + len(music_data), n_samples)
-        length = e - s
-        if length > 0:
-            buf[s:e] += music_data[:length]
+        _music_data = _music_data * _envelope[:, np.newaxis]
+        _s = int(_seg_start * SAMPLE_RATE)
+        _e = min(_s + len(_music_data), n_samples)
+        _length = _e - _s
+        if _length > 0:
+            buf[_s:_e] += _music_data[:_length]
 
     # Trim to last VO end + 5s fade-out, so music review doesn't play 45s of
     # music-only after narration finishes (accumulated music-loop padding).
-    last_vo_end_sec = 0.0
-    for entry in timeline_shots:
-        for vo in entry.get("vo_lines", []):
-            end = vo.get("end_sec")
-            if end is not None:
-                # end_sec is episode-absolute (scene tails baked in by approve flow)
-                effective_end = end + (vo.get("pause_after_ms") or 0) / 1000
-                last_vo_end_sec = max(last_vo_end_sec, effective_end)
+    # BUG FIX: use ALL manifest.vo_items (same source as build_timeline's total_dur)
+    # instead of timeline_shots[].vo_lines. vo_lines only contains VO items that were
+    # mapped to a shot window; VO items whose start_sec falls outside all shot windows
+    # (e.g. the last item when scene_heads push VO beyond ShotList cumulative) are
+    # absent from vo_lines, causing last_vo_end_sec to be 3s too short (35s → 32s).
+    last_vo_end_sec = max(
+        ((vo.get("end_sec") or 0.0) + (vo.get("pause_after_ms") or 0) / 1000
+         for vo in manifest.get("vo_items", [])),
+        default=0.0,
+    )
     # Trim to last_vo_end_sec which already includes pause_after_ms.
     # pause_after_ms IS the musical tail — adding VO_OUTRO_SEC on top double-counts
     # it and produces 85.348s instead of the correct 80.348s.
@@ -603,8 +586,10 @@ def apply_music_plan_overrides(timeline_shots, segment_list, source_name, vo_sho
                 entry["start_sec"] = max(0.0, seg_start - _shot_offset)
             if "end_sec" in seg:
                 # Store as music_end_sec (separate from shot duration_sec to avoid
-                # corruption).
-                entry["music_end_sec"] = max(0.0, seg_end - _shot_offset)
+                # corruption).  Clamp to the shot's actual end so music placed for
+                # shot N never bleeds past the shot boundary into shot N+1 territory
+                # without the correct duck intervals for N+1's VO items.
+                entry["music_end_sec"] = max(0.0, min(seg_end, entry_end) - _shot_offset)
             if "music_asset_id" in seg:
                 # Store override separately — keep original music_item_id intact.
                 # Renderer uses _override for audio selection.
@@ -619,7 +604,9 @@ def apply_music_plan_overrides(timeline_shots, segment_list, source_name, vo_sho
                         _vo_items, _new_fade,
                         shot_start_offset_sec=_shot_offset)
             applied += 1
-            break  # one segment → one timeline entry
+            # NOTE: no break — a segment may span multiple shots (e.g. [0,15]
+            # covers both sh01 [0,12) and sh02 [12,20)). Continue iterating so
+            # every overlapping shot receives the music assignment and duck intervals.
 
     if applied:
         print(f"  [INFO] Applied {applied} user segment(s) from {source_name}")

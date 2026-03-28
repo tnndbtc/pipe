@@ -124,20 +124,11 @@ def _seg_display_dur(seg: dict) -> float:
     return 0.0
 
 
-def _scene_id_from_shot_id(shot_id: str) -> str:
-    """'sc01-sh01' → 'sc01'"""
-    m = re.match(r'^(sc\d+)', shot_id)
-    return m.group(1) if m else ""
-
-
 def _scene_id_from_item_id(item_id: str) -> str:
     """'vo-sc01-001' → 'sc01'"""
     m = re.search(r'(sc\d+)', item_id)
     return m.group(1) if m else ""
 
-
-def _shot_sort_key(shot_id: str):
-    return tuple(int(n) for n in re.findall(r'\d+', shot_id))
 
 
 # ── scene timeline builder ────────────────────────────────────────────────────
@@ -227,6 +218,42 @@ def build_scene_timeline(vo_items: list, scene_heads: dict, voplan_total_dur: fl
     return scene_slots, video_total_dur, vo_head_offsets
 
 
+# ── music ducking helper ──────────────────────────────────────────────────────
+
+def _build_duck_vol_filter(vo_items: list, seg_start_ep: float, seg_end_ep: float,
+                           duck_db: float, fade_sec: float,
+                           base_db: float, vol_offset_db: float) -> str:
+    """Return an FFmpeg volume filter string that ducks during VO lines.
+
+    The returned string is used BEFORE adelay, so ``t`` in the expression is
+    segment-relative (t=0 == seg_start_ep in the episode).
+
+    When no VO lines overlap the segment a plain ``volume=<scalar>`` is returned.
+    """
+    base_amp = 10 ** (base_db / 20.0)
+    duck_amp = base_amp * (10 ** (duck_db / 20.0))
+    scale    = 10 ** (vol_offset_db / 20.0)
+
+    intervals = []
+    for vi in vo_items:
+        vi_start = float(vi.get("start_sec") or 0)
+        vi_end   = float(vi.get("end_sec")   or 0)
+        if vi_end <= seg_start_ep or vi_start >= seg_end_ep:
+            continue
+        # Convert to segment-relative time; expand by fade_sec on each side
+        t0 = max(0.0, vi_start - fade_sec - seg_start_ep)
+        t1 = vi_end + fade_sec - seg_start_ep
+        if t1 > t0:
+            intervals.append((round(t0, 3), round(t1, 3)))
+
+    if not intervals:
+        return f"volume={base_amp * scale:.6f}"
+
+    cond = "+".join(f"between(t,{t0},{t1})" for t0, t1 in intervals)
+    expr = f"if(gt({cond},0),{duck_amp * scale:.6f},{base_amp * scale:.6f})"
+    return f"volume=volume='{expr}':eval=frame"
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -234,17 +261,14 @@ def main():
     ap.add_argument("--input", required=True)
     args = ap.parse_args()
 
-    cfg             = load_json(Path(args.input))
-    ep_dir          = Path(cfg["ep_dir"])
-    locale          = cfg.get("locale", "en")
-    selections      = cfg.get("selections", {})
-    include_music   = cfg.get("include_music", False)
-    include_sfx     = cfg.get("include_sfx", False)
-    shot_ids_filter = cfg.get("shot_ids", None)
-    out_name        = cfg.get("out_name", None) or "preview_video.mp4"
+    cfg           = load_json(Path(args.input))
+    ep_dir        = Path(cfg["ep_dir"])
+    locale        = cfg.get("locale", "en")
+    include_music = cfg.get("include_music", False)
+    include_sfx   = cfg.get("include_sfx",  False)
+    out_name      = cfg.get("out_name", None) or "preview_video.mp4"
 
     print(f"  [media_preview] ep_dir={ep_dir} locale={locale}")
-    print(f"  [media_preview] shots with selections: {len(selections)}")
     print(f"  [media_preview] include_music={include_music} include_sfx={include_sfx}")
 
     out_dir = ep_dir / "assets" / "media" / "MediaPreviewPack"
@@ -476,9 +500,10 @@ def main():
             print("  [vo] No VO WAV files — silent VO track")
             build_silent_audio(total_dur, vo_audio)
 
-        # ── 8. Build music audio ───────────────────────────────────────────────
-        # MusicPlan shot_overrides[] carry episode-absolute start_sec/end_sec.
-        # No shot_id resolution needed — iterate segments directly.
+        # ── 8. Build music audio with VO ducking ───────────────────────────────
+        # MusicPlan shot_overrides[] carry episode-absolute start_sec/end_sec and
+        # duck_db.  Each segment is volume-automated so music dips during every VO
+        # line (± fade_sec), matching the ducking in music_review_pack.py.
         music_audio = None
         if include_music:
             music_path = ep_dir / "MusicPlan.json"
@@ -488,17 +513,22 @@ def main():
                 _clip_vol  = music_data.get("clip_volumes", {})
                 _track_vol = music_data.get("track_volumes", {})
                 BASE_DB    = -6.0
-                m_inputs, m_delays, m_volumes, m_clip_durs = [], [], [], []
+                DEFAULT_DUCK_DB   = -12.0
+                DEFAULT_FADE_SEC  =   0.5
+                m_inputs, m_delays, m_clip_durs, m_vol_filters = [], [], [], []
 
                 for ovr in music_data.get("shot_overrides", []):
-                    _asset = ovr.get("music_asset_id", "")
-                    _start = ovr.get("start_sec")
-                    _end   = ovr.get("end_sec")
+                    _asset    = ovr.get("music_asset_id", "")
+                    _start    = ovr.get("start_sec")
+                    _end      = ovr.get("end_sec")
+                    _duck_db  = float(ovr.get("duck_db",  DEFAULT_DUCK_DB))
+                    _fade_sec = float(ovr.get("fade_sec", DEFAULT_FADE_SEC))
                     if _start is None:
                         continue
-                    delay_ms = max(0.0, float(_start) - window_start) * 1000
-                    clip_dur = (max(0.0, float(_end) - float(_start))
-                                if _end is not None else None)
+                    _start_f = float(_start)
+                    _end_f   = float(_end) if _end is not None else total_dur
+                    delay_ms = max(0.0, _start_f - window_start) * 1000
+                    clip_dur = max(0.0, _end_f - _start_f) if _end is not None else None
 
                     _wav_loop = ep_dir / "assets" / "music" / f"{_asset}.loop.wav"
                     _wav_base = ep_dir / "assets" / "music" / f"{_asset}.wav"
@@ -510,24 +540,30 @@ def main():
 
                     _stem   = _re.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _asset)
                     _db_off = _track_vol.get(_stem, 0.0) + _clip_vol.get(_asset, 0.0)
-                    volume  = 10 ** ((BASE_DB + _db_off) / 20.0)
+
+                    vol_filter = _build_duck_vol_filter(
+                        vo_items, _start_f, _end_f,
+                        _duck_db, _fade_sec, BASE_DB, _db_off)
+
                     m_inputs.append(wav)
                     m_delays.append(delay_ms)
-                    m_volumes.append(volume)
                     m_clip_durs.append(clip_dur)
-                    print(f"  [music] {_asset}: delay={delay_ms:.0f}ms clip_dur={clip_dur}")
+                    m_vol_filters.append(vol_filter)
+                    print(f"  [music] {_asset}: delay={delay_ms:.0f}ms "
+                          f"clip_dur={clip_dur} duck_db={_duck_db}")
 
                 if m_inputs:
                     music_audio = tmp / "music_mix.wav"
                     f_parts = []
-                    for idx, (d, v, cd) in enumerate(zip(m_delays, m_volumes, m_clip_durs)):
+                    for idx, (d, vf, cd) in enumerate(
+                            zip(m_delays, m_vol_filters, m_clip_durs)):
                         if cd is not None:
                             f_parts.append(
-                                f"[{idx}]atrim=duration={cd:.3f},volume={v:.4f},"
+                                f"[{idx}]atrim=duration={cd:.3f},{vf},"
                                 f"adelay={d:.0f}|{d:.0f}[m{idx}]")
                         else:
                             f_parts.append(
-                                f"[{idx}]adelay={d:.0f}|{d:.0f},volume={v:.4f}[m{idx}]")
+                                f"[{idx}]{vf},adelay={d:.0f}|{d:.0f}[m{idx}]")
                     mix_ins = "".join(f"[m{i}]" for i in range(len(m_inputs)))
                     f_str   = (";".join(f_parts)
                                + f";{mix_ins}amix=inputs={len(m_inputs)}:normalize=0,"
@@ -543,7 +579,7 @@ def main():
                         print(f"  [warn] Music mix failed: {res.stderr[-300:]}")
                         music_audio = None
                     else:
-                        print(f"  [music] Mixed {len(m_inputs)} music clip(s)")
+                        print(f"  [music] Mixed {len(m_inputs)} music clip(s) with ducking")
                 else:
                     print("  [music] No music WAVs found — music skipped")
             else:
