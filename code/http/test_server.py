@@ -5567,6 +5567,9 @@ placeholder="Enter your story here"></textarea>
       if (_sfxSlug === currentSlug) {
         const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
         if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
+        // Reload VO + Music timelines so bars reflect any VOPlan/MusicPlan changes
+        // made while the user was on another tab.
+        _loadAndMergeTl(_sfxSlug, _sfxEpId).then(tl => { _sfxTimeline = tl; sfxRenderTimeline(); }).catch(() => {});
         return;
       }
       // Different project: fall through and sync from Run tab below.
@@ -7156,6 +7159,9 @@ placeholder="Enter your story here"></textarea>
       // Already populated — sync from Run tab, then fall back to localStorage
       _mediaSyncFromRunTab();
       _mediaRestoreLastEp();
+      // Reload VO + SFX + Music timelines so bars reflect any plan changes
+      // made while the user was on another tab.
+      if (_mediaSlug && _mediaEpId) _mediaLoadTimeline();
       // If episode is selected but no batch results loaded yet, try loading
       if (_mediaSlug && _mediaEpId && !_mediaResults) mediaLoadExisting();
       return;
