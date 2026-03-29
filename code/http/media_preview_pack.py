@@ -603,15 +603,27 @@ def main():
                 # source_file in shot_overrides may be a bare clip_id string (e.g.
                 # "ambulance_1.2s-3.5s") rather than a filesystem path — the SFX tab
                 # stores the dropdown value (clip_id) there, not the WAV path.
+                # Primary source: SfxPlan.json cut_clips[] (written at Confirm Plan time).
+                # Fallback: sfx_cut_clips.json (always up-to-date, written on every Cut Clip).
                 _cut_clip_abs = {}
-                for _cc in sfx_plan.get("cut_clips", []):
+                _cc_sources = list(sfx_plan.get("cut_clips", []))
+                _sfx_cut_clips_path = ep_dir / "assets" / "sfx" / "sfx_cut_clips.json"
+                if _sfx_cut_clips_path.exists():
+                    try:
+                        _extra = load_json(_sfx_cut_clips_path)
+                        if isinstance(_extra, list):
+                            _existing_ids = {c.get("clip_id") for c in _cc_sources}
+                            _cc_sources += [c for c in _extra if c.get("clip_id") not in _existing_ids]
+                    except Exception:
+                        pass
+                for _cc in _cc_sources:
                     _cid  = _cc.get("clip_id", "")
                     _crel = _cc.get("path", "")
                     if _cid and _crel:
                         _cabs = Path(_crel) if Path(_crel).is_absolute() else ep_dir / _crel
                         _cut_clip_abs[_cid] = str(_cabs)
 
-                s_inputs, s_delays, s_durs = [], [], []
+                s_inputs, s_delays, s_durs, s_ducks, s_fades = [], [], [], [], []
                 for entry in sfx_plan.get("shot_overrides", []):
                     src = entry.get("source_file") or entry.get("local_path") or ""
                     # Resolve clip_id → absolute path when src is not a valid file path
@@ -626,14 +638,27 @@ def main():
                         s_inputs.append(src)
                         s_delays.append(delay_ms)
                         s_durs.append(clip_dur)
+                        s_ducks.append(float(entry.get("duck_db", 0) or 0))
+                        s_fades.append(float(entry.get("fade_sec", 0) or 0))
 
                 if s_inputs:
                     sfx_audio = tmp / "sfx_mix.wav"
-                    f_parts   = [
-                        (f"[{i}]atrim=duration={dur:.3f},adelay={d:.0f}|{d:.0f}[s{i}]" if dur
-                         else f"[{i}]adelay={d:.0f}|{d:.0f}[s{i}]")
-                        for i, (d, dur) in enumerate(zip(s_delays, s_durs))
-                    ]
+                    f_parts = []
+                    for i, (d, dur, duck, fade) in enumerate(
+                            zip(s_delays, s_durs, s_ducks, s_fades)):
+                        # Start with trim+delay
+                        filt = (f"[{i}]atrim=duration={dur:.3f},adelay={d:.0f}|{d:.0f}"
+                                if dur else f"[{i}]adelay={d:.0f}|{d:.0f}")
+                        # Apply volume attenuation (duck_db, 0 = no change)
+                        if duck != 0:
+                            vol = 10 ** (duck / 20.0)
+                            filt += f",volume={vol:.6f}"
+                        # Apply fade-in and fade-out (fade_sec, 0 = no fade)
+                        if fade > 0 and dur and dur > 0:
+                            filt += (f",afade=t=in:st=0:d={fade:.3f}"
+                                     f",afade=t=out:st={max(0.0, dur - fade):.3f}:d={fade:.3f}")
+                        filt += f"[s{i}]"
+                        f_parts.append(filt)
                     mix_ins = "".join(f"[s{i}]" for i in range(len(s_inputs)))
                     f_str   = (";".join(f_parts)
                                + f";{mix_ins}amix=inputs={len(s_inputs)}:normalize=0,"

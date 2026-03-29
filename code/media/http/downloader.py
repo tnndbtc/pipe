@@ -637,7 +637,10 @@ def _source_search_openverse_images(
     # triggering cascading token refreshes that 429'd the auth endpoint.
     max_page    = 50 if token else 20
     n_requested = per_page
-    page_size   = min(n_requested, max_page)
+    _terms      = _kw_terms(query)
+    # When kw-filtering, always use the API maximum per page so the filter has
+    # enough candidates per call.  Without filtering, respect n_requested.
+    page_size   = max_page if _terms else min(n_requested, max_page)
 
     # Base params shared across pages (no "page" key yet).
     # cc0, by only — CC BY-SA excluded (ShareAlike conflicts with YouTube ToS).
@@ -649,7 +652,7 @@ def _source_search_openverse_images(
     all_raw: list = []
     page           = 1
     error_occurred = False
-    while len(all_raw) < n_requested:
+    while True:
         params = dict(base_params)
         params["page"] = page
 
@@ -664,7 +667,7 @@ def _source_search_openverse_images(
 
         log.info("Openverse search images q=%r page=%d page_size=%d", query, page, page_size)
         try:
-            page_results = _with_backoff(call, backoff)
+            raw = _with_backoff(call, backoff)
         except requests.HTTPError as exc:
             body = (exc.response.text or "")[:200] if exc.response is not None else ""
             log.warning("Openverse search failed q=%r page=%d: %s  body=%r",
@@ -676,10 +679,29 @@ def _source_search_openverse_images(
             error_occurred = True
             break  # do NOT cache — allow retry
 
+        if _terms:
+            page_results = [
+                r for r in raw
+                if _kw_hit(_terms, r.get("title", ""),
+                           " ".join(t["name"] for t in r.get("tags", []) if isinstance(t, dict)),
+                           _slug_text(r.get("foreign_landing_url", "")))
+            ]
+            log.debug("Openverse images kw-filter q=%r page=%d raw=%d kept=%d",
+                      query, page, len(raw), len(page_results))
+        else:
+            page_results = raw
         all_raw.extend(page_results)
-        if len(page_results) < page_size:
+        if len(raw) < page_size:
             break  # no more pages
         page += 1
+        if _terms:
+            if page > _KW_FILTER_PAGE_CAP:
+                log.info("Openverse images kw-filter q=%r: page cap %d reached, stopping",
+                         query, _KW_FILTER_PAGE_CAP)
+                break
+        else:
+            if len(all_raw) >= n_requested:
+                break  # have enough results without filtering
 
     candidates = []
     for result in all_raw[:n_requested]:
@@ -734,14 +756,17 @@ def _source_search_wikimedia_images(
     headers: dict = {"User-Agent": _USER_AGENT}
     if token: headers["Authorization"] = f"Bearer {token}"
 
-    page_size     = min(per_page, 500)
+    _terms        = _kw_terms(query)
+    # When kw-filtering, always use max page size so the filter has enough
+    # candidates per call.  Wikimedia max is 500.
+    page_size     = 500 if _terms else min(per_page, 500)
     ACCEPTED_MIMES = {"image/jpeg", "image/png", "image/gif"}
     candidates: list = []
     gsroffset     = 0
     page_num      = 1
     fetch_failed  = False
 
-    while len(candidates) < per_page:
+    while True:
         params: dict = {
             "action": "query", "generator": "search", "gsrnamespace": 6,
             "gsrsearch": query, "gsrlimit": page_size,
@@ -768,7 +793,45 @@ def _source_search_wikimedia_images(
             fetch_failed = True
             break  # do NOT cache failures — allow retry on next call
 
+        # Collect all imageinfo pages for this batch of titles.
+        # The API may return an iicontinue token meaning more imageinfo pages
+        # exist for the same set of titles — keep fetching until exhausted.
         pages_data = (data.get("query") or {}).get("pages", {})
+        iicontinue_token = (
+            (data.get("continue") or {}).get("iicontinue")
+            or (data.get("query-continue", {}).get("imageinfo") or {}).get("iicontinue")
+        )
+        ii_page_num = 1
+        while iicontinue_token:
+            ii_page_num += 1
+            ii_params = dict(params)
+            ii_params["iicontinue"] = iicontinue_token
+            # Use the newer continue style expected by the API
+            ii_params["continue"] = (data.get("continue") or {}).get("continue", "||")
+            log.debug("Wikimedia images iicontinue q=%r page=%d iipage=%d token=%r",
+                      query, page_num, ii_page_num, iicontinue_token)
+            try:
+                def ii_call(p=ii_params):
+                    r = requests.get("https://commons.wikimedia.org/w/api.php",
+                                     headers=headers, params=p, timeout=_TIMEOUT)
+                    r.raise_for_status()
+                    return r.json()
+                ii_data = _with_backoff(ii_call, backoff)
+            except Exception as exc:
+                log.warning("Wikimedia imageinfo continuation failed: %s", exc)
+                break
+            # Merge imageinfo lists from the continuation page into pages_data
+            for page_id, wm_page_cont in (ii_data.get("query") or {}).get("pages", {}).items():
+                ii_cont_list = wm_page_cont.get("imageinfo") or []
+                if page_id in pages_data:
+                    pages_data[page_id].setdefault("imageinfo", []).extend(ii_cont_list)
+                else:
+                    pages_data[page_id] = wm_page_cont
+            iicontinue_token = (
+                (ii_data.get("continue") or {}).get("iicontinue")
+                or (ii_data.get("query-continue", {}).get("imageinfo") or {}).get("iicontinue")
+            )
+
         for wm_page in pages_data.values():
             ii_list = wm_page.get("imageinfo") or []
             if not ii_list: continue
@@ -791,6 +854,10 @@ def _source_search_wikimedia_images(
             attr_text = (f'"{title}" by {author} / Wikimedia Commons / {license_summary}' if author
                          else f'"{title}" / Wikimedia Commons / {license_summary}')
 
+            if _terms and not _kw_hit(_terms, title, categories_raw,
+                                        _slug_text(asset_page)):
+                continue  # keyword filter: skip images not matching query terms
+
             candidate = {
                 "source_site": "wikimedia", "source_id": source_id,
                 "asset_page_url": asset_page,
@@ -806,11 +873,21 @@ def _source_search_wikimedia_images(
                 candidate["license_note"] = "PD-Art — jurisdiction-specific reproduction limits may apply"
             candidates.append(candidate)
 
+        log.debug("Wikimedia images kw-filter q=%r page=%d raw=%d kept=%d",
+                  query, page_num, len(pages_data), len(candidates))
         cont = data.get("continue")
         if not cont or not pages_data:
             break  # no more pages
         gsroffset = cont.get("gsroffset", gsroffset)
         page_num += 1
+        if _terms:
+            if page_num > _KW_FILTER_PAGE_CAP:
+                log.info("Wikimedia images kw-filter q=%r: page cap %d reached, stopping",
+                         query, _KW_FILTER_PAGE_CAP)
+                break
+        else:
+            if len(candidates) >= per_page:
+                break  # have enough results without filtering
 
     candidates = candidates[:per_page]
     if not fetch_failed or candidates:
@@ -933,7 +1010,10 @@ def _source_search_europeana_images(
     key = ("europeana", "image", query, per_page, tuple(sorted((extra_params or {}).items())))
     if key in _search_cache: return _search_cache[key]
 
-    page_size = min(per_page, 100)
+    _terms    = _kw_terms(query)
+    # When kw-filtering, always use the API maximum (100) per page so the filter
+    # has enough candidates per call.  Without filtering, respect per_page.
+    page_size = 100 if _terms else min(per_page, 100)
     # "open" = CC0/PDM only.  "restricted" adds CC BY (and CC BY-SA/NC which
     # is_license_acceptable will then reject).  Using both broadens recall
     # significantly — many cultural heritage items carry CC BY, not CC0/PDM.
@@ -949,7 +1029,7 @@ def _source_search_europeana_images(
     page_num     = 1
     fetch_failed = False
 
-    while len(candidates) < per_page:
+    while True:
         params = dict(base_params)
         params["cursor"] = cursor
 
@@ -982,9 +1062,15 @@ def _source_search_europeana_images(
             if not preview_url:
                 continue
             title     = (item.get("title") or [""])[0]
+            dc_desc   = " ".join(item.get("dcDescription") or [])
+            dc_subject = " ".join(item.get("dcSubject") or [])
+            guid      = item.get("guid", "")
+            if _terms and not _kw_hit(_terms, title, dc_desc, dc_subject,
+                                      _slug_text(guid)):
+                continue  # keyword filter: skip items not matching query terms
+
             author    = ", ".join(item.get("dcCreator") or [])
             provider  = (item.get("dataProvider") or [""])[0]
-            guid      = item.get("guid", "")
             source_id = item.get("id", "")
             attr_required = license_summary not in {"CC0", "Public Domain"}
             attr_text = (f'"{title}" by {author} / {provider} / {license_summary}' if author
@@ -1002,11 +1088,21 @@ def _source_search_europeana_images(
                 "provider": provider,
             })
 
+        log.debug("Europeana images kw-filter q=%r page=%d raw=%d kept=%d",
+                  query, page_num, len(items), len(candidates))
         next_cursor = data.get("nextCursor")
         if not next_cursor or len(items) < page_size:
             break  # no more pages or source exhausted
         cursor   = next_cursor
         page_num += 1
+        if _terms:
+            if page_num > _KW_FILTER_PAGE_CAP:
+                log.info("Europeana images kw-filter q=%r: page cap %d reached, stopping",
+                         query, _KW_FILTER_PAGE_CAP)
+                break
+        else:
+            if len(candidates) >= per_page:
+                break  # have enough results without filtering
 
     candidates = candidates[:per_page]
     if not fetch_failed or candidates:
@@ -2296,7 +2392,7 @@ def _pixabay_search_images(
 
     results: list[dict] = []
     page = 1
-    while len(results) < n_requested:
+    while True:
         params = dict(base_params)
         params["page"] = page
 
@@ -2325,10 +2421,14 @@ def _pixabay_search_images(
         if len(raw) < page_size:
             break  # API has no more pages
         page += 1
-        if _terms and page > _KW_FILTER_PAGE_CAP:
-            log.info("Pixabay images kw-filter q=%r: page cap %d reached, stopping",
-                     q, _KW_FILTER_PAGE_CAP)
-            break
+        if _terms:
+            if page > _KW_FILTER_PAGE_CAP:
+                log.info("Pixabay images kw-filter q=%r: page cap %d reached, stopping",
+                         q, _KW_FILTER_PAGE_CAP)
+                break
+        else:
+            if len(results) >= n_requested:
+                break  # have enough results without filtering
 
     result = results[:n_requested]
     _search_cache[key] = result
@@ -2374,7 +2474,7 @@ def _pixabay_search_videos(
 
     results: list[dict] = []
     page = 1
-    while len(results) < n_requested:
+    while True:
         params = dict(base_params)
         params["page"] = page
 
@@ -2403,10 +2503,14 @@ def _pixabay_search_videos(
         if len(raw) < page_size:
             break  # API has no more pages
         page += 1
-        if _terms and page > _KW_FILTER_PAGE_CAP:
-            log.info("Pixabay videos kw-filter q=%r: page cap %d reached, stopping",
-                     q, _KW_FILTER_PAGE_CAP)
-            break
+        if _terms:
+            if page > _KW_FILTER_PAGE_CAP:
+                log.info("Pixabay videos kw-filter q=%r: page cap %d reached, stopping",
+                         q, _KW_FILTER_PAGE_CAP)
+                break
+        else:
+            if len(results) >= n_requested:
+                break  # have enough results without filtering
 
     result = results[:n_requested]
     _search_cache[key] = result

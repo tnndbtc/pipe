@@ -5559,11 +5559,17 @@ placeholder="Enter your story here"></textarea>
 
   function _sfxSyncFromRunTab() {
     // Auto-select episode from Run tab globals if SFX tab has no selection
-    if (_sfxSlug && _sfxEpId && _sfxSlug === currentSlug && _sfxEpId === currentEpId) {
-      // Already on correct project — restore sessionStorage selections
-      const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
-      if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
-      return;
+    if (_sfxSlug && _sfxEpId) {
+      // SFX tab already has an episode loaded.
+      // If same project: keep the SFX tab's own episode selection — do NOT follow the Run
+      // tab's (possibly auto-selected) episode.  The user must change the SFX dropdown
+      // manually if they want a different episode within the same project.
+      if (_sfxSlug === currentSlug) {
+        const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
+        if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
+        return;
+      }
+      // Different project: fall through and sync from Run tab below.
     }
     if (!currentSlug || !currentEpId) return;
     const target = currentSlug + '|' + currentEpId;
@@ -5680,10 +5686,26 @@ placeholder="Enter your story here"></textarea>
     const inEl  = document.getElementById('sfx-mark-in-'  + sk);
     const outEl = document.getElementById('sfx-mark-out-' + sk);
     const cutEl = document.getElementById('sfx-cut-btn-'  + sk);
-    if (inEl)  inEl.textContent  = 'In: '  + (_sfxMarks[key].start != null ? _sfxMarks[key].start.toFixed(2)+'s' : '\u2014');
-    if (outEl) outEl.textContent = 'Out: ' + (_sfxMarks[key].end   != null ? _sfxMarks[key].end.toFixed(2)+'s'   : '\u2014');
+    if (inEl)  inEl.value  = _sfxMarks[key].start != null ? _sfxMarks[key].start.toFixed(3) : '';
+    if (outEl) outEl.value = _sfxMarks[key].end   != null ? _sfxMarks[key].end.toFixed(3)   : '';
     const bothSet = _sfxMarks[key].start != null && _sfxMarks[key].end != null && _sfxMarks[key].end > _sfxMarks[key].start;
     if (cutEl) cutEl.style.background = bothSet ? 'var(--gold)' : '';
+  }
+
+  function _sfxMarkInputChange(key, which, val) {
+    const v = parseFloat(val);
+    if (!_sfxMarks[key]) _sfxMarks[key] = {};
+    _sfxMarks[key][which] = isNaN(v) ? null : v;
+    const sk = key.replace(/[^a-z0-9]/gi, '_');
+    const cutEl = document.getElementById('sfx-cut-btn-' + sk);
+    if (cutEl) {
+      const m = _sfxMarks[key];
+      const bothSet = m.start != null && m.end != null && m.end > m.start;
+      cutEl.style.background = bothSet ? 'var(--gold)' : '';
+      cutEl.style.color      = bothSet ? '#0d0d10' : '';
+      cutEl.style.fontWeight = bothSet ? '700' : '';
+      cutEl.title = bothSet ? 'Cut clip from mark to mark' : 'No marks set \u2014 will duplicate full clip';
+    }
   }
 
   async function _sfxCutClip(itemId, candidateIdx) {
@@ -5902,12 +5924,16 @@ placeholder="Enter your story here"></textarea>
           + '<div class="music-src-controls">'
           + '<button onclick="_sfxMarkPos(\'' + safeStem + '\',0,\'' + audioElId + '\',\'start\')"'
           + (mark.start != null ? ' class="active"' : '') + '>Mark Start</button>'
-          + '<span id="sfx-mark-in-' + sk + '" class="mark-label">In: '
-          + (mark.start != null ? mark.start.toFixed(2) + 's' : '\u2014') + '</span>'
+          + '<input type="number" id="sfx-mark-in-' + sk + '" class="mark-label" step="0.001" min="0"'
+          + ' style="width:72px;font-size:0.85em" placeholder="—"'
+          + ' value="' + (mark.start != null ? mark.start.toFixed(3) : '') + '"'
+          + ' oninput="_sfxMarkInputChange(\'' + safeStem + ':0\',\'start\',this.value)">'
           + '<button onclick="_sfxMarkPos(\'' + safeStem + '\',0,\'' + audioElId + '\',\'end\')"'
           + (mark.end != null ? ' class="active"' : '') + '>Mark End</button>'
-          + '<span id="sfx-mark-out-' + sk + '" class="mark-label">Out: '
-          + (mark.end != null ? mark.end.toFixed(2) + 's' : '\u2014') + '</span>'
+          + '<input type="number" id="sfx-mark-out-' + sk + '" class="mark-label" step="0.001" min="0"'
+          + ' style="width:72px;font-size:0.85em" placeholder="—"'
+          + ' value="' + (mark.end != null ? mark.end.toFixed(3) : '') + '"'
+          + ' oninput="_sfxMarkInputChange(\'' + safeStem + ':0\',\'end\',this.value)">'
           + '<button id="sfx-cut-btn-' + sk + '"'
           + (bothSet ? ' style="background:var(--gold);color:#0d0d10;font-weight:700"' : '')
           + ' onclick="_sfxSrcCutClip(\'' + safeStem + '\')"'

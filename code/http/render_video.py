@@ -971,7 +971,17 @@ def main() -> None:
         if _sfx_path.exists():
             _sfx_plan = load_json(_sfx_path)
             _cut_abs: dict = {}
-            for _cc in _sfx_plan.get("cut_clips", []):
+            _cc_src2 = list(_sfx_plan.get("cut_clips", []))
+            _sfx_cc_path = episode_dir / "assets" / "sfx" / "sfx_cut_clips.json"
+            if _sfx_cc_path.exists():
+                try:
+                    _extra2 = load_json(_sfx_cc_path)
+                    if isinstance(_extra2, list):
+                        _existing2 = {c.get("clip_id") for c in _cc_src2}
+                        _cc_src2 += [c for c in _extra2 if c.get("clip_id") not in _existing2]
+                except Exception:
+                    pass
+            for _cc in _cc_src2:
                 _cid  = _cc.get("clip_id", "")
                 _crel = _cc.get("path", "")
                 if _cid and _crel:
