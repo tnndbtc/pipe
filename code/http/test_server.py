@@ -5953,6 +5953,7 @@ placeholder="Enter your story here"></textarea>
             + '<th style="max-width:160px">Clip</th><th>Duration</th>'
             + '<th style="width:60px" title="Volume offset in dB">Vol</th>'
             + '<th style="width:360px">Preview</th>'
+            + '<th style="width:28px"></th>'
             + '</tr></thead><tbody>';
 
       _sfxCutClips.forEach(cl => {
@@ -5977,6 +5978,10 @@ placeholder="Enter your story here"></textarea>
               + ' data-vol-db="' + volVal + '"'
               + ' onplay="_sfxClipOnPlay(this)"'
               + ' src="' + wavUrl + '"></audio></td>'
+              + '<td><button onclick="_sfxDeleteClip(\'' + safeClipId + '\')"'
+              + ' title="Delete clip from memory and disk"'
+              + ' style="background:#c0392bcc;color:#fff;border:none;border-radius:3px;'
+              + 'padding:2px 6px;cursor:pointer;font-size:0.80em">\u2715</button></td>'
               + '</tr>';
       });
       genClipsHtml += '</tbody></table></div>';
@@ -5985,6 +5990,28 @@ placeholder="Enter your story here"></textarea>
     // Order: Shot Overrides → SFX Library → Generated Clips
     wrap.innerHTML = segsCardHtml + srcLibHtml + genClipsHtml;
     wrap.style.display = 'block';
+  }
+
+  // ── Delete a generated clip (memory + disk) ───────────────────────────────
+  async function _sfxDeleteClip(clipId) {
+    if (!confirm('Delete clip "' + clipId + '"?\nThe WAV file will be removed from disk.\nAny Shot Override using this clip will also be removed.')) return;
+    try {
+      const r = await fetch('/api/sfx_delete_clip', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ slug: _sfxSlug, ep_id: _sfxEpId, clip_id: clipId })
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) throw new Error(d.error || 'delete failed');
+      // Remove from memory
+      _sfxCutClips = _sfxCutClips.filter(cl => cl.clip_id !== clipId);
+      delete _sfxClipVolumes[clipId];
+      // Remove any Shot Override segments that reference this clip as their source
+      _sfxSegments = _sfxSegments.filter(seg => seg.source_file !== clipId);
+      sfxRenderShotOverrides();
+    } catch(e) {
+      alert('Delete failed: ' + e.message);
+    }
   }
 
   // ── SFX segment state helpers ──────────────────────────────────────────────
@@ -6172,12 +6199,22 @@ placeholder="Enter your story here"></textarea>
     } catch(e) {
       document.getElementById('sfx-status-bar').textContent = 'Failed to load manifest: ' + e.message;
       document.getElementById('sfx-btn-search').disabled = false;
+      // Restore footer — search failed, existing segments/clips are still valid
+      if (_sfxSegments.length > 0 || _sfxCutClips.length > 0) {
+        const _ft = document.getElementById('sfx-footer');
+        if (_ft) _ft.style.display = 'flex';
+      }
       return;
     }
 
     if (!_sfxItems.length) {
       document.getElementById('sfx-status-bar').textContent = 'No SFX items found in manifest.';
       document.getElementById('sfx-btn-search').disabled = false;
+      // Restore footer — no manifest items to search, but segments/clips still exist
+      if (_sfxSegments.length > 0 || _sfxCutClips.length > 0) {
+        const _ft = document.getElementById('sfx-footer');
+        if (_ft) _ft.style.display = 'flex';
+      }
       return;
     }
 
@@ -6950,13 +6987,21 @@ placeholder="Enter your story here"></textarea>
     const msgEl = document.getElementById('sfx-confirm-msg');
     msgEl.textContent = 'Saving\u2026';
     try {
+      // Filter out Shot Override segments that reference a deleted clip.
+      // Only apply the filter when _sfxCutClips is loaded (non-empty); if clips haven't
+      // been loaded yet (e.g. fetch failed or sfxReset was called), save all segments
+      // as-is to avoid silently wiping the plan.
+      const _validClipIds = new Set(_sfxCutClips.map(cl => cl.clip_id));
+      const _filteredSegments = _sfxCutClips.length === 0
+        ? _sfxSegments.slice()   // clips not loaded — preserve all segments
+        : _sfxSegments.filter(seg => !seg.source_file || _validClipIds.has(seg.source_file));
       const r = await fetch('/api/sfx_plan_save', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
           slug:         _sfxSlug,
           ep_id:        _sfxEpId,
-          sfx_entries: _sfxSegments.slice(),
+          sfx_entries: _filteredSegments,
           cut_clips:    _sfxCutClips,
           cut_assign:   _sfxCutAssign,
         })
@@ -20474,6 +20519,37 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 _json_resp(self, {"ok": False, "error": str(exc)}, 500)
 
+        # ── SFX: delete a generated clip from disk + sfx_cut_clips.json ────────
+        elif self.path == "/api/sfx_delete_clip":
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length))
+                slug    = payload.get("slug",    "").strip()
+                ep_id   = payload.get("ep_id",   "").strip()
+                clip_id = payload.get("clip_id", "").strip()
+                if not slug or not ep_id or not clip_id:
+                    raise ValueError("slug, ep_id, clip_id are required")
+                ep_dir  = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                cc_file = os.path.join(ep_dir, "assets", "sfx", "sfx_cut_clips.json")
+                wav_removed = False
+                if os.path.isfile(cc_file):
+                    with open(cc_file, "r", encoding="utf-8") as _f:
+                        _clips = json.load(_f)
+                    _entry = next((c for c in _clips if c.get("clip_id") == clip_id), None)
+                    _clips = [c for c in _clips if c.get("clip_id") != clip_id]
+                    with open(cc_file, "w", encoding="utf-8") as _f:
+                        json.dump(_clips, _f, indent=2, ensure_ascii=False)
+                    if _entry and _entry.get("path"):
+                        _wav = os.path.join(ep_dir, _entry["path"])
+                        if os.path.isfile(_wav):
+                            os.remove(_wav)
+                            wav_removed = True
+                            print(f"  [SFX DELETE] WAV removed: {_wav}")
+                print(f"  [SFX DELETE] clip_id={clip_id}  slug={slug}  ep={ep_id}  wav_removed={wav_removed}")
+                _json_resp(self, {"ok": True, "wav_removed": wav_removed})
+            except Exception as _del_exc:
+                _json_resp(self, {"ok": False, "error": str(_del_exc)}, 500)
+
         # ── AI SFX Generate: submit generation job to AI server ──────────────
         elif self.path == "/api/ai_sfx_generate":
             try:
@@ -22434,7 +22510,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/media_plan_save",
                   "/api/media_preview",
                   "/api/sfx_search", "/api/sfx_save", "/api/sfx_results_save",
-                  "/api/sfx_plan_save", "/api/sfx_preview", "/api/sfx_cut_clip",
+                  "/api/sfx_plan_save", "/api/sfx_preview", "/api/sfx_cut_clip", "/api/sfx_delete_clip",
                   "/api/sfx_sources", "/api/sfx_source_upload",
                   "/api/ai_sfx_generate", "/api/ai_sfx_save",
                   "/api/ai_images", "/api/ai_job_status",
