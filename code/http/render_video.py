@@ -212,7 +212,10 @@ def _concat_with_transitions(
         la = f"a{i}"
 
         if t == "none":
-            parts.append(f"{cur_v}[{i}:v]concat=n=2:v=1:a=0[{lv}]")
+            # settb normalises concat's 1/1000000 output back to the libx264
+            # clip timebase (1/(fps*512)) so a downstream xfade sees matching
+            # timebases on both of its inputs.
+            parts.append(f"{cur_v}[{i}:v]concat=n=2:v=1:a=0,settb=1/{fps*512}[{lv}]")
             parts.append(f"{cur_a}[{i}:a]concat=n=2:v=0:a=1[{la}]")
             cum_dur += d
         else:

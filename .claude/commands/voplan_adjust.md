@@ -200,6 +200,78 @@ for item, wseg, ratio in matches:
 
 if not any_suggestion:
     print("  (no matched lines — nothing to suggest)\n")
+
+# ── 7. Cross-clip pause context ──────────────────────────────────────────────
+#
+# For the first matched item: if it has a predecessor NOT in this clip,
+# print the formula for the cross-clip pause before this clip.
+# For the last matched item: if it has a successor NOT in this clip,
+# print the formula for the cross-clip pause after this clip.
+#
+# Formula (cross-clip pause):
+#   pause_after_ms on PREV_ITEM
+#     = (prev_clip_cut_end  − prev_speech_end)      ← tail of previous clip
+#     + (this_speech_start  − this_clip_cut_start)  ← head of this clip
+#
+# Formula (scene_head adjustment, when this clip contains the first item):
+#   new scene_heads[scene_id]
+#     = current_scene_head + (this_speech_start − this_clip_cut_start)
+
+matched_items = [(item, wseg) for item, wseg, ratio in matches if wseg is not None]
+
+if matched_items:
+    first_item, first_wseg = matched_items[0]
+    last_item,  last_wseg  = matched_items[-1]
+
+    first_iid  = first_item["item_id"]
+    last_iid   = last_item["item_id"]
+    first_idx  = item_id_list.index(first_iid)
+    last_idx   = item_id_list.index(last_iid)
+
+    # Determine which adjacent items were NOT matched in this clip
+    prev_iid = item_id_list[first_idx - 1] if first_idx > 0 else None
+    next_iid = item_id_list[last_idx + 1]  if last_idx < len(item_id_list) - 1 else None
+
+    matched_iids = {item["item_id"] for item, wseg, _ in matches if wseg is not None}
+
+    has_cross_before = prev_iid and prev_iid not in matched_iids
+    has_cross_after  = next_iid and next_iid not in matched_iids
+
+    if has_cross_before or has_cross_after:
+        print()
+        print("── Cross-clip pause context " + "─" * 52)
+        print()
+
+    if has_cross_before:
+        sp_start = first_wseg["start"]
+        scene_id_first = scene_of.get(first_iid, "")
+        is_scene_first = (scene_first.get(scene_id_first) == first_iid)
+
+        if is_scene_first:
+            cur_head = scene_heads.get(scene_id_first, float(first_item.get("start_sec", 0)))
+            print(f"  SCENE HEAD ({first_iid} is first in scene):")
+            print(f"    Speech starts at {sp_start:.3f}s in this clip")
+            print(f"    new scene_heads[{scene_id_first}]")
+            print(f"      = {cur_head:.3f} + ({sp_start:.3f} − this_clip_cut_start)")
+            print(f"      = {cur_head:.3f} + ?  ← provide: this_clip_cut_start")
+        else:
+            print(f"  GAP BEFORE this clip  ({prev_iid} → {first_iid}):")
+            print(f"    {first_iid} speech starts at {sp_start:.3f}s in this clip")
+            print(f"    pause_after_ms on {prev_iid}")
+            print(f"      = (prev_clip_cut_end − <{prev_iid} speech end from prev run>)")
+            print(f"      + ({sp_start:.3f} − this_clip_cut_start)")
+            print(f"    Provide: prev_clip_cut_end, this_clip_cut_start")
+        print()
+
+    if has_cross_after:
+        sp_end = last_wseg["end"]
+        print(f"  GAP AFTER this clip  ({last_iid} → {next_iid}):")
+        print(f"    {last_iid} speech ends at {sp_end:.3f}s in this clip")
+        print(f"    pause_after_ms on {last_iid}")
+        print(f"      = (this_clip_cut_end − {sp_end:.3f})")
+        print(f"      + (<{next_iid} speech start from next run> − next_clip_cut_start)")
+        print(f"    Provide: this_clip_cut_end, next_clip_cut_start")
+        print()
 ```
 
 Before running, replace the two placeholder strings in the script:
@@ -210,3 +282,23 @@ Then run the script using the project Python interpreter:
   `/home/tnnd/.virtualenvs/pipe/bin/python3`
 
 Print the output exactly as produced — no reformatting.
+
+---
+
+## Step 3 — Fill in known values from conversation context
+
+After printing the script output, check if any cross-clip pause formulas were printed.
+
+For each formula that references `<{item_id} speech end/start from prev/next run>`:
+- Search this conversation for a previous `/voplan_adjust` run that detected that item
+- If found, substitute the actual Whisper speech_end or speech_start value into the formula
+- Print the updated formula with the known value filled in
+
+For each formula that still has unknowns (`this_clip_cut_start`, `this_clip_cut_end`,
+`prev_clip_cut_end`, `next_clip_cut_start`):
+- Ask the user to provide those cut points
+- Once provided, compute the final pause_after_ms value and print:
+
+  ```
+  pause_after_ms on {item_id}: {current_ms}ms → {new_ms}ms  ◀
+  ```
