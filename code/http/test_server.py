@@ -8904,9 +8904,10 @@ placeholder="Enter your story here"></textarea>
           vo_items:  voTl.vo_items  || [],
         };
       } catch (_) {}
-      if (!amR.ok || !slR.ok) throw new Error('fetch failed');
-      const am = await amR.json();
-      const sl = await slR.json();
+      // AssetManifest and ShotList are optional for MTV episodes — do not
+      // throw if they are missing; just skip the sections that need them.
+      const am = amR.ok ? await amR.json() : null;
+      const sl = slR.ok ? await slR.json() : null;
 
       // Restore segments from MediaPlan.json (only if not already edited)
       if (mpR.ok) {
@@ -10964,13 +10965,14 @@ placeholder="Enter your story here"></textarea>
     const v = document.getElementById('music-ep-select').value;
     const _musicEpLbl = document.getElementById('music-ep-label');
     if (_musicEpLbl) _musicEpLbl.textContent = v ? v.split('|')[1] : '';
-    if (!v) { _musicSlug = null; _musicEpId = null; return; }
+    if (!v) { _musicSlug = null; _musicEpId = null; window._mtvPreviewPath = null; return; }
     [_musicSlug, _musicEpId] = v.split('|');
-    _musicClipVolumes = {};
-    _musicClipResults = [];   // reset; repopulated from gen_music_clip_results.json by _musicLoadExisting
-    _musicCutClips    = [];   // reset on episode change; repopulated from disk by _musicLoadExisting
-    _musicShotMap     = {};   // reset; repopulated from ShotList.json by _musicLoadExisting
-    _musicOverrides   = {};   // reset; repopulated from MusicPlan.json by _musicLoadExisting
+    _musicClipVolumes    = {};
+    _musicClipResults    = [];   // reset; repopulated from gen_music_clip_results.json by _musicLoadExisting
+    _musicCutClips       = [];   // reset on episode change; repopulated from disk by _musicLoadExisting
+    _musicShotMap        = {};   // reset; repopulated from ShotList.json by _musicLoadExisting
+    _musicOverrides      = {};   // reset; repopulated from MusicPlan.json by _musicLoadExisting
+    window._mtvPreviewPath = null;  // reset; repopulated by musicGenerateReview for MTV episodes
     document.getElementById('music-btn-review').disabled  = false;
     _musicSetStatus('Episode selected. Click Generate Preview to begin.');
     // Try to load existing data
@@ -13785,10 +13787,16 @@ placeholder="Enter your story here"></textarea>
 
   function getSelectedLocales() {
     const locales = [];
-    if (document.getElementById('locale-en')      ?.checked && !locales.includes('en')) locales.push('en');
-    if (document.getElementById('locale-en-ex')   ?.checked && !locales.includes('en')) locales.push('en');
-    if (document.getElementById('locale-zh-Hans') ?.checked && !locales.includes('zh-Hans')) locales.push('zh-Hans');
-    if (document.getElementById('locale-zh-Hans-ex')?.checked && !locales.includes('zh-Hans')) locales.push('zh-Hans');
+    // Only read the active bar's checkboxes — never mix new-project and existing-project
+    // inputs, because the hidden bar's checkboxes retain their HTML-default checked state.
+    const _isExisting = document.getElementById('existing-ep-bar')?.style.display !== 'none';
+    if (_isExisting) {
+      if (document.getElementById('locale-en-ex')      ?.checked) locales.push('en');
+      if (document.getElementById('locale-zh-Hans-ex') ?.checked) locales.push('zh-Hans');
+    } else {
+      if (document.getElementById('locale-en')      ?.checked) locales.push('en');
+      if (document.getElementById('locale-zh-Hans') ?.checked) locales.push('zh-Hans');
+    }
     return locales.length ? locales : ['en'];
   }
   function onLocaleChange() {
@@ -21065,37 +21073,73 @@ class Handler(BaseHTTPRequestHandler):
                 slug         = payload["slug"]
                 ep_id        = payload["ep_id"]
                 ep_dir       = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
-                # Detect primary locale from pipeline_vars.sh
+                # Detect primary locale — same strategy as /api/music_prepare_loops:
+                #   1. PRIMARY_LOCALE from pipeline_vars.sh (explicit override)
+                #   2. LOCALES list from pipeline_vars.sh / meta.json
+                #   3. Auto-detect from story.txt CJK content
                 import re as _re_mp
                 _primary_locale_mp = "en"
+                _all_locales_mp = ["en"]
                 _vars_mp = os.path.join(ep_dir, "pipeline_vars.sh")
                 if os.path.isfile(_vars_mp):
                     with open(_vars_mp, encoding="utf-8") as _vf_mp:
-                        _m_mp = _re_mp.search(
-                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
-                            _vf_mp.read())
-                        if _m_mp:
-                            _primary_locale_mp = _m_mp.group(1).strip()
-
-                # ── MTV: run lyrics alignment before preview ─────────────────
+                        _vars_text_mp = _vf_mp.read()
+                    _m_mp = _re_mp.search(
+                        r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                        _vars_text_mp)
+                    if _m_mp:
+                        _primary_locale_mp = _m_mp.group(1).strip()
+                    _m_locs_mp = _re_mp.search(
+                        r'(?:^|[\n;])(?:export\s+)?LOCALES=["\']?([^"\';\n]+)["\']?',
+                        _vars_text_mp)
+                    if _m_locs_mp:
+                        _all_locales_mp = [l.strip() for l in _m_locs_mp.group(1).split(",") if l.strip()]
                 _meta_mp_path = os.path.join(ep_dir, "meta.json")
                 _is_mtv_mp = False
                 if os.path.isfile(_meta_mp_path):
                     try:
                         _meta_mp = json.load(open(_meta_mp_path, encoding="utf-8"))
                         _is_mtv_mp = _meta_mp.get("story_format") == "mtv"
+                        _loc_str_mp = _meta_mp.get("locales", "")
+                        if _loc_str_mp:
+                            _all_locales_mp = [l.strip() for l in _loc_str_mp.split(",") if l.strip()]
+                        if _primary_locale_mp == "en" and _all_locales_mp:
+                            _primary_locale_mp = _all_locales_mp[0]
+                    except Exception:
+                        pass
+                # Auto-detect from story.txt: if lyrics are predominantly CJK,
+                # prefer first zh-* locale in the locales list.
+                _story_mp = os.path.join(ep_dir, "story.txt")
+                if _is_mtv_mp and os.path.isfile(_story_mp):
+                    try:
+                        _story_text_mp = open(_story_mp, encoding="utf-8").read()
+                        _cjk_mp = sum(1 for c in _story_text_mp
+                                      if '\u4e00' <= c <= '\u9fff'
+                                      or '\u3040' <= c <= '\u30ff'
+                                      or '\uac00' <= c <= '\ud7af')
+                        _alnum_mp = sum(1 for c in _story_text_mp if c.isalnum())
+                        if _alnum_mp > 0 and _cjk_mp / _alnum_mp > 0.3:
+                            _zh_mp = next((l for l in _all_locales_mp if l.startswith("zh")), None)
+                            if _zh_mp:
+                                _primary_locale_mp = _zh_mp
                     except Exception:
                         pass
 
                 if _is_mtv_mp:
-                    # Find first music file in resources/music/
+                    # Find music file in resources/music/, preferring one that matches the locale
                     _music_dir_mp = os.path.join(PIPE_DIR, "projects", slug, "resources", "music")
                     _music_file_mp = None
                     if os.path.isdir(_music_dir_mp):
-                        for _fn in sorted(os.listdir(_music_dir_mp)):
-                            if _fn.lower().endswith(('.mp3', '.wav', '.flac', '.ogg', '.m4a')):
-                                _music_file_mp = os.path.join(_music_dir_mp, _fn)
-                                break
+                        _audio_exts_mp = ('.mp3', '.wav', '.flac', '.ogg', '.m4a')
+                        _all_music_mp = sorted(f for f in os.listdir(_music_dir_mp)
+                                               if f.lower().endswith(_audio_exts_mp))
+                        # Prefer file whose stem contains the locale language code (e.g. "zh" for zh-Hans)
+                        _lang_mp = _primary_locale_mp.split("-")[0].lower()
+                        _locale_match_mp = next(
+                            (f for f in _all_music_mp if _lang_mp in f.lower()), None)
+                        _chosen_mp = _locale_match_mp or (_all_music_mp[0] if _all_music_mp else None)
+                        if _chosen_mp:
+                            _music_file_mp = os.path.join(_music_dir_mp, _chosen_mp)
                     if not _music_file_mp:
                         _json_resp(self, {"error": "MTV mode: no music file found in resources/music/. "
                                                    "Upload a music file in the Music tab first."}, 400)
@@ -21593,36 +21637,79 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 if _is_mtv_mpl:
                     # Run lyrics alignment (same logic as /api/media_preview MTV path)
+                    # Detect primary locale first (needed for music file selection below).
+                    # Strategy:
+                    #   1. Try PRIMARY_LOCALE from pipeline_vars.sh (explicit override).
+                    #   2. Otherwise read meta.json locales list.
+                    #   3. Auto-detect from story.txt content: if the lyrics are
+                    #      predominantly CJK, prefer zh-Hans (or first zh-* locale in list).
+                    #      This handles episodes where both 'en' and 'zh-Hans' are listed
+                    #      but the actual lyrics are Chinese.
+                    _primary_locale_mpl = "en"
+                    _all_locales_mpl = ["en"]
+                    _vars_mpl = os.path.join(ep_dir, "pipeline_vars.sh")
+                    if os.path.isfile(_vars_mpl):
+                        import re as _re_mpl
+                        with open(_vars_mpl, encoding="utf-8") as _vf_mpl:
+                            _vars_text_mpl = _vf_mpl.read()
+                        _m_mpl = _re_mpl.search(
+                            r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                            _vars_text_mpl)
+                        if _m_mpl:
+                            _primary_locale_mpl = _m_mpl.group(1).strip()
+                        # Also collect full locales list for CJK auto-detect below
+                        _m_locs = _re_mpl.search(
+                            r'(?:^|[\n;])(?:export\s+)?LOCALES=["\']?([^"\';\n]+)["\']?',
+                            _vars_text_mpl)
+                        if _m_locs:
+                            _all_locales_mpl = [l.strip() for l in _m_locs.group(1).split(",") if l.strip()]
+                    if os.path.isfile(_meta_mpl):
+                        try:
+                            _loc_str = json.load(open(_meta_mpl, encoding="utf-8")).get("locales", "en")
+                            _all_locales_mpl = [l.strip() for l in _loc_str.split(",") if l.strip()]
+                            # Only override _primary_locale_mpl from meta if not already set by PRIMARY_LOCALE
+                            if _primary_locale_mpl == "en" and _all_locales_mpl:
+                                _primary_locale_mpl = _all_locales_mpl[0]
+                        except Exception:
+                            pass
+                    # Auto-detect from story.txt: if lyrics are predominantly CJK,
+                    # switch to first zh-* locale in the list (overrides "en" default).
+                    _story_mpl = os.path.join(ep_dir, "story.txt")
+                    if os.path.isfile(_story_mpl):
+                        try:
+                            _story_text_mpl = open(_story_mpl, encoding="utf-8").read()
+                            _cjk_count = sum(1 for c in _story_text_mpl
+                                             if '\u4e00' <= c <= '\u9fff'
+                                             or '\u3040' <= c <= '\u30ff'
+                                             or '\uac00' <= c <= '\ud7af')
+                            _total_alnum = sum(1 for c in _story_text_mpl if c.isalnum())
+                            if _total_alnum > 0 and _cjk_count / _total_alnum > 0.3:
+                                # Lyrics are predominantly CJK — find first zh locale
+                                _zh_locale = next(
+                                    (l for l in _all_locales_mpl if l.startswith("zh")), None)
+                                if _zh_locale:
+                                    _primary_locale_mpl = _zh_locale
+                        except Exception:
+                            pass
                     _music_dir_mpl = os.path.join(PIPE_DIR, "projects", slug, "resources", "music")
                     _music_file_mpl = None
                     if os.path.isdir(_music_dir_mpl):
-                        for _fn in sorted(os.listdir(_music_dir_mpl)):
-                            if _fn.lower().endswith(('.mp3', '.wav', '.flac', '.ogg', '.m4a')):
-                                _music_file_mpl = os.path.join(_music_dir_mpl, _fn)
-                                break
+                        _audio_exts_mpl = ('.mp3', '.wav', '.flac', '.ogg', '.m4a')
+                        _all_music_mpl = sorted(f for f in os.listdir(_music_dir_mpl)
+                                                if f.lower().endswith(_audio_exts_mpl))
+                        # Prefer file whose stem contains the locale language code (e.g. "zh" for zh-Hans)
+                        _lang_mpl = _primary_locale_mpl.split("-")[0].lower()
+                        _locale_match_mpl = next(
+                            (f for f in _all_music_mpl if _lang_mpl in f.lower()), None)
+                        _chosen_mpl = _locale_match_mpl or (_all_music_mpl[0] if _all_music_mpl else None)
+                        if _chosen_mpl:
+                            _music_file_mpl = os.path.join(_music_dir_mpl, _chosen_mpl)
                     if not _music_file_mpl:
                         raise FileNotFoundError("MTV mode: no music file found in resources/music/. "
                                                 "Upload a music file first.")
                     _lyrics_path_mpl = os.path.join(ep_dir, "story.txt")
                     _has_lyrics_mpl = (os.path.isfile(_lyrics_path_mpl)
                                        and os.path.getsize(_lyrics_path_mpl) > 0)
-                    # Detect primary locale
-                    _primary_locale_mpl = "en"
-                    _vars_mpl = os.path.join(ep_dir, "pipeline_vars.sh")
-                    if os.path.isfile(_vars_mpl):
-                        import re as _re_mpl
-                        with open(_vars_mpl, encoding="utf-8") as _vf_mpl:
-                            _m_mpl = _re_mpl.search(
-                                r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
-                                _vf_mpl.read())
-                            if _m_mpl:
-                                _primary_locale_mpl = _m_mpl.group(1).strip()
-                    elif os.path.isfile(_meta_mpl):
-                        try:
-                            _loc_str = json.load(open(_meta_mpl, encoding="utf-8")).get("locales", "en")
-                            _primary_locale_mpl = _loc_str.split(",")[0].strip() or "en"
-                        except Exception:
-                            pass
                     _align_cmd_mpl = [
                         sys.executable,
                         os.path.join(os.path.dirname(os.path.abspath(__file__)),

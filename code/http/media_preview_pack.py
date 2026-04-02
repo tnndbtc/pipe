@@ -336,6 +336,21 @@ def main():
         print(f"  [dur] seg_total={seg_total:.3f}s  voplan={voplan_total_dur:.3f}s  total_dur={total_dur:.3f}s")
     else:
         total_dur = video_total_dur  # from VOPlan scene timeline
+    # Extend total_dur to cover the full music track if MusicPlan defines a longer
+    # end_sec (e.g. MTV instrumental outro after the last lyric).
+    _mus_plan_path = ep_dir / "MusicPlan.json"
+    if _mus_plan_path.exists():
+        try:
+            _mp_doc = load_json(_mus_plan_path)
+            _music_end = max(
+                (float(o.get("end_sec", 0)) for o in _mp_doc.get("shot_overrides", [])),
+                default=0.0,
+            )
+            if _music_end > total_dur:
+                total_dur = _music_end
+                print(f"  [dur] extended total_dur to music end {_music_end:.3f}s")
+        except Exception as _e:
+            print(f"  [warn] could not read MusicPlan for duration: {_e}")
     print(f"  [dur] total_dur (video)={total_dur:.3f}s")
 
     # ── 5. Build video clips from flat MediaPlan segments ─────────────────────

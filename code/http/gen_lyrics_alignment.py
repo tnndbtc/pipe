@@ -69,7 +69,8 @@ def _split_lyrics(text: str) -> list[str]:
 
 
 def _align_with_stable_ts(music_path: str, lyrics_lines: list[str],
-                          model_size: str = "base") -> list[dict]:
+                          model_size: str = "base",
+                          locale: str = "en") -> list[dict]:
     """Run stable-ts forced alignment and return per-line timestamps.
 
     Returns list of {text, start_sec, end_sec} dicts.
@@ -91,7 +92,9 @@ def _align_with_stable_ts(music_path: str, lyrics_lines: list[str],
     print(f"  [align] Lyrics: {len(lyrics_lines)} lines")
 
     # stable-ts forced alignment: given known text, find timestamps
-    result = model.align(music_path, lyrics_text, language="en")
+    # Map locale to whisper language code (e.g. "zh-Hans" → "zh")
+    _lang = locale.split("-")[0] if locale else "en"
+    result = model.align(music_path, lyrics_text, language=_lang)
 
     # Collect all words with timestamps across all segments
     all_words: list[dict] = []
@@ -110,13 +113,39 @@ def _align_with_stable_ts(music_path: str, lyrics_lines: list[str],
 
     # Map word-level timestamps back to original lyric lines.
     # Walk through words, matching them to each lyric line in order.
+    #
+    # Token-count estimation:
+    #   - For space-separated languages (en, etc.): token count ≈ word count.
+    #   - For CJK languages (zh, ja, ko): no spaces, so split() gives 1 element
+    #     per line. Instead we count CJK characters as a proxy for token count
+    #     and distribute all_words proportionally across lines.
+    def _count_tokens(s: str) -> int:
+        """Estimate how many alignment tokens a line should consume."""
+        space_words = s.split()
+        if len(space_words) > 1:
+            # Space-separated: use word count
+            return len(space_words)
+        # No spaces — count CJK characters (each ≈ 1 whisper token)
+        cjk = sum(1 for c in s if '\u4e00' <= c <= '\u9fff'
+                  or '\u3040' <= c <= '\u30ff'
+                  or '\uac00' <= c <= '\ud7af')
+        return max(cjk, 1)
+
+    # Pre-compute per-line token estimates and total
+    token_counts = [_count_tokens(ln) for ln in lyrics_lines if ln.strip()]
+    total_tokens = sum(token_counts)
+    # Scale to actual number of aligned words
+    scale = len(all_words) / total_tokens if total_tokens > 0 else 1.0
+
     aligned: list[dict] = []
     word_idx = 0
+    tc_idx = 0
     for line in lyrics_lines:
-        line_words = line.split()
-        if not line_words:
+        if not line.strip():
             continue
-        n = len(line_words)
+        raw_n = token_counts[tc_idx]
+        tc_idx += 1
+        n = max(1, round(raw_n * scale))
         # Find the span of words for this line
         start_wi = word_idx
         end_wi = min(word_idx + n, len(all_words))
@@ -267,7 +296,7 @@ def main() -> None:
         else:
             print(f"  [align] Music: {music_path}")
             print(f"  [align] Lyrics: {len(lyrics_lines)} lines from {lyrics_path}")
-            aligned = _align_with_stable_ts(str(music_path), lyrics_lines, args.model)
+            aligned = _align_with_stable_ts(str(music_path), lyrics_lines, args.model, args.locale)
     else:
         # No lyrics — transcribe vocals from the music audio
         print(f"  [transcribe] Music: {music_path}")

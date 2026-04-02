@@ -732,6 +732,23 @@ def main() -> None:
     # Snap to frame boundary so ffmpeg never rounds the last partial frame up.
     # e.g. 34.997s × 24fps = 839.928 → 840 frames → 35.000s without this snap.
     total_dur = math.floor(voplan_total_dur * FPS) / FPS
+    # MTV: VOPlan ends at the last lyric, but the music track may have an
+    # instrumental outro. Extend total_dur to cover the full music clip so
+    # the rendered video is not cut short.
+    if (getattr(args, "format", None) or "").lower() == "mtv":
+        _mus_plan_path = episode_dir / "MusicPlan.json"
+        if _mus_plan_path.exists():
+            try:
+                _mp_doc = load_json(_mus_plan_path)
+                _music_end = max(
+                    (float(o.get("end_sec", 0)) for o in _mp_doc.get("shot_overrides", [])),
+                    default=0.0,
+                )
+                if _music_end > total_dur:
+                    total_dur = math.floor(_music_end * FPS) / FPS
+                    print(f"  [dur] MTV: extended total_dur to music end {_music_end:.3f}s")
+            except Exception as _e:
+                print(f"  [warn] MTV: could not read MusicPlan for duration: {_e}")
     print(f"  [dur] total_dur={total_dur:.3f}s")
 
     _scale_pad = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
