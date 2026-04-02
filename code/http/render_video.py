@@ -608,6 +608,10 @@ def parse_args() -> argparse.Namespace:
         "--verbose", action="store_true",
         help="Print FFmpeg commands as they run.",
     )
+    p.add_argument(
+        "--format", default=None, metavar="FORMAT",
+        help="Project format (e.g. 'mtv'). MTV skips VO mixing and music ducking.",
+    )
     return p.parse_args()
 
 
@@ -848,24 +852,27 @@ def main() -> None:
             sys.exit(1)
 
         # ── 7. Build VO audio (episode-absolute from VOPlan) ─────────────────
+        _is_mtv = (getattr(args, "format", None) or "").lower() == "mtv"
         _vo_dir    = episode_dir / "assets" / locale / "audio" / "vo"
         _vo_audio  = _tmp / "vo_mix.wav"
         _vo_inputs: list = []
         _vo_delays: list = []
         _vo_volumes: list = []
 
-        for _vi in sorted(vo_items, key=lambda v: v.get("start_sec", 0)):
-            _wav = _vo_dir / f"{_vi['item_id']}.wav"
-            if not _wav.exists():
-                continue
-            _scid    = _scene_id_from_item_id(_vi.get("item_id", ""))
-            _head_off = vo_head_offsets.get(_scid, 0.0)
-            _delay_ms = int((_vi["start_sec"] + _head_off) * 1000)
-            if _delay_ms < 0:
-                continue
-            _vo_inputs.append(str(_wav))
-            _vo_delays.append(_delay_ms)
-            _vo_volumes.append(float(_vi.get("volume_db", 0.0) or 0.0))
+        # MTV: skip VO audio entirely — no WAV files exist, music is the sole audio
+        if not _is_mtv:
+            for _vi in sorted(vo_items, key=lambda v: v.get("start_sec", 0)):
+                _wav = _vo_dir / f"{_vi['item_id']}.wav"
+                if not _wav.exists():
+                    continue
+                _scid    = _scene_id_from_item_id(_vi.get("item_id", ""))
+                _head_off = vo_head_offsets.get(_scid, 0.0)
+                _delay_ms = int((_vi["start_sec"] + _head_off) * 1000)
+                if _delay_ms < 0:
+                    continue
+                _vo_inputs.append(str(_wav))
+                _vo_delays.append(_delay_ms)
+                _vo_volumes.append(float(_vi.get("volume_db", 0.0) or 0.0))
 
         if _vo_inputs:
             _vf_parts = []
@@ -891,7 +898,10 @@ def main() -> None:
             else:
                 print(f"  [vo] Mixed {len(_vo_inputs)} VO line(s)")
         else:
-            print("  [vo] No VO WAV files — silent VO track")
+            if _is_mtv:
+                print("  [vo] MTV mode — skipping VO audio (music is primary audio)")
+            else:
+                print("  [vo] No VO WAV files — silent VO track")
             build_silent_audio(total_dur, _vo_audio)
 
         # ── 8. Build music audio (from MusicPlan.json) ───────────────────────
@@ -927,8 +937,10 @@ def main() -> None:
                         continue
                     _stem   = re.sub(r'_\d[\d_]*s-[\d_\.]+s$', '', _asset)
                     _db_off = _track_vol.get(_stem, 0.0) + _clip_vol.get(_asset, 0.0)
+                    # MTV: no ducking — pass empty list so music plays at full volume
+                    _duck_items = [] if _is_mtv else vo_items
                     _vf     = _build_duck_vol_filter(
-                        vo_items, _mst_f, _men_f,
+                        _duck_items, _mst_f, _men_f,
                         _duck_db, _fade_sec, _BASE_MDB, _db_off)
                     _mi.append(_wav)
                     _md.append(_mdms)

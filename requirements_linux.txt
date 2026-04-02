@@ -90,3 +90,14 @@ azure-cognitiveservices-speech>=1.38.0
 # different API and is missing load_alignment_model. Install from GitHub:
 #   pip install git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
 ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
+
+
+# ---------------------------------------------------------------------------
+# MTV — Lyrics alignment / transcription  (gen_lyrics_alignment.py)
+#
+# stable-ts extends OpenAI Whisper with forced alignment and improved
+# timestamp accuracy. Used to align known lyrics to music audio, or
+# transcribe vocals when no lyrics are provided.
+# Requires openai-whisper (listed above) and ffmpeg (system package).
+# ---------------------------------------------------------------------------
+stable-ts>=2.16.0

@@ -2451,13 +2451,13 @@ placeholder="Enter your story here"></textarea>
   <!-- ── Run options + buttons ── -->
   <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
     <label id="label-no-music"
-           style="display:flex; align-items:center; gap:6px; cursor:pointer;
-                  font-size:0.82em; font-family:var(--mono); color:var(--dim);
-                  user-select:none;"
-           title="Include background music in renders — uncheck to render VO + SFX only">
-      <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()" checked
-             style="width:14px; height:14px; cursor:pointer; accent-color:var(--gold);">
+           style="display:none;">
+      <input type="checkbox" id="chk-no-music" onchange="toggleMusicMode()" checked>
       🎵 Music
+    </label>
+    <label id="label-mtv" style="display:none;">
+      <input type="checkbox" id="cb-mtv" onchange="toggleMtvMode()">
+      🎬 MTV
     </label>
     <label style="display:flex; align-items:center; gap:6px; cursor:pointer;
                   font-size:0.82em; font-family:var(--mono); color:var(--dim);
@@ -2515,6 +2515,7 @@ placeholder="Enter your story here"></textarea>
           <option value="monologue"             disabled title="Not yet validated">Monologue / First-Person</option>
           <option value="ssml_narration">SSML Narration (authored)</option>
           <option value="Script.json">Provided Script (external agent)</option>
+          <option value="mtv">🎬 MTV (Music Video)</option>
         </select>
         <span id="badge-format" class="info-badge" style="display:none"></span>
       </div>
@@ -2557,6 +2558,7 @@ placeholder="Enter your story here"></textarea>
         <option value="monologue"             disabled title="Not yet validated">Monologue / First-Person</option>
         <option value="ssml_narration">SSML Narration (authored)</option>
         <option value="Script.json">Provided Script (external agent)</option>
+        <option value="mtv">🎬 MTV (Music Video)</option>
       </select>
     </div>
     <div id="media-config-panel-existing" style="margin-top:10px; padding:10px 14px; background:#e8f5e8; border:1px solid #a8d8a8; border-radius:6px; font-size:12px; color:#555; line-height:1.7;">
@@ -3305,7 +3307,7 @@ placeholder="Enter your story here"></textarea>
   let currentEpId = null;
 
   let renderProd = false;    // false = preview_local (CRF 28), true = high (CRF 18)
-  let noMusic    = true;     // true = skip music by default (faster renders during development)
+  let noMusic    = false;    // music always enabled — skip Music tab to omit music
   let purgeAssets = false;  // saved per-project in meta.json; default OFF to avoid accidental data loss
 
   let _preparedMeta  = null;   // result from last /api/infer_story_meta call
@@ -3723,6 +3725,12 @@ placeholder="Enter your story here"></textarea>
         setStatus('error');
         return;
       }
+      // MTV: episode created — no AI pipeline needed. User goes to Music tab next.
+      if (_selectedFormat === 'mtv') {
+        appendLine('🎬 MTV project created. Go to the Music tab to upload music and Generate Preview.', 'sys');
+        setStatus('done');
+        return;
+      }
     }
 
     const ep_dir = 'projects/' + currentSlug + '/episodes/' + currentEpId;
@@ -3860,11 +3868,15 @@ placeholder="Enter your story here"></textarea>
         if (target) {
           voSel.value = target;
           if (voSel.value) {
-            // Fire onVoEpChange whenever target differs from previous,
-            // or when locales haven't been loaded yet for this episode.
             const locSel = document.getElementById('vo-locale-select');
-            if (target !== prevEpDir || locSel.options.length <= 1)
+            if (target !== prevEpDir || locSel.options.length <= 1) {
+              // Episode or locale changed — full reload
               onVoEpChange();
+            } else {
+              // Same episode, locales already loaded — just refresh VO items
+              // (VOPlan may have been updated by Music tab alignment)
+              loadVoItems();
+            }
           }
         }
       })
@@ -3917,6 +3929,16 @@ placeholder="Enter your story here"></textarea>
           const isNotFound = data.error.toLowerCase().includes('not found') ||
                              data.error.toLowerCase().includes('no such file');
           if (isNotFound) {
+            // Check if this is an MTV project — show appropriate guidance
+            const _isMtvVo = _mediaStoryFormat === 'mtv' || window._voStoryFormat === 'mtv';
+            if (_isMtvVo) {
+              body.innerHTML =
+                '<div style="color:var(--dim);font-size:0.85em;padding:20px 0;line-height:1.7">' +
+                '🎬 <strong>MTV Mode</strong> — VO data not ready yet.<br>' +
+                'Go to the <strong>Media tab</strong> and click <strong>Generate Preview</strong> ' +
+                'to run lyrics alignment and populate this tab.' +
+                '</div>';
+            } else {
             body.innerHTML =
               '<div style="color:var(--dim);font-size:0.85em;padding:20px 0;line-height:1.7">' +
               '⚠ VO data not ready for this episode.<br>' +
@@ -3926,6 +3948,7 @@ placeholder="Enter your story here"></textarea>
               '&nbsp;&nbsp;<strong>[6] gen_tts</strong> — synthesises VO WAV files<br><br>' +
               'These run automatically as part of Stage 9 (Render) in the Run tab.' +
               '</div>';
+            }
           } else {
             body.innerHTML = '<span class="vo-empty" style="color:#f88">Error: ' +
                              escHtml(data.error) + '</span>';
@@ -3935,7 +3958,7 @@ placeholder="Enter your story here"></textarea>
         const items = data.items || [];
         items._scene_tails = data.scene_tails || {};
         items._scene_heads = data.scene_heads || {};
-        _renderVoItems(items, slug, epId, locale, data.voice_catalog || {});
+        _renderVoItems(items, slug, epId, locale, data.voice_catalog || {}, data.story_format || '');
         _voLoadSentinel(epDir, locale);
         _voLoadWhisperCompare(epDir, locale);  // TTS accuracy check (fire-and-forget)
         // Load approved durations for drift detection (OPEN 3)
@@ -3952,10 +3975,12 @@ placeholder="Enter your story here"></textarea>
 
   let _voVoiceCatalog = {};   // { voiceName: {styles, local_name, gender} } — set by _renderVoItems
 
-  function _renderVoItems(items, slug, epId, locale, voiceCatalog) {
+  function _renderVoItems(items, slug, epId, locale, voiceCatalog, storyFormat) {
     _voVoiceCatalog = voiceCatalog || {};
     window._voSlug = slug;   // stored for timeline loading
     window._voEpId = epId;
+    window._voStoryFormat = storyFormat || '';
+    const _isMtv = storyFormat === 'mtv';
     const epDir = `projects/${slug}/episodes/${epId}`;
     const body = document.getElementById('vo-body');
     if (!items.length) {
@@ -3987,6 +4012,13 @@ placeholder="Enter your story here"></textarea>
     window._voItemsByScene  = {};   // scene_id → [{item_id, duration_sec, pause_after_ms}]
 
     let html = '';
+    if (_isMtv) {
+      html += '<div style="background:#2a2000;border:1px solid #e5c07b50;border-radius:6px;'
+            + 'padding:8px 14px;margin-bottom:12px;font-size:0.85em;color:#e5c07b">'
+            + '🎬 <strong>MTV Mode</strong> — Lyrics aligned from music. '
+            + 'TTS controls are disabled. Timestamps from forced alignment. Lyrics text is editable — click to fix, then blur to auto-save.'
+            + '</div>';
+    }
     sceneOrder.forEach((sc, scIdx) => {
       const scJ = JSON.stringify(sc);
       const slugJ = JSON.stringify(slug);
@@ -4105,31 +4137,32 @@ placeholder="Enter your story here"></textarea>
             data-orig-pitch="${origPitch}" data-orig-degree="${origDegree}"
             data-break-ms="${breakMs}" data-ep-dir="${escHtml(epDir)}"
             data-locale="${escHtml(locale)}"
-            data-dur="${it.duration_sec ?? 0}">
+            data-dur="${it.duration_sec ?? 0}"
+            data-align-start="${it.start_sec ?? ''}" data-align-end="${it.end_sec ?? ''}">
           <span class="vo-item-id">${iidE}</span>
           <span class="vo-badge ${badgeClass}" title="${escHtml(badge)}">${badgeLabel}</span>
           <input  class="vo-field vo-text"   id="vo-text-${iidE}"   value="${origText}" title="text"
-                  oninput='_voParamChanged(${iidJ})'/>
+                  oninput='_voParamChanged(${iidJ})' ${_isMtv ? `onblur='_voSaveMtvText(${iidJ},${epDirJ},${locJ})'` : ''}/>
           <select class="vo-field vo-voice"  id="vo-voice-${iidE}"
-                  onchange='_voVoiceChanged(${iidJ})'>${vOpts}</select>
+                  onchange='_voVoiceChanged(${iidJ})' ${_isMtv ? 'disabled' : ''}>${vOpts}</select>
           <select class="vo-field vo-style"  id="vo-style-${iidE}"
-                  onchange='_voParamChanged(${iidJ})'>${sOpts}</select>
+                  onchange='_voParamChanged(${iidJ})' ${_isMtv ? 'disabled' : ''}>${sOpts}</select>
           <input  class="vo-field vo-rate"   id="vo-rate-${iidE}"
                   value="${origRate}" placeholder="rate" title="azure_rate"
-                  oninput='_voParamChanged(${iidJ})'/>
+                  oninput='_voParamChanged(${iidJ})' ${_isMtv ? 'disabled' : ''}/>
           <input  class="vo-field vo-pitch"  id="vo-pitch-${iidE}"
                   value="${origPitch}" placeholder="pitch" title="azure_pitch"
-                  oninput='_voParamChanged(${iidJ})'/>
+                  oninput='_voParamChanged(${iidJ})' ${_isMtv ? 'disabled' : ''}/>
           <input  class="vo-field vo-degree" id="vo-degree-${iidE}"
                   value="${origDegree}" placeholder="deg" title="azure_style_degree"
-                  oninput='_voParamChanged(${iidJ})'/>
+                  oninput='_voParamChanged(${iidJ})' ${_isMtv ? 'disabled' : ''}/>
           <input  class="vo-field vo-vol${(it.volume_db??0)!==0?' vo-vol-active':''}" id="vo-vol-${iidE}" type="number"
                   min="-20" max="20" step="0.5" value="${it.volume_db ?? 0}"
                   title="Volume trim (dB). Applied at mix time — does not modify the .wav file."
-                  oninput='_voParamChanged(${iidJ})'/>
+                  oninput='_voParamChanged(${iidJ})' ${_isMtv ? 'disabled' : ''}/>
           <span   class="vo-dur${staleClass}" id="vo-dur-${iidE}"
                   title="Trimmed duration | Pause after (INVARIANT E: not summed)">${escHtml(durLabel)}</span>
-          <div class="vo-btn-group">
+          <div class="vo-btn-group" ${_isMtv ? 'style="display:none"' : ''}>
             <button class="vo-preview-btn"   id="vo-preview-${iidE}" title="Preview active .wav"
                     onclick='_voPreviewItem(${iidJ},${slugJ},${epIdJ},${locJ})'>▶</button>
             <button class="vo-resynth-btn"   id="vo-recreate-${iidE}" title="Re-Create: fresh TTS with same params (bypasses cache)"
@@ -4138,7 +4171,7 @@ placeholder="Enter your story here"></textarea>
                     onclick='_voSaveItem(${iidJ},${epDirJ},${locJ})'>💾 Save</button>
           </div>
         </div>
-        <div class="vo-trim-row" id="vo-trim-row-${iidE}">
+        <div class="vo-trim-row" id="vo-trim-row-${iidE}" ${_isMtv ? 'style="display:none"' : ''}>
           <span style="color:var(--dim);font-size:0.85em">Trim:</span>
           <input class="vo-trim-input" id="vo-trim-start-${iidE}" type="number"
                  step="0.01" min="0" placeholder="start s" title="trim_start_sec"/>
@@ -5059,6 +5092,26 @@ placeholder="Enter your story here"></textarea>
     }
   }
 
+  // POST /api/vo_text — save edited lyrics text for MTV items (auto-save on blur)
+  async function _voSaveMtvText(itemId, epDir, locale) {
+    const el = document.getElementById('vo-text-' + itemId);
+    if (!el) return;
+    const newText = el.value.trim();
+    const row = document.getElementById('vo-row-' + itemId);
+    const origText = row?.dataset?.origText ?? '';
+    if (newText === origText) return;  // no change
+    if (!newText) { alert('Lyrics text cannot be empty'); el.value = origText; return; }
+    try {
+      await _voPost('/api/vo_text', {
+        ep_dir: epDir, locale, item_id: itemId, text: newText,
+      }, itemId);
+      if (row) row.dataset.origText = newText;  // update baseline
+    } catch(e) {
+      alert('vo_text save error: ' + e.message);
+      el.value = origText;  // revert on failure
+    }
+  }
+
   // POST /api/vo_scene_tail — save inter-scene break duration
   async function _voSaveSceneTail(scene, epDir, locale) {
     const scIdE = scene.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -5232,10 +5285,17 @@ placeholder="Enter your story here"></textarea>
         const textEl  = document.getElementById('vo-text-'  + it.item_id);
         const volEl   = document.getElementById('vo-vol-'   + it.item_id);
         const dur     = row     ? (parseFloat(row.dataset.dur)    || 0)   : (it.duration_sec   || 0);
-        const pauseMs = pauseEl ? (parseInt(pauseEl.value,   10)  || 300) : (it.pause_after_ms || 300);
+        const _rawPause = pauseEl ? parseInt(pauseEl.value, 10) : NaN;
+        const pauseMs = !isNaN(_rawPause) ? _rawPause : (it.pause_after_ms ?? 300);
         const volDb   = volEl   ? (parseFloat(volEl.value)        || 0)   : (it.volume_db      || 0);
-        const startSec = parseFloat(_approveCursor.toFixed(6));
-        const endSec   = parseFloat((_approveCursor + dur).toFixed(6));
+        // MTV: use alignment-provided timestamps (preserves instrumental gaps)
+        const _isMtvApprove = window._voStoryFormat === 'mtv';
+        const _alignStart = row ? row.dataset.alignStart : '';
+        const _alignEnd   = row ? row.dataset.alignEnd   : '';
+        const startSec = (_isMtvApprove && _alignStart !== '')
+          ? parseFloat(_alignStart) : parseFloat(_approveCursor.toFixed(6));
+        const endSec = (_isMtvApprove && _alignEnd !== '')
+          ? parseFloat(_alignEnd) : parseFloat((_approveCursor + dur).toFixed(6));
         _approveItems.push({
           item_id:        it.item_id,
           speaker_id:     it.speaker_id || '',
@@ -5416,6 +5476,29 @@ placeholder="Enter your story here"></textarea>
   function toggleMusicMode() {
     const chk = document.getElementById('chk-no-music');
     noMusic = chk ? !chk.checked : !noMusic;  // checked = Music ON = noMusic false
+    // MTV requires Music — uncheck MTV if Music is unchecked
+    if (noMusic) {
+      const mtvChk = document.getElementById('cb-mtv');
+      if (mtvChk) { mtvChk.checked = false; }
+    }
+  }
+  function toggleMtvMode() {
+    const isMtv = _selectedFormat === 'mtv';
+    // Sync hidden checkbox for any code that still reads it
+    const mtvChk = document.getElementById('cb-mtv');
+    if (mtvChk) mtvChk.checked = isMtv;
+    if (isMtv) {
+      // MTV requires Music — ensure Music is checked
+      const musicChk = document.getElementById('chk-no-music');
+      if (musicChk && !musicChk.checked) {
+        musicChk.checked = true;
+        toggleMusicMode();
+      }
+    }
+    // Update Story textarea placeholder for MTV mode
+    storyEl.placeholder = isMtv
+      ? 'Paste song lyrics here (one line per lyric line). Section headers like [Verse] are stripped automatically.'
+      : 'Enter your story here';
   }
   function togglePurgeMode() {
     const chk = document.getElementById('chk-purge-assets');
@@ -5564,7 +5647,7 @@ placeholder="Enter your story here"></textarea>
       // If same project: keep the SFX tab's own episode selection — do NOT follow the Run
       // tab's (possibly auto-selected) episode.  The user must change the SFX dropdown
       // manually if they want a different episode within the same project.
-      if (_sfxSlug === currentSlug) {
+      if (_sfxSlug === currentSlug && _sfxEpId === currentEpId) {
         const stored = sessionStorage.getItem('sfx_selected__' + _sfxSlug + '__' + _sfxEpId);
         if (stored) try { _sfxSelected = JSON.parse(stored); } catch(e) {}
         // Reload VO + Music timelines so bars reflect any VOPlan/MusicPlan changes
@@ -7050,6 +7133,7 @@ placeholder="Enter your story here"></textarea>
 
   let _mediaSlug           = null;
   let _mediaEpId           = null;
+  let _mediaStoryFormat    = '';    // 'mtv' for music video projects
   // Legacy batch state (kept for backward compat with any remaining refs)
   let _mediaBatchId        = null;
   let _mediaExpandedRows   = new Set();
@@ -7206,8 +7290,15 @@ placeholder="Enter your story here"></textarea>
     const v = document.getElementById('media-ep-select').value;
     const _mediaEpLbl = document.getElementById('media-ep-label');
     if (_mediaEpLbl) _mediaEpLbl.textContent = v ? v.split('|')[1] : '';
-    if (!v) { _mediaSlug = null; _mediaEpId = null; return; }
+    if (!v) { _mediaSlug = null; _mediaEpId = null; _mediaStoryFormat = ''; return; }
     [_mediaSlug, _mediaEpId] = v.split('|');
+    // Load story_format from meta.json for MTV detection
+    _mediaStoryFormat = '';
+    try {
+      const _metaR = await fetch('/api/episode_file?slug=' + encodeURIComponent(_mediaSlug)
+                                 + '&ep_id=' + encodeURIComponent(_mediaEpId) + '&file=meta.json');
+      if (_metaR.ok) { const _metaD = await _metaR.json(); _mediaStoryFormat = _metaD.story_format || ''; }
+    } catch(e) {}
     _mediaSearchBtnSet(false);
     const aiBtn = document.getElementById('media-btn-ai-search');
     if (aiBtn) aiBtn.disabled = false;
@@ -9580,6 +9671,10 @@ placeholder="Enter your story here"></textarea>
       } else {
         _mediaSetStatus('✅ Preview ready.');
       }
+      // MTV: alignment wrote VOPlan — reload VO tab so lyrics+timestamps appear
+      if (_mediaStoryFormat === 'mtv') {
+        try { loadVoItems(); } catch(e) {}
+      }
     } catch (err) {
       _mediaSetStatus('❌ Preview failed: ' + err.message);
     } finally {
@@ -11172,6 +11267,16 @@ placeholder="Enter your story here"></textarea>
       if (!r1.ok || d1.error) throw new Error(d1.error || 'loop analysis failed');
       _musicCandidates = d1.candidates || d1;
 
+      // MTV: alignment done — render body with music clip as preview (no review pack).
+      if (d1.mtv) {
+        _musicSetStatus(d1.message || 'Lyrics alignment complete. Review in VO tab.', false);
+        window._mtvPreviewPath = d1.music_path || null;
+        _musicRenderBody();
+        _musicBusy = false;
+        document.getElementById('music-btn-review').disabled = false;
+        return;
+      }
+
       // Step 2: Generate review pack (timeline + preview audio) with current overrides
       _musicSetStatus('Step 2/2 — Generating review pack (VO + music preview) …', true);
       // Re-fetch user_cut_clips.json — may have been written after tab loaded
@@ -11338,8 +11443,9 @@ placeholder="Enter your story here"></textarea>
     body.innerHTML = '';
 
     // ── Preview audio player ──
-    const previewPath = 'projects/' + _musicSlug + '/episodes/' + _musicEpId
-      + '/assets/music/MusicReviewPack/preview_audio.wav';
+    const previewPath = window._mtvPreviewPath
+      || ('projects/' + _musicSlug + '/episodes/' + _musicEpId
+          + '/assets/music/MusicReviewPack/preview_audio.wav');
     const previewWrap = document.createElement('div');
     previewWrap.className = 'music-preview-wrap';
     previewWrap.id = 'music-preview-wrap-el';
@@ -12601,22 +12707,22 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('ex-genre').value = meta.genre  || '';
     document.getElementById('save-ep-status').textContent = '';
     if (meta.story_format) {
-      const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration', 'Script.json']);
+      const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration', 'Script.json', 'mtv']);
       const fmt = _ENABLED_FORMATS.has(meta.story_format) ? meta.story_format : 'continuous_narration';
       _selectedFormat = fmt;
       document.getElementById('info-format-sel-existing').value = fmt;
       updateFormatHint(fmt, 'format-hint-existing');
       _updateMediaConfigPanel(fmt);
+      // Restore MTV state from format
+      if (fmt === 'mtv') toggleMtvMode();
     }
     if (meta.locales_str) {
       const locs = meta.locales_str.split(',').map(l => l.trim());
       document.getElementById('locale-en-ex').checked       = locs.includes('en');
       document.getElementById('locale-zh-Hans-ex').checked  = locs.includes('zh-Hans');
     }
-    // Restore Music state into the single top-bar checkbox
-    // meta.no_music=true → skip music → checkbox unchecked
-    // meta.no_music=false → include music → checkbox checked
-    if (meta.no_music !== undefined) {
+    // Restore Music state — but MTV always needs music, so skip override
+    if (meta.no_music !== undefined && _selectedFormat !== 'mtv') {
       noMusic = !!meta.no_music;
       const chk = document.getElementById('chk-no-music');
       if (chk) chk.checked = !noMusic;
@@ -13265,6 +13371,15 @@ placeholder="Enter your story here"></textarea>
                                  '&ep_id=' + encodeURIComponent(epId));
       const status = await res.json();
       await syncRunTabFromPipeline(slug, epId, status.story_file, status.voice_cast, status);
+      // MTV: Music tab must always be accessible — user uploads music there
+      // and triggers alignment (which creates VOPlan). Without this, there's
+      // a circular dependency: tab needs VOPlan, but VOPlan is created from tab.
+      if (status.story_format === 'mtv') {
+        ['music', 'media', 'sfx'].forEach(t => {
+          const btn = document.querySelector(`.tab[data-tab="${t}"]`);
+          if (btn) { btn.disabled = false; btn.title = ''; }
+        });
+      }
     } catch(_) {}
   }
 
@@ -13448,11 +13563,12 @@ placeholder="Enter your story here"></textarea>
         setRunBtnEnabled(true);
         document.getElementById('save-new-ep-row').style.display = '';
       } else if (!_slug) {
-        // Empty slug (e.g. SSML with no extractable title) — show info bar,
-        // let user fill in Title (which auto-derives slug via onTitleInput)
-        _preparedEpId = null;
+        // Empty slug (e.g. SSML / MTV with no story) — show info bar,
+        // let user fill in Title (which auto-derives slug via onTitleInput).
+        // Set default ep_id so Run doesn't block; onSlugInput will update it.
+        _preparedEpId = 's01e01';
         const epEl = document.getElementById('info-ep-id');
-        if (epEl) epEl.textContent = '(fill in Title ↑)';
+        if (epEl) epEl.textContent = _preparedEpId;
         // Run stays disabled until onSlugInput computes episode ID
       } else {
         // Existing project/slug — Run directly
@@ -13477,7 +13593,10 @@ placeholder="Enter your story here"></textarea>
     const story = storyEl.value.trim();
     const locs  = getSelectedLocales();
     const ep_id = _preparedEpId;
-    if (!slug || !title || !ep_id) throw new Error('Prepare must run first (missing slug or episode ID).');
+    const isMtv = _selectedFormat === 'mtv';
+    if (!ep_id) throw new Error('Click Prepare first to generate an episode ID.');
+    if (!slug)  throw new Error('Project slug is required — fill in the Title field above.');
+    if (!title && !isMtv) throw new Error('Title is required.');
     const r = await fetch('/api/create_episode', {
       method:  'POST',
       headers: {'Content-Type': 'application/json'},
@@ -13485,7 +13604,7 @@ placeholder="Enter your story here"></textarea>
         slug, ep_id, story, title, genre,
         story_format: _selectedFormat,
         locales:      locs.join(','),
-        no_music:     !(document.getElementById('chk-no-music')?.checked),
+        no_music:     isMtv ? false : !(document.getElementById('chk-no-music')?.checked),
         purge_cache:  document.getElementById('chk-purge-assets')?.checked || false,
       })
     });
@@ -13576,7 +13695,8 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('info-slug').value = slug;
     updateSlugBadge(d.slug_exists, slug);
     // Format — fall back to continuous_narration if saved format is disabled
-    const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration', 'Script.json']);
+    // (MTV is set via checkbox, not the format dropdown — don't clobber it)
+    const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration', 'Script.json', 'mtv']);
     if (!_ENABLED_FORMATS.has(_selectedFormat)) _selectedFormat = 'continuous_narration';
     const fsel = document.getElementById('info-format-sel');
     fsel.value = _selectedFormat;
@@ -13642,11 +13762,13 @@ placeholder="Enter your story here"></textarea>
     _selectedFormat = document.getElementById('info-format-sel').value;
     updateFormatHint(_selectedFormat, 'format-hint');
     _updateMediaConfigPanel(_selectedFormat);
+    toggleMtvMode();
   }
   function onFormatChangeExisting() {
     _selectedFormat = document.getElementById('info-format-sel-existing').value;
     updateFormatHint(_selectedFormat, 'format-hint-existing');
     _updateMediaConfigPanel(_selectedFormat);
+    toggleMtvMode();
   }
   function updateFormatHint(fmt, hintId) {
     const hints = {
@@ -14690,6 +14812,16 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
             _mm_cmd += ["--primary", ep(f"VOPlan.{_primary_loc_mm}.json")]
         return _mm_cmd
     elif step == "gen_tts":
+        # MTV: skip TTS entirely — no VO synthesis needed, lyrics come from alignment
+        _meta_tts = os.path.join(ep_dir, "meta.json")
+        if os.path.isfile(_meta_tts):
+            try:
+                _mj_tts = json.load(open(_meta_tts, encoding="utf-8"))
+                if _mj_tts.get("story_format") == "mtv":
+                    print("[gen_tts] MTV format — skipping TTS (no VO synthesis needed)")
+                    return []  # no-op
+            except Exception:
+                pass
         cmd = [
             "python3", os.path.join(code_dir, "gen_tts_cloud.py"),
             "--manifest", ep(f"VOPlan.{locale}.json"),
@@ -14767,6 +14899,15 @@ def _build_step_cmd(step: str, slug: str, ep_id: str, locale: str,
         ]
         if no_music:
             cmd.append("--no-music")
+        # MTV format: pass --format so render_video skips VO mixing and music ducking
+        _meta_rv = os.path.join(ep_dir, "meta.json")
+        if os.path.isfile(_meta_rv):
+            try:
+                _mj_rv = json.load(open(_meta_rv, encoding="utf-8"))
+                if _mj_rv.get("story_format") == "mtv":
+                    cmd += ["--format", "mtv"]
+            except Exception:
+                pass
         # Phase 2 — Timeline Lock: pass primary locale's approved VO timing so non-primary
         # locales cannot produce shorter shots than the primary locale.
         _primary_loc_rv = (payload or {}).get("primary_locale", "en")
@@ -15372,7 +15513,13 @@ class Handler(BaseHTTPRequestHandler):
                                     src_dur = round(wf.getnframes() / wf.getframerate(), 3)
                         except Exception:
                             pass
-                        it["duration_sec"]        = dur
+                        # MTV has no WAV files — fall back to VOPlan start_sec/end_sec
+                        if dur is not None:
+                            it["duration_sec"] = dur
+                        elif it.get("end_sec") and it.get("start_sec") is not None:
+                            it["duration_sec"] = round(it["end_sec"] - it["start_sec"], 3)
+                        else:
+                            it["duration_sec"] = None
                         it["source_duration_sec"] = src_dur
                         it["badge"]               = _vo_badge(it.get("text", ""), src_dur or dur or 0)
                         it["has_trim_override"]   = iid in overrides
@@ -15402,9 +15549,19 @@ class Handler(BaseHTTPRequestHandler):
                     }
                     scene_tails = manifest.get("scene_tails", {})
                     scene_heads = manifest.get("scene_heads", {})
+                    # Include story_format so VO tab can detect MTV mode
+                    _vo_story_format = "episodic"
+                    _vo_meta_path = os.path.join(full_ep_dir, "meta.json")
+                    if os.path.isfile(_vo_meta_path):
+                        try:
+                            _vo_meta = json.load(open(_vo_meta_path, encoding="utf-8"))
+                            _vo_story_format = _vo_meta.get("story_format", "episodic")
+                        except Exception:
+                            pass
                     body = json.dumps({"items": items, "voice_catalog": voice_catalog,
                                        "scene_tails": scene_tails,
-                                       "scene_heads": scene_heads}).encode()
+                                       "scene_heads": scene_heads,
+                                       "story_format": _vo_story_format}).encode()
                     self.send_response(200)
                 except FileNotFoundError:
                     body = json.dumps({"error": f"Manifest not found: {mpath}"}).encode()
@@ -18600,6 +18757,48 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 _json_resp(self, {"error": str(exc)}, 409)
 
+        # POST /api/vo_text — update lyrics text for a single vo_item (MTV mode)
+        elif self.path == "/api/vo_text":
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                req     = json.loads(self.rfile.read(length))
+                ep_dir  = req.get("ep_dir",  "").strip()
+                locale  = req.get("locale",  "").strip()
+                item_id = req.get("item_id", "").strip()
+                text    = req.get("text",    "").strip()
+                _log.info("[vo_text] item=%s  text=%r  locale=%s  ep=%s",
+                          item_id, text[:80], locale, ep_dir)
+                if not text:
+                    raise ValueError("text cannot be empty")
+                _vo_validate_inputs(ep_dir, locale, item_id)
+                full_ep = _vo_resolve_ep_dir(ep_dir)
+                from pathlib import Path as _P
+
+                with _get_vo_lock(full_ep):
+                    mpath = os.path.join(full_ep, f"VOPlan.{locale}.json")
+                    with open(mpath, encoding="utf-8") as _mf:
+                        _mani = json.load(_mf)
+                    found = False
+                    for _it in _mani.get("vo_items", []):
+                        if _it["item_id"] == item_id:
+                            _it["text"] = text
+                            found = True
+                            break
+                    if not found:
+                        raise ValueError(f"item_id {item_id!r} not found in manifest")
+                    _tmp = mpath + ".tmp"
+                    with open(_tmp, "w", encoding="utf-8") as _mf:
+                        json.dump(_mani, _mf, indent=2, ensure_ascii=False)
+                    os.replace(_tmp, mpath)
+
+                    primary = _get_primary_locale(_P(full_ep))
+                    _invalidate_vo_state(full_ep, primary)
+
+                _json_resp(self, {"item_id": item_id, "text": text})
+
+            except Exception as exc:
+                _json_resp(self, {"error": str(exc)}, 409)
+
         # POST /api/vo_scene_tail — set inter-scene tail silence (ms) for a scene
         elif self.path == "/api/vo_scene_tail":
             try:
@@ -19199,9 +19398,20 @@ class Handler(BaseHTTPRequestHandler):
                                _cached_count, len(_approval_items), locale)
                     # ─────────────────────────────────────────────────────────────────
 
-                # Contract validation — always run against the on-disk manifest
+                # Contract validation — skip for MTV (schema requires TTS/shot fields MTV doesn't have)
                 _vp_path = os.path.join(full_ep, f"VOPlan.{locale}.json")
-                if os.path.isfile(_vp_path):
+                _is_mtv_vc = False
+                try:
+                    _meta_vc_path = os.path.join(full_ep, "meta.json")
+                    if os.path.isfile(_meta_vc_path):
+                        _is_mtv_vc = json.load(open(_meta_vc_path, encoding="utf-8")).get("story_format") == "mtv"
+                except Exception:
+                    pass
+                if _is_mtv_vc:
+                    _vc_pass = True
+                    _vc_output = "MTV mode — contract validation skipped"
+                    _log.info("[vo_approve] %s", _vc_output)
+                elif os.path.isfile(_vp_path):
                     _verify_script = os.path.join(
                         PIPE_DIR, "contracts", "tools", "verify_contracts.py")
                     try:
@@ -19675,7 +19885,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id are required")
-                if not story_text:
+                if not story_text and story_format != "mtv":
                     raise ValueError("story text is required")
 
                 # Derive episode_number from ep_id (s01e03 → "03", ep0018 → "18")
@@ -20866,6 +21076,65 @@ class Handler(BaseHTTPRequestHandler):
                             _vf_mp.read())
                         if _m_mp:
                             _primary_locale_mp = _m_mp.group(1).strip()
+
+                # ── MTV: run lyrics alignment before preview ─────────────────
+                _meta_mp_path = os.path.join(ep_dir, "meta.json")
+                _is_mtv_mp = False
+                if os.path.isfile(_meta_mp_path):
+                    try:
+                        _meta_mp = json.load(open(_meta_mp_path, encoding="utf-8"))
+                        _is_mtv_mp = _meta_mp.get("story_format") == "mtv"
+                    except Exception:
+                        pass
+
+                if _is_mtv_mp:
+                    # Find first music file in resources/music/
+                    _music_dir_mp = os.path.join(PIPE_DIR, "projects", slug, "resources", "music")
+                    _music_file_mp = None
+                    if os.path.isdir(_music_dir_mp):
+                        for _fn in sorted(os.listdir(_music_dir_mp)):
+                            if _fn.lower().endswith(('.mp3', '.wav', '.flac', '.ogg', '.m4a')):
+                                _music_file_mp = os.path.join(_music_dir_mp, _fn)
+                                break
+                    if not _music_file_mp:
+                        _json_resp(self, {"error": "MTV mode: no music file found in resources/music/. "
+                                                   "Upload a music file in the Music tab first."}, 400)
+                        return
+
+                    # Build alignment command — lyrics are optional for MTV
+                    # (transcribe mode if no lyrics provided)
+                    _lyrics_path_mp = os.path.join(ep_dir, "story.txt")
+                    _has_lyrics = (os.path.isfile(_lyrics_path_mp)
+                                  and os.path.getsize(_lyrics_path_mp) > 0)
+
+                    _align_cmd = [
+                        sys.executable,
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "gen_lyrics_alignment.py"),
+                        "--music",  _music_file_mp,
+                        "--out",    ep_dir,
+                        "--locale", _primary_locale_mp,
+                    ]
+                    if _has_lyrics:
+                        _align_cmd += ["--lyrics", _lyrics_path_mp]
+
+                    # Run gen_lyrics_alignment.py
+                    _align_result = subprocess.run(
+                        _align_cmd,
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    if _align_result.returncode != 0:
+                        _json_resp(self, {
+                            "error": "MTV lyrics alignment failed",
+                            "detail": _align_result.stderr or _align_result.stdout,
+                        }, 500)
+                        return
+                    print(f"[mtv] Alignment done: {_align_result.stdout.strip()}")
+
+                    # MTV: alignment done — fall through to normal render.
+                    # VOPlan and MusicPlan should already exist; render_video.py
+                    # receives --format mtv to skip VO mixing and ducking.
+
                 import tempfile
                 tmp_path = None
                 try:
@@ -21313,6 +21582,87 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("slug and ep_id are required")
 
                 ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+
+                # MTV: no loop analysis needed — run lyrics alignment instead
+                _meta_mpl = os.path.join(ep_dir, "meta.json")
+                _is_mtv_mpl = False
+                if os.path.isfile(_meta_mpl):
+                    try:
+                        _is_mtv_mpl = json.load(open(_meta_mpl, encoding="utf-8")).get("story_format") == "mtv"
+                    except Exception:
+                        pass
+                if _is_mtv_mpl:
+                    # Run lyrics alignment (same logic as /api/media_preview MTV path)
+                    _music_dir_mpl = os.path.join(PIPE_DIR, "projects", slug, "resources", "music")
+                    _music_file_mpl = None
+                    if os.path.isdir(_music_dir_mpl):
+                        for _fn in sorted(os.listdir(_music_dir_mpl)):
+                            if _fn.lower().endswith(('.mp3', '.wav', '.flac', '.ogg', '.m4a')):
+                                _music_file_mpl = os.path.join(_music_dir_mpl, _fn)
+                                break
+                    if not _music_file_mpl:
+                        raise FileNotFoundError("MTV mode: no music file found in resources/music/. "
+                                                "Upload a music file first.")
+                    _lyrics_path_mpl = os.path.join(ep_dir, "story.txt")
+                    _has_lyrics_mpl = (os.path.isfile(_lyrics_path_mpl)
+                                       and os.path.getsize(_lyrics_path_mpl) > 0)
+                    # Detect primary locale
+                    _primary_locale_mpl = "en"
+                    _vars_mpl = os.path.join(ep_dir, "pipeline_vars.sh")
+                    if os.path.isfile(_vars_mpl):
+                        import re as _re_mpl
+                        with open(_vars_mpl, encoding="utf-8") as _vf_mpl:
+                            _m_mpl = _re_mpl.search(
+                                r'(?:^|[\n;])(?:export\s+)?PRIMARY_LOCALE=["\']?([^"\';\n]+)["\']?',
+                                _vf_mpl.read())
+                            if _m_mpl:
+                                _primary_locale_mpl = _m_mpl.group(1).strip()
+                    elif os.path.isfile(_meta_mpl):
+                        try:
+                            _loc_str = json.load(open(_meta_mpl, encoding="utf-8")).get("locales", "en")
+                            _primary_locale_mpl = _loc_str.split(",")[0].strip() or "en"
+                        except Exception:
+                            pass
+                    _align_cmd_mpl = [
+                        sys.executable,
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "gen_lyrics_alignment.py"),
+                        "--music", _music_file_mpl,
+                        "--out",   ep_dir,
+                        "--locale", _primary_locale_mpl,
+                    ]
+                    if _has_lyrics_mpl:
+                        _align_cmd_mpl += ["--lyrics", _lyrics_path_mpl]
+                    _align_res_mpl = subprocess.run(
+                        _align_cmd_mpl,
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    if _align_res_mpl.returncode != 0:
+                        raise RuntimeError("MTV lyrics alignment failed: " +
+                                           (_align_res_mpl.stderr or _align_res_mpl.stdout)[-2000:])
+                    print(f"[mtv] Alignment done: {_align_res_mpl.stdout.strip()}")
+                    # Return success with empty candidates (no loop analysis for MTV)
+                    _voplan_mpl = os.path.join(ep_dir, f"VOPlan.{_primary_locale_mpl}.json")
+                    _vo_count_mpl = 0
+                    if os.path.isfile(_voplan_mpl):
+                        try:
+                            with open(_voplan_mpl, encoding="utf-8") as _vf2:
+                                _vo_count_mpl = len(json.load(_vf2).get("vo_items", []))
+                        except Exception:
+                            pass
+                    # Music file path relative to PIPE_DIR for /serve_media
+                    _music_rel_mpl = os.path.relpath(_music_file_mpl, PIPE_DIR)
+                    body = json.dumps({"ok": True, "candidates": {},
+                                       "mtv": True,
+                                       "music_path": _music_rel_mpl,
+                                       "message": f"Lyrics alignment complete — {_vo_count_mpl} items. Review in VO tab."}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
                 manifest_path = os.path.join(ep_dir, "AssetManifest.shared.json")
                 if not os.path.isfile(manifest_path):
                     raise FileNotFoundError("AssetManifest.shared.json not found")

@@ -646,17 +646,25 @@ def main():
                     f_parts = []
                     for i, (d, dur, duck, fade) in enumerate(
                             zip(s_delays, s_durs, s_ducks, s_fades)):
-                        # Start with trim+delay
-                        filt = (f"[{i}]atrim=duration={dur:.3f},adelay={d:.0f}|{d:.0f}"
-                                if dur else f"[{i}]adelay={d:.0f}|{d:.0f}")
+                        # Build filter: atrim → volume → afade → adelay
+                        # afade MUST come BEFORE adelay so fade times reference
+                        # the trimmed audio content, not the delayed stream.
+                        # (adelay prepends silence; afade(out) zeroes everything
+                        #  after st+d — if that falls in the silence region the
+                        #  actual audio is completely muted.)
+                        filt = f"[{i}]"
+                        if dur:
+                            filt += f"atrim=duration={dur:.3f},"
                         # Apply volume attenuation (duck_db, 0 = no change)
                         if duck != 0:
                             vol = 10 ** (duck / 20.0)
-                            filt += f",volume={vol:.6f}"
+                            filt += f"volume={vol:.6f},"
                         # Apply fade-in and fade-out (fade_sec, 0 = no fade)
                         if fade > 0 and dur and dur > 0:
-                            filt += (f",afade=t=in:st=0:d={fade:.3f}"
-                                     f",afade=t=out:st={max(0.0, dur - fade):.3f}:d={fade:.3f}")
+                            filt += (f"afade=t=in:st=0:d={fade:.3f},"
+                                     f"afade=t=out:st={max(0.0, dur - fade):.3f}:d={fade:.3f},")
+                        # Delay LAST — positions the processed clip at episode-absolute time
+                        filt += f"adelay={d:.0f}|{d:.0f}"
                         filt += f"[s{i}]"
                         f_parts.append(filt)
                     mix_ins = "".join(f"[s{i}]" for i in range(len(s_inputs)))
