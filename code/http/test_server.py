@@ -5621,23 +5621,21 @@ placeholder="Enter your story here"></textarea>
 
   function sfxInit() {
     const sel = document.getElementById('sfx-ep-select');
-    const needsPopulate = sel.options.length <= 1;
-    if (needsPopulate) {
-      // Load all projects/episodes into the select, then sync from Run tab
-      fetch('/list_projects').then(r => r.json()).then(data => {
-        (data.projects || []).forEach(proj => {
-          (proj.episodes || []).forEach(ep => {
-            const opt = document.createElement('option');
-            opt.value       = proj.slug + '|' + ep.id;
-            opt.textContent = proj.slug + ' / ' + ep.id;
-            sel.appendChild(opt);
-          });
+    // Always re-fetch project list so episodes created after page load appear in the dropdown.
+    const prevVal = sel.value;
+    fetch('/list_projects').then(r => r.json()).then(data => {
+      sel.innerHTML = '<option value="">— select episode —</option>';
+      (data.projects || []).forEach(proj => {
+        (proj.episodes || []).forEach(ep => {
+          const opt = document.createElement('option');
+          opt.value       = proj.slug + '|' + ep.id;
+          opt.textContent = proj.slug + ' / ' + ep.id;
+          sel.appendChild(opt);
         });
-        _sfxSyncFromRunTab();
-      }).catch(() => { _sfxSyncFromRunTab(); });
-    } else {
+      });
+      if (prevVal) sel.value = prevVal;
       _sfxSyncFromRunTab();
-    }
+    }).catch(() => { _sfxSyncFromRunTab(); });
   }
 
   function _sfxSyncFromRunTab() {
@@ -7237,21 +7235,11 @@ placeholder="Enter your story here"></textarea>
         _mp.classList.toggle('media-scrolled', _mb.scrollTop > 40);
       }, { passive: true });
     }
-    // Populate episode selector from list_projects (same as Pipeline tab)
-    var needsSync = document.getElementById('media-ep-select').options.length <= 1;
-    if (!needsSync) {
-      // Already populated — sync from Run tab, then fall back to localStorage
-      _mediaSyncFromRunTab();
-      _mediaRestoreLastEp();
-      // Reload VO + SFX + Music timelines so bars reflect any plan changes
-      // made while the user was on another tab.
-      if (_mediaSlug && _mediaEpId) _mediaLoadTimeline();
-      // If episode is selected but no batch results loaded yet, try loading
-      if (_mediaSlug && _mediaEpId && !_mediaResults) mediaLoadExisting();
-      return;
-    }
+    // Always re-fetch project list so episodes created after page load appear in the dropdown.
+    const sel = document.getElementById('media-ep-select');
+    const prevVal = sel.value;
     fetch('/list_projects').then(r => r.json()).then(data => {
-      const sel = document.getElementById('media-ep-select');
+      sel.innerHTML = '<option value="">— select episode —</option>';
       (data.projects || []).forEach(proj => {
         (proj.episodes || []).forEach(ep => {
           const opt = document.createElement('option');
@@ -7260,6 +7248,7 @@ placeholder="Enter your story here"></textarea>
           sel.appendChild(opt);
         });
       });
+      if (prevVal) sel.value = prevVal;
       // Sync from Run tab first; fall back to last-used episode from localStorage
       _mediaSyncFromRunTab();
       _mediaRestoreLastEp();
@@ -7268,6 +7257,11 @@ placeholder="Enter your story here"></textarea>
         sel.selectedIndex = 1;
         onMediaEpChange();
       }
+      // Reload VO + SFX + Music timelines so bars reflect any plan changes
+      // made while the user was on another tab.
+      if (_mediaSlug && _mediaEpId) _mediaLoadTimeline();
+      // If episode is selected but no batch results loaded yet, try loading
+      if (_mediaSlug && _mediaEpId && !_mediaResults) mediaLoadExisting();
     }).catch(() => {});
   }
 
@@ -10933,8 +10927,10 @@ placeholder="Enter your story here"></textarea>
     // If episode already selected, reload data automatically (user may have
     // run step 5 or copied songs since last visit).
     if (_musicSlug && _musicEpId && _musicSlug === currentSlug && _musicEpId === currentEpId) { _musicLoadExisting(); return; }
-    if (sel.options.length > 1) { _musicSyncFromRunTab(); return; }
+    // Always re-fetch project list so episodes created after page load appear in the dropdown.
+    const prevVal = sel.value;
     fetch('/list_projects').then(r => r.json()).then(data => {
+      sel.innerHTML = '<option value="">— select episode —</option>';
       (data.projects || []).forEach(proj => {
         (proj.episodes || []).forEach(ep => {
           const opt = document.createElement('option');
@@ -10943,6 +10939,7 @@ placeholder="Enter your story here"></textarea>
           sel.appendChild(opt);
         });
       });
+      if (prevVal) sel.value = prevVal;
       _musicSyncFromRunTab();
     }).catch(() => {});
   }
@@ -10972,6 +10969,7 @@ placeholder="Enter your story here"></textarea>
     _musicCutClips       = [];   // reset on episode change; repopulated from disk by _musicLoadExisting
     _musicShotMap        = {};   // reset; repopulated from ShotList.json by _musicLoadExisting
     _musicOverrides      = {};   // reset; repopulated from MusicPlan.json by _musicLoadExisting
+    _musicTimeline       = null; // reset; prevents stale MTV timeline leaking into non-MTV episodes
     window._mtvPreviewPath = null;  // reset; repopulated by musicGenerateReview for MTV episodes
     document.getElementById('music-btn-review').disabled  = false;
     _musicSetStatus('Episode selected. Click Generate Preview to begin.');
@@ -11269,14 +11267,37 @@ placeholder="Enter your story here"></textarea>
       if (!r1.ok || d1.error) throw new Error(d1.error || 'loop analysis failed');
       _musicCandidates = d1.candidates || d1;
 
-      // MTV: alignment done — render body with music clip as preview (no review pack).
+      // ── MTV FORMAT PREVIEW ────────────────────────────────────────────────────
+      // For MTV episodes, Generate Preview must NOT call /api/music_review_pack.
+      // music_review_pack requires a VOPlan with shotlist_ref + real shot durations
+      // + TTS VO WAV files — none of which exist for MTV episodes.
+      //
+      // The ONLY correct approach for MTV:
+      //   1. Read music_clip_id from Shot Overrides (_musicOverrides mirrors the DOM).
+      //   2. Serve assets/music/{clip_id}.wav directly as the preview audio.
+      //   3. Return early — no mixing, no rendering, no VOPlan needed.
+      //
+      // DO NOT change this to call music_review_pack for any reason.
+      // Any agent who changes this is introducing the same bug that wasted multiple
+      // days of debugging effort.
       if (d1.mtv) {
-        _musicSetStatus(d1.message || 'Lyrics alignment complete. Review in VO tab.', false);
-        window._mtvPreviewPath = d1.music_path || null;
+        const _mtvOvrs = Object.values(_musicOverrides).filter(
+          o => o.music_clip_id && parseFloat(o.end_sec || 0) > parseFloat(o.start_sec || 0)
+        );
+        const _mtvClip = _mtvOvrs[0];
+        if (!_mtvClip || !_mtvClip.music_clip_id) throw new Error('MTV preview: no clip selected in Shot Overrides');
+        window._mtvPreviewPath = 'projects/' + _musicSlug + '/episodes/' + _musicEpId
+          + '/assets/music/' + _mtvClip.music_clip_id + '.wav';
+        // Set a minimal timeline so _musicRenderTimeline() draws the music bar
+        // from _musicOverrides free-form segments (lines below that filter !o.shot_id).
+        _musicTimeline = {
+          total_duration_sec: (_mtvClip.end_sec || 0) - (_mtvClip.start_sec || 0),
+          shots: [], vo_items: [], sfx_items: [],
+        };
+        _musicSetStatus('MTV preview ready — playing clip from Shot Overrides.', false);
         _musicRenderBody();
-        _musicBusy = false;
-        document.getElementById('music-btn-review').disabled = false;
-        return;
+        document.getElementById('music-footer').style.display = 'flex';
+        return;  // Skip music_review_pack entirely — it cannot work for MTV episodes
       }
 
       // Step 2: Generate review pack (timeline + preview audio) with current overrides
@@ -21126,23 +21147,36 @@ class Handler(BaseHTTPRequestHandler):
                         pass
 
                 if _is_mtv_mp:
-                    # Find music file in resources/music/, preferring one that matches the locale
-                    _music_dir_mp = os.path.join(PIPE_DIR, "projects", slug, "resources", "music")
+                    # ── Music file selection: read MusicPlan.json Shot Overrides ──────────
+                    # CORRECT approach: read the clip chosen by the user in Shot Overrides
+                    # from MusicPlan.json, then look up its path in user_cut_clips.json.
+                    # DO NOT search resources/music/ alphabetically — that picks the wrong
+                    # file and corrupts VOPlan with wrong timestamps (e.g. 73.93s intro pause).
                     _music_file_mp = None
-                    if os.path.isdir(_music_dir_mp):
-                        _audio_exts_mp = ('.mp3', '.wav', '.flac', '.ogg', '.m4a')
-                        _all_music_mp = sorted(f for f in os.listdir(_music_dir_mp)
-                                               if f.lower().endswith(_audio_exts_mp))
-                        # Prefer file whose stem contains the locale language code (e.g. "zh" for zh-Hans)
-                        _lang_mp = _primary_locale_mp.split("-")[0].lower()
-                        _locale_match_mp = next(
-                            (f for f in _all_music_mp if _lang_mp in f.lower()), None)
-                        _chosen_mp = _locale_match_mp or (_all_music_mp[0] if _all_music_mp else None)
-                        if _chosen_mp:
-                            _music_file_mp = os.path.join(_music_dir_mp, _chosen_mp)
+                    _music_plan_path_mp = os.path.join(ep_dir, "MusicPlan.json")
+                    _cut_clips_path_mp  = os.path.join(ep_dir, "assets", "music", "user_cut_clips.json")
+                    if os.path.isfile(_music_plan_path_mp) and os.path.isfile(_cut_clips_path_mp):
+                        try:
+                            _mplan_mp = json.load(open(_music_plan_path_mp, encoding="utf-8"))
+                            _cut_clips_mp = json.load(open(_cut_clips_path_mp, encoding="utf-8"))
+                            _ovr_clip_id_mp = None
+                            for _ovr_mp in (_mplan_mp.get("shot_overrides") or []):
+                                _cid_mp = _ovr_mp.get("music_clip_id") or _ovr_mp.get("music_asset_id")
+                                if _cid_mp:
+                                    _ovr_clip_id_mp = _cid_mp
+                                    break
+                            if _ovr_clip_id_mp:
+                                for _cc_mp in _cut_clips_mp:
+                                    if _cc_mp.get("clip_id") == _ovr_clip_id_mp:
+                                        _cc_path_mp = _cc_mp.get("path", "")
+                                        if _cc_path_mp:
+                                            _music_file_mp = os.path.join(PIPE_DIR, _cc_path_mp)
+                                        break
+                        except Exception as _e_mp:
+                            print(f"  [WARN] media_preview: MusicPlan clip lookup failed: {_e_mp}")
                     if not _music_file_mp:
-                        _json_resp(self, {"error": "MTV mode: no music file found in resources/music/. "
-                                                   "Upload a music file in the Music tab first."}, 400)
+                        _json_resp(self, {"error": "MTV mode: no clip found in MusicPlan.json Shot Overrides. "
+                                                   "Select a clip in the Music tab Shot Overrides first."}, 400)
                         return
 
                     # Build alignment command — lyrics are optional for MTV
@@ -21691,22 +21725,39 @@ class Handler(BaseHTTPRequestHandler):
                                     _primary_locale_mpl = _zh_locale
                         except Exception:
                             pass
-                    _music_dir_mpl = os.path.join(PIPE_DIR, "projects", slug, "resources", "music")
+                    # ── Music file selection: read MusicPlan.json Shot Overrides ──────────
+                    # CORRECT approach: read the clip chosen by the user in Shot Overrides
+                    # from MusicPlan.json, then look up its path in user_cut_clips.json.
+                    # DO NOT search resources/music/ alphabetically — that picks the wrong
+                    # file and corrupts VOPlan with wrong timestamps (e.g. 73.93s intro pause).
                     _music_file_mpl = None
-                    if os.path.isdir(_music_dir_mpl):
-                        _audio_exts_mpl = ('.mp3', '.wav', '.flac', '.ogg', '.m4a')
-                        _all_music_mpl = sorted(f for f in os.listdir(_music_dir_mpl)
-                                                if f.lower().endswith(_audio_exts_mpl))
-                        # Prefer file whose stem contains the locale language code (e.g. "zh" for zh-Hans)
-                        _lang_mpl = _primary_locale_mpl.split("-")[0].lower()
-                        _locale_match_mpl = next(
-                            (f for f in _all_music_mpl if _lang_mpl in f.lower()), None)
-                        _chosen_mpl = _locale_match_mpl or (_all_music_mpl[0] if _all_music_mpl else None)
-                        if _chosen_mpl:
-                            _music_file_mpl = os.path.join(_music_dir_mpl, _chosen_mpl)
+                    _music_plan_path_mpl = os.path.join(ep_dir, "MusicPlan.json")
+                    _cut_clips_path_mpl  = os.path.join(ep_dir, "assets", "music", "user_cut_clips.json")
+                    if os.path.isfile(_music_plan_path_mpl) and os.path.isfile(_cut_clips_path_mpl):
+                        try:
+                            _mplan_mpl = json.load(open(_music_plan_path_mpl, encoding="utf-8"))
+                            _cut_clips_mpl = json.load(open(_cut_clips_path_mpl, encoding="utf-8"))
+                            # Find first shot_override that has a clip assigned
+                            _ovr_clip_id_mpl = None
+                            for _ovr_mpl in (_mplan_mpl.get("shot_overrides") or []):
+                                _cid = _ovr_mpl.get("music_clip_id") or _ovr_mpl.get("music_asset_id")
+                                if _cid:
+                                    _ovr_clip_id_mpl = _cid
+                                    break
+                            if _ovr_clip_id_mpl:
+                                # Look up the clip path in user_cut_clips.json
+                                for _cc_mpl in _cut_clips_mpl:
+                                    if _cc_mpl.get("clip_id") == _ovr_clip_id_mpl:
+                                        _cc_path_mpl = _cc_mpl.get("path", "")
+                                        if _cc_path_mpl:
+                                            _music_file_mpl = os.path.join(PIPE_DIR, _cc_path_mpl)
+                                        break
+                        except Exception as _e_mpl:
+                            print(f"  [WARN] music_prepare_loops: MusicPlan clip lookup failed: {_e_mpl}")
                     if not _music_file_mpl:
-                        raise FileNotFoundError("MTV mode: no music file found in resources/music/. "
-                                                "Upload a music file first.")
+                        raise FileNotFoundError(
+                            "MTV mode: no clip found in MusicPlan.json Shot Overrides. "
+                            "Select a clip in the Music tab Shot Overrides first.")
                     _lyrics_path_mpl = os.path.join(ep_dir, "story.txt")
                     _has_lyrics_mpl = (os.path.isfile(_lyrics_path_mpl)
                                        and os.path.getsize(_lyrics_path_mpl) > 0)
