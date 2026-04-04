@@ -1086,12 +1086,17 @@ def main() -> None:
             _final_audio = _vo_audio
 
         # ── 11. Mux video + audio with quality profile ───────────────────────
+        # tpad freezes the last frame when the concat video is shorter than
+        # total_dur (e.g. because xfade dissolve transitions absorb overlap
+        # time, reducing the concat duration relative to the sum of clip durs).
+        # -t total_dur then trims the padded stream to the exact target length.
         final_mp4 = output_dir / "output.mp4"
         _result = subprocess.run([
             "ffmpeg", "-y",
             "-i", str(_concat_video),
             "-i", str(_final_audio),
             "-map", "0:v:0", "-map", "1:a:0",
+            "-vf", f"tpad=stop_mode=clone:stop_duration={total_dur:.3f}",
             "-c:v", "libx264", "-crf", str(crf), "-preset", preset_str,
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",

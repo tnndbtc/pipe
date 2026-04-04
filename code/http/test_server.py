@@ -8551,11 +8551,31 @@ placeholder="Enter your story here"></textarea>
       return seg.hold_sec != null ? seg.hold_sec : 0;
     });
 
+    // Transition time adjustments (mirrors _concat_with_transitions in render_video.py).
+    // dissolve_* transitions use xfade which OVERLAPS the two adjacent clips → subtracts.
+    // fade_black / flash_white INSERT a colour clip between cuts → adds the inserted clip's duration.
+    const _TRANS_OVERLAP = { dissolve_short: 0.3, dissolve_medium: 0.5, dissolve_long: 1.0 };
+    const _TRANS_INSERT  = { fade_black: 0.5, flash_white: 0.1 };
+
+    // Helper: compute the transition-aware start position of segment i in the rendered video.
+    function _segStartSec(upToIdx) {
+      let c = 0;
+      for (let j = 0; j < upToIdx; j++) {
+        c += durations[j];
+        if (j + 1 < _mediaSegments.length) {
+          const t = _mediaSegments[j + 1].transition || 'none';
+          if (_TRANS_OVERLAP[t] != null)     c -= _TRANS_OVERLAP[t];
+          else if (_TRANS_INSERT[t] != null) c += _TRANS_INSERT[t];
+        }
+      }
+      return c;
+    }
+
     // Clamp last segment so total never exceeds VO duration.
     // If user typed a larger value it snaps back; smaller values are kept as-is.
     if (totalSec > 0 && _mediaSegments.length > 0) {
       const lastIdx = _mediaSegments.length - 1;
-      const prevSum = durations.slice(0, lastIdx).reduce((a, b) => a + b, 0);
+      const prevSum = _segStartSec(lastIdx);  // transition-aware start of last segment
       const maxLast = Math.max(0, totalSec - prevSum);
       if (durations[lastIdx] > maxLast) {
         durations[lastIdx] = maxLast;
@@ -8573,6 +8593,11 @@ placeholder="Enter your story here"></textarea>
     const ends   = [];
     let cursor = 0;
     for (let i = 0; i < _mediaSegments.length; i++) {
+      if (i > 0) {
+        const t = _mediaSegments[i].transition || 'none';
+        if (_TRANS_OVERLAP[t] != null)      cursor -= _TRANS_OVERLAP[t];
+        else if (_TRANS_INSERT[t] != null)  cursor += _TRANS_INSERT[t];
+      }
       starts[i] = cursor;
       ends[i]   = cursor + durations[i];
       cursor    += durations[i];
