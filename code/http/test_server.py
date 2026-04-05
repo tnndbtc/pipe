@@ -18056,6 +18056,9 @@ class Handler(BaseHTTPRequestHandler):
                 _creds = Credentials.from_authorized_user_file(_prof["token_path"])
                 if _creds.expired and _creds.refresh_token:
                     _creds.refresh(_GRequest())
+                    # Persist the refreshed access token so the next request
+                    # doesn't need to refresh again (and survives server restarts).
+                    open(_prof["token_path"], "w", encoding="utf-8").write(_creds.to_json())
                 _yt = _yt_build("youtube", "v3", credentials=_creds)
                 _playlists = []
                 _req = _yt.playlists().list(part="snippet", mine=True, maxResults=50)
@@ -18080,7 +18083,7 @@ class Handler(BaseHTTPRequestHandler):
 
             # Input validation
             if not slug or not ep_id or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
-                    or not re.match(r'^s\d+e\d+$', ep_id) \
+                    or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id) \
                     or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                 body = json.dumps({"error": "invalid parameters"}).encode()
                 self.send_response(400)
@@ -18128,7 +18131,7 @@ class Handler(BaseHTTPRequestHandler):
 
             if not slug or not ep_id \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
-                    or not re.match(r'^s\d+e\d+$', ep_id) \
+                    or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id) \
                     or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                 self.send_response(400); self.end_headers(); return
 
@@ -18156,7 +18159,7 @@ class Handler(BaseHTTPRequestHandler):
             # C26: validate path parameters
             if not slug or not ep_id \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
-                    or not re.match(r'^s\d+e\d+$', ep_id) \
+                    or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id) \
                     or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                 self.send_response(400); self.end_headers(); return
 
@@ -18224,7 +18227,7 @@ class Handler(BaseHTTPRequestHandler):
             # C26: validate path parameters
             if not slug or not ep_id \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
-                    or not re.match(r'^s\d+e\d+$', ep_id) \
+                    or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id) \
                     or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                 self.send_response(400); self.end_headers(); return
 
@@ -20981,7 +20984,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("slug, ep_id, item_id, and file are required")
                 if not re.match(r'^[a-zA-Z0-9_\-]+$', slug):
                     raise ValueError("invalid slug")
-                if not re.match(r'^s\d+e\d+$', ep_id):
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id):
                     raise ValueError("invalid ep_id")
                 if not re.match(r'^[a-zA-Z0-9_\-]+$', item_id):
                     raise ValueError("invalid item_id")
@@ -21080,7 +21083,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("slug, ep_id, and file are required")
                 if not re.match(r'^[a-zA-Z0-9_\-]+$', slug):
                     raise ValueError("invalid slug")
-                if not re.match(r'^s\d+e\d+$', ep_id):
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id):
                     raise ValueError("invalid ep_id")
 
                 ext = os.path.splitext(file_name)[1].lower() or ".wav"
@@ -22397,7 +22400,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id required")
-                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id):
                     raise ValueError("invalid slug or ep_id")
 
                 ep_dir     = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
@@ -22675,7 +22678,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if not slug or not ep_id or not fields:
                     raise ValueError("slug, ep_id, fields required")
-                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id):
                     raise ValueError("invalid slug or ep_id")
 
                 render_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes",
@@ -22708,7 +22711,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if not slug or not ep_id or not field:
                     raise ValueError("slug, ep_id, field required")
-                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id):
                     raise ValueError("invalid slug or ep_id")
 
                 # Only allow known writable fields
@@ -22752,7 +22755,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not slug or not ep_id:
                     raise ValueError("slug and ep_id required")
                 # C26: validate path parameters
-                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id):
                     raise ValueError("invalid slug or ep_id")
                 if locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                     raise ValueError("invalid locale")
@@ -22848,7 +22851,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if not slug or not ep_id or file_data is None:
                     raise ValueError("slug, ep_id, and file required")
-                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id):
                     raise ValueError("invalid slug or ep_id")
 
                 render_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
@@ -22890,7 +22893,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if not slug or not ep_id or not action:
                     raise ValueError("slug, ep_id, action required")
-                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^s\d+e\d+$', ep_id):
+                if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id):
                     raise ValueError("invalid slug or ep_id")
                 if action not in ("validate", "upload", "publish"):
                     raise ValueError(f"unknown action: {action!r}")
