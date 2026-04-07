@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>__FILENAME__</title>
+<style>
+  :root {
+    --bg: #f5f3ef; --surface: #ffffff; --border: #d4d0c8;
+    --gold: #8a6d3b; --text: #1a1a1a; --dim: #666;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    --c-key: #1a6db6; --c-str: #2a7a4a; --c-num: #9a6a00; --c-bool: #c03050;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  }
+  header {
+    background: var(--panel-bg); border-bottom: 1px solid var(--border);
+    padding: 12px 20px; display: flex; align-items: center; gap: 14px;
+    flex-shrink: 0;
+  }
+  .hdr-name { font-size: 0.92rem; font-weight: 700; color: var(--gold); font-family: var(--mono); }
+  .hdr-path { font-size: 0.71em; color: var(--dim); font-family: var(--mono); margin-top: 3px; }
+  #btn-copy {
+    margin-left: auto; background: var(--active-bg); color: var(--dim);
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 0.78em; font-weight: 700; padding: 6px 16px; cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  #btn-copy:hover { background: #ffffff22; color: var(--text); }
+  #content {
+    flex: 1; overflow: auto; padding: 16px 22px;
+    font-family: var(--mono); font-size: 0.82em; line-height: 1.7;
+    white-space: pre;
+  }
+  .key  { color: var(--c-key); }
+  .str  { color: var(--c-str); }
+  .num  { color: var(--c-num); }
+  .bool { color: var(--c-bool); }
+  #content::-webkit-scrollbar { width: 6px; height: 6px; }
+  #content::-webkit-scrollbar-track { background: transparent; }
+  #content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="hdr-name">__FILENAME__</div>
+    <div class="hdr-path">__RELPATH__</div>
+  </div>
+  <button id="btn-copy" onclick="copyRaw()">Copy</button>
+</header>
+<div id="content"></div>
+<script>
+const raw    = __CONTENT_JSON__;
+const isJson = __IS_JSON__;
+const el     = document.getElementById('content');
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function highlight(text) {
+  let s = esc(text);
+  // Keys:  leading indent + "key":
+  s = s.replace(/^(\s*)("[^"]*")(\s*:)/gm,
+    '$1<span class="key">$2</span>$3');
+  // String values: : "..."
+  s = s.replace(/(\:\s*)("[^"]*")/g,
+    '$1<span class="str">$2</span>');
+  // Numbers
+  s = s.replace(/(\:\s*)(-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)/g,
+    '$1<span class="num">$2</span>');
+  // Booleans / null
+  s = s.replace(/(\:\s*)(true|false|null)\b/g,
+    '$1<span class="bool">$2</span>');
+  return s;
+}
+
+if (isJson) {
+  try {
+    const pretty = JSON.stringify(JSON.parse(raw), null, 2);
+    el.innerHTML = highlight(pretty);
+  } catch(e) {
+    el.textContent = raw;
+  }
+} else {
+  el.textContent = raw;
+}
+
+function copyRaw() {
+  navigator.clipboard.writeText(raw).then(() => {
+    const b = document.getElementById('btn-copy');
+    b.textContent = 'Copied!';
+    setTimeout(() => { b.textContent = 'Copy'; }, 1500);
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = raw; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+  });
+}
+</script>
+</body>
+</html>
