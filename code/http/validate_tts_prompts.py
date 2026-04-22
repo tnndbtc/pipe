@@ -60,7 +60,11 @@ def compare_tts(
     locale:     str,
 ) -> list[str]:
     """Return list of divergence strings (empty = all match)."""
-    character = voicecast.get("characters", {}).get(speaker_id)
+    _chars = voicecast.get("characters", [])
+    if isinstance(_chars, dict):
+        character = _chars.get(speaker_id)
+    else:
+        character = next((c for c in _chars if c.get("character_id") == speaker_id), None)
     if character is None:
         # No VoiceCast entry → nothing to compare
         return []

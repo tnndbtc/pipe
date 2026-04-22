@@ -63,6 +63,10 @@ PRODUCER = "render_video.py"
 W, H   = 1280, 720      # output resolution
 FPS    = 24             # frames per second
 
+# ── Overlay / subtitle constants ───────────────────────────────────────────────
+# NotoSansCJK covers both Latin and Chinese/Japanese/Korean characters.
+NOTO_CJK_FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+
 # ── Music transition durations ─────────────────────────────────────────────────
 MUSIC_FADEOUT_SEC   = 0.5   # music → no-music fade (configurable via CLI)
 
@@ -421,8 +425,93 @@ def build_scene_timeline(
     return scene_slots, video_total_dur, vo_head_offsets
 
 
-def write_srt_from_voplan(vo_items: list, srt_path: Path, subs_path: Path) -> None:
-    """Write SRT + subs.json directly from VOPlan items (episode-absolute timing)."""
+_SUB_MAX_CHARS = 24   # max CJK characters per subtitle card (≈1 line on phone)
+_SUB_BREAK     = "。！？…；，,!?;,"  # preferred break-after characters
+
+
+def _split_subtitle_text(text: str) -> list[str]:
+    """Split a long narration paragraph into short subtitle cards.
+
+    Strategy:
+    1. Try to break at sentence-ending punctuation within the first MAX+1 chars.
+    2. Hard-split at _SUB_MAX_CHARS but never in the middle of an ASCII word.
+    Each returned card is ≤ ~_SUB_MAX_CHARS characters.
+    """
+    import unicodedata as _ud
+
+    def _visual_width(s: str) -> int:
+        """CJK/fullwidth chars count as 2, ASCII as 1."""
+        return sum(2 if _ud.east_asian_width(c) in ("W", "F") else 1 for c in s)
+
+    _VW_MAX = _SUB_MAX_CHARS * 2  # visual-width budget (≈24 CJK = 48 units)
+
+    cards: list[str] = []
+    remaining = text.strip()
+    while _visual_width(remaining) > _VW_MAX:
+        # Walk character by character until we exceed visual width budget
+        vw = 0
+        limit_idx = len(remaining)
+        for i, ch in enumerate(remaining):
+            vw += 2 if _ud.east_asian_width(ch) in ("W", "F") else 1
+            if vw > _VW_MAX:
+                limit_idx = i
+                break
+
+        # Find best punctuation break within [0, limit_idx]
+        best = -1
+        for i, ch in enumerate(remaining[:limit_idx + 1]):
+            if ch in _SUB_BREAK:
+                best = i
+
+        if best >= 0:
+            cut = best + 1
+        else:
+            # Hard cut — but don't split in the middle of an ASCII word
+            cut = limit_idx
+            # Walk back until we're not mid-ASCII-word
+            while cut > 0 and remaining[cut - 1].isascii() and remaining[cut - 1].isalpha() \
+                    and cut < len(remaining) and remaining[cut].isascii() and remaining[cut].isalpha():
+                cut -= 1
+            if cut == 0:          # couldn't find a word boundary → hard cut at limit
+                cut = limit_idx
+
+        # If what's left after this cut is a tiny tail (≤ 4 visual units),
+        # absorb it into the current card rather than creating a stray entry.
+        tail = remaining[cut:].strip()
+        tail_vw = _visual_width(tail)
+        if 0 < tail_vw <= 8:
+            card = remaining.strip()
+            if card:
+                cards.append(card)
+            remaining = ""
+        else:
+            card = remaining[:cut].strip()
+            if card:
+                cards.append(card)
+            remaining = tail
+    if remaining:
+        cards.append(remaining)
+    return cards or [text.strip()]
+
+
+def write_srt_from_voplan(
+    vo_items: list,
+    srt_path: Path,
+    subs_path: Path,
+    title_offset: float = 0.0,
+) -> None:
+    """Write SRT + subs.json directly from VOPlan items (episode-absolute timing).
+
+    Long paragraphs are split into short subtitle cards (≤ _SUB_MAX_CHARS chars)
+    with timing distributed proportionally by character count.
+
+    Args:
+        vo_items:     List of dicts with keys text, start_sec, end_sec.
+        srt_path:     Output .srt file path.
+        subs_path:    Output .subs.json file path.
+        title_offset: Seconds to add to all timestamps (default 0.0).
+                      Pass TITLE_CARD_OFFSET when a title-card pre-roll is active.
+    """
     lines: list[str] = []
     subs:  list[dict] = []
     seq = 1
@@ -430,16 +519,34 @@ def write_srt_from_voplan(vo_items: list, srt_path: Path, subs_path: Path) -> No
         text = vi.get("text", "").strip()
         if not text:
             continue
-        abs_in  = round(vi["start_sec"] * 1000)
-        abs_out = round(vi["end_sec"]   * 1000)
-        timecode = f"{ms_to_srt_ts(abs_in)} --> {ms_to_srt_ts(abs_out)}"
-        lines += [str(seq), timecode, text, ""]
-        subs.append({
-            "line_id":  vi.get("item_id", ""),
-            "timecode": timecode,
-            "text":     text,
-        })
-        seq += 1
+        abs_in  = round((vi["start_sec"] + title_offset) * 1000)
+        abs_out = round((vi["end_sec"]   + title_offset) * 1000)
+        duration_ms = abs_out - abs_in
+
+        cards = _split_subtitle_text(text)
+        total_chars = sum(len(c) for c in cards)
+
+        # Distribute time proportionally; guarantee ≥50 ms per card
+        card_starts: list[int] = []
+        cur_ms = abs_in
+        for card in cards:
+            card_starts.append(cur_ms)
+            share = round(duration_ms * len(card) / total_chars) if total_chars else duration_ms
+            cur_ms += max(share, 50)
+
+        for i, card in enumerate(cards):
+            t_in  = card_starts[i]
+            t_out = card_starts[i + 1] if i + 1 < len(card_starts) else abs_out
+            t_out = max(t_out, t_in + 50)
+            timecode = f"{ms_to_srt_ts(t_in)} --> {ms_to_srt_ts(t_out)}"
+            lines += [str(seq), timecode, card, ""]
+            subs.append({
+                "line_id":  vi.get("item_id", ""),
+                "timecode": timecode,
+                "text":     card,
+            })
+            seq += 1
+
     srt_path.write_text("\n".join(lines), encoding="utf-8")
     subs_path.write_text(json.dumps(subs, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -612,6 +719,17 @@ def parse_args() -> argparse.Namespace:
         "--format", default=None, metavar="FORMAT",
         help="Project format (e.g. 'mtv'). MTV skips VO mixing and music ducking.",
     )
+    p.add_argument(
+        "--title-card", action="store_true",
+        help="Burn story title overlay for first 1.0s, fade out 0.7→1.0s. "
+             "Delays VO audio by 1.0s (title-only pre-roll). "
+             "Title text read from episode meta.json → story_title.",
+    )
+    p.add_argument(
+        "--subtitles", action="store_true",
+        help="Burn subtitles at the bottom of the video, synced to TTS timing. "
+             "When --title-card is also active, subtitles start at t=1.0s.",
+    )
     return p.parse_args()
 
 
@@ -718,12 +836,24 @@ def main() -> None:
     # ── 3. Read MediaPlan.json segments ───────────────────────────────────────
     media_plan_path = episode_dir / "MediaPlan.json"
     media_segments: list = []
+    _bg_resolved_path: str | None = None   # fallback bg from VOPlan.resolved_assets
     if media_plan_path.exists():
         _mp_data       = load_json(media_plan_path)
         media_segments = _mp_data.get("shot_overrides", [])
         print(f"  [media] {len(media_segments)} segment(s) from MediaPlan.json")
     else:
-        print("  [media] MediaPlan.json not found — rendering black background")
+        # simple_narration: no MediaPlan — check resolved_assets for bg-provided
+        for _ra in voplan.get("resolved_assets", []):
+            if (_ra.get("asset_id") == "bg-provided"
+                    and _ra.get("asset_type") == "background"):
+                _uri = _ra.get("uri", "")
+                _p = _uri[len("file://"):] if _uri.startswith("file://") else _uri
+                if _p and Path(_p).exists():
+                    _bg_resolved_path = _p
+                    print(f"  [media] no MediaPlan.json — using bg-provided: {Path(_p).name}")
+                    break
+        if not _bg_resolved_path:
+            print("  [media] MediaPlan.json not found — rendering black background")
 
     # ── 4. Compute total duration ─────────────────────────────────────────────
     if media_segments:
@@ -749,6 +879,21 @@ def main() -> None:
                     print(f"  [dur] MTV: extended total_dur to music end {_music_end:.3f}s")
             except Exception as _e:
                 print(f"  [warn] MTV: could not read MusicPlan for duration: {_e}")
+    # ── Subtitle env-var supplement (simple_narration pipeline) ─────────────
+    if not args.subtitles and os.environ.get("SIMPLE_NARRATION_SUBTITLES"):
+        args.subtitles = True
+
+    # ── Story segments (multi-story overlay, no silent pre-roll) ─────────────
+    # story_segments is written by simple_narration_setup.py and preserved by
+    # post_tts_analysis.py.  Each entry carries the first_item_id so we can
+    # look up the exact start_sec after TTS timing is known.
+    TITLE_CARD_OFFSET = 0.0   # no silent pre-roll in multi-story format
+    story_segments = voplan.get("story_segments", [])
+    # Build item_id → start_sec lookup from resolved vo_items
+    _item_start: dict[str, float] = {
+        v["item_id"]: float(v.get("start_sec", 0.0)) for v in vo_items
+    }
+
     print(f"  [dur] total_dur={total_dur:.3f}s")
 
     _scale_pad = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
@@ -762,22 +907,57 @@ def main() -> None:
 
         # ── 5. Build video clips from segments ──────────────────────────────
         if not media_segments:
-            _bp = _tmp / "clip_0000_black.mp4"
-            _r = subprocess.run([
-                "ffmpeg", "-y", "-f", "lavfi",
-                "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={total_dur:.3f}",
-                "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-                "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-shortest", str(_bp)
-            ], capture_output=True, text=True)
-            if _r.returncode == 0:
-                _clip_files.append(_bp)
-                _clip_durs.append(total_dur)
-                _clip_trans.append("none")
-                print(f"  [clip] black placeholder {total_dur:.3f}s ok")
-            else:
-                print(f"[ERROR] black placeholder failed: {_r.stderr[-300:]}", file=sys.stderr)
-                sys.exit(1)
+            _bp = _tmp / "clip_0000_bg.mp4"
+            _used_bg = False
+            if _bg_resolved_path:
+                _bg_ext = Path(_bg_resolved_path).suffix.lower()
+                _is_vid = _bg_ext in {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+                if _is_vid:
+                    _bg_cmd = [
+                        "ffmpeg", "-y",
+                        "-stream_loop", "-1", "-i", _bg_resolved_path,
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-vf", _scale_pad, "-r", str(FPS), "-pix_fmt", "yuv420p",
+                        "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
+                        "-shortest", str(_bp),
+                    ]
+                else:
+                    _bg_cmd = [
+                        "ffmpeg", "-y",
+                        "-loop", "1", "-framerate", str(FPS), "-i", _bg_resolved_path,
+                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                        "-vf", _scale_pad, "-r", str(FPS), "-pix_fmt", "yuv420p",
+                        "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
+                        "-shortest", str(_bp),
+                    ]
+                _r = subprocess.run(_bg_cmd, capture_output=True, text=True)
+                if _r.returncode == 0:
+                    _clip_files.append(_bp)
+                    _clip_durs.append(total_dur)
+                    _clip_trans.append("none")
+                    _kind = "video" if _is_vid else "image"
+                    print(f"  [clip] bg-provided ({_kind}) {total_dur:.3f}s ok")
+                    _used_bg = True
+                else:
+                    print(f"  [warn] bg-provided render failed — falling back to black:\n"
+                          f"         {_r.stderr[-300:]}")
+            if not _used_bg:
+                _bp = _tmp / "clip_0000_black.mp4"
+                _r = subprocess.run([
+                    "ffmpeg", "-y", "-f", "lavfi",
+                    "-i", f"color=c=black:size={W}x{H}:rate={FPS}:duration={total_dur:.3f}",
+                    "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                    "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-shortest", str(_bp)
+                ], capture_output=True, text=True)
+                if _r.returncode == 0:
+                    _clip_files.append(_bp)
+                    _clip_durs.append(total_dur)
+                    _clip_trans.append("none")
+                    print(f"  [clip] black placeholder {total_dur:.3f}s ok")
+                else:
+                    print(f"[ERROR] black placeholder failed: {_r.stderr[-300:]}", file=sys.stderr)
+                    sys.exit(1)
         else:
             for _si, _seg in enumerate(media_segments):
                 _stype    = _seg.get("type", "image")
@@ -884,7 +1064,7 @@ def main() -> None:
                     continue
                 _scid    = _scene_id_from_item_id(_vi.get("item_id", ""))
                 _head_off = vo_head_offsets.get(_scid, 0.0)
-                _delay_ms = int((_vi["start_sec"] + _head_off) * 1000)
+                _delay_ms = int((_vi["start_sec"] + _head_off + TITLE_CARD_OFFSET) * 1000)
                 if _delay_ms < 0:
                     continue
                 _vo_inputs.append(str(_wav))
@@ -1085,6 +1265,68 @@ def main() -> None:
         else:
             _final_audio = _vo_audio
 
+        # ── 11a. Generate SRT (must exist before mux when burning subtitles) ───
+        # Always generate here so the file is ready; step 12 will skip if already done.
+        srt_path  = output_dir / f"output.{locale}.srt"
+        subs_path = output_dir / "output.subs.json"
+        write_srt_from_voplan(vo_items, srt_path, subs_path,
+                              title_offset=TITLE_CARD_OFFSET)
+        if args.subtitles:
+            print(f"  [subtitles] SRT: {srt_path}  (offset={TITLE_CARD_OFFSET:.1f}s)")
+
+        # ── 11b. Build video filter chain ────────────────────────────────────
+        # Base: freeze last frame to fill any gap between concat and total_dur.
+        _vf_chain = [f"tpad=stop_mode=clone:stop_duration={total_dur:.3f}"]
+
+        # Per-story badge overlays: [01/05] Title, shown for 1.2s at story start.
+        # drawbox gives a semi-transparent black pill behind the text.
+        def _esc(t: str) -> str:
+            return (t.replace("\\", "\\\\")
+                     .replace("'",  "\u2019")
+                     .replace(":",  "\\:")
+                     .replace("[",  "\\[")
+                     .replace("]",  "\\]"))
+
+        _font_arg = (f":fontfile={NOTO_CJK_FONT}"
+                     if Path(NOTO_CJK_FONT).exists() else "")
+        _OVERLAY_DUR = 1.2   # seconds each story badge is visible
+
+        if story_segments:
+            for _seg in story_segments:
+                _idx   = _seg["story_index"]
+                _total = _seg["story_count"]
+                _stitle = _seg.get("title", "")
+                _fid   = _seg.get("first_item_id", "")
+                _t0    = _item_start.get(_fid, 0.0)
+                _t1    = _t0 + _OVERLAY_DUR
+                _badge = f"\\[{_idx:02d}/{_total:02d}\\] {_esc(_stitle)}"
+                _enable = f"between(t,{_t0:.3f},{_t1:.3f})"
+                _vf_chain.append(
+                    f"drawbox=x=16:y=14:w=iw*0.62:h=68"
+                    f":color=black@0.65:t=fill:enable='{_enable}'"
+                )
+                _vf_chain.append(
+                    f"drawtext=text='{_badge}'{_font_arg}"
+                    f":fontsize=28:fontcolor=white"
+                    f":borderw=1:bordercolor=black@0.4"
+                    f":x=28:y=32:enable='{_enable}'"
+                )
+            print(f"  [story-overlay] {len(story_segments)} badge(s) queued")
+
+        # Burned-in subtitles: white text + black outline at bottom.
+        if args.subtitles and srt_path.exists():
+            _srt_esc = str(srt_path).replace("\\", "/").replace(":", "\\:")
+            _vf_chain.append(
+                f"subtitles='{_srt_esc}'"
+                f":force_style='FontName=Noto Sans CJK SC"
+                f",FontSize=24,Alignment=2,MarginV=40"
+                f",PrimaryColour=&H00FFFFFF"
+                f",OutlineColour=&H00000000"
+                f",Outline=2,Shadow=1'"
+            )
+
+        _vf_str = ",".join(_vf_chain)
+
         # ── 11. Mux video + audio with quality profile ───────────────────────
         # tpad freezes the last frame when the concat video is shorter than
         # total_dur (e.g. because xfade dissolve transitions absorb overlap
@@ -1096,7 +1338,7 @@ def main() -> None:
             "-i", str(_concat_video),
             "-i", str(_final_audio),
             "-map", "0:v:0", "-map", "1:a:0",
-            "-vf", f"tpad=stop_mode=clone:stop_duration={total_dur:.3f}",
+            "-vf", _vf_str,
             "-c:v", "libx264", "-crf", str(crf), "-preset", preset_str,
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
@@ -1109,11 +1351,119 @@ def main() -> None:
         print(f"  [mux] {final_mp4}")
 
     # ── 12. SRT + subtitle sidecar ───────────────────────────────────────────
-    srt_path  = output_dir / f"output.{locale}.srt"
-    subs_path = output_dir / "output.subs.json"
-    write_srt_from_voplan(vo_items, srt_path, subs_path)
     print(f"  SRT:  {srt_path}")
     print(f"  Subs: {subs_path}")
+
+    # ── 12a. YouTube chapters ─────────────────────────────────────────────────
+    if story_segments:
+        chapters_path = output_dir / "chapters.txt"
+        with open(chapters_path, "w", encoding="utf-8") as _cf:
+            for _seg in story_segments:
+                _t0 = _item_start.get(_seg.get("first_item_id", ""), 0.0)
+                _mm = int(_t0 // 60)
+                _ss = int(_t0 % 60)
+                _cf.write(f"{_mm}:{_ss:02d} {_seg['title']}\n")
+        print(f"  Chapters: {chapters_path}")
+
+    # ── 12b. Thumbnail — clean background frame + large centered title ───────
+    # Use the background source directly (no burned-in subtitles/badges).
+    # Then overlay the first story title as large, prominent center text.
+    # YouTube recommended: 1280×720, <2 MB.
+    thumb_path  = output_dir / "thumbnail.png"
+    thumb_raw   = output_dir / "thumbnail_raw.png"
+    _BOLD_FONT  = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+    _thumb_font = _BOLD_FONT if Path(_BOLD_FONT).exists() else NOTO_CJK_FONT
+
+    # Step 1: grab a raw frame from the background source (clean, no text).
+    # Use bg source when available (avoids burned-in subtitles/badges).
+    # Seek to min(5s, 10% of total_dur) so short videos don't seek past EOF.
+    _thumb_src = _bg_resolved_path or str(final_mp4)
+    _thumb_ss  = f"{min(5.0, total_dur * 0.1):.2f}"
+    _tr1 = subprocess.run([
+        "ffmpeg", "-y", "-ss", _thumb_ss, "-i", _thumb_src,
+        "-frames:v", "1", "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        "-q:v", "2", str(thumb_raw)
+    ], capture_output=True, text=True)
+
+    if _tr1.returncode == 0 and story_segments:
+        # Step 2: overlay title using Pillow (avoids ffmpeg filter reinit bugs)
+        try:
+            from PIL import Image, ImageDraw, ImageFont  # type: ignore
+
+            _thumb_title = story_segments[0]["title"]
+            _W, _H = 1280, 720
+            _FONT_SIZE = 72
+            _LINE_PAD  = 16   # px between lines
+            _BOX_PAD   = 24   # px above/below text block
+
+            # Load bold font
+            try:
+                _pil_font = ImageFont.truetype(_thumb_font, _FONT_SIZE)
+            except Exception:
+                _pil_font = ImageFont.load_default()
+
+            # Split title into 1-2 balanced lines for thumbnail.
+            # Finds punctuation nearest to the midpoint; hard-splits if none.
+            def _split(title: str) -> list[str]:
+                title = title.strip()
+                if len(title) <= 14:          # short enough for one line
+                    return [title]
+                mid = len(title) // 2
+                best = -1
+                for d in range(len(title)):   # search outward from midpoint
+                    for i in [mid - d, mid + d]:
+                        if 0 < i < len(title) and title[i] in "，,。！？ ：:":
+                            best = i
+                            break
+                    if best != -1:
+                        break
+                cut = (best + 1) if best != -1 else mid
+                return [title[:cut].strip(), title[cut:].strip()]
+
+            _lines   = _split(_thumb_title)
+            _img     = Image.open(str(thumb_raw)).convert("RGB")
+            _img     = _img.resize((_W, _H), Image.LANCZOS)
+            _draw    = ImageDraw.Draw(_img, "RGBA")
+
+            # Measure each line
+            _line_dims = []
+            for _ln in _lines:
+                _bb = _draw.textbbox((0, 0), _ln, font=_pil_font)
+                _line_dims.append((_bb[2] - _bb[0], _bb[3] - _bb[1]))
+
+            _max_tw   = max(d[0] for d in _line_dims)
+            _line_h   = max(d[1] for d in _line_dims) + _LINE_PAD
+            _block_h  = _line_h * len(_lines) + _BOX_PAD * 2
+            _box_y0   = (_H - _block_h) // 2
+            _box_y1   = _box_y0 + _block_h
+
+            # Dark semi-transparent band
+            _draw.rectangle([(0, _box_y0), (_W, _box_y1)], fill=(0, 0, 0, 178))
+
+            # Draw each line centered
+            for _li, (_ln, (_tw, _th)) in enumerate(zip(_lines, _line_dims)):
+                _tx = (_W - _tw) // 2
+                _ty = _box_y0 + _BOX_PAD + _li * _line_h
+                # Shadow/border
+                for _dx, _dy in [(-2,0),(2,0),(0,-2),(0,2),(-2,-2),(2,2)]:
+                    _draw.text((_tx + _dx, _ty + _dy), _ln, font=_pil_font, fill=(0, 0, 0, 200))
+                _draw.text((_tx, _ty), _ln, font=_pil_font, fill=(255, 255, 255, 255))
+
+            _img.save(str(thumb_path), "PNG")
+            thumb_raw.unlink(missing_ok=True)
+            print(f"  Thumbnail: {thumb_path}")
+
+        except Exception as _te:
+            # Pillow failed — use raw frame as fallback
+            thumb_raw.rename(thumb_path)
+            print(f"  [warn] thumbnail title overlay failed: {_te}")
+
+    elif _tr1.returncode == 0:
+        # No story_segments — use raw frame as-is
+        thumb_raw.rename(thumb_path)
+        print(f"  Thumbnail: {thumb_path}")
+    else:
+        print(f"  [warn] thumbnail extraction failed: {_tr1.stderr[-200:]}")
 
     # ── 13. render_output.json  (contract: RenderOutput.v1.json) ────────────
     total_ms  = round(total_dur * 1000)
