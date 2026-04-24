@@ -1594,7 +1594,17 @@ else: print(v)
 " 2>/dev/null; }
   [[ -z "$IMAGE"        ]] && IMAGE="$(_cfg_get background)"
   [[ -z "$LOCALE"       ]] && LOCALE="$(_cfg_get locale)"
-  [[ -z "$PROFILE"      ]] && PROFILE="$(_cfg_get profile)"
+  if [[ -z "$PROFILE" ]]; then
+    PROFILE="$(python3 -c "
+import json
+d = json.load(open('$CONFIG', encoding='utf-8'))
+p = d.get('profile', '')
+if isinstance(p, dict):
+    print(p.get('mode', ''))
+elif isinstance(p, str):
+    print(p)
+" 2>/dev/null)"
+  fi
   [[ -z "$TITLE_CARD"   ]] && TITLE_CARD="$(_cfg_get title_card)"
   [[ -z "$SUBTITLES"    ]] && SUBTITLES="$(_cfg_get subtitles)"
   if [[ -z "$VIDEO_EFFECT" ]]; then

@@ -1263,9 +1263,10 @@
     <button class="tab"        data-tab="youtube"  onclick="switchTab('youtube')" >▶ YouTube</button>
   </nav>
 
-  <div class="toggle-wrap" id="toggle-render"
+  <!-- Initial class/title must match JS default (renderProd = true → HD) -->
+  <div class="toggle-wrap render-hd" id="toggle-render"
        onclick="toggleRenderMode()" tabindex="0"
-       title="Preview — fast encode (CRF 28) for review">
+       title="HD mode — high quality encode (CRF 18) for final upload">
     <span class="toggle-label toggle-left">🖼 Preview</span>
     <div class="toggle-track"><div class="toggle-thumb"></div></div>
     <span class="toggle-label toggle-right">📺 HD</span>
@@ -3832,7 +3833,13 @@ placeholder="Enter your story here"></textarea>
   // Show popover after text selection in a vo-text input (zh locales only)
   document.addEventListener('mouseup', function(e) {
     const input = e.target.closest('input.vo-text');
-    if (!input) { _voPhCancel(); return; }
+    if (!input) {
+      // Don't cancel when clicking inside the phoneme popover itself —
+      // mouseup fires before onclick, so cancelling here would null _voPhCtx
+      // before _voPhCommit() runs, silently discarding the override.
+      if (!e.target.closest('#vo-ph-popover')) _voPhCancel();
+      return;
+    }
     const row = input.closest('.vo-item-row');
     if (!row) return;
     const locale = row.dataset.locale || '';

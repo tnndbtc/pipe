@@ -348,7 +348,8 @@ def _xml_escape(text: str) -> str:
                 .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
 
 
-def segment_zh_phonemes(text: str, azure_lang: str) -> list[dict]:
+def segment_zh_phonemes(text: str, azure_lang: str,
+                        phoneme_overrides: dict | None = None) -> list[dict]:
     """Split *text* into plain-text and phoneme-correction segments.
 
     Returns a list of dicts, each either:
@@ -359,15 +360,19 @@ def segment_zh_phonemes(text: str, azure_lang: str) -> list[dict]:
     any <mstts:express-as> block — Azure rejects <phoneme> inside express-as
     with error 1007.
 
+    phoneme_overrides: per-item corrections from VOPlan tts_prompt.phoneme_overrides
+    (e.g. {"华": "hua 2"}).  Merged with _ZH_PHONEME_CORRECTIONS; item wins on conflict.
+
     For non-zh locales (or when there are no corrections) returns a single
     text segment so callers can use the same code path everywhere.
     """
-    if not azure_lang.startswith("zh") or not _ZH_PHONEME_CORRECTIONS:
+    merged = {**_ZH_PHONEME_CORRECTIONS, **(phoneme_overrides or {})}
+    if not azure_lang.startswith("zh") or not merged:
         return [{"type": "text", "content": text}]
     segments: list[dict] = []
     buf: list[str] = []
     for ch in text:
-        pinyin = _ZH_PHONEME_CORRECTIONS.get(ch)
+        pinyin = merged.get(ch)
         if pinyin:
             if buf:
                 segments.append({"type": "text", "content": "".join(buf)})
@@ -405,6 +410,7 @@ def build_ssml(
     duration_sec: float | None = None,
     pitch: str | None = None,
     break_ms: int = 0,
+    phoneme_overrides: dict | None = None,
 ) -> str:
     """Build Azure SSML for a single utterance.
 
@@ -437,7 +443,7 @@ def build_ssml(
     # bare <phoneme> direct child of <voice> (Azure rejects <phoneme> inside
     # <mstts:express-as>).
     voice_parts: list[str] = []
-    for seg in segment_zh_phonemes(text, azure_lang):
+    for seg in segment_zh_phonemes(text, azure_lang, phoneme_overrides):
         if seg["type"] == "text":
             escaped = _xml_escape(seg["content"])
             if break_ms > 0:
@@ -2521,20 +2527,24 @@ def load_items_from_manifest(manifest: dict, path: str, asset_id_filter: str | N
         # ── Sentence-end break (explicit > VoiceCast base; default 0 = disabled) ──
         break_ms = int(tts.get("azure_break_ms") or vc_locale.get("azure_break_ms") or 0)
 
+        # ── Per-item phoneme overrides (saved by VO tab /api/vo_phoneme) ──
+        phoneme_overrides = tts.get("phoneme_overrides") or {}
+
         items.append({
-            "item_id":      vo["item_id"],
-            "speaker":      speaker_id,
-            "text":         vo["text"],
-            "locale":       locale,
-            "azure_lang":   azure_lang,
-            "voice":        voice,
-            "voice_style":  voice_style,
-            "emotion":      emotion,
-            "style":        style,
-            "style_degree": style_degree,
-            "rate":         rate,
-            "pitch":        pitch,
-            "break_ms":     break_ms,
+            "item_id":           vo["item_id"],
+            "speaker":           speaker_id,
+            "text":              vo["text"],
+            "locale":            locale,
+            "azure_lang":        azure_lang,
+            "voice":             voice,
+            "voice_style":       voice_style,
+            "emotion":           emotion,
+            "style":             style,
+            "style_degree":      style_degree,
+            "rate":              rate,
+            "pitch":             pitch,
+            "break_ms":          break_ms,
+            "phoneme_overrides": phoneme_overrides,
         })
 
     return items
@@ -2710,6 +2720,7 @@ def _synthesise_per_item(synthesizer, items: list[dict], out_dir: Path, force: b
             style_degree=vo["style_degree"],
             pitch=vo.get("pitch"),
             break_ms=vo.get("break_ms", 0),
+            phoneme_overrides=vo.get("phoneme_overrides"),
         )
 
         try:

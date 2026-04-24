@@ -34,6 +34,8 @@ import urllib.request as _urllib_req
 import urllib.error   as _urllib_err
 
 # ── YouTube category mapping (genre → category_id, no LLM needed) ─────────────
+# "narration" is set by simple_narration_setup.py — ONLY simple_run.sh writes this
+# genre, and its content is always News & Politics per product requirement.
 _GENRE_TO_CATEGORY = {
     "history":       "27",
     "documentary":   "27",
@@ -42,7 +44,7 @@ _GENRE_TO_CATEGORY = {
     "news":          "25",
     "entertainment": "24",
     "comedy":        "23",
-    "narration":     "24",
+    "narration":     "25",
 }
 _DEFAULT_CATEGORY = "25"  # News & Politics (default for simple_run.sh content)
 
@@ -150,7 +152,10 @@ def _launch_stream_job(job_key: str, ep_dir: str, cmd: list, env: dict, client) 
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,   # prevent SIGTTIN from terminal reads
                 text=True, bufsize=1, env=env, cwd=PIPE_DIR,
+                start_new_session=True,     # new session = new process group, isolated
+                                            # from server's terminal SIGTSTP/SIGHUP
             )
             with _lock:
                 _procs[client] = proc
@@ -3122,10 +3127,12 @@ class Handler(BaseHTTPRequestHandler):
                         _pre_cmd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
                         text=True,
                         bufsize=1,
                         env=step_env,
                         cwd=PIPE_DIR,
+                        start_new_session=True,
                     )
                     with _lock:
                         _procs[client] = _pre_proc
@@ -3164,10 +3171,12 @@ class Handler(BaseHTTPRequestHandler):
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
                     text=True,
                     bufsize=1,
                     env=step_env,
                     cwd=PIPE_DIR,
+                    start_new_session=True,
                 )
                 with _lock:
                     _procs[client] = proc
@@ -3217,7 +3226,9 @@ class Handler(BaseHTTPRequestHandler):
                         _rs_proc = subprocess.Popen(
                             _rs_cmd,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL,
                             text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                            start_new_session=True,
                         )
                         with _lock:
                             _procs[client] = _rs_proc
@@ -3338,7 +3349,9 @@ class Handler(BaseHTTPRequestHandler):
                     _sp = subprocess.Popen(
                         _sub_cmd,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
                         text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                        start_new_session=True,
                     )
                     with _lock:
                         _procs[client] = _sp
@@ -3375,8 +3388,10 @@ class Handler(BaseHTTPRequestHandler):
                         cmd,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
                         text=True, bufsize=1,
                         env=step_env, cwd=PIPE_DIR,
+                        start_new_session=True,
                     )
                     with _lock:
                         _procs[client] = proc
@@ -3469,7 +3484,9 @@ class Handler(BaseHTTPRequestHandler):
                     p = subprocess.Popen(
                         cmd,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
                         text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                        start_new_session=True,
                     )
                     with _lock:
                         _procs[client] = p
@@ -3714,7 +3731,9 @@ class Handler(BaseHTTPRequestHandler):
                 _p35 = subprocess.Popen(
                     _cmd_tts,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
                     text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                    start_new_session=True,
                 )
                 with _lock:
                     _procs[client] = _p35
@@ -3743,7 +3762,9 @@ class Handler(BaseHTTPRequestHandler):
                 _p35b = subprocess.Popen(
                     _cmd_pta,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
                     text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                    start_new_session=True,
                 )
                 with _lock:
                     _procs[client] = _p35b
@@ -3830,7 +3851,9 @@ class Handler(BaseHTTPRequestHandler):
                     _p75 = subprocess.Popen(
                         _cmd,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
                         text=True, bufsize=1, env=step_env, cwd=PIPE_DIR,
+                        start_new_session=True,
                     )
                     with _lock:
                         _procs[client] = _p75
@@ -9433,14 +9456,10 @@ class Handler(BaseHTTPRequestHandler):
                     "sources":            sources,
                 }, ensure_ascii=False)
 
-                _sources_rule = (
-                    "- sources: if the 'sources' list is non-empty, append a dedicated line "
-                    "at the very end of the description (after all other content, before or within "
-                    "the hashtag paragraph): "
-                    "\"来源：#Source1 #Source2\" for Chinese output, "
-                    "\"Sources: #Source1 #Source2\" for English output — "
-                    "use each source name exactly as given, prefixed with #\n"
-                ) if sources else ""
+                # NOTE: sources are appended server-side AFTER the Claude call
+                # (see sources_block below). LLMs do not reliably obey this rule,
+                # so we do NOT ask Claude to include sources — we append them
+                # deterministically to the final description ourselves.
 
                 system_prompt = (
                     "You are a YouTube metadata expert. Generate upload metadata "
@@ -9455,7 +9474,6 @@ class Handler(BaseHTTPRequestHandler):
                     "- tags: 10-15 items, mix specific and broad terms\n"
                     f"- thumbnail_source_sec: pick midpoint of shot with emotional_tag "
                     f"'triumph', 'climax', or 'reveal'; must be within [0, {total_dur}]\n"
-                    + _sources_rule +
                     "- Do NOT include category_id in the response"
                 ).format(output_lang=output_lang)
 
@@ -9575,7 +9593,22 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception as _lic_exc:
                         print(f"  [youtube] WARNING: could not read licenses.json: {_lic_exc}")
 
-                final_description = suggested["description"].rstrip() + credits_block
+                # ── Append Sources block deterministically ────────────────────
+                # Parsed from story.txt `### #Src1 #Src2` line (see earlier block).
+                # Do NOT rely on the LLM to include these — always append here.
+                sources_block = ""
+                if sources:
+                    _src_hashtags = " ".join(f"#{s}" for s in sources)
+                    if output_lang.startswith("Chinese"):
+                        sources_block = f"\n\n来源：{_src_hashtags}"
+                    else:
+                        sources_block = f"\n\nSources: {_src_hashtags}"
+
+                final_description = (
+                    suggested["description"].rstrip()
+                    + sources_block
+                    + credits_block
+                )
 
                 # ── Assemble full draft ───────────────────────────────────────
                 # Prefer thumbnail.jpg; fall back to thumbnail.png if jpg not yet created
@@ -9924,8 +9957,10 @@ class Handler(BaseHTTPRequestHandler):
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
                     text=True,
                     cwd=PIPE_DIR,
+                    start_new_session=True,
                 )
                 with _lock:
                     _procs[_yt_key] = proc
