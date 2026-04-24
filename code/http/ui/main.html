@@ -2194,7 +2194,7 @@ placeholder="Enter your story here"></textarea>
   let currentSlug = null;
   let currentEpId = null;
 
-  let renderProd = false;    // false = preview_local (CRF 28), true = high (CRF 18)
+  let renderProd = true;     // false = preview_local (CRF 28), true = high (CRF 18)
   let noMusic    = false;    // music always enabled — skip Music tab to omit music
   let purgeAssets = false;  // saved per-project in meta.json; default OFF to avoid accidental data loss
 
@@ -2751,8 +2751,9 @@ placeholder="Enter your story here"></textarea>
               autoTarget = epDir;
           });
         });
-        // Priority: Run-tab project → previous selection → nothing
-        const target = autoTarget || prevEpDir;
+        // Priority: Run-tab project → previous selection → first available
+        const target = autoTarget || prevEpDir ||
+                       (voSel.options.length > 1 ? voSel.options[1].value : '');
         if (target) {
           voSel.value = target;
           if (voSel.value) {
@@ -10992,6 +10993,21 @@ placeholder="Enter your story here"></textarea>
       document.getElementById('yt-save-wrap').style.display        = ytMissing ? 'none' : 'block';
 
       if (ytMissing) {
+        // Auto-detect: try every other locale in the dropdown before giving up
+        const _locSel = document.getElementById('yt-locale-sel');
+        const _otherLocales = Array.from(_locSel.options)
+          .map(o => o.value).filter(v => v && v !== locale);
+        for (const _tryLocale of _otherLocales) {
+          try {
+            const _tr = await fetch(`/api/youtube_status?slug=${encodeURIComponent(slug)}&ep_id=${encodeURIComponent(epId)}&locale=${encodeURIComponent(_tryLocale)}`);
+            const _td = await _tr.json();
+            if (_td.youtube != null) {
+              _locSel.value = _tryLocale;   // switch dropdown
+              initYoutubeTab();             // re-run with detected locale
+              return;
+            }
+          } catch {}
+        }
         badge.textContent = 'No youtube.json — select playlist then click Generate';
         badge.style.background = '#78350f';
         document.getElementById('yt-meta-form').style.display     = 'none';

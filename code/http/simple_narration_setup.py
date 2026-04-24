@@ -104,6 +104,8 @@ def parse_story_txt(
             _flush_story()
             current_title = m.group(1).strip()
             current_chunk = []
+        elif re.match(r"^###", line):
+            pass  # ### = sources/metadata marker — exclude from narration
         elif re.match(r"^\s*-\s*$", line):
             _flush_chunk()
         else:
@@ -368,6 +370,7 @@ def build_pipeline_vars(
     profile: str,
     episode_id: str = "s01e01",
     episode_number: str = "01",
+    subtitles: bool = False,
 ) -> str:
     """Return pipeline_vars.sh content, matching gen_pipeline_vars.py format."""
     primary = locale.split(",")[0].strip()
@@ -387,6 +390,8 @@ def build_pipeline_vars(
         f'export VOICE_CAST_FILE="projects/{slug}/VoiceCast.json"',
         f'export NO_MUSIC="1"',
     ]
+    if subtitles:
+        lines.append('export SIMPLE_NARRATION_SUBTITLES="1"')
     return "\n".join(lines) + "\n"
 
 
@@ -635,6 +640,8 @@ def parse_args() -> argparse.Namespace:
                    help="Disable built-in default skip list")
     p.add_argument("--alt",             type=int, default=None,
                    help="Use alternatives[N] instead of primary voice (0-based)")
+    p.add_argument("--subtitles",       action="store_true",
+                   help="Burn subtitles into output (persisted to pipeline_vars.sh)")
     return p.parse_args()
 
 
@@ -736,7 +743,8 @@ def main() -> None:
 
     # 4b. pipeline_vars.sh
     vars_content = build_pipeline_vars(
-        slug, title, locale_str, seed, args.profile, episode_id, episode_number
+        slug, title, locale_str, seed, args.profile, episode_id, episode_number,
+        subtitles=args.subtitles,
     )
     write_text(ep_dir / "pipeline_vars.sh", vars_content)
 

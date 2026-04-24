@@ -1,0 +1,56 @@
+{
+  "background": "/mnt/shared/story/news/news_business.png",
+  "locale": "zh-Hans",
+  "profile": "high",
+  "title_card": false,
+  "subtitles": true,
+  "video_effect": {
+    "mode": "auto",
+    "notes": "Set mode to: auto | light_streak | dark_streak | none. auto = renderer picks based on background average luma: light_streak for dark images (luma<110), dark_streak for bright images (luma>145), alternating bright+dark for mid-tone images.",
+    "light_streak": {
+      "notes": "4 bright vertical strips sweeping left-right across the frame. Best for images with a dark background. Adds luma to create a glowing shimmer effect. 4 lanes evenly spaced (W/8, W/8*3, W/8*5, W/8*7), oscillation amplitude = W/8 (each strip stays in its lane). All strips sync on the same sine wave.",
+      "delta_primary": 60,
+      "delta_secondary": 65,
+      "halfwidth_primary_px": 38,
+      "halfwidth_secondary_px": 32,
+      "period_sec": 14,
+      "luma_threshold": "avg_luma < 110"
+    },
+    "dark_streak": {
+      "notes": "4 dark vertical strips sweeping left-right across the frame. Best for images with a bright background. Subtracts luma to create a shadow shimmer effect. Same 4-lane layout and sine-wave sync as light_streak.",
+      "delta_primary": 35,
+      "delta_secondary": 30,
+      "halfwidth_primary_px": 22,
+      "halfwidth_secondary_px": 26,
+      "period_sec": 14,
+      "luma_threshold": "avg_luma > 145"
+    }
+  },
+  "narrator": {
+    "zh-Hans": {
+      "Xiaoxiao DragonHD": {
+        "enabled": false,
+        "gender": "female",
+        "notes": "Customerservice style. Good for business news and professional narration.",
+        "azure_voice": "zh-CN-Xiaoxiao:DragonHDFlashLatestNeural",
+        "azure_style": "customerservice",
+        "azure_style_degree": 1.0,
+        "azure_rate": "0%",
+        "azure_pitch": "-5%",
+        "azure_break_ms": 500
+      },
+      "Yunjian": {
+        "enabled": true,
+        "gender": "male",
+        "notes": "Relaxed narration style. Good for storytelling.",
+        "azure_voice": "zh-CN-YunjianNeural",
+        "azure_style": "narration-relaxed",
+        "azure_style_degree": 1.0,
+        "azure_rate": "0%",
+        "azure_pitch": "0%",
+        "azure_break_ms": 500
+      }
+    }
+  },
+  "skip_sections": ["Sources"]
+}

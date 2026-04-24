@@ -44,7 +44,7 @@ _GENRE_TO_CATEGORY = {
     "comedy":        "23",
     "narration":     "24",
 }
-_DEFAULT_CATEGORY = "24"
+_DEFAULT_CATEGORY = "25"  # News & Politics (default for simple_run.sh content)
 
 PORT      = 8000
 PIPE_DIR  = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root (pipe/)
@@ -5054,13 +5054,19 @@ class Handler(BaseHTTPRequestHandler):
 
             thumb_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
                                       "renders", locale, "thumbnail.jpg")
+            _thumb_ctype = "image/jpeg"
+            if not os.path.isfile(thumb_path):
+                # Fall back to PNG (TTS mode writes thumbnail.png directly)
+                thumb_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
+                                          "renders", locale, "thumbnail.png")
+                _thumb_ctype = "image/png"
             if not os.path.isfile(thumb_path):
                 self.send_response(404); self.end_headers(); return
 
             with open(thumb_path, "rb") as _tf:
                 data = _tf.read()
             self.send_response(200)
-            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Type", _thumb_ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
@@ -9334,6 +9340,15 @@ class Handler(BaseHTTPRequestHandler):
                 shotlist    = _jload(os.path.join(ep_dir, "ShotList.json")) or {}
                 story_prompt= _jload(os.path.join(ep_dir, "StoryPrompt.json"))
 
+                # ── Extract sources from story.txt (### #Src1 #Src2 format) ─────
+                sources = []
+                story_txt_path = os.path.join(ep_dir, "story.txt")
+                if os.path.isfile(story_txt_path):
+                    for _sl in open(story_txt_path, encoding="utf-8"):
+                        _sm = re.match(r'^###\s+(.+)', _sl.rstrip())
+                        if _sm:
+                            sources = re.findall(r'#([^\s#]+)', _sm.group(1))
+
                 # ── Collect narrator text (capped at 4000 chars) ──────────────
                 lines = []
                 for scene in script.get("scenes", []):
@@ -9399,8 +9414,9 @@ class Handler(BaseHTTPRequestHandler):
                     ep_goal = (story_prompt.get("episode_goal")
                                or story_prompt.get("prompt_text", "")[:500])
 
-                output_lang = "English" if profile_info.get("locale", "en") == "en" \
-                              else "Chinese (Simplified)"
+                _eff_locale = profile_info.get("locale") or locale
+                output_lang = "Chinese (Simplified)" if _eff_locale.startswith("zh") \
+                              else "English"
 
                 total_dur = shotlist.get("total_duration_sec", 0)
 
@@ -9414,7 +9430,17 @@ class Handler(BaseHTTPRequestHandler):
                     "episode_goal":       ep_goal,
                     "narrator_text":      truncated,
                     "shots":              shot_summaries,
+                    "sources":            sources,
                 }, ensure_ascii=False)
+
+                _sources_rule = (
+                    "- sources: if the 'sources' list is non-empty, append a dedicated line "
+                    "at the very end of the description (after all other content, before or within "
+                    "the hashtag paragraph): "
+                    "\"来源：#Source1 #Source2\" for Chinese output, "
+                    "\"Sources: #Source1 #Source2\" for English output — "
+                    "use each source name exactly as given, prefixed with #\n"
+                ) if sources else ""
 
                 system_prompt = (
                     "You are a YouTube metadata expert. Generate upload metadata "
@@ -9429,6 +9455,7 @@ class Handler(BaseHTTPRequestHandler):
                     "- tags: 10-15 items, mix specific and broad terms\n"
                     f"- thumbnail_source_sec: pick midpoint of shot with emotional_tag "
                     f"'triumph', 'climax', or 'reveal'; must be within [0, {total_dur}]\n"
+                    + _sources_rule +
                     "- Do NOT include category_id in the response"
                 ).format(output_lang=output_lang)
 
@@ -9551,6 +9578,16 @@ class Handler(BaseHTTPRequestHandler):
                 final_description = suggested["description"].rstrip() + credits_block
 
                 # ── Assemble full draft ───────────────────────────────────────
+                # Prefer thumbnail.jpg; fall back to thumbnail.png if jpg not yet created
+                _thumb_jpg = os.path.join(render_dir, "thumbnail.jpg")
+                _thumb_png = os.path.join(render_dir, "thumbnail.png")
+                _thumb_rel = (
+                    f"projects/{slug}/episodes/{ep_id}/renders/{locale}/thumbnail.jpg"
+                    if os.path.isfile(_thumb_jpg) else
+                    f"projects/{slug}/episodes/{ep_id}/renders/{locale}/thumbnail.png"
+                    if os.path.isfile(_thumb_png) else None
+                )
+
                 draft = {
                     "upload_profile":      upload_profile,
                     "title":               suggested["title"],
@@ -9562,7 +9599,7 @@ class Handler(BaseHTTPRequestHandler):
                     "video_language":      locale if locale != "zh-Hans" else "zh-Hans",
                     "privacy":             "private",
                     "made_for_kids":       False,
-                    "thumbnail":           f"projects/{slug}/episodes/{ep_id}/renders/{locale}/thumbnail.jpg",
+                    "thumbnail":           _thumb_rel,
                     "thumbnail_source_sec":suggested.get("thumbnail_source_sec"),
                     "subtitles":           subtitles,
                     "publish_at":          None,

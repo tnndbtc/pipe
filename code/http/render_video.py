@@ -670,6 +670,65 @@ def write_srt(shots: list[dict], srt_path: Path, subs_path: Path, fps: int,
     subs_path.write_text(json.dumps(subs, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# ── Light streak effect ───────────────────────────────────────────────────────
+
+def _build_light_streak_vf(bg_path: str, mode: str = "auto") -> str:
+    """Build a 4-strip geq streak filter chain.
+
+    mode values:
+      "auto"         — measure bg image avg luma, pick automatically:
+                         luma < 110  → light_streak (bright strips)
+                         luma > 145  → dark_streak  (dark strips)
+                         otherwise   → alternating  (bright/dark/bright/dark)
+      "light_streak" — always use bright strips (+60/+65 luma delta)
+      "dark_streak"  — always use dark strips   (−35/−30 luma delta)
+
+    4 strips, one per quarter-width lane (W/8, W/8*3, W/8*5, W/8*7).
+    All strips share the same sine wave (period 14 s), amplitude W/8 per lane.
+    Returns a comma-separated vf filter string ready to append after scale/pad.
+    """
+    # ── Determine strip layout ────────────────────────────────────────────────
+    if mode == "light_streak":
+        resolved = "light_streak"
+    elif mode == "dark_streak":
+        resolved = "dark_streak"
+    else:  # "auto" or anything else
+        avg_luma = 128.0  # safe mid-tone fallback
+        try:
+            from PIL import Image as _PILImage, ImageStat as _PILStat  # type: ignore
+            _img = _PILImage.open(bg_path).convert("L")
+            avg_luma = _PILStat.Stat(_img).mean[0]
+        except Exception:
+            pass
+        if avg_luma < 110:
+            resolved = "light_streak"
+        elif avg_luma > 145:
+            resolved = "dark_streak"
+        else:
+            resolved = "alternating"
+        print(f"  [light_streak] auto: avg_luma={avg_luma:.1f} → {resolved}")
+
+    sin_expr = "sin(2*3.14159*T/14)"
+
+    # Each tuple: (lane_multiplier, is_bright, delta, half_width_px)
+    if resolved == "light_streak":
+        strips = [(1, True, 60, 38), (3, True, 65, 32), (5, True, 60, 38), (7, True, 65, 32)]
+    elif resolved == "dark_streak":
+        strips = [(1, False, 35, 22), (3, False, 30, 26), (5, False, 35, 22), (7, False, 30, 26)]
+    else:  # alternating
+        strips = [(1, True, 60, 38), (3, False, 35, 22), (5, True, 65, 32), (7, False, 30, 26)]
+
+    filters = []
+    for lane, is_bright, delta, hw in strips:
+        center  = f"W/8*{lane}+W/8*{sin_expr}"
+        falloff = f"max(0,1-abs(X-({center}))/{hw})"
+        lum     = (f"min(255,lum(X,Y)+{delta}*{falloff})" if is_bright
+                   else f"max(0,lum(X,Y)-{delta}*{falloff})")
+        filters.append(f"geq=lum='{lum}':cb='cb(X,Y)':cr='cr(X,Y)'")
+
+    return ",".join(filters)
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -883,6 +942,9 @@ def main() -> None:
     if not args.subtitles and os.environ.get("SIMPLE_NARRATION_SUBTITLES"):
         args.subtitles = True
 
+    # ── Video-effect env-var supplement (simple_narration pipeline) ──────────
+    _video_effect = os.environ.get("SIMPLE_NARRATION_VIDEO_EFFECT", "").strip()
+
     # ── Story segments (multi-story overlay, no silent pre-roll) ─────────────
     # story_segments is written by simple_narration_setup.py and preserved by
     # post_tts_analysis.py.  Each entry carries the first_item_id so we can
@@ -922,15 +984,21 @@ def main() -> None:
                         "-shortest", str(_bp),
                     ]
                 else:
+                    # Static still image — plain hold, with optional light streak overlay
+                    _bg_vf = _scale_pad
+                    if _video_effect in ("light_streak", "dark_streak", "auto"):
+                        _streak = _build_light_streak_vf(_bg_resolved_path, mode=_video_effect)
+                        _bg_vf  = _scale_pad + "," + _streak
+                        print(f"  [clip] streak effect mode={_video_effect!r}")
                     _bg_cmd = [
                         "ffmpeg", "-y",
                         "-loop", "1", "-framerate", str(FPS), "-i", _bg_resolved_path,
                         "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-                        "-vf", _scale_pad, "-r", str(FPS), "-pix_fmt", "yuv420p",
+                        "-vf", _bg_vf, "-r", str(FPS), "-pix_fmt", "yuv420p",
                         "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
                         "-shortest", str(_bp),
                     ]
-                _r = subprocess.run(_bg_cmd, capture_output=True, text=True)
+                    _r = subprocess.run(_bg_cmd, capture_output=True, text=True)
                 if _r.returncode == 0:
                     _clip_files.append(_bp)
                     _clip_durs.append(total_dur)
@@ -1289,7 +1357,7 @@ def main() -> None:
 
         _font_arg = (f":fontfile={NOTO_CJK_FONT}"
                      if Path(NOTO_CJK_FONT).exists() else "")
-        _OVERLAY_DUR = 1.2   # seconds each story badge is visible
+        _OVERLAY_DUR = 5.0   # seconds each story title is visible
 
         if story_segments:
             for _seg in story_segments:
@@ -1301,15 +1369,17 @@ def main() -> None:
                 _t1    = _t0 + _OVERLAY_DUR
                 _badge = f"\\[{_idx:02d}/{_total:02d}\\] {_esc(_stitle)}"
                 _enable = f"between(t,{_t0:.3f},{_t1:.3f})"
+                # Full-width semi-transparent band at the top
                 _vf_chain.append(
-                    f"drawbox=x=16:y=14:w=iw*0.62:h=68"
+                    f"drawbox=x=0:y=0:w=iw:h=90"
                     f":color=black@0.65:t=fill:enable='{_enable}'"
                 )
+                # Title centered horizontally, sitting inside the top band
                 _vf_chain.append(
                     f"drawtext=text='{_badge}'{_font_arg}"
-                    f":fontsize=28:fontcolor=white"
-                    f":borderw=1:bordercolor=black@0.4"
-                    f":x=28:y=32:enable='{_enable}'"
+                    f":fontsize=52:fontcolor=white"
+                    f":borderw=2:bordercolor=black@0.6"
+                    f":x=(w-tw)/2:y=20:enable='{_enable}'"
                 )
             print(f"  [story-overlay] {len(story_segments)} badge(s) queued")
 
@@ -1376,14 +1446,24 @@ def main() -> None:
 
     # Step 1: grab a raw frame from the background source (clean, no text).
     # Use bg source when available (avoids burned-in subtitles/badges).
-    # Seek to min(5s, 10% of total_dur) so short videos don't seek past EOF.
-    _thumb_src = _bg_resolved_path or str(final_mp4)
-    _thumb_ss  = f"{min(5.0, total_dur * 0.1):.2f}"
-    _tr1 = subprocess.run([
-        "ffmpeg", "-y", "-ss", _thumb_ss, "-i", _thumb_src,
-        "-frames:v", "1", "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-        "-q:v", "2", str(thumb_raw)
-    ], capture_output=True, text=True)
+    # Seek to min(5s, 10% of total_dur) for videos; skip -ss for still images
+    # because seeking past frame 0 on a PNG/JPG makes ffmpeg exit 0 but write
+    # no output file, which causes a FileNotFoundError in the Pillow step.
+    _thumb_src      = _bg_resolved_path or str(final_mp4)
+    _thumb_is_still = Path(_thumb_src).suffix.lower() not in {
+        ".mp4", ".mov", ".mkv", ".webm", ".avi"
+    }
+    _thumb_ss = f"{min(5.0, total_dur * 0.1):.2f}"
+    _thumb_cmd = ["ffmpeg", "-y"]
+    if not _thumb_is_still:
+        _thumb_cmd += ["-ss", _thumb_ss]
+    _thumb_cmd += [
+        "-i", _thumb_src,
+        "-frames:v", "1",
+        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        "-q:v", "2", str(thumb_raw),
+    ]
+    _tr1 = subprocess.run(_thumb_cmd, capture_output=True, text=True)
 
     if _tr1.returncode == 0 and story_segments:
         # Step 2: overlay title using Pillow (avoids ffmpeg filter reinit bugs)
