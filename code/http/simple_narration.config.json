@@ -3,12 +3,12 @@
   "locale": "zh-Hans",
   "profile": {
     "notes": "Render quality profile. Options: preview_local (CRF 28, preset medium — fast, good for iteration), high (CRF 18, preset medium — final upload quality), draft_720p (CRF 28, preset medium — 720p draft).",
-    "mode": "preview_local"
+    "mode": "high"
   },
   "title_card": false,
   "subtitles": true,
   "video_effect": {
-    "mode": "none",
+    "mode": "auto",
     "notes": "Set mode to: auto | light_streak | dark_streak | none. auto = renderer picks based on background average luma: light_streak for dark images (luma<110), dark_streak for bright images (luma>145), alternating bright+dark for mid-tone images.",
     "light_streak": {
       "notes": "4 bright vertical strips sweeping left-right across the frame. Best for images with a dark background. Adds luma to create a glowing shimmer effect. 4 lanes evenly spaced (W/8, W/8*3, W/8*5, W/8*7), oscillation amplitude = W/8 (each strip stays in its lane). All strips sync on the same sine wave.",
