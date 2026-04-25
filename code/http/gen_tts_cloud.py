@@ -1211,19 +1211,35 @@ def _align_by_silence(
         offsets[-1]["end_sec"] = round(total_dur, 4)
 
         # Proportionality guard: reject alignment if any sentence's duration is
-        # wildly shorter than its char-count share.  This catches intra-sentence
-        # HD voice pauses being mis-identified as inter-sentence boundaries.
+        # wildly shorter OR longer than its char-count share.  This catches
+        # intra-sentence HD voice pauses being mis-identified as inter-sentence
+        # boundaries (too-short split) AND intra-sentence pauses being MISSED
+        # so that the split lands too late (too-long split).
         #
         # Rules:
-        #  - Skip the LAST sentence: always gets trailing chunk silence (inflated).
+        #  - Skip the LAST sentence for the LOWER bound only: it always gets
+        #    trailing chunk silence (inflated duration), so a low ratio is fine.
+        #    But the UPPER bound still applies to the last sentence to catch the
+        #    mirror case where a very late boundary leaves the last item too short.
         #  - Skip sentences with < 20 chars: short dramatic lines are inherently
         #    variable (e.g. "Hush." gets a long break + Azure pad).
-        #  - For others: reject if actual < 0.20 × proportional share.
+        #  - Lower bound: reject if actual < 0.55 × proportional share.
+        #    Threshold raised from 0.20→0.55: the old 0.20 allowed intra-sentence
+        #    punctuation pauses (e.g. "?" mid-text) to be mis-taken as chunk
+        #    boundaries, producing splits as low as 55% of the proportional
+        #    share that went undetected.  0.55 rejects those cases and falls
+        #    back to proportional splitting, which is more reliable.
+        #  - Upper bound: reject if actual > 1.45 × proportional share (non-last
+        #    items only).  A silence gap INSIDE item N can be mistaken for the
+        #    boundary between N and N+1, making item N appear too long (ratio
+        #    ~1.5×) and item N+1 too short.  0.55/1.45 are symmetric on a log
+        #    scale: ln(0.55)≈-0.60, ln(1.45)≈+0.37 — asymmetric by design since
+        #    the last item legitimately inflates; for non-last items both tails
+        #    indicate a mis-detected silence boundary.
         total_chars = sum(len(s.get("text", "")) for s in sentences)
         if total_chars > 0:
             for idx, (off, sent) in enumerate(zip(offsets, sentences)):
-                if idx == len(offsets) - 1:
-                    continue   # last sentence: skip (trailing silence is expected)
+                is_last    = (idx == len(offsets) - 1)
                 sent_chars = len(sent.get("text", ""))
                 if sent_chars < 20:
                     continue   # short lines: naturally variable ratio
@@ -1232,11 +1248,18 @@ def _align_by_silence(
                     continue
                 actual_dur = off["end_sec"] - off["start_sec"]
                 ratio = actual_dur / prop_dur
-                if ratio < 0.20:
+                if not is_last and ratio < 0.55:
                     log.debug(
-                        f"[chunk_align] silence-gap proportionality fail: "
+                        f"[chunk_align] silence-gap proportionality fail (too short): "
                         f"{sent['item_id']} actual={actual_dur:.2f}s "
-                        f"prop={prop_dur:.2f}s ratio={ratio:.2f} < 0.20"
+                        f"prop={prop_dur:.2f}s ratio={ratio:.2f} < 0.55"
+                    )
+                    return None   # fall through to proportional
+                if not is_last and ratio > 1.45:
+                    log.debug(
+                        f"[chunk_align] silence-gap proportionality fail (too long): "
+                        f"{sent['item_id']} actual={actual_dur:.2f}s "
+                        f"prop={prop_dur:.2f}s ratio={ratio:.2f} > 1.45"
                     )
                     return None   # fall through to proportional
 

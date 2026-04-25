@@ -1698,6 +1698,18 @@ if has_srt:
 if has_spd:
     vf_parts.append(f"setpts={1.0 / speed:.6f}*PTS")
 
+# Thumbnail raw frame — grabbed BEFORE subtitle burn so subtitle text is not baked in
+thumb_path = os.path.join(base_folder, 'thumbnail.png')
+thumb_raw  = os.path.join(base_folder, 'thumbnail_raw.png')
+total_dur  = probe_dur(out_video)
+ss = f"{min(5.0, total_dur * 0.1):.2f}"
+tr = subprocess.run([
+    'ffmpeg', '-y', '-ss', ss, '-i', out_video, '-frames:v', '1',
+    '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease'
+           ',pad=1280:720:(ow-iw)/2:(oh-ih)/2',
+    '-q:v', '2', thumb_raw
+], capture_output=True, text=True)
+
 # Run ffmpeg
 tmp_out = out_video + '.tmp.mp4'
 
@@ -1723,18 +1735,6 @@ else:
         sys.exit(1)
     os.replace(tmp_out, out_video)
     print("    Video done.")
-
-# Thumbnail — always grab a frame; only overlay title text when ## headings exist
-thumb_path = os.path.join(base_folder, 'thumbnail.png')
-thumb_raw  = os.path.join(base_folder, 'thumbnail_raw.png')
-total_dur  = probe_dur(out_video)
-ss = f"{min(5.0, total_dur * 0.1):.2f}"
-tr = subprocess.run([
-    'ffmpeg', '-y', '-ss', ss, '-i', out_video, '-frames:v', '1',
-    '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease'
-           ',pad=1280:720:(ow-iw)/2:(oh-ih)/2',
-    '-q:v', '2', thumb_raw
-], capture_output=True, text=True)
 if tr.returncode == 0:
     if titles:
         try:

@@ -83,6 +83,87 @@ DEFAULT_PROFILE = "preview_local"
 SAMPLE_RATE = 44100
 CHANNELS    = 2
 
+# ── faster-whisper model cache (loaded lazily, reused across all VO items) ─────
+_faster_whisper_model: "object | None" = None
+_faster_whisper_model_size: str = ""
+
+
+def _load_faster_whisper(model_size: str = "base") -> "object | None":
+    """Return cached faster-whisper model, loading it on first call."""
+    global _faster_whisper_model, _faster_whisper_model_size
+    if _faster_whisper_model is not None and _faster_whisper_model_size == model_size:
+        return _faster_whisper_model
+    try:
+        from faster_whisper import WhisperModel  # type: ignore
+        print(f"  [whisper] Loading faster-whisper model '{model_size}'...", flush=True)
+        _faster_whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        _faster_whisper_model_size = model_size
+        return _faster_whisper_model
+    except Exception as exc:
+        print(f"  [whisper] faster-whisper not available: {exc}", flush=True)
+        return None
+
+
+def _whisper_align(wav_path: "Path", text: str, locale: str,
+                   model_size: str = "base") -> "tuple[list, list]":
+    """Transcribe the WAV with word-level timestamps via faster-whisper.
+
+    Returns (words, seg_ends) where:
+      words    — word-level dicts [{"word": str, "start": float, "end": float}, ...]
+                 in WAV-relative seconds.
+      seg_ends — Whisper segment end times [float, ...] in WAV-relative seconds.
+                 For a multi-sentence VO item, seg_ends[i] is the end of the i-th
+                 Whisper segment and approximates the i-th sentence boundary.
+                 Prefer seg_ends over _char_time for sentence boundary computation
+                 because Whisper's segment breaks track actual speech pauses, while
+                 _char_time only does a proportional char→word-index mapping that
+                 is inaccurate when speech rate is non-uniform.
+
+    Returns ([], []) on any failure so callers fall back to proportional timing.
+    """
+    if not wav_path.exists() or not text.strip():
+        return [], []
+    model = _load_faster_whisper(model_size)
+    if model is None:
+        return [], []
+    try:
+        lang = locale.split("-")[0]
+        segments, _ = model.transcribe(
+            str(wav_path),
+            language=lang,
+            word_timestamps=True,
+            condition_on_previous_text=False,
+        )
+        words: list = []
+        seg_ends: list = []
+        for seg in segments:
+            seg_ends.append(round(seg.end, 3))
+            if seg.words:
+                for w in seg.words:
+                    wt = w.word.strip()
+                    if wt:
+                        words.append({"word": wt,
+                                      "start": round(w.start, 3),
+                                      "end":   round(w.end, 3)})
+        return words, seg_ends
+    except Exception as exc:
+        print(f"  [whisper] transcribe failed for {wav_path.name}: {exc}", flush=True)
+        return [], []
+
+
+def _char_time(words: list, char_pos: int, total_chars: int,
+               fallback_sec: float = 0.0) -> float:
+    """Map a character position in the full text to a WAV-relative timestamp.
+
+    Uses the word-level alignment list produced by _whisper_align.
+    Proportionally maps char_pos → word index → word end time.
+    """
+    if not words or total_chars <= 0:
+        return fallback_sec
+    frac = min(char_pos / total_chars, 1.0)
+    idx  = min(int(frac * len(words)), len(words) - 1)
+    return words[idx]["end"]
+
 
 # ── I/O helpers ────────────────────────────────────────────────────────────────
 
@@ -597,10 +678,11 @@ def _wav_sentence_boundaries(
         if boundaries is None:
             return proportional
 
-        # Post-check: cap any boundary that overshoots its proportional estimate
-        # (catches em-dash / drama pauses that are larger than the azure break).
+        # Post-check: cap any boundary that is grossly out of range.
+        # Too-late guard (b > 2×exp): em-dash / drama pauses larger than sentence break.
+        # Too-early guard (b < exp/2): comma/clause pauses picked instead of sentence break.
         for i, (b, exp) in enumerate(zip(boundaries, proportional)):
-            if b > 2 * exp:
+            if b > 2 * exp or b < exp / 2:
                 boundaries[i] = exp
 
         return boundaries
@@ -653,6 +735,18 @@ def write_srt_from_voplan(
         n_sents   = len(sentences)
         wav_dur   = vi["end_sec"] - vi["start_sec"]
 
+        # ── Whisper forced alignment (used for both sentence and card timing) ──
+        # Run once per VO item; results are used by all branches below.
+        # Falls back gracefully: _align_words = [] means proportional is used.
+        _wav_item_start = 0.0   # alignment always returns WAV-relative times
+        _align_total_chars = len(text)
+        _align_words: list = []
+        _align_seg_ends: list = []   # Whisper segment end times (WAV-relative)
+        if vo_dir:
+            _locale = vi.get("tts_prompt", {}).get("locale", "zh")
+            _wav_path = vo_dir / f"{vi['item_id']}.wav"
+            _align_words, _align_seg_ends = _whisper_align(_wav_path, text, _locale)
+
         if n_sents == 1:
             # Single sentence: one or more cards spanning the full item duration.
             cards = _split_subtitle_text(text)
@@ -664,30 +758,66 @@ def write_srt_from_voplan(
                              "text": cards[0]})
                 seq += 1
             else:
-                # Too long for one line — time-split cards proportionally by char count.
+                # Too long for one line — split cards.
+                # Use Whisper word-level timestamps when available, else proportional.
                 total_c = sum(len(c) for c in cards)
                 t = abs_in
+                char_off = 0
                 for card in cards:
-                    card_end = t + round((abs_out - abs_in) * len(card) / total_c)
+                    if _align_words:
+                        card_end = abs_in + round(
+                            (_char_time(_align_words, char_off + len(card),
+                                        _align_total_chars, wav_dur) - _wav_item_start)
+                            * 1000
+                        )
+                    else:
+                        card_end = t + round((abs_out - abs_in) * len(card) / total_c)
+                    card_end = max(card_end, t + 100)
                     timecode = f"{ms_to_srt_ts(t)} --> {ms_to_srt_ts(card_end)}"
                     lines += [str(seq), timecode, card, ""]
                     subs.append({"line_id": vi.get("item_id", ""), "timecode": timecode,
                                  "text": card})
                     seq += 1
                     t = card_end
+                    char_off += len(card)
         else:
-            # Multiple sentences: proportional char-count timing.
-            # silencedetect is unreliable — Azure TTS comma/clause pauses (200-400 ms)
-            # are indistinguishable from sentence-terminal pauses, causing subtitles
-            # to appear 2-3 cards ahead of the speech.  Proportional char-count is
-            # accurate to within ~0.5 s which is imperceptible to viewers.
+            # Multiple sentences.
+            # Use Whisper word-level timestamps (from forced alignment) when available.
+            # Falls back to proportional char-count when Whisper is unavailable.
             char_counts = [len(s) for s in sentences]
-            total_c = sum(char_counts)
-            cum = 0
-            bounds = []
-            for c in char_counts[:-1]:
-                cum += c
-                bounds.append(cum / total_c * wav_dur)
+
+            # Sentence boundary timestamps (WAV-relative seconds).
+            # Priority:
+            #   1. Whisper segment ends match n_sents exactly → use directly.
+            #   2. Whisper has more segments than sentences → pick the segment
+            #      boundary (internal seg_ends) closest to each proportional
+            #      char-split point.  This handles CJK text where Whisper often
+            #      splits one Chinese sentence into several smaller segments.
+            #   3. Proportional char-count → last resort when Whisper unavailable.
+            if _align_seg_ends and len(_align_seg_ends) == n_sents:
+                # seg_ends[-1] is the WAV end; boundaries are seg_ends[:-1].
+                bounds = [round(e - _wav_item_start, 4)
+                          for e in _align_seg_ends[:-1]]
+            elif _align_seg_ends and len(_align_seg_ends) > n_sents:
+                # More Whisper segments than sentences: pick the seg_end closest
+                # to each proportional char split.  seg_ends[-1] is WAV end —
+                # only consider internal boundaries (all but the last).
+                internal = _align_seg_ends[:-1]
+                total_c  = sum(char_counts)
+                cum = 0
+                bounds = []
+                for c in char_counts[:-1]:
+                    cum += c
+                    expected = (cum / total_c) * wav_dur
+                    best_seg = min(internal, key=lambda t: abs(t - expected))
+                    bounds.append(round(best_seg - _wav_item_start, 4))
+            else:
+                total_c = sum(char_counts)
+                cum = 0
+                bounds = []
+                for c in char_counts[:-1]:
+                    cum += c
+                    bounds.append(cum / total_c * wav_dur)
 
             # Convert WAV-relative bounds to absolute episode ms timestamps.
             # bound_ms[i] = start of sentence i; bound_ms[i+1] = end of sentence i.
@@ -696,6 +826,7 @@ def write_srt_from_voplan(
                 for b in bounds
             ] + [abs_out]
 
+            sent_char_off = 0
             for i, sent in enumerate(sentences):
                 t_in  = max(bound_ms[i],     abs_in)
                 t_out = min(bound_ms[i + 1], abs_out)
@@ -708,17 +839,26 @@ def write_srt_from_voplan(
                                  "text": cards[0]})
                     seq += 1
                 else:
-                    # Too long — time-split cards proportionally within this sentence's window
+                    # Cards within this sentence — use proportional within
+                    # the sentence window [t_in, t_out].
+                    # _char_time is NOT used here: it maps char positions across
+                    # the full WAV (all sentences), so for sentence N it returns
+                    # a time near the sentence N start — collapsing the card.
+                    # Since t_in/t_out are already precisely bounded (by Whisper
+                    # segment ends or proportional), proportional within that
+                    # window is the correct approach for card splits.
                     total_c = sum(len(c) for c in cards)
                     t = t_in
-                    for card in cards:
+                    for ci, card in enumerate(cards):
                         card_end = t + round((t_out - t_in) * len(card) / total_c)
+                        card_end = min(max(card_end, t + 100), t_out)
                         timecode = f"{ms_to_srt_ts(t)} --> {ms_to_srt_ts(card_end)}"
                         lines += [str(seq), timecode, card, ""]
                         subs.append({"line_id": vi.get("item_id", ""), "timecode": timecode,
                                      "text": card})
                         seq += 1
                         t = card_end
+                sent_char_off += len(sent)
 
     srt_path.write_text("\n".join(lines), encoding="utf-8")
     subs_path.write_text(json.dumps(subs, ensure_ascii=False, indent=2), encoding="utf-8")
