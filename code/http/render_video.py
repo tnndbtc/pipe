@@ -705,8 +705,8 @@ def write_srt_from_voplan(
     detection on the corresponding WAV file so that each card appears in sync
     with the speech — one line on screen at a time.
 
-    Long sentences that exceed _SUB_MAX_CHARS are visually wrapped with \\n
-    inside a single SRT entry (so they still appear/disappear as one card).
+    Long sentences that exceed _SUB_MAX_CHARS are split into multiple separate
+    SRT entries, each with its own proportional timecode window.
 
     Args:
         vo_items:     List of dicts with keys text, start_sec, end_sec, item_id,

@@ -26,6 +26,24 @@ import sys
 import time
 from pathlib import Path
 
+
+class _Tee:
+    """Write to both a file and the original stream."""
+    def __init__(self, stream, log_path: Path):
+        self._stream  = stream
+        self._logfile = open(log_path, "a", encoding="utf-8", buffering=1)
+
+    def write(self, data):
+        self._stream.write(data)
+        self._logfile.write(data)
+
+    def flush(self):
+        self._stream.flush()
+        self._logfile.flush()
+
+    def fileno(self):           # needed by some stdlib internals
+        return self._stream.fileno()
+
 try:
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
@@ -125,6 +143,15 @@ def main() -> None:
 
     locale     = args.locale
     render_dir = ep_dir / "renders" / locale
+
+    # Tee stdout+stderr to a persistent log so every publish run is traceable
+    render_dir.mkdir(parents=True, exist_ok=True)
+    _log_path = render_dir / "youtube_action.log"
+    import datetime as _dt
+    _ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sys.stdout = _Tee(sys.stdout, _log_path)
+    sys.stderr = _Tee(sys.stderr, _log_path)
+    print(f"\n{'='*60}\n[{_ts}] publish_episode  locale={locale}\n{'='*60}")
 
     yt_json_path = render_dir / "youtube.json"
     state_path   = render_dir / "upload_state.json"
@@ -237,6 +264,12 @@ def main() -> None:
         # Publish immediately
         if current_privacy == "public":
             print(f"\n  ✓ Already public — no action needed.")
+            # Sync local youtube.json in case it was never updated
+            if meta.get("privacy") != "public":
+                meta["privacy"] = "public"
+                with open(yt_json_path, "w", encoding="utf-8") as _f:
+                    json.dump(meta, _f, ensure_ascii=False, indent=2)
+                print(f"  ✓ Synced youtube.json privacy → public")
             _print_links(video_id)
             return
 
@@ -252,6 +285,11 @@ def main() -> None:
             label="videos.update publish"
         )
         print(f"  ✓ Published: https://www.youtube.com/watch?v={video_id}")
+        # Update local youtube.json so UI reflects the new privacy state
+        meta["privacy"] = "public"
+        with open(yt_json_path, "w", encoding="utf-8") as _f:
+            json.dump(meta, _f, ensure_ascii=False, indent=2)
+        print(f"  ✓ Updated youtube.json privacy → public")
 
     _print_links(video_id)
 

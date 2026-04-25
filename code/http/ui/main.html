@@ -1922,7 +1922,8 @@ placeholder="Enter your story here"></textarea>
   <div style="display:flex;align-items:center;gap:12px">
     <div class="section-label" style="margin:0">▶ YouTube Upload</div>
     <span id="yt-project-label" class="file-badge" style="font-weight:700"></span>
-    <span id="yt-status-badge" style="font-size:0.8em;padding:3px 10px;border-radius:12px;background:var(--active-bg);color:var(--dim)">No episode loaded</span>
+    <span id="yt-status-badge" style="font-size:0.8em;padding:3px 10px;border-radius:12px;background:transparent;color:var(--dim);border:1px solid var(--border)">No episode loaded</span>
+    <span id="yt-privacy-badge" style="display:none;font-size:0.8em;padding:3px 10px;border-radius:12px;background:transparent;border:1px solid var(--border)"></span>
   </div>
 
   <!-- Locale selector -->
@@ -11039,12 +11040,22 @@ placeholder="Enter your story here"></textarea>
       document.getElementById('yt-subs-section').style.display  = 'block';
       document.getElementById('yt-actions').style.display       = 'flex';
 
-      // Upload state badge
+      // Upload state badges
       const st = d.upload_state || {};
       const watchBtn = document.getElementById('yt-watch-btn');
+      const privacyBadge = document.getElementById('yt-privacy-badge');
       if (st.video_id) {
-        badge.textContent = `Uploaded: ${st.video_id}`;
-        badge.style.background = '#14532d';
+        badge.textContent = `✓ Uploaded: ${st.video_id}`;
+        badge.style.color = 'var(--dim)';
+        badge.style.border = '1px solid var(--border)';
+        if (privacyBadge) {
+          const p = yt.privacy || 'private';
+          const isPublic = p === 'public';
+          privacyBadge.textContent = isPublic ? '🌐 Public' : p === 'unlisted' ? '🔓 Unlisted' : '🔒 Private';
+          privacyBadge.style.color = isPublic ? '#4ade80' : 'var(--dim)';
+          privacyBadge.style.border = isPublic ? '1px solid #4ade8066' : '1px solid var(--border)';
+          privacyBadge.style.display = 'inline-block';
+        }
         if (watchBtn) {
           watchBtn.href = `https://www.youtube.com/watch?v=${encodeURIComponent(st.video_id)}`;
           watchBtn.style.display = 'inline-block';
@@ -11052,7 +11063,9 @@ placeholder="Enter your story here"></textarea>
         _ytShowChecklist(st, yt);
       } else {
         badge.textContent = 'Ready to validate';
-        badge.style.background = '#1e3a5f';
+        badge.style.color = 'var(--dim)';
+        badge.style.border = '1px solid var(--border)';
+        if (privacyBadge) privacyBadge.style.display = 'none';
         watchBtn.style.display = 'none';
         document.getElementById('yt-checklist').style.display = 'none';
       }
@@ -12373,7 +12386,15 @@ placeholder="Enter your story here"></textarea>
     const episodes = (proj && proj.episodes) || [];
     episodes.forEach(ep => {
       const o = document.createElement('option');
-      o.value = ep.id; o.textContent = ep.id;
+      o.value = ep.id;
+      const ytUp = ep.yt_upload || {};
+      const ytLocales = Object.keys(ytUp);
+      if (ytLocales.length) {
+        const parts = ytLocales.map(l => ytUp[l].published ? `🌐${l}` : `✓${l}`);
+        o.textContent = `${ep.id}  ${parts.join(' ')}`;
+      } else {
+        o.textContent = ep.id;
+      }
       epSel.appendChild(o);
     });
     // Add "＋ New episode…" option at the end

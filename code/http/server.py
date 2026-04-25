@@ -2730,7 +2730,33 @@ class Handler(BaseHTTPRequestHandler):
                                         "size":  os.path.getsize(fpath),
                                         "mtime": os.path.getmtime(fpath),
                                     })
-                            episodes.append({"id": ep_id, "files": files})
+                            # Check YouTube upload states per locale
+                            yt_upload: dict = {}
+                            renders_path = os.path.join(ep_path, "renders")
+                            if os.path.isdir(renders_path):
+                                for _locale in sorted(os.listdir(renders_path)):
+                                    _state_path = os.path.join(renders_path, _locale, "upload_state.json")
+                                    if os.path.isfile(_state_path):
+                                        try:
+                                            with open(_state_path) as _sf:
+                                                _st = json.load(_sf)
+                                            if _st.get("video_id"):
+                                                _privacy = None
+                                                _yt_path = os.path.join(renders_path, _locale, "youtube.json")
+                                                if os.path.isfile(_yt_path):
+                                                    try:
+                                                        with open(_yt_path) as _yf:
+                                                            _privacy = json.load(_yf).get("privacy")
+                                                    except Exception:
+                                                        pass
+                                                yt_upload[_locale] = {
+                                                    "video_id": _st["video_id"],
+                                                    "video_uploaded": bool(_st.get("video_uploaded")),
+                                                    "published": _privacy == "public",
+                                                }
+                                        except Exception:
+                                            pass
+                            episodes.append({"id": ep_id, "files": files, "yt_upload": yt_upload})
                     result.append({"slug": slug, "episodes": episodes})
             body = json.dumps({"projects": result}).encode()
             self.send_response(200)
@@ -9952,6 +9978,9 @@ class Handler(BaseHTTPRequestHandler):
                 if action == "validate":
                     cmd.append("--yes")  # non-interactive
 
+                _log.info("[youtube_action] start  action=%s  slug=%s  ep=%s  locale=%s",
+                          action, slug, ep_id, locale)
+
                 _yt_key = f"yt_{slug}_{ep_id}"
                 proc = subprocess.Popen(
                     cmd,
@@ -9971,8 +10000,12 @@ class Handler(BaseHTTPRequestHandler):
                         _procs.pop(_yt_key, None)
 
                 if proc.returncode is None or proc.returncode == -15:
+                    _log.info("[youtube_action] cancelled  action=%s  slug=%s  ep=%s  locale=%s",
+                              action, slug, ep_id, locale)
                     resp = json.dumps({"ok": False, "cancelled": True, "error": "Upload cancelled."}).encode()
                 else:
+                    _log.info("[youtube_action] done  action=%s  rc=%s  slug=%s  ep=%s  locale=%s",
+                              action, proc.returncode, slug, ep_id, locale)
                     output = stdout + ("\n\n--- stderr ---\n" + stderr if stderr.strip() else "")
                     resp = json.dumps({
                         "ok":     proc.returncode == 0,
