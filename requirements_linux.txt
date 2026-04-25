@@ -72,16 +72,23 @@ google-api-python-client>=2.0  # YouTube Data API client
 
 
 # ---------------------------------------------------------------------------
-# Speech-to-text — VO script verification  (whisper)
+# Speech-to-text — clip ordering + VO script verification
 #
-# Transcribes .wav/.mp3 files and compares output against a given script.
-# Uses CPU by default; GPU accelerated if CUDA is available.
-# Model files (~140 MB for 'base', ~1.5 GB for 'large') are downloaded
-# automatically to ~/.cache/whisper/ on first run.
+# faster-whisper  — used by simple_run.sh STEP 0 to transcribe AI-generated
+#   clips and order them against the story script.  Built on CTranslate2 with
+#   int8 quantisation; runs on CPU with ~1/3 the RAM of openai-whisper.
+#   Model files are downloaded automatically to ~/.cache/huggingface/ on first
+#   run (~1.5 GB for 'medium').  Requires ffmpeg: sudo apt install ffmpeg
 #
-# Requires ffmpeg (system package): sudo apt install ffmpeg
+# openai-whisper  — used by stable-ts (below) and direct whisper calls in
+#   other scripts.  Model files (~140 MB for 'base') downloaded to
+#   ~/.cache/whisper/ on first run.
+#
+# Both require ffmpeg (system package): sudo apt install ffmpeg
 # ---------------------------------------------------------------------------
+faster-whisper>=1.0.0
 openai-whisper>=20231117
+opencc-python-reimplemented>=0.1.7   # Traditional→Simplified normalisation for clip ordering
 
 
 # ---------------------------------------------------------------------------

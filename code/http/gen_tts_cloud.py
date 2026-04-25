@@ -1120,13 +1120,15 @@ def _align_by_silence(
         n_sents   = len(sentences)
 
         # Derive min silence from the inter-sentence break settings in this chunk.
-        # Use 80% of the minimum break so we detect only the explicit breaks, not
-        # intra-sentence drama pauses (em-dashes / commas).
+        # Use 60% of the minimum break (was 80%) so that azure_break pauses that
+        # land slightly below the nominal value are still detected.  False
+        # positives from intra-sentence drama pauses are eliminated by the
+        # closest-to-proportional boundary selection below.
         if min_silence_frames is None:
             min_pauses = [s.get("pause_ms", 0) for s in sentences[:-1]
                           if s.get("pause_ms", 0) > 0]
             if min_pauses:
-                min_silence_ms = max(100, int(min(min_pauses) * 0.80))
+                min_silence_ms = max(100, int(min(min_pauses) * 0.60))
             else:
                 min_silence_ms = 100  # default: 100ms when no breaks defined
             min_silence_frames = int(min_silence_ms / 1000 * AZURE_SAMPLE_RATE)
@@ -1164,9 +1166,36 @@ def _align_by_silence(
         if len(silence_midpoints) < n_sents - 1:
             return None   # not enough gaps found at this threshold
 
-        # Take the first n_sents-1 gaps as boundaries (they're already in time order)
-        boundaries = sorted(silence_midpoints[: n_sents - 1])
         total_dur  = _pcm_duration_sec(pcm)
+
+        # Pick the silence closest to each expected proportional cut point.
+        # "Take first N-1" fails when an intra-sentence pause (e.g. the ~500ms
+        # pause Azure inserts after a 。sentence ending) has the same duration as
+        # the explicit azure_break between items and appears earlier in the WAV
+        # than the true item boundary — causing the slicer to cut too early.
+        total_chars = sum(len(s.get("text", "")) for s in sentences)
+        if total_chars > 0:
+            cum = 0
+            expected_cuts: list[float] = []
+            for s in sentences[:-1]:
+                cum += len(s.get("text", ""))
+                expected_cuts.append(cum / total_chars * total_dur)
+        else:
+            per = total_dur / n_sents
+            expected_cuts = [(i + 1) * per for i in range(n_sents - 1)]
+
+        available = list(silence_midpoints)
+        boundaries: list[float] = []
+        for exp in expected_cuts:
+            if not available:
+                break
+            best = min(available, key=lambda m: abs(m - exp))
+            boundaries.append(best)
+            available.remove(best)
+        boundaries = sorted(boundaries)
+
+        if len(boundaries) < n_sents - 1:
+            return None
 
         offsets: list[dict] = []
         prev = 0.0

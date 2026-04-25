@@ -136,7 +136,11 @@ def upload_video(youtube, meta: dict, mp4_path: Path,
             "description":  meta.get("description", ""),
             "tags":         meta.get("tags", []),
             "categoryId":   str(meta.get("category_id", "24")),
-            "defaultLanguage": meta.get("video_language", "en"),
+            "defaultLanguage":      meta.get("video_language", "en"),
+            # Tell YouTube what language the audio track is spoken in.
+            # Without this, YouTube cannot determine the spoken language and
+            # may show uploaded captions (CC) by default for all viewers.
+            "defaultAudioLanguage": meta.get("video_language", "en"),
         },
         "status": {
             "privacyStatus":     "private",

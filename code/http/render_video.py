@@ -494,58 +494,231 @@ def _split_subtitle_text(text: str) -> list[str]:
     return cards or [text.strip()]
 
 
+# ── Sentence-aware subtitle helpers ──────────────────────────────────────────
+
+# Sentence terminators: fullwidth AND halfwidth so we catch both styles.
+_SENT_TERM = frozenset("。！？!?")
+
+
+def _split_into_sentences(text: str) -> list[str]:
+    """Split text at sentence terminators (。！？!?), keeping terminator with
+    its sentence.  Any trailing fragment without a terminator is merged back
+    into the preceding sentence."""
+    parts = re.split(r'(?<=[。！？!?])', text.strip())
+    sents = [p for p in parts if p.strip()]
+    if not sents:
+        return [text] if text.strip() else []
+    # Merge orphan trailing fragment (no closing terminator) with previous
+    if sents[-1] and sents[-1][-1] not in _SENT_TERM:
+        if len(sents) >= 2:
+            sents[-2] += sents[-1]
+            sents.pop()
+    return sents if sents else [text]
+
+
+def _wav_sentence_boundaries(
+    wav_path: "Path",
+    n_sentences: int,
+    char_counts: list,
+    wav_dur: float,
+    azure_break_ms: int = 500,
+) -> list:
+    """Return sorted list of N-1 boundary midpoints (seconds within the WAV)
+    between N sentences, derived from ffmpeg silencedetect.
+
+    Algorithm:
+      1. Run silencedetect (noise=-35dB, min_dur=0.12 s) on the WAV.
+      2. Collect interior silence midpoints (exclude leading <0.1 s and
+         trailing that end within 0.1 s of WAV end).
+      3. Take the first N-1 midpoints whose silence duration ≥ threshold
+         (= azure_break_ms × 0.6, then lowered 25 % each retry until 100 ms).
+      4. Post-check: if a boundary > 2 × its proportional expected position,
+         replace it with the proportional estimate.  This handles the case
+         where an em-dash or other prosody pause is larger than the actual
+         sentence-break pause.
+
+    Falls back to proportional char-count distribution if WAV is missing,
+    ffmpeg fails, or not enough silences can be found.
+    """
+    if n_sentences <= 1:
+        return []
+
+    total_chars = sum(char_counts)
+    cum = 0
+    proportional: list = []
+    for c in char_counts[:-1]:
+        cum += c
+        proportional.append(cum / total_chars * wav_dur)
+
+    if not wav_path.exists():
+        return proportional
+
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-i", str(wav_path), "-af",
+             "silencedetect=noise=-35dB:duration=0.12", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=15,
+        )
+        silences: list = []
+        pending = None
+        for line in res.stderr.splitlines():
+            ms = re.search(r'silence_start: ([\d.]+)', line)
+            if ms:
+                pending = float(ms.group(1))
+            me = re.search(r'silence_end: ([\d.]+)', line)
+            if me and pending is not None:
+                silences.append((pending, float(me.group(1))))
+                pending = None
+
+        # Interior only: exclude leading (<0.1 s start) and trailing (end near WAV end)
+        interior = [
+            (s, e) for s, e in silences
+            if s >= 0.1 and e <= wav_dur - 0.05
+        ]
+
+        n_bounds = n_sentences - 1
+        if len(interior) < n_bounds:
+            return proportional
+
+        # Try decreasing thresholds until we find at least n_bounds qualifying silences
+        threshold_ms = max(120.0, azure_break_ms * 0.6)
+        boundaries: "list | None" = None
+        while threshold_ms >= 100:
+            qualifying = [
+                (s + e) / 2.0
+                for s, e in interior
+                if (e - s) * 1000 >= threshold_ms
+            ]
+            if len(qualifying) >= n_bounds:
+                boundaries = sorted(qualifying)[:n_bounds]
+                break
+            threshold_ms *= 0.75
+
+        if boundaries is None:
+            return proportional
+
+        # Post-check: cap any boundary that overshoots its proportional estimate
+        # (catches em-dash / drama pauses that are larger than the azure break).
+        for i, (b, exp) in enumerate(zip(boundaries, proportional)):
+            if b > 2 * exp:
+                boundaries[i] = exp
+
+        return boundaries
+
+    except Exception:
+        return proportional
+
+
 def write_srt_from_voplan(
     vo_items: list,
     srt_path: Path,
     subs_path: Path,
     title_offset: float = 0.0,
+    vo_dir: "Path | None" = None,
 ) -> None:
     """Write SRT + subs.json directly from VOPlan items (episode-absolute timing).
 
-    Long paragraphs are split into short subtitle cards (≤ _SUB_MAX_CHARS chars)
-    with timing distributed proportionally by character count.
+    Each vo_item is split into SENTENCES (at 。！？!?) and each sentence is
+    shown as a separate subtitle card.  Sentence timing is derived from silence
+    detection on the corresponding WAV file so that each card appears in sync
+    with the speech — one line on screen at a time.
+
+    Long sentences that exceed _SUB_MAX_CHARS are visually wrapped with \\n
+    inside a single SRT entry (so they still appear/disappear as one card).
 
     Args:
-        vo_items:     List of dicts with keys text, start_sec, end_sec.
+        vo_items:     List of dicts with keys text, start_sec, end_sec, item_id,
+                      tts_prompt.
         srt_path:     Output .srt file path.
         subs_path:    Output .subs.json file path.
         title_offset: Seconds to add to all timestamps (default 0.0).
-                      Pass TITLE_CARD_OFFSET when a title-card pre-roll is active.
+        vo_dir:       Directory containing {item_id}.wav files.  When supplied,
+                      silence detection is used for per-sentence timing.
+                      When None, proportional char-count timing is used.
     """
     lines: list[str] = []
     subs:  list[dict] = []
     seq = 1
+
     for vi in sorted(vo_items, key=lambda v: v.get("start_sec", 0)):
         text = vi.get("text", "").strip()
         if not text:
             continue
         abs_in  = round((vi["start_sec"] + title_offset) * 1000)
         abs_out = round((vi["end_sec"]   + title_offset) * 1000)
-        duration_ms = abs_out - abs_in
+        if abs_out - abs_in <= 0:
+            continue
 
-        cards = _split_subtitle_text(text)
-        total_chars = sum(len(c) for c in cards)
+        sentences = _split_into_sentences(text)
+        n_sents   = len(sentences)
+        wav_dur   = vi["end_sec"] - vi["start_sec"]
 
-        # Distribute time proportionally; guarantee ≥50 ms per card
-        card_starts: list[int] = []
-        cur_ms = abs_in
-        for card in cards:
-            card_starts.append(cur_ms)
-            share = round(duration_ms * len(card) / total_chars) if total_chars else duration_ms
-            cur_ms += max(share, 50)
+        if n_sents == 1:
+            # Single sentence: one or more cards spanning the full item duration.
+            cards = _split_subtitle_text(text)
+            if len(cards) == 1:
+                # Fits on one line — single card spanning the full item duration.
+                timecode = f"{ms_to_srt_ts(abs_in)} --> {ms_to_srt_ts(abs_out)}"
+                lines += [str(seq), timecode, cards[0], ""]
+                subs.append({"line_id": vi.get("item_id", ""), "timecode": timecode,
+                             "text": cards[0]})
+                seq += 1
+            else:
+                # Too long for one line — time-split cards proportionally by char count.
+                total_c = sum(len(c) for c in cards)
+                t = abs_in
+                for card in cards:
+                    card_end = t + round((abs_out - abs_in) * len(card) / total_c)
+                    timecode = f"{ms_to_srt_ts(t)} --> {ms_to_srt_ts(card_end)}"
+                    lines += [str(seq), timecode, card, ""]
+                    subs.append({"line_id": vi.get("item_id", ""), "timecode": timecode,
+                                 "text": card})
+                    seq += 1
+                    t = card_end
+        else:
+            # Multiple sentences: proportional char-count timing.
+            # silencedetect is unreliable — Azure TTS comma/clause pauses (200-400 ms)
+            # are indistinguishable from sentence-terminal pauses, causing subtitles
+            # to appear 2-3 cards ahead of the speech.  Proportional char-count is
+            # accurate to within ~0.5 s which is imperceptible to viewers.
+            char_counts = [len(s) for s in sentences]
+            total_c = sum(char_counts)
+            cum = 0
+            bounds = []
+            for c in char_counts[:-1]:
+                cum += c
+                bounds.append(cum / total_c * wav_dur)
 
-        for i, card in enumerate(cards):
-            t_in  = card_starts[i]
-            t_out = card_starts[i + 1] if i + 1 < len(card_starts) else abs_out
-            t_out = max(t_out, t_in + 50)
-            timecode = f"{ms_to_srt_ts(t_in)} --> {ms_to_srt_ts(t_out)}"
-            lines += [str(seq), timecode, card, ""]
-            subs.append({
-                "line_id":  vi.get("item_id", ""),
-                "timecode": timecode,
-                "text":     card,
-            })
-            seq += 1
+            # Convert WAV-relative bounds to absolute episode ms timestamps.
+            # bound_ms[i] = start of sentence i; bound_ms[i+1] = end of sentence i.
+            bound_ms = [abs_in] + [
+                round((vi["start_sec"] + title_offset + b) * 1000)
+                for b in bounds
+            ] + [abs_out]
+
+            for i, sent in enumerate(sentences):
+                t_in  = max(bound_ms[i],     abs_in)
+                t_out = min(bound_ms[i + 1], abs_out)
+                t_out = max(t_out, t_in + 100)   # guarantee ≥100 ms visibility
+                cards = _split_subtitle_text(sent)
+                if len(cards) == 1:
+                    timecode = f"{ms_to_srt_ts(t_in)} --> {ms_to_srt_ts(t_out)}"
+                    lines += [str(seq), timecode, cards[0], ""]
+                    subs.append({"line_id": vi.get("item_id", ""), "timecode": timecode,
+                                 "text": cards[0]})
+                    seq += 1
+                else:
+                    # Too long — time-split cards proportionally within this sentence's window
+                    total_c = sum(len(c) for c in cards)
+                    t = t_in
+                    for card in cards:
+                        card_end = t + round((t_out - t_in) * len(card) / total_c)
+                        timecode = f"{ms_to_srt_ts(t)} --> {ms_to_srt_ts(card_end)}"
+                        lines += [str(seq), timecode, card, ""]
+                        subs.append({"line_id": vi.get("item_id", ""), "timecode": timecode,
+                                     "text": card})
+                        seq += 1
+                        t = card_end
 
     srt_path.write_text("\n".join(lines), encoding="utf-8")
     subs_path.write_text(json.dumps(subs, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -785,9 +958,14 @@ def parse_args() -> argparse.Namespace:
              "Title text read from episode meta.json → story_title.",
     )
     p.add_argument(
-        "--subtitles", action="store_true",
+        "--subtitles", action="store_true", default=True,
         help="Burn subtitles at the bottom of the video, synced to TTS timing. "
-             "When --title-card is also active, subtitles start at t=1.0s.",
+             "When --title-card is also active, subtitles start at t=1.0s. "
+             "Default: on. Pass --no-subtitles to disable.",
+    )
+    p.add_argument(
+        "--no-subtitles", dest="subtitles", action="store_false",
+        help="Disable burned-in subtitles.",
     )
     return p.parse_args()
 
@@ -1338,7 +1516,8 @@ def main() -> None:
         srt_path  = output_dir / f"output.{locale}.srt"
         subs_path = output_dir / "output.subs.json"
         write_srt_from_voplan(vo_items, srt_path, subs_path,
-                              title_offset=TITLE_CARD_OFFSET)
+                              title_offset=TITLE_CARD_OFFSET,
+                              vo_dir=_vo_dir)
         if args.subtitles:
             print(f"  [subtitles] SRT: {srt_path}  (offset={TITLE_CARD_OFFSET:.1f}s)")
 

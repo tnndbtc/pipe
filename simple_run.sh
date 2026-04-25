@@ -251,7 +251,6 @@ if [[ -n "$INPUT_FOLDER" ]]; then
 
   _out_video="${INPUT_FOLDER}/output.mp4"
   _out_srt="${INPUT_FOLDER}/output.srt"
-  _tts_dir="${INPUT_FOLDER}/_tts"
   _story_json=""
 
   echo "════════════════════════════════════════════════════════════"
@@ -317,29 +316,157 @@ STORY_PARSE_EOF
     echo ""
   fi
 
-  # ── Step 0: Whisper clip ordering ──────────────────────────────────────────
-  # Transcribes each clip, matches transcript to story lines by character
-  # overlap, and writes .clip_order.json.  Downstream stitch/whisper steps
-  # read this file instead of relying on filename sort.
+  # ── Derive slug + EP_DIR early (needed for status_report.txt if STEP 0 fails)
+  if [[ -z "$LOCALE" && -n "$CONFIG" && -f "$CONFIG" ]]; then
+    LOCALE="$(python3 -c "import json; d=json.load(open('$CONFIG',encoding='utf-8')); print(d.get('locale',''))" 2>/dev/null || true)"
+  fi
+  [[ -z "$LOCALE"  ]] && LOCALE="en"
+  [[ -z "$EPISODE" ]] && EPISODE="s01e01"
+
+  # ── Derive slug from story filename (same logic as TTS mode) ─────
+  # Prefer the bare filename stem when it is already clean
+  # (alphanumeric / dash / underscore only) — gives a stable, human-readable
+  # project name like "ai_story_2026-04-23_1800utc_36" on every re-run.
+  # Fall back to content-derived slug (with random suffix) only when the
+  # filename contains characters that would make a bad directory name.
+  _slug="$(python3 - "${STORY:-}" 2>/dev/null << 'CLIPS_SLUG_EOF'
+import re, os, sys
+fn = os.path.splitext(os.path.basename(sys.argv[1] if len(sys.argv) > 1 else ''))[0]
+if fn and re.match(r'^[a-zA-Z0-9_\-]+$', fn):
+    print(fn); sys.exit(0)
+sys.exit(1)
+CLIPS_SLUG_EOF
+  )"
+
+  if [[ -z "$_slug" ]]; then
+    # Filename has non-slug chars — fall back to first heading/line of text
+    _clips_title=""
+    if [[ -n "$STORY" && -f "$STORY" ]]; then
+      _clips_title="$(python3 -c "
+import re, sys
+text = open('$STORY', encoding='utf-8').read()
+for line in text.splitlines():
+    m = re.match(r'^#{1,6}\s+(.+)', line)
+    if m: print(m.group(1).strip()); sys.exit(0)
+for line in text.splitlines():
+    s = line.strip()
+    if s: print(s); sys.exit(0)
+" 2>/dev/null)"
+    fi
+    [[ -z "$_clips_title" ]] && _clips_title="$(basename "$INPUT_FOLDER")"
+    _slug="$(python3 -c "
+import re, unicodedata, secrets
+orig = '''$_clips_title'''
+t = unicodedata.normalize('NFKD', orig).encode('ascii','ignore').decode('ascii')
+t = t.lower().strip()
+t = re.sub(r'[^\w\s-]', '', t)
+t = re.sub(r'[\s_]+', '-', t)
+t = re.sub(r'-{2,}', '-', t)
+t = t.strip('-')[:32]
+rand6 = secrets.token_hex(3)
+print((t + '-' + rand6) if t else 'story-' + rand6)
+" 2>/dev/null || echo "story-$(python3 -c 'import secrets; print(secrets.token_hex(3))')")"
+  fi
+
+  EP_DIR="projects/${_slug}/episodes/${EPISODE}"
+  mkdir -p "$EP_DIR"
+  _tts_dir="${EP_DIR}/_tts"
+
+  # ── Step 0: Clip pre-flight + Whisper ordering ────────────────────────────
+  # Phase A: MD5 dedup — auto-removes exact byte-copies, logs what was kept.
+  # Phase B: faster-whisper transcription + greedy matching.  Handles N≠M:
+  #   N < M → reports missing lines + writes status_report.txt, exits 3.
+  #   N > M → renames older same-line clip to .mp4.bak, keeps newer, continues.
+  #   N = M → orders and renames to clip01.mp4 … clipNN.mp4.
   _clip_order_json="${INPUT_FOLDER}/.clip_order.json"
   if [[ -n "$_story_json" && -f "$_story_json" ]]; then
-    echo "  STEP 0 — Whisper clip ordering"
-    python3 - "$INPUT_FOLDER" "$_story_json" "$_clip_order_json" << 'CLIP_ORDER_EOF'
-import sys, os, glob, re, json, subprocess, tempfile
-from collections import Counter
+    echo "  STEP 0 — Clip pre-flight + Whisper ordering"
 
-folder       = sys.argv[1]
-story_json_p = sys.argv[2]
-order_out    = sys.argv[3]
+    # ── Phase A: exact duplicate detection + auto-removal ──────────────────
+    python3 - "$INPUT_FOLDER" << 'CLIP_DEDUP_EOF'
+import sys, os, glob, re, hashlib
 
 def natural_key(p):
     return [int(t) if t.isdigit() else t.lower()
             for t in re.split(r'(\d+)', os.path.basename(p))]
 
+def md5_file(path, chunk=1 << 20):
+    h = hashlib.md5()
+    with open(path, 'rb') as f:
+        while True:
+            buf = f.read(chunk)
+            if not buf: break
+            h.update(buf)
+    return h.hexdigest()
+
+folder = sys.argv[1]
+clips  = sorted(
+    [f for f in glob.glob(os.path.join(folder, '*.mp4'))
+     if os.path.basename(f) != 'output.mp4'],
+    key=natural_key)
+
+if not clips:
+    sys.exit(0)
+
+print(f"  Phase A — dedup check ({len(clips)} clips)...")
+by_hash = {}
+for c in clips:
+    by_hash.setdefault(md5_file(c), []).append(c)
+
+removed = 0
+for group in by_hash.values():
+    if len(group) < 2:
+        continue
+    keep = group[0]
+    for dupe in group[1:]:
+        try:
+            os.remove(dupe)
+            print(f"  [info] Duplicate removed : {os.path.basename(dupe)}")
+            print(f"         (identical to      {os.path.basename(keep)} — kept)")
+            removed += 1
+        except OSError as e:
+            print(f"  [warn] Could not remove duplicate "
+                  f"{os.path.basename(dupe)}: {e}")
+
+if removed:
+    print(f"  Phase A — removed {removed} exact duplicate(s), continuing")
+else:
+    print(f"  Phase A — no exact duplicates")
+CLIP_DEDUP_EOF
+
+    # ── Phase B: Whisper ordering + missing/extra resolution ───────────────
+    python3 - "$INPUT_FOLDER" "$_story_json" "$_clip_order_json" \
+              "$EP_DIR" "${PIPE_SERVER_URL:-http://localhost:8000}" \
+              "${EPISODE:-s01e01}" << 'CLIP_ORDER_EOF'
+import sys, os, glob, re, json, tempfile, subprocess, urllib.request
+from collections import Counter
+from datetime import datetime
+
+folder       = sys.argv[1]
+story_json_p = sys.argv[2]
+order_out    = sys.argv[3]
+ep_dir       = sys.argv[4]
+server_url   = sys.argv[5]
+ep_id        = sys.argv[6]
+
+def natural_key(p):
+    return [int(t) if t.isdigit() else t.lower()
+            for t in re.split(r'(\d+)', os.path.basename(p))]
+
+def title_for_line(li, titles):
+    """Return the story title covering line index li."""
+    label = ''
+    for t in titles:
+        if t['clip_index'] <= li:
+            label = t['title']
+    return (label[:30] if label else f'line {li}')
+
 story = json.load(open(story_json_p, encoding='utf-8'))
 lines = story.get('display_text', story.get('text', []))
 if not lines:
     print("  [skip] no story lines — keeping filename order"); sys.exit(0)
+
+M = len(lines)
 
 clips = sorted(
     [f for f in glob.glob(os.path.join(folder, '*.mp4'))
@@ -347,11 +474,25 @@ clips = sorted(
     key=natural_key)
 N = len(clips)
 
-if N != len(lines):
-    print(f"  [warn] {N} clips vs {len(lines)} story lines — skipping auto-order")
-    sys.exit(0)
+if N != M:
+    print(f"  [info] {N} clips vs {M} story lines — "
+          f"will identify missing/extra via whisper")
 
-# Load Whisper transcription cache
+# ── Whisper model options ──────────────────────────────────────────
+# Library: faster-whisper (pip install faster-whisper)
+# Uses CTranslate2 + int8 quantization on CPU — 4× faster than
+# openai-whisper at the same accuracy.
+#
+# Model comparison (4-core CPU, 8 GB RAM, ~5s clips, 27 clips):
+#   "medium"         ~400 MB RAM  first-run ~2 min  re-run ~4s   ← CURRENT
+#   "large-v3-turbo" ~900 MB RAM  first-run ~5 min  re-run ~9s   ← upgrade if ordering mistakes
+#   "large-v3"       ~1.5 GB RAM  first-run ~7 min  re-run ~13s  ← best quality, diminishing return
+#
+# To switch: change MODEL_SIZE below.  Cache auto-regenerates on next run.
+# GPU: all options ~4× faster; prefer large-v3-turbo or large-v3 on GPU.
+# ─────────────────────────────────────────────────────────────────
+MODEL_SIZE = "medium"
+
 cache_path = os.path.join(folder, '.whisper_order_cache.json')
 cache = {}
 try:
@@ -360,13 +501,39 @@ except Exception:
     pass
 
 try:
-    import whisper as _wm
-    _model = _wm.load_model('small')
-    print("  Whisper model loaded (small)")
+    from faster_whisper import WhisperModel
+    _model = WhisperModel(MODEL_SIZE, device='cpu', compute_type='int8')
+    print(f"  faster-whisper model loaded ({MODEL_SIZE})")
 except ImportError:
-    print("  [warn] whisper not available — keeping filename order"); sys.exit(0)
+    print("  [ERROR] faster-whisper is not installed on this machine.")
+    print("  This is required to transcribe and order AI-generated clips.")
+    print("  Install it with:")
+    print("    pip install faster-whisper")
+    print("  Then re-run the same command.")
+    sys.exit(1)
+
+# Traditional → Simplified converter (opencc-python-reimplemented).
+# Whisper defaults to Traditional Chinese for Mandarin audio; story text
+# is Simplified.  Without conversion, 國/国, 們/们 etc. score as mismatches
+# and clip-to-line assignment degrades.  We convert both sides to Simplified
+# before scoring so the character overlap is computed on the same script.
+# The initial_prompt below also biases Whisper toward Simplified output,
+# but opencc is the authoritative fix regardless of what Whisper emits.
+try:
+    import opencc as _opencc_mod
+    _cc = _opencc_mod.OpenCC('t2s')   # Traditional → Simplified
+    def _to_simplified(s): return _cc.convert(s)
+    print("  opencc loaded — Trad→Simplified normalisation enabled")
+except ImportError:
+    print("  [warn] opencc-python-reimplemented not installed — "
+          "Traditional/Simplified mismatch may reduce match accuracy.")
+    print("  Install with: pip install opencc-python-reimplemented")
+    def _to_simplified(s): return s   # no-op fallback
 
 def transcribe_clip(clip_path):
+    """Return (text, seg_list) where seg_list is [{start, end, text}, ...].
+    Segments are stored in the order cache so TTS-B can reuse them for
+    S_start/S_end timing without a second transcription pass."""
     with tempfile.TemporaryDirectory() as tmp:
         wav = os.path.join(tmp, 'clip.wav')
         r = subprocess.run(
@@ -374,75 +541,227 @@ def transcribe_clip(clip_path):
              '-c:a', 'pcm_s16le', wav, '-loglevel', 'error'],
             capture_output=True)
         if r.returncode != 0:
-            return ''
-        res = _model.transcribe(wav, task='transcribe', verbose=None, fp16=False)
-        return res.get('text', '').strip()
+            return '', []
+        # initial_prompt biases the decoder toward Simplified Chinese output;
+        # opencc in norm() is the authoritative normalisation backstop.
+        segs, _ = _model.transcribe(wav, language='zh',
+                                    initial_prompt='以下是简体中文内容。')
+        seg_list = [{'start': s.start, 'end': s.end, 'text': s.text}
+                    for s in segs]
+        text = ''.join(s['text'] for s in seg_list).strip()
+        return text, seg_list
 
 def norm(s):
-    return re.sub(r'\s+', '', s.lower())
+    return re.sub(r'\s+', '', _to_simplified(s).lower())
 
 def overlap_score(a, b):
     na, nb = norm(a), norm(b)
     ca, cb = Counter(na), Counter(nb)
-    common = sum((ca & cb).values())
-    return common / max(len(na), len(nb), 1)
+    return sum((ca & cb).values()) / max(len(na), len(nb), 1)
 
-# Transcribe clips not in cache or stale
+# Cache invalidation: re-transcribe if stale, wrong library, or missing text
 need_transcribe = [
     c for c in clips
     if abs(cache.get(os.path.basename(c), {}).get('mtime', 0)
            - os.path.getmtime(c)) >= 1.0
+    or cache.get(os.path.basename(c), {}).get('library') != 'faster-whisper'
     or 'text' not in cache.get(os.path.basename(c), {})]
 
 if need_transcribe:
-    print(f"  Transcribing {len(need_transcribe)}/{N} clips...")
+    print(f"  Transcribing {len(need_transcribe)}/{N} clips "
+          f"(cache: {N - len(need_transcribe)} hits)...")
     for clip in need_transcribe:
-        cn   = os.path.basename(clip)
-        text = transcribe_clip(clip)
-        cache[cn] = {'mtime': os.path.getmtime(clip), 'text': text}
+        cn         = os.path.basename(clip)
+        text, segs = transcribe_clip(clip)
+        cache[cn]  = {'mtime': os.path.getmtime(clip), 'text': text,
+                      'library': 'faster-whisper', 'segments': segs}
         print(f"    {cn}: {text[:60]!r}")
     json.dump(cache, open(cache_path, 'w', encoding='utf-8'),
               ensure_ascii=False, indent=2)
 else:
-    print(f"  Whisper cache valid ({N} clips)")
+    print(f"  Whisper cache valid ({N} clips, faster-whisper/{MODEL_SIZE})")
 
 clip_texts = [cache.get(os.path.basename(c), {}).get('text', '') for c in clips]
 
-# Build score matrix; greedy best-match assignment (no line used twice)
-scores   = [[overlap_score(clip_texts[i], lines[j])
-             for j in range(len(lines))] for i in range(N)]
-assigned = {}
-used     = set()
-for sc, ci, li in sorted(
-        [(scores[i][j], i, j) for i in range(N) for j in range(len(lines))],
-        reverse=True):
-    if ci not in assigned and li not in used:
-        assigned[ci] = li; used.add(li)
-    if len(assigned) == N:
-        break
-# Fallback for any unmatched clip
-for i in range(N):
-    if i not in assigned:
-        for j in range(len(lines)):
-            if j not in used:
-                assigned[i] = j; used.add(j); break
+# Build N×M score matrix
+scores = [[overlap_score(clip_texts[i], lines[j])
+           for j in range(M)] for i in range(N)]
 
-ordered_idx   = sorted(range(N), key=lambda i: assigned[i])
+# Greedy best-match assignment
+assigned   = {}
+used_lines = set()
+for sc, ci, li in sorted(
+        [(scores[i][j], i, j) for i in range(N) for j in range(M)],
+        reverse=True):
+    if ci not in assigned and li not in used_lines:
+        assigned[ci] = li
+        used_lines.add(li)
+    if len(assigned) == min(N, M):
+        break
+
+extra_clips = sorted(set(range(N)) - set(assigned.keys()))
+
+# ── B.4: Extra clip resolution (N > M) ───────────────────────────
+resolved_extras    = set()
+replaced_clips_log = []
+
+for ci in extra_clips:
+    best_li = max(range(M), key=lambda j: scores[ci][j])
+    best_sc = scores[ci][best_li]
+
+    if best_sc > 0.15:
+        rival_ci = [k for k, v in assigned.items() if v == best_li][0]
+        clip_new, clip_old = sorted(
+            [clips[ci], clips[rival_ci]],
+            key=lambda p: os.path.getmtime(p), reverse=True)
+        bak_path = clip_old + '.bak'
+        try:
+            os.rename(clip_old, bak_path)
+        except OSError as e:
+            print(f"  [warn] Could not rename {os.path.basename(clip_old)} "
+                  f"to .bak: {e} — keeping both, line {best_li} may be wrong")
+            continue
+        del assigned[rival_ci]
+        new_ci = clips.index(clip_new)
+        assigned[new_ci] = best_li
+        resolved_extras.add(ci)
+        replaced_clips_log.append({
+            'bak':  os.path.basename(bak_path),
+            'kept': os.path.basename(clip_new),
+            'line': best_li,
+        })
+        print(f"  [info] Line {best_li}: kept newer  {os.path.basename(clip_new)}")
+        print(f"         renamed older {os.path.basename(clip_old)} → .mp4.bak")
+    else:
+        print(f"  [WARN] Unknown extra clip (no story match): "
+              f"{os.path.basename(clips[ci])} — will append at end")
+
+unmatched_extras = [ci for ci in extra_clips if ci not in resolved_extras]
+
+# Recompute after resolution
+used_lines    = set(assigned.values())
+missing_lines = sorted(set(range(M)) - used_lines)
+
+# ── B.5: Report missing clips (hard error) ───────────────────────
+if missing_lines:
+    ts             = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    story_basename = os.path.basename(story_json_p).replace('.story_parsed.json', '')
+
+    lines_block = ''
+    for li in missing_lines:
+        label = title_for_line(li, story['titles'])
+        lines_block += f"  Line {li:3d}  [{label}]\n"
+        lines_block += f"           {lines[li][:80]}\n"
+
+    report = (
+        f"[CLIP VALIDATION] Missing clips detected — {ts}\n"
+        f"Story  : {story_basename}\n"
+        f"Folder : {folder}\n"
+        f"Clips  : {N} found, {M} expected\n\n"
+        f"Missing clips ({len(missing_lines)}):\n"
+        f"{lines_block}\n"
+        f"Action: regenerate the above clips in Grok, add to folder, re-run.\n"
+        f"Whisper cache is warm — only new clips will be re-transcribed.\n"
+    )
+
+    print(f"\n  [ERROR] Missing clips — no video for these story lines:")
+    for li in missing_lines:
+        label = title_for_line(li, story['titles'])
+        print(f"    Line {li:3d}  [{label}]  {lines[li][:70]}")
+    print(f"  ACTION: Regenerate the listed clips in Grok and re-run.")
+
+    # Write status_report.txt (primary path)
+    os.makedirs(ep_dir, exist_ok=True)
+    sr_path = os.path.join(ep_dir, 'status_report.txt')
+    try:
+        with open(sr_path, 'a', encoding='utf-8') as fh:
+            sep = '=' * 60
+            fh.write(f"\n{sep}\n{ts}\n{sep}\n{report}\n")
+        print(f"  STATUS REPORT written → {sr_path}")
+    except OSError as e:
+        print(f"  [warn] Could not write status_report.txt: {e}")
+        print(f"  (missing clip details printed to terminal above)")
+
+    # Attempt POST to server (secondary, optional)
+    try:
+        slug = os.path.basename(os.path.dirname(os.path.dirname(ep_dir)))
+        body = json.dumps(
+            {'slug': slug, 'ep_id': ep_id, 'text': report}).encode()
+        req = urllib.request.Request(
+            f'{server_url}/api/append_status_report',
+            data=body, headers={'Content-Type': 'application/json'})
+        urllib.request.urlopen(req, timeout=2)
+    except Exception:
+        pass  # server not running — file write above is the primary path
+
+    sys.exit(3)
+
+# ── B.6: Rename to clip01.mp4 … clipNN.mp4 (clean run only) ──────
+ordered_idx = sorted(assigned.keys(), key=lambda ci: assigned[ci])
+for rank, ci in enumerate(ordered_idx):
+    old_path = clips[ci]
+    new_name = f"clip{rank+1:02d}.mp4"
+    new_path = os.path.join(folder, new_name)
+    if os.path.basename(old_path) != new_name:
+        try:
+            os.rename(old_path, new_path)
+            clips[ci] = new_path
+            print(f"  [rename] {os.path.basename(old_path):<48} → {new_name}")
+        except OSError as e:
+            print(f"  [warn] rename failed: {os.path.basename(old_path)} "
+                  f"→ {new_name}: {e} (using original name)")
+
+# ── B.6b: Rekey whisper cache to post-rename basenames ───────────
+# After B.6 renames grok_xxxx.mp4 → clip01.mp4 etc., the cache keys
+# are stale (old basenames).  Rewrite the cache now so the next run
+# gets cache hits instead of re-transcribing every clip.
+new_cache = {}
+for ci, entry_path in enumerate(clips):
+    new_bn = os.path.basename(entry_path)          # post-rename name
+    # find the matching entry under either the new or any old key
+    entry = cache.get(new_bn)
+    if entry is None:
+        # fallback: scan cache for an entry whose mtime matches this file
+        mt = os.path.getmtime(entry_path)
+        for k, v in cache.items():
+            if abs(v.get('mtime', -1) - mt) < 1.0:
+                entry = v
+                break
+    if entry:
+        new_cache[new_bn] = entry
+json.dump(new_cache, open(cache_path, 'w', encoding='utf-8'),
+          ensure_ascii=False, indent=2)
+
+# ── B.7: Write .clip_order.json ───────────────────────────────────
 ordered_clips = [os.path.basename(clips[i]) for i in ordered_idx]
 match_scores  = [round(scores[i][assigned[i]], 3) for i in ordered_idx]
 story_indices = [assigned[i] for i in ordered_idx]
 
-json.dump({'ordered_clips': ordered_clips,
-           'match_scores':  match_scores,
-           'story_indices': story_indices},
-          open(order_out, 'w', encoding='utf-8'), indent=2)
+json.dump({
+    'ordered_clips':  ordered_clips,
+    'match_scores':   match_scores,
+    'story_indices':  story_indices,
+    'missing_lines':  missing_lines,
+    'missing_texts':  [lines[li] for li in missing_lines],
+    'replaced_clips': replaced_clips_log,
+    'extra_clips':    [os.path.basename(clips[ci]) for ci in unmatched_extras],
+}, open(order_out, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
 
-print(f"  Clip order ({N} clips):")
+print(f"\n  Clip order ({len(ordered_clips)} clips):")
 for rank, name in enumerate(ordered_clips):
     si = story_indices[rank]; sc = match_scores[rank]
-    print(f"    [{rank+1:2d}] {name:<48} → line {si:3d}  score={sc:.2f}  {lines[si][:35]!r}")
+    print(f"    [{rank+1:2d}] {name:<20} → line {si:3d}  "
+          f"score={sc:.2f}  {lines[si][:35]!r}")
 CLIP_ORDER_EOF
+    _clip_order_exit=$?
     echo ""
+    if [[ $_clip_order_exit -ne 0 ]]; then
+      echo "════════════════════════════════════════════════════════════"
+      echo "  CLIP VALIDATION FAILED — see error above for details."
+      echo "  Fix the issue, then re-run the same command."
+      echo "════════════════════════════════════════════════════════════"
+      exit $_clip_order_exit
+    fi
   fi
 
   # ── TTS Regen ───────────────────────────────────────────────────────────────
@@ -459,7 +778,7 @@ CLIP_ORDER_EOF
     echo "  TTS REGEN — Azure TTS per clip"
     python3 - "$INPUT_FOLDER" "$_story_json" "$CONFIG" \
               "$TTS_CPS_MAP" "$TTS_MARGIN" "$TTS_ROUNDS" \
-              "${TTS_FORCE:-0}" "$AZURE_SPEECH_REGION" << 'TTS_REGEN_EOF'
+              "${TTS_FORCE:-0}" "$AZURE_SPEECH_REGION" "$EP_DIR" << 'TTS_REGEN_EOF'
 import sys, os, json, glob, re, subprocess, tempfile, shutil
 
 folder       = sys.argv[1]
@@ -470,6 +789,7 @@ tts_margin   = float(sys.argv[5])
 tts_rounds   = int(sys.argv[6])
 tts_force    = sys.argv[7] == '1'
 azure_region = sys.argv[8]
+ep_dir       = sys.argv[9]   # projects/{slug}/episodes/{ep_id}
 azure_key    = os.environ['AZURE_SPEECH_KEY']
 
 TTS_TOL = 0.05
@@ -586,7 +906,7 @@ pitch   = narr.get('azure_pitch', '0%')
 vk      = f"{voice}:{style}"
 
 # Collect original clips
-tts_dir = os.path.join(folder, '_tts')
+tts_dir = os.path.join(ep_dir, '_tts')
 os.makedirs(tts_dir, exist_ok=True)
 
 # Respect Whisper-determined clip order if available
@@ -626,43 +946,86 @@ need_w = [i for i, c in enumerate(clips)
           if tts_force
           or abs(wo_cache.get(os.path.basename(c), {}).get('mtime', 0)
                  - os.path.getmtime(c)) >= 1.0
-          or 'S' not in wo_cache.get(os.path.basename(c), {})]
+          or 'S' not in wo_cache.get(os.path.basename(c), {})
+    or 'S_start' not in wo_cache.get(os.path.basename(c), {})]
 
 if need_w:
-    print(f"  TTS-B — Whisper on {len(need_w)}/{N} original clips (model=small)")
+    # ── Reuse STEP 0 faster-whisper segments where available ─────────
+    # STEP 0 already transcribed every clip with faster-whisper and stored
+    # per-segment timestamps in .whisper_order_cache.json.  Read those now
+    # so TTS-B doesn't have to run a second transcription pass.
+    order_cache_path = os.path.join(folder, '.whisper_order_cache.json')
+    order_cache = {}
     try:
-        import whisper as _wm
-        _wmod = _wm.load_model('small'); _api = True
-    except ImportError:
-        _api = False
-        print("  [warn] whisper API unavailable — using S=clip_dur*0.9 fallback", file=sys.stderr)
-    with tempfile.TemporaryDirectory() as tmp:
-        for i in need_w:
-            c = clips[i]; cn = os.path.basename(c); mt = os.path.getmtime(c)
-            wav = os.path.join(tmp, f'c{i:04d}.wav')
-            r = subprocess.run(['ffmpeg', '-y', '-i', c, '-ar', '16000', '-ac', '1',
-                                '-c:a', 'pcm_s16le', wav, '-loglevel', 'error'],
-                               capture_output=True)
-            if r.returncode != 0:
-                wo_cache[cn] = {'mtime': mt, 'S': clip_durs[i] * 0.9, 'segments': []}
-                continue
-            if _api:
-                res  = _wmod.transcribe(wav, task='transcribe', verbose=None, fp16=False)
-                segs = res.get('segments', [])
-                S    = max((s['end'] for s in segs), default=clip_durs[i] * 0.9)
-                sd   = [{'start': s['start'], 'end': s['end'],
-                          'text': s['text'].strip()} for s in segs]
-            else:
-                S = clip_durs[i] * 0.9; sd = []
-            wo_cache[cn] = {'mtime': mt, 'S': float(S), 'segments': sd}
-            print(f"    [{i+1}/{N}] {cn}: S={S:.2f}s")
-    json.dump(wo_cache, open(wo_path, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+        order_cache = json.load(open(order_cache_path, encoding='utf-8'))
+    except Exception:
+        pass
+
+    still_need_w = []
+    for i in need_w:
+        cn = os.path.basename(clips[i])
+        oc = order_cache.get(cn, {})
+        oc_segs = oc.get('segments', [])
+        if oc_segs and abs(oc.get('mtime', 0) - os.path.getmtime(clips[i])) < 1.0:
+            S    = max((s['end']   for s in oc_segs), default=clip_durs[i] * 0.9)
+            S_st = min((s['start'] for s in oc_segs), default=0.0)
+            wo_cache[cn] = {'mtime': oc['mtime'], 'S': float(S),
+                            'S_start': float(S_st), 'segments': oc_segs}
+            print(f"    [{i+1}/{N}] {cn}: S={S_st:.2f}s–{S:.2f}s (order cache)")
+        else:
+            still_need_w.append(i)
+    need_w = still_need_w
+
+    if need_w:
+        json.dump(wo_cache, open(wo_path, 'w', encoding='utf-8'),
+                  ensure_ascii=False, indent=2)
+
+    print(f"  TTS-B — Whisper on {len(need_w)}/{N} clips (model=small)"
+          f"{' — all from order cache' if not need_w else ''}")
+    if need_w:
+        try:
+            import whisper as _wm
+            _wmod = _wm.load_model('small'); _api = True
+        except ImportError:
+            _api = False
+            print("  [warn] whisper API unavailable — using S=clip_dur*0.9 fallback", file=sys.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in need_w:
+                c = clips[i]; cn = os.path.basename(c); mt = os.path.getmtime(c)
+                wav = os.path.join(tmp, f'c{i:04d}.wav')
+                r = subprocess.run(['ffmpeg', '-y', '-i', c, '-ar', '16000', '-ac', '1',
+                                    '-c:a', 'pcm_s16le', wav, '-loglevel', 'error'],
+                                   capture_output=True)
+                if r.returncode != 0:
+                    wo_cache[cn] = {'mtime': mt, 'S': clip_durs[i] * 0.9,
+                                    'S_start': 0.0, 'segments': []}
+                    continue
+                if _api:
+                    res  = _wmod.transcribe(wav, task='transcribe', verbose=None, fp16=False)
+                    segs = res.get('segments', [])
+                    S    = max((s['end']   for s in segs), default=clip_durs[i] * 0.9)
+                    S_st = min((s['start'] for s in segs), default=0.0)
+                    sd   = [{'start': s['start'], 'end': s['end'],
+                              'text': s['text'].strip()} for s in segs]
+                else:
+                    S = clip_durs[i] * 0.9; S_st = 0.0; sd = []
+                wo_cache[cn] = {'mtime': mt, 'S': float(S), 'S_start': float(S_st),
+                                'segments': sd}
+                print(f"    [{i+1}/{N}] {cn}: S={S_st:.2f}s–{S:.2f}s")
+        json.dump(wo_cache, open(wo_path, 'w', encoding='utf-8'),
+                  ensure_ascii=False, indent=2)
 else:
     print(f"  TTS-B — whisper_orig cache valid ({N} clips)")
 
-S_vals = [wo_cache.get(os.path.basename(c), {}).get('S', clip_durs[i] * 0.9)
-          for i, c in enumerate(clips)]
-T_vals = [min(S_vals[i] * (1 - tts_margin), clip_durs[i] * 0.95) for i in range(N)]
+S_vals       = [wo_cache.get(os.path.basename(c), {}).get('S',       clip_durs[i] * 0.9)
+                for i, c in enumerate(clips)]
+S_start_vals = [wo_cache.get(os.path.basename(c), {}).get('S_start', 0.0)
+                for i, c in enumerate(clips)]
+# T is the TTS target duration = speech window (S_end - S_start), minus margin.
+# S_start offset is added back as silence at mux time so voice aligns to lip movement.
+T_vals = [min((S_vals[i] - S_start_vals[i]) * (1 - tts_margin),
+              (clip_durs[i] - S_start_vals[i]) * 0.95)
+          for i in range(N)]
 
 # TTS-C..H: Sequential per-clip TTS generation
 try:
@@ -675,10 +1038,11 @@ except ImportError:
 print(f"  TTS-C..H — {N} clips | {vk}")
 
 for i, clip in enumerate(clips):
-    cn  = os.path.basename(clip)
-    cs  = os.path.splitext(cn)[0]
-    wav_p = os.path.join(tts_dir, f'{cs}.wav')
-    mp4_p = os.path.join(tts_dir, cn)
+    cn        = os.path.basename(clip)
+    cs        = os.path.splitext(cn)[0]
+    wav_p     = os.path.join(tts_dir, f'{cs}.wav')
+    mp4_p     = os.path.join(tts_dir, cn)
+    S_start_i = S_start_vals[i]   # speech-start offset for lip-sync alignment
 
     # Cache check
     meta = metadata.get(cn, {})
@@ -744,23 +1108,40 @@ for i, clip in enumerate(clips):
                 print(f"    R2: {A2:.2f}s err={e2:+.1%} ok")
                 fw, fd, fr = wav_r2, A2, r2_s
 
-        if fd > S_vals[i]:
-            print(f"  [WARN] clip {i}: TTS {fd:.2f}s > lip-sync {S_vals[i]:.2f}s")
+        speech_window = S_vals[i] - S_start_vals[i]
+        if fd > speech_window:
+            print(f"  [WARN] clip {i}: TTS {fd:.2f}s > speech window "
+                  f"{speech_window:.2f}s ({S_start_vals[i]:.2f}s–{S_vals[i]:.2f}s)")
 
         shutil.copy2(fw, wav_p)
         metadata[cn] = {'rate_r1': r1_s, 'dur_r1': round(A1, 3), 'rate_final': fr,
                          'dur_actual': round(fd, 3), 'dur_target': round(T_i, 3),
+                         'S_start': round(S_start_i, 3),
                          'chars': ch, 'ok': True}
         json.dump(metadata, open(meta_path, 'w', encoding='utf-8'),
                   ensure_ascii=False, indent=2)
 
-    # Rebuild clip with TTS audio
-    r = subprocess.run([
-        'ffmpeg', '-y', '-i', clip, '-i', wav_p,
-        '-c:v', 'copy', '-map', '0:v:0', '-map', '1:a:0',
-        '-c:a', 'aac', '-b:a', '192k', '-t', f'{clip_durs[i]:.3f}',
-        mp4_p,
-    ], capture_output=True, text=True)
+    # Rebuild clip with TTS audio.
+    # If the original speaker's speech starts after t=0 (e.g. 1.2s into clip),
+    # adelay inserts that many ms of silence before the TTS so the voice aligns
+    # to the moment the mouth opens — improving lip-sync naturalness.
+    delay_ms = int(S_start_i * 1000)
+    if delay_ms > 10:
+        r = subprocess.run([
+            'ffmpeg', '-y', '-i', clip, '-i', wav_p,
+            '-c:v', 'copy',
+            '-filter_complex', f'[1:a]adelay={delay_ms}:all=1[delayed]',
+            '-map', '0:v:0', '-map', '[delayed]',
+            '-c:a', 'aac', '-b:a', '192k', '-t', f'{clip_durs[i]:.3f}',
+            mp4_p,
+        ], capture_output=True, text=True)
+    else:
+        r = subprocess.run([
+            'ffmpeg', '-y', '-i', clip, '-i', wav_p,
+            '-c:v', 'copy', '-map', '0:v:0', '-map', '1:a:0',
+            '-c:a', 'aac', '-b:a', '192k', '-t', f'{clip_durs[i]:.3f}',
+            mp4_p,
+        ], capture_output=True, text=True)
     if r.returncode != 0:
         print(f"  [ERROR] ffmpeg rebuild {cn}: {r.stderr[-200:]}", file=sys.stderr)
 
@@ -1417,10 +1798,12 @@ FINAL_EOF
   [[ -z "$LOCALE"  ]] && LOCALE="en"
   [[ -z "$EPISODE" ]] && EPISODE="s01e01"
 
-  # Derive slug: story title → folder name → random fallback
-  _clips_title=""
-  if [[ -n "$STORY" && -f "$STORY" ]]; then
-    _clips_title="$(python3 -c "
+  # Slug + EP_DIR already derived early (before STEP 0); skip re-derivation.
+  # Only re-derive if somehow not set (e.g. no-story mode edge case).
+  if [[ -z "$_slug" ]]; then
+    _clips_title=""
+    if [[ -n "$STORY" && -f "$STORY" ]]; then
+      _clips_title="$(python3 -c "
 import re, sys
 text = open('$STORY', encoding='utf-8').read()
 for line in text.splitlines():
@@ -1430,10 +1813,10 @@ for line in text.splitlines():
     s = line.strip()
     if s: print(s); sys.exit(0)
 " 2>/dev/null)"
-  fi
-  [[ -z "$_clips_title" ]] && _clips_title="$(basename "$INPUT_FOLDER")"
+    fi
+    [[ -z "$_clips_title" ]] && _clips_title="$(basename "$INPUT_FOLDER")"
 
-  _slug="$(python3 -c "
+    _slug="$(python3 -c "
 import re, unicodedata, secrets
 orig = '''$_clips_title'''
 t = unicodedata.normalize('NFKD', orig).encode('ascii','ignore').decode('ascii')
@@ -1446,7 +1829,8 @@ rand6 = secrets.token_hex(3)
 print((t + '-' + rand6) if t else 'story-' + rand6)
 " 2>/dev/null || echo "story-$(python3 -c 'import secrets; print(secrets.token_hex(3))')")"
 
-  EP_DIR="projects/${_slug}/episodes/${EPISODE}"
+    EP_DIR="projects/${_slug}/episodes/${EPISODE}"
+  fi
   RENDERS_DIR="${EP_DIR}/renders/${LOCALE}"
   mkdir -p "$RENDERS_DIR"
 
