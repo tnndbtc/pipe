@@ -32,7 +32,7 @@
   "narrator": {
     "zh-Hans": {
       "Xiaoxiao DragonHD": {
-        "enabled": true,
+        "enabled": false,
         "gender": "female",
         "notes": "Customerservice style. Good for business news and professional narration.",
         "azure_voice": "zh-CN-Xiaoxiao:DragonHDFlashLatestNeural",

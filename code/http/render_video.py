@@ -151,6 +151,45 @@ def _whisper_align(wav_path: "Path", text: str, locale: str,
         return [], []
 
 
+def _rms_speech_onset(wav_path: "Path", window_ms: int = 20,
+                      rms_thresh: float = 0.02,
+                      min_run: int = 3) -> float:
+    """Return the time (seconds, WAV-relative) when speech energy first appears.
+
+    Uses a simple RMS threshold with a minimum run of `min_run` consecutive
+    windows above `rms_thresh` to avoid triggering on transient clicks or
+    TTS-engine pop artifacts at the very start of some Azure TTS outputs.
+
+    Falls back to 0.0 on any error so callers see no change.
+    """
+    try:
+        import soundfile as sf
+        import numpy as np
+        data, sr = sf.read(str(wav_path))
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        win = max(1, int(sr * window_ms / 1000))
+        # slide a window and collect RMS values
+        rms_seq = []
+        for s in range(0, len(data), win):
+            chunk = data[s: s + win]
+            rms_seq.append(float(np.sqrt(np.mean(chunk ** 2))))
+        # find first run of `min_run` consecutive windows above threshold
+        run = 0
+        for i, r in enumerate(rms_seq):
+            if r >= rms_thresh:
+                run += 1
+                if run >= min_run:
+                    # onset = start of the run (not just the last window)
+                    onset_idx = i - (min_run - 1)
+                    return round(onset_idx * win / sr, 3)
+            else:
+                run = 0
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 def _char_time(words: list, char_pos: int, total_chars: int,
                fallback_sec: float = 0.0) -> float:
     """Map a character position in the full text to a WAV-relative timestamp.
@@ -747,12 +786,36 @@ def write_srt_from_voplan(
             _wav_path = vo_dir / f"{vi['item_id']}.wav"
             _align_words, _align_seg_ends = _whisper_align(_wav_path, text, _locale)
 
+        # Offset the first subtitle card by the actual speech start in the WAV.
+        # Azure TTS sometimes prepends leading silence or a transient artifact
+        # before the first spoken word, making subtitles appear too early.
+        #
+        # Two-source onset strategy:
+        #   RMS onset  — reliable for normal Azure TTS leading silence
+        #                (100–450 ms of true silence before speech).
+        #   Whisper onset — reliable when the WAV has an audio artifact at t=0
+        #                   (high-energy click/pop followed by silence then speech)
+        #                   because Whisper skips non-speech sounds and timestamps
+        #                   the first intelligible word.
+        #
+        # Rule: use RMS onset when it fires (> 0 ms), otherwise fall back to
+        # Whisper's first-word onset.  Both are capped at 15% of the WAV
+        # duration so a spurious reading cannot hide the subtitle entirely.
+        _rms_onset_s    = 0.0
+        _whisper_onset_s = round(_align_words[0]["start"], 3) if _align_words else 0.0
+        if vo_dir:
+            _rms_onset_s = _rms_speech_onset(_wav_path)
+        _onset_s = _rms_onset_s if _rms_onset_s > 0.0 else _whisper_onset_s
+        _onset_s = min(_onset_s, wav_dur * 0.15)   # safety cap
+        _onset_ms     = round(_onset_s * 1000)
+        abs_in_speech  = abs_in + _onset_ms   # episode-ms of first spoken word
+
         if n_sents == 1:
             # Single sentence: one or more cards spanning the full item duration.
             cards = _split_subtitle_text(text)
             if len(cards) == 1:
                 # Fits on one line — single card spanning the full item duration.
-                timecode = f"{ms_to_srt_ts(abs_in)} --> {ms_to_srt_ts(abs_out)}"
+                timecode = f"{ms_to_srt_ts(abs_in_speech)} --> {ms_to_srt_ts(abs_out)}"
                 lines += [str(seq), timecode, cards[0], ""]
                 subs.append({"line_id": vi.get("item_id", ""), "timecode": timecode,
                              "text": cards[0]})
@@ -761,7 +824,7 @@ def write_srt_from_voplan(
                 # Too long for one line — split cards.
                 # Use Whisper word-level timestamps when available, else proportional.
                 total_c = sum(len(c) for c in cards)
-                t = abs_in
+                t = abs_in_speech
                 char_off = 0
                 for card in cards:
                     if _align_words:
@@ -821,14 +884,16 @@ def write_srt_from_voplan(
 
             # Convert WAV-relative bounds to absolute episode ms timestamps.
             # bound_ms[i] = start of sentence i; bound_ms[i+1] = end of sentence i.
-            bound_ms = [abs_in] + [
+            # Use abs_in_speech (not abs_in) so the first sentence starts when
+            # speech actually begins, not at the WAV start (which may include silence).
+            bound_ms = [abs_in_speech] + [
                 round((vi["start_sec"] + title_offset + b) * 1000)
                 for b in bounds
             ] + [abs_out]
 
             sent_char_off = 0
             for i, sent in enumerate(sentences):
-                t_in  = max(bound_ms[i],     abs_in)
+                t_in  = max(bound_ms[i],     abs_in_speech if i == 0 else abs_in)
                 t_out = min(bound_ms[i + 1], abs_out)
                 t_out = max(t_out, t_in + 100)   # guarantee ≥100 ms visibility
                 cards = _split_subtitle_text(sent)
