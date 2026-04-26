@@ -105,6 +105,7 @@ TTS_MARGIN="0.05"
 TTS_ROUNDS="2"
 TTS_CPS_MAP="${HOME}/.config/pipe/tts_cps_map.json"
 TTS_FORCE=""
+UNIFORM_RATE=""       # use one fixed TTS rate (host avg CPS); adjust clip video speed per-clip
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 print_help() {
@@ -128,6 +129,9 @@ USAGE
   --tts-margin    N      Acceptable timing error ratio   (default: 0.05)
   --tts-rounds    N      Max TTS calibration rounds      (default: 2)
   --tts-force            Force re-synthesis even if WAV is cached
+  --uniform-rate         Measure host avg CPS from clips; generate all TTS at
+                         that one fixed rate; adjust per-clip video speed to
+                         match lip-movement window to TTS duration
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  MODE 2 — TTS  (--story, default)
@@ -237,6 +241,7 @@ while [[ $# -gt 0 ]]; do
     --tts-rounds)       TTS_ROUNDS="$2";      shift 2 ;;
     --tts-cps-map)      TTS_CPS_MAP="$2";     shift 2 ;;
     --tts-force)        TTS_FORCE="1";        shift ;;
+    --uniform-rate)     UNIFORM_RATE="1";     shift ;;
     *)
       echo "[ERROR] Unknown flag: $1" >&2
       exit 1
@@ -259,6 +264,7 @@ if [[ -n "$INPUT_FOLDER" ]]; then
   echo "  Story     : ${STORY:-none}"
   echo "  Speed     : ${SPEED:-1.0}"
   echo "  TTS-regen : ${TTS_REGEN:-no}"
+  echo "  Uniform-rate: ${UNIFORM_RATE:-no}"
   echo "  Out       : $_out_video"
   echo "════════════════════════════════════════════════════════════"
   echo ""
@@ -778,7 +784,8 @@ CLIP_ORDER_EOF
     echo "  TTS REGEN — Azure TTS per clip"
     python3 - "$INPUT_FOLDER" "$_story_json" "$CONFIG" \
               "$TTS_CPS_MAP" "$TTS_MARGIN" "$TTS_ROUNDS" \
-              "${TTS_FORCE:-0}" "$AZURE_SPEECH_REGION" "$EP_DIR" << 'TTS_REGEN_EOF'
+              "${TTS_FORCE:-0}" "$AZURE_SPEECH_REGION" "$EP_DIR" \
+              "${UNIFORM_RATE:-0}" << 'TTS_REGEN_EOF'
 import sys, os, json, glob, re, subprocess, tempfile, shutil
 
 folder       = sys.argv[1]
@@ -790,6 +797,7 @@ tts_rounds   = int(sys.argv[6])
 tts_force    = sys.argv[7] == '1'
 azure_region = sys.argv[8]
 ep_dir       = sys.argv[9]   # projects/{slug}/episodes/{ep_id}
+uniform_rate = sys.argv[10] == '1' if len(sys.argv) > 10 else False
 azure_key    = os.environ['AZURE_SPEECH_KEY']
 
 TTS_TOL = 0.05
@@ -1027,6 +1035,36 @@ T_vals = [min((S_vals[i] - S_start_vals[i]) * (1 - tts_margin),
               (clip_durs[i] - S_start_vals[i]) * 0.95)
           for i in range(N)]
 
+# ── Phase 1 (uniform-rate): measure host avg CPS from Whisper transcripts ────
+# We compute a weighted-average chars/sec over every clip that has Whisper data,
+# then convert it to a single azure_rate that all TTS calls will share.
+fixed_rate_str = None  # set only when uniform_rate=True
+if uniform_rate:
+    total_chars_w = 0; total_speech_s = 0.0
+    for i, c in enumerate(clips):
+        cn   = os.path.basename(c)
+        oc   = wo_cache.get(cn, {})
+        segs = oc.get('segments', [])
+        if not segs:
+            continue
+        text = ''.join(s.get('text', '') for s in segs).strip()
+        ch_w = len(text)
+        dur  = oc.get('S', clip_durs[i] * 0.9) - oc.get('S_start', 0.0)
+        if dur > 0.1 and ch_w > 0:
+            total_chars_w += ch_w
+            total_speech_s += dur
+    if total_speech_s > 0:
+        avg_cps      = total_chars_w / total_speech_s
+        fixed_rate_f = predict_rate(avg_cps, vk, cps_map)
+        fixed_rate_str = fmt_rate(fixed_rate_f)
+        print(f"  [uniform-rate] host avg CPS: {avg_cps:.2f} "
+              f"({total_chars_w} chars / {total_speech_s:.1f}s across {N} clips)")
+        print(f"  [uniform-rate] fixed TTS rate: {fixed_rate_str}")
+    else:
+        print("  [WARN] uniform-rate: no Whisper transcript data; "
+              "falling back to per-clip rate", file=sys.stderr)
+        uniform_rate = False
+
 # TTS-C..H: Sequential per-clip TTS generation
 try:
     import azure.cognitiveservices.speech  # noqa: just validate import
@@ -1046,7 +1084,9 @@ for i, clip in enumerate(clips):
 
     # Cache check
     meta = metadata.get(cn, {})
-    if not tts_force and meta.get('ok') and os.path.exists(wav_p):
+    # Uniform-rate: invalidate cache if WAV was not generated with the same fixed rate
+    _cache_stale = uniform_rate and meta.get('rate_fixed') != fixed_rate_str
+    if not tts_force and not _cache_stale and meta.get('ok') and os.path.exists(wav_p):
         try:
             if probe_dur(wav_p) > 0:
                 if chars[i] > 0:
@@ -1072,76 +1112,148 @@ for i, clip in enumerate(clips):
         if ch == 0:
             print(f"  [{i+1}/{N}] {cn}: empty text, skipping"); continue
 
-        # Rate prediction
-        r1_f  = predict_rate(ch / T_i, vk, cps_map)
-        r1_s  = fmt_rate(r1_f)
-        wav_r1 = os.path.join(tts_dir, f'{cs}_r1.wav')
-        print(f"  [{i+1}/{N}] {cn}: rate={r1_s} T={T_i:.2f}s chars={ch}")
-        try:
-            synthesize(build_ssml(ssml_t[i], voice, style, sdeg, r1_s, pitch), wav_r1)
-            A1 = probe_dur(wav_r1)
-        except Exception as e:
-            print(f"  [ERROR] R1: {e}", file=sys.stderr); continue
-
-        upd_map(cps_map, vk, r1_s, ch / A1, ch, A1)
-        save_map(cps_map, cps_map_path)
-        e1 = (A1 - T_i) / T_i
-
-        if abs(e1) < TTS_TOL or tts_rounds <= 1:
-            fw, fd, fr = wav_r1, A1, r1_s
-            print(f"    R1: {A1:.2f}s err={e1:+.1%} ok")
-        else:
-            r2_f  = clamp_rate((1.0 + parse_rate(r1_s) / 100.0) * (A1 / T_i))
-            r2_s  = fmt_rate(r2_f)
-            print(f"    R1: {A1:.2f}s err={e1:+.1%} -> R2 rate={r2_s}")
-            wav_r2 = os.path.join(tts_dir, f'{cs}_r2.wav')
+        if uniform_rate:
+            # ── Uniform-rate path: one fixed TTS rate, no calibration loop ──
+            r1_s   = fixed_rate_str
+            wav_r1 = os.path.join(tts_dir, f'{cs}_r1.wav')
+            print(f"  [{i+1}/{N}] {cn}: rate={r1_s} (fixed) chars={ch}")
             try:
-                synthesize(build_ssml(ssml_t[i], voice, style, sdeg, r2_s, pitch), wav_r2)
-                A2 = probe_dur(wav_r2)
+                synthesize(build_ssml(ssml_t[i], voice, style, sdeg, r1_s, pitch), wav_r1)
+                A1 = probe_dur(wav_r1)
             except Exception as e:
-                print(f"  [ERROR] R2: {e}", file=sys.stderr)
+                print(f"  [ERROR] R1: {e}", file=sys.stderr); continue
+            upd_map(cps_map, vk, r1_s, ch / A1, ch, A1)
+            save_map(cps_map, cps_map_path)
+            fw, fd, fr = wav_r1, A1, r1_s
+            print(f"    tts_dur={A1:.2f}s")
+
+            shutil.copy2(fw, wav_p)
+            metadata[cn] = {'rate_fixed': fr, 'dur_actual': round(fd, 3),
+                             'S_start': round(S_start_i, 3),
+                             'chars': ch, 'ok': True}
+            json.dump(metadata, open(meta_path, 'w', encoding='utf-8'),
+                      ensure_ascii=False, indent=2)
+
+        else:
+            # ── Per-clip rate calibration (original path) ─────────────────
+            r1_f  = predict_rate(ch / T_i, vk, cps_map)
+            r1_s  = fmt_rate(r1_f)
+            wav_r1 = os.path.join(tts_dir, f'{cs}_r1.wav')
+            print(f"  [{i+1}/{N}] {cn}: rate={r1_s} T={T_i:.2f}s chars={ch}")
+            try:
+                synthesize(build_ssml(ssml_t[i], voice, style, sdeg, r1_s, pitch), wav_r1)
+                A1 = probe_dur(wav_r1)
+            except Exception as e:
+                print(f"  [ERROR] R1: {e}", file=sys.stderr); continue
+
+            upd_map(cps_map, vk, r1_s, ch / A1, ch, A1)
+            save_map(cps_map, cps_map_path)
+            e1 = (A1 - T_i) / T_i
+
+            if abs(e1) < TTS_TOL or tts_rounds <= 1:
                 fw, fd, fr = wav_r1, A1, r1_s
+                print(f"    R1: {A1:.2f}s err={e1:+.1%} ok")
             else:
-                upd_map(cps_map, vk, r2_s, ch / A2, ch, A2)
-                save_map(cps_map, cps_map_path)
-                e2 = (A2 - T_i) / T_i
-                print(f"    R2: {A2:.2f}s err={e2:+.1%} ok")
-                fw, fd, fr = wav_r2, A2, r2_s
+                r2_f  = clamp_rate((1.0 + parse_rate(r1_s) / 100.0) * (A1 / T_i))
+                r2_s  = fmt_rate(r2_f)
+                print(f"    R1: {A1:.2f}s err={e1:+.1%} -> R2 rate={r2_s}")
+                wav_r2 = os.path.join(tts_dir, f'{cs}_r2.wav')
+                try:
+                    synthesize(build_ssml(ssml_t[i], voice, style, sdeg, r2_s, pitch), wav_r2)
+                    A2 = probe_dur(wav_r2)
+                except Exception as e:
+                    print(f"  [ERROR] R2: {e}", file=sys.stderr)
+                    fw, fd, fr = wav_r1, A1, r1_s
+                else:
+                    upd_map(cps_map, vk, r2_s, ch / A2, ch, A2)
+                    save_map(cps_map, cps_map_path)
+                    e2 = (A2 - T_i) / T_i
+                    print(f"    R2: {A2:.2f}s err={e2:+.1%} ok")
+                    fw, fd, fr = wav_r2, A2, r2_s
 
-        speech_window = S_vals[i] - S_start_vals[i]
-        if fd > speech_window:
-            print(f"  [WARN] clip {i}: TTS {fd:.2f}s > speech window "
-                  f"{speech_window:.2f}s ({S_start_vals[i]:.2f}s–{S_vals[i]:.2f}s)")
+            speech_window = S_vals[i] - S_start_vals[i]
+            if fd > speech_window:
+                print(f"  [WARN] clip {i}: TTS {fd:.2f}s > speech window "
+                      f"{speech_window:.2f}s ({S_start_vals[i]:.2f}s–{S_vals[i]:.2f}s)")
 
-        shutil.copy2(fw, wav_p)
-        metadata[cn] = {'rate_r1': r1_s, 'dur_r1': round(A1, 3), 'rate_final': fr,
-                         'dur_actual': round(fd, 3), 'dur_target': round(T_i, 3),
-                         'S_start': round(S_start_i, 3),
-                         'chars': ch, 'ok': True}
-        json.dump(metadata, open(meta_path, 'w', encoding='utf-8'),
-                  ensure_ascii=False, indent=2)
+            shutil.copy2(fw, wav_p)
+            metadata[cn] = {'rate_r1': r1_s, 'dur_r1': round(A1, 3), 'rate_final': fr,
+                             'dur_actual': round(fd, 3), 'dur_target': round(T_i, 3),
+                             'S_start': round(S_start_i, 3),
+                             'chars': ch, 'ok': True}
+            json.dump(metadata, open(meta_path, 'w', encoding='utf-8'),
+                      ensure_ascii=False, indent=2)
 
     # Rebuild clip with TTS audio.
-    # If the original speaker's speech starts after t=0 (e.g. 1.2s into clip),
-    # adelay inserts that many ms of silence before the TTS so the voice aligns
-    # to the moment the mouth opens — improving lip-sync naturalness.
-    delay_ms = int(S_start_i * 1000)
-    if delay_ms > 10:
-        r = subprocess.run([
-            'ffmpeg', '-y', '-i', clip, '-i', wav_p,
-            '-c:v', 'copy',
-            '-filter_complex', f'[1:a]adelay={delay_ms}:all=1[delayed]',
-            '-map', '0:v:0', '-map', '[delayed]',
-            '-c:a', 'aac', '-b:a', '192k', '-t', f'{clip_durs[i]:.3f}',
-            mp4_p,
-        ], capture_output=True, text=True)
+    if uniform_rate:
+        # ── Uniform-rate mux: time-scale video so lip-movement window ≈ TTS ──
+        tts_dur_i       = probe_dur(wav_p)
+        speech_window_i = S_vals[i] - S_start_vals[i]
+        SPEED_CLAMP_LO, SPEED_CLAMP_HI = 0.60, 1.50
+        if tts_dur_i > 0 and speech_window_i > 0:
+            clip_speed_i = speech_window_i / tts_dur_i
+            if clip_speed_i < SPEED_CLAMP_LO:
+                print(f"  [WARN] {cn}: clip_speed {clip_speed_i:.3f} clamped to {SPEED_CLAMP_LO}")
+                clip_speed_i = SPEED_CLAMP_LO
+            elif clip_speed_i > SPEED_CLAMP_HI:
+                print(f"  [WARN] {cn}: clip_speed {clip_speed_i:.3f} clamped to {SPEED_CLAMP_HI}")
+                clip_speed_i = SPEED_CLAMP_HI
+        else:
+            clip_speed_i = 1.0
+        new_dur_i  = clip_durs[i] / clip_speed_i
+        # TTS audio starts at S_start_i mapped into the sped clip's time base
+        delay_ms   = int((S_start_i / clip_speed_i) * 1000)
+        pts_factor = 1.0 / clip_speed_i
+        print(f"    clip_speed={clip_speed_i:.3f}x  tts={tts_dur_i:.2f}s  "
+              f"speech_win={speech_window_i:.2f}s  new_dur={new_dur_i:.2f}s")
+        metadata[cn]['clip_speed'] = round(clip_speed_i, 4)
+        json.dump(metadata, open(meta_path, 'w', encoding='utf-8'),
+                  ensure_ascii=False, indent=2)
+        if delay_ms > 10:
+            r = subprocess.run([
+                'ffmpeg', '-y', '-i', clip, '-i', wav_p,
+                '-filter_complex',
+                    f'[0:v]setpts={pts_factor:.6f}*PTS[vout];'
+                    f'[1:a]adelay={delay_ms}:all=1[aout]',
+                '-map', '[vout]', '-map', '[aout]',
+                '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-b:a', '192k', '-t', f'{new_dur_i:.3f}',
+                mp4_p,
+            ], capture_output=True, text=True)
+        else:
+            r = subprocess.run([
+                'ffmpeg', '-y', '-i', clip, '-i', wav_p,
+                '-filter_complex',
+                    f'[0:v]setpts={pts_factor:.6f}*PTS[vout]',
+                '-map', '[vout]', '-map', '1:a:0',
+                '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-b:a', '192k', '-t', f'{new_dur_i:.3f}',
+                mp4_p,
+            ], capture_output=True, text=True)
     else:
-        r = subprocess.run([
-            'ffmpeg', '-y', '-i', clip, '-i', wav_p,
-            '-c:v', 'copy', '-map', '0:v:0', '-map', '1:a:0',
-            '-c:a', 'aac', '-b:a', '192k', '-t', f'{clip_durs[i]:.3f}',
-            mp4_p,
-        ], capture_output=True, text=True)
+        # ── Original mux: copy video as-is, replace audio only ──────────────
+        # If the original speaker's speech starts after t=0 (e.g. 1.2s into clip),
+        # adelay inserts that many ms of silence before the TTS so the voice aligns
+        # to the moment the mouth opens — improving lip-sync naturalness.
+        delay_ms = int(S_start_i * 1000)
+        if delay_ms > 10:
+            r = subprocess.run([
+                'ffmpeg', '-y', '-i', clip, '-i', wav_p,
+                '-c:v', 'copy',
+                '-filter_complex', f'[1:a]adelay={delay_ms}:all=1[delayed]',
+                '-map', '0:v:0', '-map', '[delayed]',
+                '-c:a', 'aac', '-b:a', '192k', '-t', f'{clip_durs[i]:.3f}',
+                mp4_p,
+            ], capture_output=True, text=True)
+        else:
+            r = subprocess.run([
+                'ffmpeg', '-y', '-i', clip, '-i', wav_p,
+                '-c:v', 'copy', '-map', '0:v:0', '-map', '1:a:0',
+                '-c:a', 'aac', '-b:a', '192k', '-t', f'{clip_durs[i]:.3f}',
+                mp4_p,
+            ], capture_output=True, text=True)
     if r.returncode != 0:
         print(f"  [ERROR] ffmpeg rebuild {cn}: {r.stderr[-200:]}", file=sys.stderr)
 
@@ -1294,16 +1406,19 @@ PYEOF
   _whisper_model="small"
   [[ -z "$STORY" ]] && _whisper_model="medium"
   python3 - "$_stitch_src" "$_out_srt" "$_whisper_model" \
-             "${_wts_cache:-}" "${TTS_FORCE:-0}" "$INPUT_FOLDER" << 'WHISPER_CLIP_EOF'
+             "${_wts_cache:-}" "${TTS_FORCE:-0}" "$INPUT_FOLDER" \
+             "${UNIFORM_RATE:-0}" "$_out_video" << 'WHISPER_CLIP_EOF'
 import sys, os, glob, re, subprocess, tempfile, json
 
-folder     = sys.argv[1]
-srt_out    = sys.argv[2]
-model_name = sys.argv[3]
-cache_path = sys.argv[4]    # '' = no cache (non-TTS-regen path)
-tts_force   = sys.argv[5] == '1'
-base_folder = sys.argv[6] if len(sys.argv) > 6 else folder
-XFADE       = 0.4
+folder       = sys.argv[1]
+srt_out      = sys.argv[2]
+model_name   = sys.argv[3]
+cache_path   = sys.argv[4]    # '' = no cache (non-TTS-regen path)
+tts_force    = sys.argv[5] == '1'
+base_folder  = sys.argv[6] if len(sys.argv) > 6 else folder
+uniform_rate = sys.argv[7] == '1' if len(sys.argv) > 7 else False
+out_video_p  = sys.argv[8] if len(sys.argv) > 8 else ''
+XFADE        = 0.4
 
 def natural_key(p):
     return [int(t) if t.isdigit() else t.lower()
@@ -1320,6 +1435,31 @@ def fmt_ts(ms):
     ms = max(0, int(ms))
     h, ms = divmod(ms, 3_600_000); m, ms = divmod(ms, 60_000); s, ms = divmod(ms, 1_000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+# ── Uniform-rate: transcribe final output.mp4 directly (whole-video) ─────────
+# Per-clip Whisper + offset arithmetic drifts on speed-adjusted clips.
+# Transcribing the already-stitched video gives exact global timestamps.
+if uniform_rate and out_video_p and os.path.exists(out_video_p):
+    print(f"  [uniform-rate] STEP 2+3 — whole-video Whisper on output.mp4")
+    tmp_wav = out_video_p + '.tmp_w.wav'
+    subprocess.run(['ffmpeg', '-y', '-i', out_video_p, '-ar', '16000', '-ac', '1',
+                    '-c:a', 'pcm_s16le', tmp_wav, '-loglevel', 'error'], check=True)
+    from faster_whisper import WhisperModel
+    wmodel = WhisperModel(model_name, compute_type='int8')
+    segs_iter, _ = wmodel.transcribe(tmp_wav, language='zh', beam_size=5)
+    out_lines = []; seq = 1
+    for seg in segs_iter:
+        t_in  = int(seg.start * 1000)
+        t_out = int(seg.end   * 1000)
+        text  = seg.text.strip()
+        if not text: continue
+        out_lines += [str(seq), f"{fmt_ts(t_in)} --> {fmt_ts(t_out)}", text, '']
+        seq += 1
+    try: os.remove(tmp_wav)
+    except: pass
+    open(srt_out, 'w', encoding='utf-8').write('\n'.join(out_lines))
+    print(f"  -> {seq-1} segments from full video -> {srt_out}")
+    sys.exit(0)
 
 _order_path = os.path.join(base_folder, '.clip_order.json')
 if os.path.exists(_order_path):
@@ -1472,11 +1612,23 @@ story_json_p = sys.argv[4] if len(sys.argv) > 4 else ''
 STRONG_BREAKS = set('。！？…')
 WEAK_BREAKS   = set('，；、,;!?')
 ALL_BREAKS    = STRONG_BREAKS | WEAK_BREAKS
-MAX_CARD_VW   = 60
-MIN_CARD_VW   = 14
+MAX_CARD_VW   = 46   # ~23 CJK chars per card
+MIN_CARD_VW   = 10
 
 def vw(s):
     return sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1 for c in s)
+
+def _hard_split(text):
+    """Split text into <=MAX_CARD_VW chunks by character count when no punctuation found."""
+    chunks = []; buf = ''; w = 0
+    for c in text:
+        cw = 2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1
+        if w + cw > MAX_CARD_VW and buf:
+            chunks.append(buf); buf = c; w = cw
+        else:
+            buf += c; w += cw
+    if buf: chunks.append(buf)
+    return chunks
 
 def natural_chunks(text):
     text = text.strip()
@@ -1489,7 +1641,8 @@ def natural_chunks(text):
         if vw(part) <= MAX_CARD_VW:
             cards.append(part)
         else:
-            subs = re.split(r'(?<=[，；、,;!?])', part)
+            # Split on weak punctuation AND em-dash (——)
+            subs = re.split(r'(?<=[，；、,;!?])|(?<=——)', part)
             buf = ''
             for s in subs:
                 s = s.strip()
@@ -1497,9 +1650,9 @@ def natural_chunks(text):
                 if not buf: buf = s
                 elif vw(buf) + vw(s) <= MAX_CARD_VW: buf += s
                 else:
-                    if buf: cards.append(buf)
+                    if buf: cards.extend(_hard_split(buf))
                     buf = s
-            if buf: cards.append(buf)
+            if buf: cards.extend(_hard_split(buf))
     merged = []
     for card in cards:
         if (merged and vw(card) < MIN_CARD_VW
@@ -1556,6 +1709,53 @@ def map_story_to_segs(raw, segments, out_lines, label):
             seq += 1; cur = end
     print(f"    {seq-1} cards ({label}, {total_chars} chars)")
 
+def cleanup_cards(lines):
+    """Post-process SRT out_lines: strip card text, merge cards < 800 ms into neighbors.
+    Tries backward merge first, then forward merge; allows up to MAX_CARD_VW+10 when merging."""
+    MIN_CARD_MS  = 800
+    MERGE_MAX_VW = MAX_CARD_VW + 10   # slightly relaxed limit only for merging short cards
+    cards = []
+    i = 0
+    while i < len(lines):
+        if i < len(lines) and lines[i] and lines[i].isdigit():
+            ts  = lines[i+1] if i+1 < len(lines) else ''
+            txt = lines[i+2].strip() if i+2 < len(lines) else ''
+            m2  = re.match(r'(\S+)\s*-->\s*(\S+)', ts)
+            if m2:
+                cards.append([parse_ts(m2.group(1)), parse_ts(m2.group(2)), txt])
+            i += 4
+        else:
+            i += 1
+    # Pass 1: backward merge
+    merged = []
+    for card in cards:
+        t_in, t_out, text = card
+        dur = t_out - t_in
+        if merged and dur < MIN_CARD_MS:
+            prev = merged[-1]
+            combined = prev[2] + text
+            if vw(combined) <= MERGE_MAX_VW:
+                prev[2] = combined; prev[1] = t_out; continue
+        merged.append(card)
+    # Pass 2: forward merge any remaining short cards
+    result = []
+    i = 0
+    while i < len(merged):
+        t_in, t_out, text = merged[i]
+        dur = t_out - t_in
+        if dur < MIN_CARD_MS and i + 1 < len(merged):
+            nxt = merged[i + 1]
+            combined = text + nxt[2]
+            if vw(combined) <= MERGE_MAX_VW:
+                result.append([t_in, nxt[1], combined])
+                i += 2; continue
+        result.append([t_in, t_out, text])
+        i += 1
+    out = []
+    for seq2, (t_in, t_out, text) in enumerate(result, 1):
+        out += [str(seq2), f"{srt_ts(t_in)} --> {srt_ts(t_out)}", text, '']
+    return out
+
 # Parse Whisper SRT
 blocks   = re.split(r'\n{2,}', open(srt_path, encoding='utf-8').read().strip())
 raw_segs = []
@@ -1583,6 +1783,7 @@ if story_json_p and os.path.exists(story_json_p):
     display_texts = story.get('display_text', [])
     raw = ' '.join(display_texts)
     raw = re.sub(r'(?<=[一-鿿])\s+(?=[一-鿿])', '', raw)
+    raw = re.sub(r'(?<=[，。！？；：、—])\s+', '', raw)  # drop space after CJK punct
     raw = re.sub(r'\s+', ' ', raw).strip()
     map_story_to_segs(raw, segments, out_lines, 'story3 mode')
 
@@ -1593,6 +1794,7 @@ elif story_path:
     raw = re.sub(r'^-\s*$',        '', raw, flags=re.MULTILINE)
     raw = re.sub(r'^[-*]\s+',      '', raw, flags=re.MULTILINE)
     raw = re.sub(r'(?<=[一-鿿])\s+(?=[一-鿿])', '', raw)
+    raw = re.sub(r'(?<=[，。！？；：、—])\s+', '', raw)  # drop space after CJK punct
     raw = re.sub(r'\s+', ' ', raw).strip()
     map_story_to_segs(raw, segments, out_lines, 'story.txt mode')
 
@@ -1604,6 +1806,8 @@ else:
         seq = emit(out_lines, seq, t_in, t_out, text)
     print(f"    {seq-1} cards (Whisper mode)")
 
+# Apply to all modes: merge short cards, strip stray spaces
+out_lines = cleanup_cards(out_lines)
 open(srt_path, 'w', encoding='utf-8').write('\n'.join(out_lines))
 SPLITEOF
   fi

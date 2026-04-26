@@ -9389,21 +9389,45 @@ class Handler(BaseHTTPRequestHandler):
                 shotlist    = _jload(os.path.join(ep_dir, "ShotList.json")) or {}
                 story_prompt= _jload(os.path.join(ep_dir, "StoryPrompt.json"))
 
-                # ── Extract sources from story.txt (### #Src1 #Src2 format) ─────
+                # ── Extract sources + title + body from story.txt ─────────────
+                # story.txt format:
+                #   ## Title line          ← h2 heading = video title
+                #   -                      ← separator lines
+                #   body text paragraph    ← narrator body
+                #   -
+                #   ### #Src1 #Src2 …      ← sources (last ### line)
                 sources = []
+                story_txt_title = ""   # h2 heading from story.txt
+                story_txt_lines = []   # body paragraphs from story.txt
                 story_txt_path = os.path.join(ep_dir, "story.txt")
                 if os.path.isfile(story_txt_path):
                     for _sl in open(story_txt_path, encoding="utf-8"):
-                        _sm = re.match(r'^###\s+(.+)', _sl.rstrip())
+                        _sl_s = _sl.rstrip()
+                        # ## Title
+                        _hm = re.match(r'^##\s+(.+)', _sl_s)
+                        if _hm:
+                            story_txt_title = _hm.group(1).strip()
+                            continue
+                        # ### Sources
+                        _sm = re.match(r'^###\s+(.+)', _sl_s)
                         if _sm:
                             sources = re.findall(r'#([^\s#]+)', _sm.group(1))
+                            continue
+                        # Skip separator lines (lone "-")
+                        if _sl_s.strip() == '-' or _sl_s.strip() == '':
+                            continue
+                        story_txt_lines.append(_sl_s.strip())
 
                 # ── Collect narrator text (capped at 4000 chars) ──────────────
+                # Primary source: Script.json dialogue lines
+                # Fallback (news-clip mode): story.txt body paragraphs
                 lines = []
                 for scene in script.get("scenes", []):
                     for action in scene.get("actions", []):
                         if action.get("type") == "dialogue" and action.get("line"):
                             lines.append(action["line"])
+                if not lines and story_txt_lines:
+                    lines = story_txt_lines
                 total, truncated = 0, []
                 for line in lines:
                     if total + len(line) > 4000:
@@ -9469,13 +9493,16 @@ class Handler(BaseHTTPRequestHandler):
 
                 total_dur = shotlist.get("total_duration_sec", 0)
 
+                # Prefer Script.json title; fall back to story.txt ## heading
+                _script_title = script.get("title", "") or story_txt_title
+
                 user_msg = json.dumps({
                     "locale":             locale,
                     "output_language":    output_lang,
                     "episode_id":         ep_id,
                     "genre":              genre,
                     "total_duration_sec": total_dur,
-                    "script_title":       script.get("title", ""),
+                    "script_title":       _script_title,
                     "episode_goal":       ep_goal,
                     "narrator_text":      truncated,
                     "shots":              shot_summaries,
