@@ -65,7 +65,7 @@
         "azure_break_ms": 500
       },
       "Yunyang Newscast-Casual": {
-        "enabled": false,
+        "enabled": true,
         "gender": "male",
         "notes": "Casual newscast style. Conversational; good for lifestyle/soft news.",
         "azure_voice": "zh-CN-YunyangNeural",

@@ -1403,6 +1403,7 @@ placeholder="Enter your story here"></textarea>
           <option value="documentary"           disabled title="Not yet validated">Documentary / Explainer</option>
           <option value="monologue"             disabled title="Not yet validated">Monologue / First-Person</option>
           <option value="ssml_narration">SSML Narration (authored)</option>
+          <option value="simple_narration">Simple Narration (clips)</option>
           <option value="Script.json">Provided Script (external agent)</option>
           <option value="mtv">🎬 MTV (Music Video)</option>
         </select>
@@ -1446,6 +1447,7 @@ placeholder="Enter your story here"></textarea>
         <option value="documentary"           disabled title="Not yet validated">Documentary / Explainer</option>
         <option value="monologue"             disabled title="Not yet validated">Monologue / First-Person</option>
         <option value="ssml_narration">SSML Narration (authored)</option>
+        <option value="simple_narration">Simple Narration (clips)</option>
         <option value="Script.json">Provided Script (external agent)</option>
         <option value="mtv">🎬 MTV (Music Video)</option>
       </select>
@@ -6458,6 +6460,7 @@ placeholder="Enter your story here"></textarea>
     const fmtLabels = {
       continuous_narration: 'Continuous Narration',
       ssml_narration:       'SSML Narration',
+      simple_narration:     'Simple Narration (clips)',
       sleep_story:          'Sleep Story',
       default:              'Default',
     };
@@ -11677,7 +11680,7 @@ placeholder="Enter your story here"></textarea>
     document.getElementById('ex-genre').value = meta.genre  || '';
     document.getElementById('save-ep-status').textContent = '';
     if (meta.story_format) {
-      const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration', 'Script.json', 'mtv']);
+      const _ENABLED_FORMATS = new Set(['continuous_narration', 'ssml_narration', 'simple_narration', 'Script.json', 'mtv']);
       const fmt = _ENABLED_FORMATS.has(meta.story_format) ? meta.story_format : 'continuous_narration';
       _selectedFormat = fmt;
       document.getElementById('info-format-sel-existing').value = fmt;

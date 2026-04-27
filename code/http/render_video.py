@@ -152,15 +152,33 @@ def _whisper_align(wav_path: "Path", text: str, locale: str,
 
 
 def _rms_speech_onset(wav_path: "Path", window_ms: int = 20,
-                      rms_thresh: float = 0.02,
-                      min_run: int = 3) -> float:
-    """Return the time (seconds, WAV-relative) when speech energy first appears.
+                      silence_thresh: float = 0.005,
+                      min_silence_ms: int = 40,
+                      max_scan_sec: float = 1.5) -> float:
+    """Return the WAV-relative seconds when speech first begins.
 
-    Uses a simple RMS threshold with a minimum run of `min_run` consecutive
-    windows above `rms_thresh` to avoid triggering on transient clicks or
-    TTS-engine pop artifacts at the very start of some Azure TTS outputs.
+    Algorithm: scan the first ``max_scan_sec`` of the WAV in ``window_ms``
+    windows.  Return the start of the FIRST energy window that follows a
+    contiguous silence run of at least ``min_silence_ms``.  Stop immediately
+    once found — do NOT continue scanning.
 
-    Falls back to 0.0 on any error so callers see no change.
+    Why "first speech after silence" and a fixed scan cap:
+      Azure TTS produces two patterns:
+        a) silence → speech           (normal)
+        b) artifact → silence → speech  (click/pop burst before the first word)
+
+      For (a): we scan the leading silence and return the first speech window.
+      For (b): the artifact has high RMS, so silence_run stays 0 while the
+               artifact plays.  Once the artifact ends, silence accumulates
+               until ≥ min_silence_ms, then the first speech window is found.
+
+      "Last silence in 30% of WAV" fails because natural speech has pauses
+      between sentences within the first 30%, causing multi-second false onsets.
+      Capping the scan to a fixed 1.5 s avoids mid-speech pauses because
+      Azure TTS pre-speech silence (and artifact) never exceeds ~1.2 s.
+
+    Returns 0.0 when no qualifying silence precedes speech within max_scan_sec,
+    or on any error, so callers see no change.
     """
     try:
         import soundfile as sf
@@ -168,23 +186,24 @@ def _rms_speech_onset(wav_path: "Path", window_ms: int = 20,
         data, sr = sf.read(str(wav_path))
         if data.ndim > 1:
             data = data.mean(axis=1)
-        win = max(1, int(sr * window_ms / 1000))
-        # slide a window and collect RMS values
-        rms_seq = []
-        for s in range(0, len(data), win):
+        win          = max(1, int(sr * window_ms  / 1000))
+        min_sil_wins = max(1, int(min_silence_ms  / window_ms))
+        scan_end     = min(len(data), int(sr * max_scan_sec))
+
+        sil_run = 0
+        for s in range(0, scan_end, win):
             chunk = data[s: s + win]
-            rms_seq.append(float(np.sqrt(np.mean(chunk ** 2))))
-        # find first run of `min_run` consecutive windows above threshold
-        run = 0
-        for i, r in enumerate(rms_seq):
-            if r >= rms_thresh:
-                run += 1
-                if run >= min_run:
-                    # onset = start of the run (not just the last window)
-                    onset_idx = i - (min_run - 1)
-                    return round(onset_idx * win / sr, 3)
+            rms   = float(np.sqrt(np.mean(chunk ** 2)))
+            if rms < silence_thresh:
+                sil_run += 1
             else:
-                run = 0
+                # Energy window (speech or artifact).
+                if sil_run >= min_sil_wins:
+                    # A qualifying silence just ended — this is the speech onset.
+                    return round(s / sr, 3)
+                # Not enough prior silence (artifact or speech at t=0): reset.
+                sil_run = 0
+
         return 0.0
     except Exception:
         return 0.0
@@ -1209,6 +1228,235 @@ def _build_duck_vol_filter(vo_items: list, seg_start_ep: float, seg_end_ep: floa
     return f"volume=volume='{expr}':eval=frame"
 
 
+def _simple_narration_render(
+    output_dir: "Path",
+    locale: str,
+    voplan: dict,
+    do_subtitles: bool,
+) -> None:
+    """Two-pass subtitle pipeline for simple_narration projects.
+
+    simple_narration videos are already assembled by simple_run.sh.
+    This function:
+      1. Transcribes the existing output.mp4 with faster-whisper to get
+         ground-truth subtitle TIMESTAMPS.
+      2. Maps story text from voplan vo_items[].text onto those timestamps
+         (character-proportional) and splits into short cards (≤23 CJK chars).
+         Story text is always preferred over raw Whisper text — this is how
+         we guarantee correct characters (e.g. "巨响" not Whisper's "巨强").
+      3. Burns the resulting SRT into output.mp4.
+
+    IMPORTANT: output.mp4 must already exist (built by simple_run.sh).
+    This function never re-renders the video from scratch.
+    """
+    import unicodedata as _ud, re as _re, shutil as _shutil
+    final_mp4 = output_dir / "output.mp4"
+    nosub_mp4 = output_dir / "output_nosub.mp4"
+    if not final_mp4.exists():
+        print(f"[ERROR] simple_narration: {final_mp4} not found.", file=sys.stderr)
+        print("  Run simple_run.sh first to generate output.mp4.", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Idempotency: output_nosub.mp4 is the permanent clean (no-subtitle) base.
+    # First run: save output.mp4 → output_nosub.mp4 before we burn anything.
+    # Re-runs: output_nosub.mp4 already exists — use it so we never burn on top
+    # of a previously-burned output.mp4.
+    if not nosub_mp4.exists():
+        _shutil.copy2(str(final_mp4), str(nosub_mp4))
+        print(f"  [simple_narration] Saved clean base → output_nosub.mp4")
+
+    srt_path = output_dir / f"output.{locale}.srt"
+
+    # ── Pass 1: Whisper transcription of output_nosub.mp4 (always clean) ────────
+    print("  [simple_narration] Transcribing output_nosub.mp4 with Whisper...")
+    tmp_wav = str(nosub_mp4) + ".tmp_w.wav"
+    _r = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(nosub_mp4), "-ar", "16000", "-ac", "1",
+         "-c:a", "pcm_s16le", tmp_wav, "-loglevel", "error"],
+        capture_output=True, text=True)
+    if _r.returncode != 0:
+        print(f"[ERROR] audio extract failed: {_r.stderr[-300:]}", file=sys.stderr)
+        sys.exit(1)
+
+    # Build initial_prompt from story text to improve Whisper accuracy
+    _texts = [v.get("text", "") for v in voplan.get("vo_items", []) if v.get("text")]
+    _initial_prompt = " ".join(_texts[:20]) if _texts else None
+
+    # ── Card helpers (mirror of simple_run.sh SPLITEOF) ──────────────────────
+    MAX_CARD_VW = 36   # 18 CJK chars max → 18×60px=1080px < 1198px usable on 1264×720
+    MIN_CARD_VW = 10
+
+    def _vw(s: str) -> int:
+        return sum(2 if _ud.east_asian_width(c) in ("W", "F") else 1 for c in s)
+
+    def _hard_split(text: str) -> list:
+        chunks: list = []; buf = ""; w = 0
+        for c in text:
+            cw = 2 if _ud.east_asian_width(c) in ("W", "F") else 1
+            if w + cw > MAX_CARD_VW and buf:
+                chunks.append(buf); buf = c; w = cw
+            else:
+                buf += c; w += cw
+        if buf: chunks.append(buf)
+        return chunks
+
+    def _natural_chunks(text: str) -> list:
+        text = text.strip()
+        if not text: return []
+        parts = _re.split(r"(?<=[。！？…])", text)
+        cards: list = []
+        for part in parts:
+            part = part.strip()
+            if not part: continue
+            if _vw(part) <= MAX_CARD_VW:
+                cards.append(part)
+            else:
+                subs = _re.split(r"(?<=[，；、,;!?])|(?<=——)", part)
+                buf = ""
+                for s in subs:
+                    s = s.strip()
+                    if not s: continue
+                    if not buf: buf = s
+                    elif _vw(buf) + _vw(s) <= MAX_CARD_VW: buf += s
+                    else:
+                        if buf: cards.extend(_hard_split(buf))
+                        buf = s
+                if buf: cards.extend(_hard_split(buf))
+        merged: list = []
+        for card in cards:
+            if (merged and _vw(card) < MIN_CARD_VW
+                    and _vw(merged[-1]) + _vw(card) <= MAX_CARD_VW):
+                merged[-1] += card
+            else:
+                merged.append(card)
+        return merged or [text]
+
+    def _ms_to_srt(ms: int) -> str:
+        ms = max(0, int(ms))
+        h, ms = divmod(ms, 3_600_000)
+        m, ms = divmod(ms, 60_000)
+        s, ms = divmod(ms, 1_000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    def _snap_to_break(text: str, pos: int, window: int = 25) -> int:
+        ALL_BREAKS = set("。！？…，；、,;!?")
+        n = len(text)
+        for delta in range(window + 1):
+            if pos - delta >= 0 and text[pos - delta] in ALL_BREAKS: return pos - delta + 1
+            if pos + delta < n  and text[pos + delta] in ALL_BREAKS: return pos + delta + 1
+        return pos
+
+    def _map_story_to_segs(story_raw: str, segments: list) -> list:
+        """Distribute story_raw text across Whisper segment timings,
+        split into short cards, return list of (t_in_ms, t_out_ms, card_text)."""
+        total_chars = len(story_raw)
+        total_wc    = sum(len(wt) for _, _, wt in segments) or 1
+        out: list = []
+        story_cursor = 0
+        for seg_i, (t_in, t_out, wt) in enumerate(segments):
+            n_chars = round(len(wt) / total_wc * total_chars)
+            target  = story_cursor + n_chars
+            end_pos = (total_chars if seg_i == len(segments) - 1
+                       else max(_snap_to_break(story_raw, min(target, total_chars - 1)),
+                                story_cursor + 1))
+            text = story_raw[story_cursor:end_pos].strip()
+            story_cursor = end_pos
+            if not text: continue
+            cards = _natural_chunks(text)
+            if not cards: continue
+            seg_chars = sum(len(c) for c in cards) or 1
+            dur, cur = t_out - t_in, t_in
+            for i, card in enumerate(cards):
+                share = round(dur * len(card) / seg_chars)
+                end   = cur + max(share, 200)
+                if i == len(cards) - 1: end = t_out
+                out.append((cur, end, card))
+                cur = end
+        return out
+
+    try:
+        from faster_whisper import WhisperModel
+        _wmodel = WhisperModel("small", compute_type="int8")
+        _kwargs: dict = {"language": "zh", "beam_size": 5}
+        if _initial_prompt:
+            _kwargs["initial_prompt"] = _initial_prompt
+        _segs_iter, _ = _wmodel.transcribe(tmp_wav, **_kwargs)
+
+        # Collect raw Whisper segments (timestamps only — text will be replaced)
+        _raw_segs: list = []
+        for _seg in _segs_iter:
+            _wt = _seg.text.strip()
+            if not _wt: continue
+            _raw_segs.append((int(_seg.start * 1000), int(_seg.end * 1000), _wt))
+
+        # Build story text from voplan (canonical, correct Chinese characters)
+        _story_raw = " ".join(_texts)
+        _story_raw = _re.sub(r"(?<=[一-鿿])\s+(?=[一-鿿])", "", _story_raw)
+        _story_raw = _re.sub(r"(?<=[，。！？；：、—])\s+", "", _story_raw)
+        _story_raw = _re.sub(r"\s+", " ", _story_raw).strip()
+
+        if _story_raw and _raw_segs:
+            # Story text mode: use Whisper timestamps, story.txt text
+            _cards = _map_story_to_segs(_story_raw, _raw_segs)
+            print(f"  [simple_narration] story-text mode: {len(_cards)} cards from story")
+        else:
+            # Fallback: use Whisper text with card splitting (no story available)
+            _cards = []
+            for _t_in, _t_out, _wt in _raw_segs:
+                for _card in _natural_chunks(_wt):
+                    _cards.append((_t_in, _t_out, _card))
+            print(f"  [simple_narration] whisper-only mode: {len(_cards)} cards")
+
+        _lines: list = []
+        for _seq, (_t_in, _t_out, _card_text) in enumerate(_cards, 1):
+            _lines += [str(_seq),
+                       f"{_ms_to_srt(_t_in)} --> {_ms_to_srt(_t_out)}",
+                       _card_text, ""]
+        srt_path.write_text("\n".join(_lines), encoding="utf-8")
+        print(f"  [simple_narration] SRT: {srt_path}  ({len(_cards)} cards)")
+    except ImportError:
+        print("  [simple_narration] faster-whisper not available — skipping SRT",
+              file=sys.stderr)
+        do_subtitles = False
+    finally:
+        try:
+            os.unlink(tmp_wav)
+        except OSError:
+            pass
+
+    if not do_subtitles or not srt_path.exists():
+        return
+
+    # ── Pass 2: Burn SRT into output.mp4 ─────────────────────────────────────
+    print("  [simple_narration] Burning subtitles into output.mp4...")
+    _tmp_out = str(final_mp4) + ".sub_tmp.mp4"
+    _srt_esc = str(srt_path).replace("\\", "/").replace(":", "\\:")
+    _font_arg = (f":fontsdir={Path(NOTO_CJK_FONT).parent}"
+                 if Path(NOTO_CJK_FONT).exists() else "")
+    _vf = (f"subtitles='{_srt_esc}'{_font_arg}"
+           f":force_style='FontName=Noto Sans CJK SC"
+           f",FontSize=24,Alignment=2,MarginV=40"
+           f",PrimaryColour=&H00FFFFFF"
+           f",OutlineColour=&H00000000"
+           f",Outline=2,Shadow=1'")
+    _r2 = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(nosub_mp4),   # always burn from clean base
+         "-vf", _vf,
+         "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+         "-pix_fmt", "yuv420p", "-c:a", "copy",
+         _tmp_out, "-loglevel", "error"],
+        capture_output=True, text=True)
+    if _r2.returncode != 0:
+        print(f"[ERROR] subtitle burn failed: {_r2.stderr[-400:]}", file=sys.stderr)
+        try:
+            os.unlink(_tmp_out)
+        except OSError:
+            pass
+        sys.exit(1)
+    os.replace(_tmp_out, str(final_mp4))
+    print(f"  [simple_narration] Done → {final_mp4}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 # MediaPlan-mode renderer: VOPlan is the single source of truth for timing.
 # Segments come from MediaPlan.json shot_overrides[] in ORDER (no start_sec needed).
@@ -1242,6 +1490,19 @@ def main() -> None:
     output_dir  = Path(args.out).resolve() if args.out else \
                   (episode_dir / "renders" / locale)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── simple_narration: two-pass subtitle (transcribe → burn) ──────────────
+    # simple_narration videos are assembled by simple_run.sh.
+    # render_video step = Whisper on output.mp4 → SRT → burn subtitles.
+    # Never re-renders from scratch. output.mp4 must already exist.
+    if voplan.get("story_format") == "simple_narration":
+        _simple_narration_render(
+            output_dir  = output_dir,
+            locale      = locale,
+            voplan      = voplan,
+            do_subtitles= True,
+        )
+        sys.exit(0)
 
     profile_name = args.profile or DEFAULT_PROFILE
     profile      = PROFILES.get(profile_name, PROFILES[DEFAULT_PROFILE])
@@ -1720,9 +1981,16 @@ def main() -> None:
         # Always generate here so the file is ready; step 12 will skip if already done.
         srt_path  = output_dir / f"output.{locale}.srt"
         subs_path = output_dir / "output.subs.json"
-        write_srt_from_voplan(vo_items, srt_path, subs_path,
-                              title_offset=TITLE_CARD_OFFSET,
-                              vo_dir=_vo_dir)
+        # If a hand-verified lock file exists, use it instead of regenerating.
+        _srt_lock = Path(str(srt_path) + ".locked")
+        if _srt_lock.exists():
+            import shutil as _shutil
+            _shutil.copy2(_srt_lock, srt_path)
+            print(f"  [subtitles] Using locked SRT: {_srt_lock.name}")
+        else:
+            write_srt_from_voplan(vo_items, srt_path, subs_path,
+                                  title_offset=TITLE_CARD_OFFSET,
+                                  vo_dir=_vo_dir)
         if args.subtitles:
             print(f"  [subtitles] SRT: {srt_path}  (offset={TITLE_CARD_OFFSET:.1f}s)")
 

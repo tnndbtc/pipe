@@ -10,12 +10,13 @@
 #   - Finds all .mp4 files in --input_folder, sorted by filename in natural order
 #     (e.g. clip2.mp4 comes before clip12.mp4), excludes output.mp4
 #   - Stitches them with 0.4s xfade dissolve (hardcoded, tuned default)
-#   - Runs Whisper on stitched audio to generate subtitles
-#     (if --story is provided, its text is passed as Whisper initial_prompt
-#      to improve transcription accuracy)
+#   - Transcribes the final stitched output.mp4 with Whisper (whole-video).
+#     This is the ONLY correct way to get subtitle timestamps — per-clip
+#     Whisper + manual offset arithmetic is WRONG because xfade overlaps
+#     accumulate into multi-second drift by the end of the video.
+#     output.mp4 is always the ground truth. Never transcribe individual clips.
 #   - Burns subtitles into video
-#   - Saves output.mp4 and output.srt to --input_folder
-#   No Azure TTS involved. Output: <input_folder>/output.mp4
+#   No Azure TTS involved. Output: projects/<slug>/episodes/<id>/renders/<locale>/output.mp4
 #
 #   Usage:
 #     ./simple_run.sh --input_folder /path/to/clips/dir [--story       /path/to/story.txt]
@@ -254,8 +255,6 @@ done
 if [[ -n "$INPUT_FOLDER" ]]; then
   [[ ! -d "$INPUT_FOLDER" ]] && { echo "[ERROR] --input_folder not found: $INPUT_FOLDER" >&2; exit 1; }
 
-  _out_video="${INPUT_FOLDER}/output.mp4"
-  _out_srt="${INPUT_FOLDER}/output.srt"
   _story_json=""
 
   echo "════════════════════════════════════════════════════════════"
@@ -265,16 +264,71 @@ if [[ -n "$INPUT_FOLDER" ]]; then
   echo "  Speed     : ${SPEED:-1.0}"
   echo "  TTS-regen : ${TTS_REGEN:-no}"
   echo "  Uniform-rate: ${UNIFORM_RATE:-no}"
-  echo "  Out       : $_out_video"
   echo "════════════════════════════════════════════════════════════"
   echo ""
 
-  # ── Parse story3.txt → .story_parsed.json ─────────────────────────────────
+  # ── Derive LOCALE, EPISODE, slug, EP_DIR before anything writes to disk ──────
+  if [[ -z "$LOCALE" && -n "$CONFIG" && -f "$CONFIG" ]]; then
+    LOCALE="$(python3 -c "import json; d=json.load(open('$CONFIG',encoding='utf-8')); print(d.get('locale',''))" 2>/dev/null || true)"
+  fi
+  [[ -z "$LOCALE"  ]] && LOCALE="en"
+  [[ -z "$EPISODE" ]] && EPISODE="s01e01"
+
+  # Prefer the bare story filename stem as slug (stable, human-readable).
+  # Fall back to content-derived slug (with random suffix) for non-slug filenames.
+  _slug="$(python3 - "${STORY:-}" 2>/dev/null << 'CLIPS_SLUG_EOF'
+import re, os, sys
+fn = os.path.splitext(os.path.basename(sys.argv[1] if len(sys.argv) > 1 else ''))[0]
+if fn and re.match(r'^[a-zA-Z0-9_\-]+$', fn):
+    print(fn); sys.exit(0)
+sys.exit(1)
+CLIPS_SLUG_EOF
+  )"
+
+  if [[ -z "$_slug" ]]; then
+    # Filename has non-slug chars — fall back to first heading/line of text
+    _clips_title=""
+    if [[ -n "$STORY" && -f "$STORY" ]]; then
+      _clips_title="$(python3 -c "
+import re, sys
+text = open('$STORY', encoding='utf-8').read()
+for line in text.splitlines():
+    m = re.match(r'^#{1,6}\s+(.+)', line)
+    if m: print(m.group(1).strip()); sys.exit(0)
+for line in text.splitlines():
+    s = line.strip()
+    if s: print(s); sys.exit(0)
+" 2>/dev/null)"
+    fi
+    [[ -z "$_clips_title" ]] && _clips_title="$(basename "$INPUT_FOLDER")"
+    _slug="$(python3 -c "
+import re, unicodedata, secrets
+orig = '''$_clips_title'''
+t = unicodedata.normalize('NFKD', orig).encode('ascii','ignore').decode('ascii')
+t = t.lower().strip()
+t = re.sub(r'[^\w\s-]', '', t)
+t = re.sub(r'[\s_]+', '-', t)
+t = re.sub(r'-{2,}', '-', t)
+t = t.strip('-')[:32]
+rand6 = secrets.token_hex(3)
+print((t + '-' + rand6) if t else 'story-' + rand6)
+" 2>/dev/null || echo "story-$(python3 -c 'import secrets; print(secrets.token_hex(3))')")"
+  fi
+
+  EP_DIR="projects/${_slug}/episodes/${EPISODE}"
+  mkdir -p "$EP_DIR"
+  _tts_dir="${EP_DIR}/assets/${LOCALE}/audio/vo"
+  _renders_dir="${EP_DIR}/renders/${LOCALE}"
+  mkdir -p "$_renders_dir"
+  _out_video="${_renders_dir}/output.mp4"
+  _out_srt="${_renders_dir}/output.${LOCALE}.srt"
+
+  # ── Parse story → EP_DIR/.story_parsed.json ───────────────────────────────
   # Handles ## Title lines (not spoken), - separator lines (skipped),
   # and content lines (1:1 with clips).  Also derives display_text (no markup)
   # and ssml_text (pinyin <word|pinyin> → <phoneme> tags) for each line.
   if [[ -n "$STORY" && -f "$STORY" ]]; then
-    _story_json="${INPUT_FOLDER}/.story_parsed.json"
+    _story_json="${EP_DIR}/.story_parsed.json"
     echo "  Parsing story: $(basename "$STORY")"
     python3 - "$STORY" "$_story_json" << 'STORY_PARSE_EOF'
 import sys, json, re
@@ -321,62 +375,6 @@ for t in titles:
 STORY_PARSE_EOF
     echo ""
   fi
-
-  # ── Derive slug + EP_DIR early (needed for status_report.txt if STEP 0 fails)
-  if [[ -z "$LOCALE" && -n "$CONFIG" && -f "$CONFIG" ]]; then
-    LOCALE="$(python3 -c "import json; d=json.load(open('$CONFIG',encoding='utf-8')); print(d.get('locale',''))" 2>/dev/null || true)"
-  fi
-  [[ -z "$LOCALE"  ]] && LOCALE="en"
-  [[ -z "$EPISODE" ]] && EPISODE="s01e01"
-
-  # ── Derive slug from story filename (same logic as TTS mode) ─────
-  # Prefer the bare filename stem when it is already clean
-  # (alphanumeric / dash / underscore only) — gives a stable, human-readable
-  # project name like "ai_story_2026-04-23_1800utc_36" on every re-run.
-  # Fall back to content-derived slug (with random suffix) only when the
-  # filename contains characters that would make a bad directory name.
-  _slug="$(python3 - "${STORY:-}" 2>/dev/null << 'CLIPS_SLUG_EOF'
-import re, os, sys
-fn = os.path.splitext(os.path.basename(sys.argv[1] if len(sys.argv) > 1 else ''))[0]
-if fn and re.match(r'^[a-zA-Z0-9_\-]+$', fn):
-    print(fn); sys.exit(0)
-sys.exit(1)
-CLIPS_SLUG_EOF
-  )"
-
-  if [[ -z "$_slug" ]]; then
-    # Filename has non-slug chars — fall back to first heading/line of text
-    _clips_title=""
-    if [[ -n "$STORY" && -f "$STORY" ]]; then
-      _clips_title="$(python3 -c "
-import re, sys
-text = open('$STORY', encoding='utf-8').read()
-for line in text.splitlines():
-    m = re.match(r'^#{1,6}\s+(.+)', line)
-    if m: print(m.group(1).strip()); sys.exit(0)
-for line in text.splitlines():
-    s = line.strip()
-    if s: print(s); sys.exit(0)
-" 2>/dev/null)"
-    fi
-    [[ -z "$_clips_title" ]] && _clips_title="$(basename "$INPUT_FOLDER")"
-    _slug="$(python3 -c "
-import re, unicodedata, secrets
-orig = '''$_clips_title'''
-t = unicodedata.normalize('NFKD', orig).encode('ascii','ignore').decode('ascii')
-t = t.lower().strip()
-t = re.sub(r'[^\w\s-]', '', t)
-t = re.sub(r'[\s_]+', '-', t)
-t = re.sub(r'-{2,}', '-', t)
-t = t.strip('-')[:32]
-rand6 = secrets.token_hex(3)
-print((t + '-' + rand6) if t else 'story-' + rand6)
-" 2>/dev/null || echo "story-$(python3 -c 'import secrets; print(secrets.token_hex(3))')")"
-  fi
-
-  EP_DIR="projects/${_slug}/episodes/${EPISODE}"
-  mkdir -p "$EP_DIR"
-  _tts_dir="${EP_DIR}/_tts"
 
   # ── Step 0: Clip pre-flight + Whisper ordering ────────────────────────────
   # Phase A: MD5 dedup — auto-removes exact byte-copies, logs what was kept.
@@ -914,7 +912,7 @@ pitch   = narr.get('azure_pitch', '0%')
 vk      = f"{voice}:{style}"
 
 # Collect original clips
-tts_dir = os.path.join(ep_dir, '_tts')
+tts_dir = os.path.join(ep_dir, 'assets', locale, 'audio', 'vo')
 os.makedirs(tts_dir, exist_ok=True)
 
 # Respect Whisper-determined clip order if available
@@ -1233,31 +1231,45 @@ for i, clip in enumerate(clips):
                 mp4_p,
             ], capture_output=True, text=True)
     else:
-        # ── Original mux: copy video as-is, replace audio only ──────────────
+        # ── Per-clip mux: time-scale video to match TTS audio duration ───────
+        # setpts speeds up (or slows down) the video so the lip-movement window
+        # matches the TTS duration exactly.  Without this, each clip's video
+        # plays at original speed while the TTS is shorter → audio ends early
+        # per clip → accumulated ~7s of silent lip movement at end of video.
         # If the original speaker's speech starts after t=0 (e.g. 1.2s into clip),
-        # adelay inserts that many ms of silence before the TTS so the voice aligns
-        # to the moment the mouth opens — improving lip-sync naturalness.
-        delay_ms = int(S_start_i * 1000)
+        # adelay inserts that many ms of silence before TTS for lip-sync alignment.
+        tts_dur_i  = probe_dur(wav_p)
+        delay_ms   = int(S_start_i * 1000)
+        total_dur_i = tts_dur_i + delay_ms / 1000.0   # video must cover delay + TTS
+        pts_factor  = total_dur_i / clip_durs[i]        # setpts = new_dur/old_dur
+        print(f"    per-clip mux: speed={clip_durs[i]/total_dur_i:.3f}x  "
+              f"old={clip_durs[i]:.3f}s → new={total_dur_i:.3f}s")
         if delay_ms > 10:
             r = subprocess.run([
                 'ffmpeg', '-y', '-i', clip, '-i', wav_p,
-                '-c:v', 'copy',
-                '-filter_complex', f'[1:a]adelay={delay_ms}:all=1[delayed]',
-                '-map', '0:v:0', '-map', '[delayed]',
-                '-c:a', 'aac', '-b:a', '192k', '-t', f'{clip_durs[i]:.3f}',
+                '-filter_complex',
+                    f'[0:v]setpts={pts_factor:.6f}*PTS[vout];'
+                    f'[1:a]adelay={delay_ms}:all=1[aout]',
+                '-map', '[vout]', '-map', '[aout]',
+                '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-b:a', '192k', '-t', f'{total_dur_i:.3f}',
                 mp4_p,
             ], capture_output=True, text=True)
         else:
             r = subprocess.run([
                 'ffmpeg', '-y', '-i', clip, '-i', wav_p,
-                '-c:v', 'copy', '-map', '0:v:0', '-map', '1:a:0',
-                '-c:a', 'aac', '-b:a', '192k', '-t', f'{clip_durs[i]:.3f}',
+                '-filter_complex', f'[0:v]setpts={pts_factor:.6f}*PTS[vout]',
+                '-map', '[vout]', '-map', '1:a:0',
+                '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+                '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-b:a', '192k', '-t', f'{total_dur_i:.3f}',
                 mp4_p,
             ], capture_output=True, text=True)
     if r.returncode != 0:
         print(f"  [ERROR] ffmpeg rebuild {cn}: {r.stderr[-200:]}", file=sys.stderr)
 
-# Fall back to original clip for any _tts/*.mp4 still missing
+# Fall back to original clip for any VO mp4 still missing
 for i, clip in enumerate(clips):
     mp4_p = os.path.join(tts_dir, os.path.basename(clip))
     if not os.path.exists(mp4_p):
@@ -1399,186 +1411,70 @@ print(f"  Done -> {os.path.basename(out)}")
 PYEOF
   echo ""
 
-  # ── Step 2+3: Per-clip Whisper → combined output.srt ───────────────────────
-  # When --tts-regen: run Whisper on _tts/*.mp4 with per-clip mtime cache.
-  # Otherwise: run Whisper on original clips (no cache, existing behaviour).
-  echo "  STEP 2+3 — Per-clip Whisper (accurate timing per clip → combined SRT)"
+  # ── Step 2+3: Transcribe output.mp4 → output.srt ────────────────────────────
+  # IMPORTANT: subtitle timestamps MUST come from transcribing the final
+  # stitched output.mp4.  Per-clip Whisper + manual offset arithmetic is WRONG
+  # because xfade overlaps (0.4s each) accumulate multi-second drift by clip 11.
+  # output.mp4 is the only ground truth.  Do not change this to per-clip.
+  echo "  STEP 2+3 — Whisper transcription of output.mp4 → SRT"
   _whisper_model="small"
   [[ -z "$STORY" ]] && _whisper_model="medium"
-  python3 - "$_stitch_src" "$_out_srt" "$_whisper_model" \
-             "${_wts_cache:-}" "${TTS_FORCE:-0}" "$INPUT_FOLDER" \
-             "${UNIFORM_RATE:-0}" "$_out_video" << 'WHISPER_CLIP_EOF'
-import sys, os, glob, re, subprocess, tempfile, json
+  python3 - "$_out_video" "$_out_srt" "$_whisper_model" \
+             "${_story_json:-}" << 'WHISPER_CLIP_EOF'
+import sys, os, subprocess, json
 
-folder       = sys.argv[1]
+out_video_p  = sys.argv[1]
 srt_out      = sys.argv[2]
 model_name   = sys.argv[3]
-cache_path   = sys.argv[4]    # '' = no cache (non-TTS-regen path)
-tts_force    = sys.argv[5] == '1'
-base_folder  = sys.argv[6] if len(sys.argv) > 6 else folder
-uniform_rate = sys.argv[7] == '1' if len(sys.argv) > 7 else False
-out_video_p  = sys.argv[8] if len(sys.argv) > 8 else ''
-XFADE        = 0.4
-
-def natural_key(p):
-    return [int(t) if t.isdigit() else t.lower()
-            for t in re.split(r'(\d+)', os.path.basename(p))]
-
-def probe_dur(p):
-    r = subprocess.run(
-        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-         '-of', 'default=noprint_wrappers=1', p],
-        capture_output=True, text=True, check=True)
-    return float(r.stdout.strip().split('=')[1])
+story_json_p = sys.argv[4] if len(sys.argv) > 4 else ''
 
 def fmt_ts(ms):
     ms = max(0, int(ms))
     h, ms = divmod(ms, 3_600_000); m, ms = divmod(ms, 60_000); s, ms = divmod(ms, 1_000)
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-# ── Uniform-rate: transcribe final output.mp4 directly (whole-video) ─────────
-# Per-clip Whisper + offset arithmetic drifts on speed-adjusted clips.
-# Transcribing the already-stitched video gives exact global timestamps.
-if uniform_rate and out_video_p and os.path.exists(out_video_p):
-    print(f"  [uniform-rate] STEP 2+3 — whole-video Whisper on output.mp4")
-    tmp_wav = out_video_p + '.tmp_w.wav'
-    subprocess.run(['ffmpeg', '-y', '-i', out_video_p, '-ar', '16000', '-ac', '1',
-                    '-c:a', 'pcm_s16le', tmp_wav, '-loglevel', 'error'], check=True)
-    from faster_whisper import WhisperModel
-    wmodel = WhisperModel(model_name, compute_type='int8')
-    segs_iter, _ = wmodel.transcribe(tmp_wav, language='zh', beam_size=5)
-    out_lines = []; seq = 1
-    for seg in segs_iter:
-        t_in  = int(seg.start * 1000)
-        t_out = int(seg.end   * 1000)
-        text  = seg.text.strip()
-        if not text: continue
-        out_lines += [str(seq), f"{fmt_ts(t_in)} --> {fmt_ts(t_out)}", text, '']
-        seq += 1
-    try: os.remove(tmp_wav)
-    except: pass
-    open(srt_out, 'w', encoding='utf-8').write('\n'.join(out_lines))
-    print(f"  -> {seq-1} segments from full video -> {srt_out}")
-    sys.exit(0)
+if not os.path.exists(out_video_p):
+    print(f"[ERROR] output.mp4 not found: {out_video_p}", file=sys.stderr)
+    sys.exit(1)
 
-_order_path = os.path.join(base_folder, '.clip_order.json')
-if os.path.exists(_order_path):
-    _order_data = json.load(open(_order_path))
-    _all_mp4    = {os.path.basename(f)
-                   for f in glob.glob(os.path.join(folder, '*.mp4'))
-                   if os.path.basename(f) != 'output.mp4'}
-    _ordered    = [n for n in _order_data['ordered_clips'] if n in _all_mp4]
-    _unmatched  = sorted(_all_mp4 - set(_ordered), key=natural_key)
-    clips       = [os.path.join(folder, n) for n in _ordered + _unmatched]
-else:
-    clips = sorted(
-        [f for f in glob.glob(os.path.join(folder, '*.mp4'))
-         if os.path.basename(f) != 'output.mp4'],
-        key=natural_key)
-N = len(clips)
-print(f"  Per-clip Whisper: {N} clips, model={model_name}")
+# Build initial_prompt from story display_text to improve Whisper accuracy
+initial_prompt = None
+if story_json_p and os.path.exists(story_json_p):
+    try:
+        story = json.load(open(story_json_p, encoding='utf-8'))
+        lines = story.get('display_text') or story.get('text') or []
+        initial_prompt = ' '.join(lines[:20])   # first 20 lines as hint
+    except Exception:
+        pass
 
-clip_durs = [probe_dur(c) for c in clips]
-offsets_sec = []
-cur = 0.0
-for d in clip_durs:
-    offsets_sec.append(cur); cur += d + XFADE
+# Extract audio from output.mp4
+tmp_wav = out_video_p + '.tmp_w.wav'
+subprocess.run(['ffmpeg', '-y', '-i', out_video_p, '-ar', '16000', '-ac', '1',
+                '-c:a', 'pcm_s16le', tmp_wav, '-loglevel', 'error'], check=True)
 
-# Load Whisper TTS cache (only used when cache_path is provided)
-use_cache = bool(cache_path)
-wts_cache = {}
-if use_cache and not tts_force and os.path.exists(cache_path):
-    try: wts_cache = json.load(open(cache_path, encoding='utf-8'))
-    except: pass
+from faster_whisper import WhisperModel
+print(f"  Loading faster-whisper model '{model_name}'...")
+wmodel = WhisperModel(model_name, compute_type='int8')
 
-try:
-    import whisper as _wm
-    print(f"  Loading Whisper model '{model_name}'...")
-    _model = _wm.load_model(model_name); _use_api = True
-    print(f"  Model loaded.")
-except ImportError:
-    _use_api = False
-    print("  [warn] whisper Python API not available — using CLI (slower)", file=sys.stderr)
+kwargs = dict(language='zh', beam_size=5)
+if initial_prompt:
+    kwargs['initial_prompt'] = initial_prompt
 
-all_segs = []
-
-with tempfile.TemporaryDirectory() as tmp:
-    for i, (clip, off_sec) in enumerate(zip(clips, offsets_sec)):
-        cn      = os.path.basename(clip)
-        dur_sec = clip_durs[i]
-        off_ms  = int(off_sec * 1000)
-        dur_ms  = int(dur_sec * 1000)
-
-        # Cache check (TTS-regen path only)
-        if use_cache:
-            cached  = wts_cache.get(cn, {})
-            cur_mt  = os.path.getmtime(clip)
-            if (not tts_force
-                    and abs(cached.get('mtime', 0) - cur_mt) < 1.0
-                    and 'segments' in cached):
-                print(f"  [{i+1}/{N}] {cn}: whisper cache hit")
-                for s in cached['segments']:
-                    t_in  = int(s['start'] * 1000)
-                    t_out = int(s['end']   * 1000)
-                    text  = s.get('text', '').strip()
-                    if not text: continue
-                    abs_in  = t_in  + off_ms
-                    abs_out = min(t_out, dur_ms) + off_ms
-                    if abs_out <= abs_in: abs_out = abs_in + 50
-                    all_segs.append((abs_in, abs_out, text))
-                continue
-
-        print(f"  [{i+1}/{N}] {cn}  offset={off_sec:.3f}s")
-        wav = os.path.join(tmp, f'c{i:04d}.wav')
-        r = subprocess.run(
-            ['ffmpeg', '-y', '-i', clip, '-ar', '16000', '-ac', '1',
-             '-c:a', 'pcm_s16le', wav, '-loglevel', 'error'],
-            capture_output=True)
-        if r.returncode != 0:
-            print(f"  [warn] audio extract failed clip {i}", file=sys.stderr); continue
-
-        if _use_api:
-            result   = _model.transcribe(wav, task='transcribe', verbose=None, fp16=False)
-            segs_raw = [(int(s['start'] * 1000), int(s['end'] * 1000), s['text'].strip())
-                        for s in result.get('segments', []) if s['text'].strip()]
-        else:
-            wdir = os.path.join(tmp, f'w{i:04d}'); os.makedirs(wdir, exist_ok=True)
-            subprocess.run(['whisper', wav, '--model', model_name, '--output_format', 'srt',
-                           '--output_dir', wdir, '--task', 'transcribe'], capture_output=True)
-            clip_srt = os.path.join(wdir, f'c{i:04d}.srt'); segs_raw = []
-            if os.path.exists(clip_srt):
-                def _ts(t):
-                    h, mn, rest = t.split(':'); s2, ms = rest.split(',')
-                    return (int(h)*3_600_000 + int(mn)*60_000 + int(s2)*1_000 + int(ms))
-                for blk in re.split(r'\n{2,}',
-                                    open(clip_srt, encoding='utf-8').read().strip()):
-                    ls = blk.strip().splitlines()
-                    if len(ls) < 3: continue
-                    m2 = re.match(r'(\S+)\s*-->\s*(\S+)', ls[1])
-                    if not m2: continue
-                    segs_raw.append((_ts(m2.group(1)), _ts(m2.group(2)),
-                                     ' '.join(ls[2:]).strip()))
-
-        # Update Whisper TTS cache
-        if use_cache:
-            seg_data = [{'start': t/1000, 'end': u/1000, 'text': txt}
-                        for t, u, txt in segs_raw]
-            wts_cache[cn] = {'mtime': os.path.getmtime(clip), 'segments': seg_data}
-            json.dump(wts_cache, open(cache_path, 'w', encoding='utf-8'),
-                      ensure_ascii=False, indent=2)
-
-        for t_in_ms, t_out_ms, text in segs_raw:
-            abs_in  = t_in_ms  + off_ms
-            abs_out = min(t_out_ms, dur_ms) + off_ms
-            if abs_out <= abs_in: abs_out = abs_in + 50
-            all_segs.append((abs_in, abs_out, text))
-
-all_segs.sort(key=lambda x: x[0])
-out_lines = []
-for seq, (t_in, t_out, text) in enumerate(all_segs, 1):
+segs_iter, _ = wmodel.transcribe(tmp_wav, **kwargs)
+out_lines = []; seq = 1
+for seg in segs_iter:
+    t_in  = int(seg.start * 1000)
+    t_out = int(seg.end   * 1000)
+    text  = seg.text.strip()
+    if not text: continue
     out_lines += [str(seq), f"{fmt_ts(t_in)} --> {fmt_ts(t_out)}", text, '']
+    seq += 1
+
+try: os.remove(tmp_wav)
+except: pass
+
 open(srt_out, 'w', encoding='utf-8').write('\n'.join(out_lines))
-print(f"  -> {len(all_segs)} segments from {N} clips -> {srt_out}")
+print(f"  -> {seq-1} segments from output.mp4 -> {srt_out}")
 WHISPER_CLIP_EOF
 
   if [[ ! -f "$_out_srt" ]]; then
@@ -1612,7 +1508,7 @@ story_json_p = sys.argv[4] if len(sys.argv) > 4 else ''
 STRONG_BREAKS = set('。！？…')
 WEAK_BREAKS   = set('，；、,;!?')
 ALL_BREAKS    = STRONG_BREAKS | WEAK_BREAKS
-MAX_CARD_VW   = 46   # ~23 CJK chars per card
+MAX_CARD_VW   = 36   # 18 CJK chars max → 18×60px=1080px < 1198px usable on 1264×720
 MIN_CARD_VW   = 10
 
 def vw(s):
@@ -1813,15 +1709,18 @@ SPLITEOF
   fi
   echo ""
 
-  # ── Step 4+5+6: Subtitle burn + speed + title overlay + thumbnail ───────────
+  # ── Step 4+5+6: Speed + title overlay + thumbnail ────────────────────────────
+  # NOTE: subtitle burn is intentionally NOT done here for simple_narration.
+  # Subtitles are burned by Stage 9 Step 11 (render_video.py) which transcribes
+  # the final output.mp4 for ground-truth timing.  Burning here would produce
+  # double-burned subtitles when Step 11 runs.
   # Title overlays (drawbox+drawtext) are added BEFORE setpts so their enable=
   # between(t,...) timestamps are in pre-speed space, consistent with SRT timing.
-  _has_srt=0; [[ -n "$_out_srt" && -f "$_out_srt" ]] && _has_srt=1
   _has_spd=0; [[ -n "$SPEED" && "$SPEED" != "1" && "$SPEED" != "1.0" ]] && _has_spd=1
 
-  echo "  STEP 4+5+6 — subtitle / speed / title overlay / thumbnail"
+  echo "  STEP 4+5+6 — speed / title overlay / thumbnail  (subtitles deferred to Step 11)"
   python3 - "$_out_video" "$INPUT_FOLDER" \
-             "${_out_srt:-}" "${SPEED:-1.0}" \
+             "" "${SPEED:-1.0}" \
              "${_story_json:-}" "$_stitch_src" << 'FINAL_EOF'
 import sys, os, json, re, glob, subprocess
 
@@ -2043,12 +1942,9 @@ print((t + '-' + rand6) if t else 'story-' + rand6)
   echo "  Project   : $EP_DIR"
   echo ""
 
-  # Copy render outputs into project
-  cp "$_out_video" "${RENDERS_DIR}/output.mp4"
   echo "  ✓ output.mp4"
 
   if [[ -f "$_out_srt" ]]; then
-    cp "$_out_srt" "${RENDERS_DIR}/output.${LOCALE}.srt"
     echo "  ✓ output.${LOCALE}.srt"
   fi
 
@@ -2063,6 +1959,149 @@ print((t + '-' + rand6) if t else 'story-' + rand6)
   if [[ -n "$STORY" && -f "$STORY" ]]; then
     cp "$STORY" "${EP_DIR}/story.txt"
     echo "  ✓ story.txt"
+  fi
+
+  # ── Create contract files: VOPlan, meta.json, VoiceCast.json ─────────────
+  # These are required for Stage 9 Step 11 (render_video) and the VO tab.
+  # Without VOPlan.{locale}.json, the server cannot detect the locale and
+  # Step 11 is invisible in the pipeline UI.
+  if [[ -n "$_story_json" && -f "$_story_json" ]]; then
+    echo "  Creating contract files (VOPlan, meta.json, VoiceCast.json)..."
+    python3 - "$EP_DIR" "$LOCALE" "$_story_json" "$CONFIG" "$_slug" \
+               "${EPISODE:-s01e01}" << 'CONTRACTS_EOF'
+import sys, json, os, glob, re, subprocess
+
+ep_dir       = sys.argv[1]
+locale       = sys.argv[2]
+story_json_p = sys.argv[3]
+config_path  = sys.argv[4]
+slug         = sys.argv[5]
+episode_id   = sys.argv[6]
+
+XFADE = 0.4
+
+def natural_key(p):
+    return [int(t) if t.isdigit() else t.lower()
+            for t in re.split(r'(\d+)', os.path.basename(p))]
+
+def probe_dur(path):
+    r = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+         '-of', 'default=noprint_wrappers=1', path],
+        capture_output=True, text=True)
+    try: return float(r.stdout.strip().split('=')[1])
+    except: return 5.0
+
+# 1. Find WAV files (speed-adjusted finals, not _r1/_r2 variants)
+vo_dir = os.path.join(ep_dir, 'assets', locale, 'audio', 'vo')
+wavs   = sorted(
+    [f for f in glob.glob(os.path.join(vo_dir, 'clip*.wav'))
+     if not re.search(r'_r\d+\.wav$', f)],
+    key=natural_key)
+if not wavs:
+    print(f"  [contracts] No WAVs in {vo_dir} — skipping", flush=True)
+    sys.exit(0)
+
+clip_ids  = [os.path.splitext(os.path.basename(w))[0] for w in wavs]
+clip_durs = [probe_dur(w) for w in wavs]
+
+# 2. Story text and titles
+story  = json.load(open(story_json_p, encoding='utf-8'))
+texts  = story.get('display_text') or story.get('text') or []
+titles = story.get('titles', [])
+story_title = titles[0]['title'] if titles else slug
+
+# 3. Voice settings from config
+config      = json.load(open(config_path, encoding='utf-8'))
+locale_narr = config.get('narrator', {}).get(locale, {})
+voice_entries = {k: v for k, v in locale_narr.items() if isinstance(v, dict)}
+if voice_entries:
+    enabled = {n: c for n, c in voice_entries.items() if c.get('enabled', False)}
+    narr = next(iter(enabled.values())) if enabled else {}
+else:
+    narr = locale_narr
+
+# 4. Build vo_items with xfade-aware timing
+vo_items = []
+cur = 0.0
+for i, clip_id in enumerate(clip_ids):
+    dur  = clip_durs[i]
+    text = texts[i] if i < len(texts) else ''
+    vo_items.append({
+        "item_id":    clip_id,
+        "speaker_id": "narrator",
+        "text":       text,
+        "start_sec":  round(cur, 3),
+        "end_sec":    round(cur + dur, 3),
+        "tts_prompt": {
+            "locale":             locale,
+            "azure_voice":        narr.get("azure_voice", ""),
+            "azure_rate":         narr.get("azure_rate",  "0%"),
+            "azure_pitch":        narr.get("azure_pitch", "0%"),
+            "azure_style":        narr.get("azure_style", ""),
+            "azure_style_degree": float(narr.get("azure_style_degree", 1.0)),
+            "azure_break_ms":     int(narr.get("azure_break_ms", 500)),
+        }
+    })
+    if i < len(clip_ids) - 1:
+        cur += dur - XFADE
+
+# 5. story_segments for badge overlays
+n_stories = len(titles)
+story_segments = []
+for idx, t in enumerate(titles):
+    ci  = t['clip_index']
+    fid = clip_ids[ci] if ci < len(clip_ids) else (clip_ids[0] if clip_ids else 'clip01')
+    story_segments.append({
+        "story_index":   idx + 1,
+        "story_count":   n_stories,
+        "title":         t['title'],
+        "first_item_id": fid,
+    })
+
+# 6. Write VOPlan.{locale}.json
+voplan = {
+    "schema_id":       "VOPlan",
+    "schema_version":  "1.0",
+    "locale":          locale,
+    "locale_scope":    "merged",
+    "story_format":    "simple_narration",
+    "vo_items":        vo_items,
+    "story_segments":  story_segments,
+    "scene_heads":     {},
+    "resolved_assets": [],
+}
+json.dump(voplan, open(os.path.join(ep_dir, f"VOPlan.{locale}.json"), 'w',
+          encoding='utf-8'), ensure_ascii=False, indent=2)
+print(f"  ✓ VOPlan.{locale}.json  ({len(vo_items)} clips)", flush=True)
+
+# 7. Write meta.json
+json.dump({
+    "story_title":  story_title,
+    "story_format": "simple_narration",
+    "locales":      locale,
+    "episode_id":   episode_id,
+}, open(os.path.join(ep_dir, "meta.json"), 'w', encoding='utf-8'),
+   ensure_ascii=False, indent=2)
+print("  ✓ meta.json", flush=True)
+
+# 8. Write VoiceCast.json at project level (projects/{slug}/)
+project_dir = os.path.dirname(os.path.dirname(ep_dir))
+json.dump({
+    "narrator": {
+        locale: {
+            "azure_voice":        narr.get("azure_voice", ""),
+            "azure_style":        narr.get("azure_style", ""),
+            "azure_style_degree": float(narr.get("azure_style_degree", 1.0)),
+            "azure_rate":         narr.get("azure_rate",  "0%"),
+            "azure_pitch":        narr.get("azure_pitch", "0%"),
+            "azure_break_ms":     int(narr.get("azure_break_ms", 500)),
+        }
+    }
+}, open(os.path.join(project_dir, "VoiceCast.json"), 'w', encoding='utf-8'),
+   ensure_ascii=False, indent=2)
+print("  ✓ VoiceCast.json", flush=True)
+CONTRACTS_EOF
   fi
 
   # ── Generate youtube.json via server API ───────────────────────────────────
