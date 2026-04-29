@@ -438,27 +438,28 @@ def build_ssml(
     if pitch:
         prosody_parts.append(f'pitch="{pitch}"')
 
-    # Split at phoneme-correction boundaries.  Each 'text' segment is wrapped
-    # in the normal express-as/prosody stack; each 'phoneme' segment becomes a
-    # bare <phoneme> direct child of <voice> (Azure rejects <phoneme> inside
-    # <mstts:express-as>).
+    # Split at phoneme-correction boundaries.  Each segment (text or phoneme)
+    # is wrapped in the normal express-as/prosody stack.
+    #
+    # NOTE: Azure neural voices (e.g. YunyangNeural, Xiaoxiao DragonHD) reject
+    # <phoneme> elements with SSML error 1007, regardless of whether the phoneme
+    # is inside or outside <mstts:express-as>.  Until Microsoft re-enables
+    # <phoneme> for HD neural voices, phoneme-correction characters are emitted
+    # as plain text (slightly incorrect pronunciation is better than no audio).
     voice_parts: list[str] = []
     for seg in segment_zh_phonemes(text, azure_lang, phoneme_overrides):
-        if seg["type"] == "text":
-            escaped = _xml_escape(seg["content"])
-            if break_ms > 0:
-                escaped = re.sub(
-                    r'([.!?](?:\s|$))',
-                    lambda m: m.group(1).rstrip() + f'<break time="{break_ms}ms"/>'
-                              + (m.group(1)[len(m.group(1).rstrip()):] or ' '),
-                    escaped,
-                )
-            voice_parts.append(_wrap_spoken(escaped, prosody_parts, style, style_degree))
-        else:  # phoneme
-            voice_parts.append(
-                f'<phoneme alphabet="pinyin" ph="{seg["pinyin"]}">'
-                f'{_xml_escape(seg["content"])}</phoneme>'
+        # Treat both 'text' and 'phoneme' segments as plain text — Azure neural
+        # voices do not support <phoneme> tags.
+        content = seg["content"]
+        escaped = _xml_escape(content)
+        if break_ms > 0:
+            escaped = re.sub(
+                r'([.!?](?:\s|$))',
+                lambda m: m.group(1).rstrip() + f'<break time="{break_ms}ms"/>'
+                          + (m.group(1)[len(m.group(1).rstrip()):] or ' '),
+                escaped,
             )
+        voice_parts.append(_wrap_spoken(escaped, prosody_parts, style, style_degree))
 
     return (
         f"<speak version='1.0' xml:lang='{azure_lang}' "

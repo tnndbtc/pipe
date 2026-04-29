@@ -2104,94 +2104,24 @@ print("  ✓ VoiceCast.json", flush=True)
 CONTRACTS_EOF
   fi
 
-  # ── Generate youtube.json via server API ───────────────────────────────────
+  # ── Generate youtube.json directly (no server required) ───────────────────
   echo ""
-  _server_url="${PIPE_SERVER_URL:-http://localhost:8000}"
   _yt_generated=""
-  _auto_playlist_id=""
-
-  _server_ok="$(python3 -c "
-import urllib.request, urllib.error
-try:
-    urllib.request.urlopen('${_server_url}/list_projects', timeout=2)
-    print('yes')
-except Exception:
-    print('no')
-" 2>/dev/null)"
-
-  if [[ "$_server_ok" != "yes" ]]; then
-    echo "  ⚠  Server not reachable at ${_server_url}"
-    echo "     Start the server, open the YouTube tab, click ✨ Generate youtube.json"
+  _story_bn="$(basename "${STORY:-}")"
+  echo "  Generating YouTube metadata (takes ~20s) …"
+  _yt_result="$(python3 "${SCRIPT_DIR}/code/http/gen_youtube_json.py" \
+    --slug        "${_slug}" \
+    --ep_id       "${EPISODE}" \
+    --locale      "${LOCALE}" \
+    --story_basename "${_story_bn}" \
+    2>/tmp/simple_run_yt_err.txt)"
+  if [[ "$_yt_result" == "ok" ]]; then
+    echo "  ✓ youtube.json generated → open the YouTube tab to review & edit"
+    _yt_generated="${RENDERS_DIR}/youtube.json"
   else
-    # Auto-match playlist from story filename prefix (e.g. "ai_story_..." → "AI")
-    if [[ -n "$STORY" ]]; then
-      _auto_playlist_id="$(python3 - "$(basename "${STORY:-}")" "$_server_url" "$LOCALE" 2>/dev/null << 'PLAYLIST_MATCH_EOF'
-import sys, re, json, urllib.request
-story_basename, server_url, locale = sys.argv[1], sys.argv[2], sys.argv[3]
-m = re.match(r'^([a-zA-Z][a-zA-Z0-9]*)[\W_]', story_basename)
-if not m: sys.exit(0)
-prefix = m.group(1).lower()
-try:
-    with urllib.request.urlopen(
-            f"{server_url}/api/youtube_playlists?locale={locale}", timeout=10) as r:
-        playlists = json.loads(r.read()).get('playlists', [])
-except Exception:
-    sys.exit(0)
-for exact in (True, False):
-    for pl in playlists:
-        t = pl['title'].strip().lower()
-        if (exact and t == prefix) or (not exact and t.startswith(prefix)):
-            print(pl['id']); sys.exit(0)
-PLAYLIST_MATCH_EOF
-      )" || true
-      [[ -n "$_auto_playlist_id" ]] && echo "  Playlist  : auto-matched → $_auto_playlist_id"
-    fi
-    echo "  Calling /api/generate_youtube_json (takes ~20s) …"
-    _yt_result="$(python3 -c "
-import json, sys, urllib.request, urllib.error
-base = '${_server_url}'
-slug = '${_slug}'; ep_id = '${EPISODE}'; locale = '${LOCALE}'
-
-# Step 1: generate the draft via Claude
-gen_body = json.dumps({'slug': slug, 'ep_id': ep_id, 'locale': locale, 'playlist_id': '${_auto_playlist_id}'}).encode()
-req = urllib.request.Request(base + '/api/generate_youtube_json', data=gen_body,
-                             headers={'Content-Type': 'application/json'})
-try:
-    with urllib.request.urlopen(req, timeout=180) as r:
-        d = json.loads(r.read())
-    if not d.get('ok'):
-        print('err:' + str(d.get('error', 'unknown')), file=sys.stderr)
-        print('fail'); sys.exit(0)
-except urllib.error.URLError as e:
-    print('err:' + str(e), file=sys.stderr)
-    print('fail'); sys.exit(0)
-
-# Step 2: write the draft to disk via youtube_save_all
-draft = d.get('draft', {})
-save_body = json.dumps({'slug': slug, 'ep_id': ep_id, 'locale': locale,
-                        'fields': draft}).encode()
-req2 = urllib.request.Request(base + '/api/youtube_save_all', data=save_body,
-                              headers={'Content-Type': 'application/json'})
-try:
-    with urllib.request.urlopen(req2, timeout=30) as r2:
-        d2 = json.loads(r2.read())
-    if d2.get('ok'):
-        print('ok')
-    else:
-        print('err:save failed: ' + str(d2.get('error', 'unknown')), file=sys.stderr)
-        print('fail')
-except urllib.error.URLError as e:
-    print('err:save request failed: ' + str(e), file=sys.stderr)
-    print('fail')
-" 2>/tmp/simple_run_yt_err.txt)"
-    if [[ "$_yt_result" == "ok" ]]; then
-      echo "  ✓ youtube.json generated → open the YouTube tab to review & edit"
-      _yt_generated="${RENDERS_DIR}/youtube.json"
-    else
-      _yt_err="$(cat /tmp/simple_run_yt_err.txt 2>/dev/null)"
-      echo "  ✗ Generation failed: ${_yt_err:-unknown error}"
-      echo "     Open the YouTube tab and click ✨ Generate youtube.json manually"
-    fi
+    _yt_err="$(cat /tmp/simple_run_yt_err.txt 2>/dev/null)"
+    echo "  ✗ Generation failed: ${_yt_err:-unknown error}"
+    echo "     Open the YouTube tab and click ✨ Generate youtube.json manually"
   fi
   echo ""
 
@@ -2494,102 +2424,30 @@ if [[ -f "${RENDERS_DIR}/thumbnail.png" && ! -f "${RENDERS_DIR}/thumbnail.jpg" ]
     && echo "  ✓ thumbnail.jpg" || echo "  ⚠ thumbnail.jpg conversion failed"
 fi
 
-# ── Step 8: Pre-generate youtube.json via server API ─────────────────────────
-# Calls /api/generate_youtube_json so the YouTube tab is pre-populated when
-# you open the UI.  Uses PIPE_SERVER_URL env var (default: http://localhost:8000).
-# Skips silently if the server is not running.
+# ── Step 8: Pre-generate youtube.json (direct — no server required) ───────────
+# Calls gen_youtube_json.py directly so youtube.json is generated even when
+# the HTTP server is not running (e.g. during unattended crontab execution).
 echo "════════════════════════════════════════════════════════════"
 echo "  STEP 8 — Pre-generate YouTube metadata"
 echo "════════════════════════════════════════════════════════════"
-_server_url="${PIPE_SERVER_URL:-http://localhost:8000}"
 _yt_json_path="${RENDERS_DIR}/youtube.json"
 _yt_generated=""
-_auto_playlist_id=""
-
-_server_ok="$(python3 -c "
-import urllib.request, urllib.error
-try:
-    urllib.request.urlopen('${_server_url}/list_projects', timeout=2)
-    print('yes')
-except Exception:
-    print('no')
-" 2>/dev/null)"
-
-if [[ "$_server_ok" != "yes" ]]; then
-  echo "  ⚠  Server not reachable at ${_server_url}"
-  echo "     Start the server, then open the YouTube tab and click ✨ Generate youtube.json"
+_story_bn="$(basename "${STORY:-}")"
+echo "  Slug      : ${_slug}   Episode: ${EPISODE}   Locale: ${LOCALE}"
+echo "  Generating YouTube metadata (takes ~20s) …"
+_yt_result="$(python3 "${SCRIPT_DIR}/code/http/gen_youtube_json.py" \
+  --slug        "${_slug}" \
+  --ep_id       "${EPISODE}" \
+  --locale      "${LOCALE}" \
+  --story_basename "${_story_bn}" \
+  2>/tmp/simple_run_yt_err.txt)"
+if [[ "$_yt_result" == "ok" ]]; then
+  echo "  ✓ youtube.json generated → open the YouTube tab to review & edit"
+  _yt_generated="$_yt_json_path"
 else
-  echo "  Server    : ${_server_url}"
-  echo "  Slug      : ${_slug}   Episode: ${EPISODE}   Locale: ${LOCALE}"
-  # Auto-match playlist from story filename prefix (e.g. "business_story_..." → "Business")
-  if [[ -n "$STORY" ]]; then
-    _auto_playlist_id="$(python3 - "$(basename "${STORY:-}")" "$_server_url" "$LOCALE" 2>/dev/null << 'PLAYLIST_MATCH_EOF'
-import sys, re, json, urllib.request
-story_basename, server_url, locale = sys.argv[1], sys.argv[2], sys.argv[3]
-m = re.match(r'^([a-zA-Z][a-zA-Z0-9]*)[\W_]', story_basename)
-if not m: sys.exit(0)
-prefix = m.group(1).lower()
-try:
-    with urllib.request.urlopen(
-            f"{server_url}/api/youtube_playlists?locale={locale}", timeout=10) as r:
-        playlists = json.loads(r.read()).get('playlists', [])
-except Exception:
-    sys.exit(0)
-for exact in (True, False):
-    for pl in playlists:
-        t = pl['title'].strip().lower()
-        if (exact and t == prefix) or (not exact and t.startswith(prefix)):
-            print(pl['id']); sys.exit(0)
-PLAYLIST_MATCH_EOF
-    )" || true
-    [[ -n "$_auto_playlist_id" ]] && echo "  Playlist  : auto-matched → $_auto_playlist_id"
-  fi
-  echo "  Calling /api/generate_youtube_json (takes ~20s) …"
-  _yt_result="$(python3 -c "
-import json, sys, urllib.request, urllib.error
-base = '${_server_url}'
-slug = '${_slug}'; ep_id = '${EPISODE}'; locale = '${LOCALE}'
-
-# Step 1: generate the draft via Claude
-gen_body = json.dumps({'slug': slug, 'ep_id': ep_id, 'locale': locale, 'playlist_id': '${_auto_playlist_id}'}).encode()
-req = urllib.request.Request(base + '/api/generate_youtube_json', data=gen_body,
-                             headers={'Content-Type': 'application/json'})
-try:
-    with urllib.request.urlopen(req, timeout=180) as r:
-        d = json.loads(r.read())
-    if not d.get('ok'):
-        print('err:' + str(d.get('error', 'unknown')), file=sys.stderr)
-        print('fail'); sys.exit(0)
-except urllib.error.URLError as e:
-    print('err:' + str(e), file=sys.stderr)
-    print('fail'); sys.exit(0)
-
-# Step 2: write the draft to disk via youtube_save_all
-draft = d.get('draft', {})
-save_body = json.dumps({'slug': slug, 'ep_id': ep_id, 'locale': locale,
-                        'fields': draft}).encode()
-req2 = urllib.request.Request(base + '/api/youtube_save_all', data=save_body,
-                              headers={'Content-Type': 'application/json'})
-try:
-    with urllib.request.urlopen(req2, timeout=30) as r2:
-        d2 = json.loads(r2.read())
-    if d2.get('ok'):
-        print('ok')
-    else:
-        print('err:save failed: ' + str(d2.get('error', 'unknown')), file=sys.stderr)
-        print('fail')
-except urllib.error.URLError as e:
-    print('err:save request failed: ' + str(e), file=sys.stderr)
-    print('fail')
-" 2>/tmp/simple_run_yt_err.txt)"
-  if [[ "$_yt_result" == "ok" ]]; then
-    echo "  ✓ youtube.json generated → open the YouTube tab to review & edit"
-    _yt_generated="$_yt_json_path"
-  else
-    _yt_err="$(cat /tmp/simple_run_yt_err.txt 2>/dev/null)"
-    echo "  ✗ Generation failed: ${_yt_err:-unknown error}"
-    echo "     Open the YouTube tab and click ✨ Generate youtube.json manually"
-  fi
+  _yt_err="$(cat /tmp/simple_run_yt_err.txt 2>/dev/null)"
+  echo "  ✗ Generation failed: ${_yt_err:-unknown error}"
+  echo "     Open the YouTube tab and click ✨ Generate youtube.json manually"
 fi
 echo ""
 
