@@ -293,6 +293,11 @@ def main():
         "Output ONLY valid JSON with exactly these fields: "
         "title, description, tags, thumbnail_source_sec. "
         "No markdown, no explanation — raw JSON only.\n\n"
+        "CRITICAL JSON RULES:\n"
+        "- ALL double-quote characters inside string values MUST be escaped as \\\"\n"
+        "- Example: write \\\"超级DSC\\\" not \"超级DSC\" inside a string value\n"
+        "- Use Chinese quotation marks「」or『』instead of \\\" when quoting terms\n"
+        "- The JSON must be complete and valid — do not truncate\n\n"
         "Constraints:\n"
         f"- title: ≤ 70 characters, in {output_lang}\n"
         "- description: first 2 lines are compelling hooks (shown in search results); "
@@ -306,20 +311,72 @@ def main():
     prompt_text = system_prompt + "\n\n---\n\nEpisode data (JSON):\n\n" + user_msg
     REQUIRED    = {"title", "description", "tags", "thumbnail_source_sec"}
 
-    # ── Call Claude (with one retry) ───────────────────────────────────────────
+    def _try_parse(raw: str):
+        """Try json.loads; on failure attempt to repair unescaped inner quotes."""
+        try:
+            return json.loads(raw), None
+        except json.JSONDecodeError as e:
+            pass
+        # Repair: replace bare " inside JSON string values with \" using a
+        # state-machine walk.  This handles the common case where Claude
+        # emits "quoted term" inside a string value without escaping.
+        repaired = _repair_json_quotes(raw)
+        try:
+            return json.loads(repaired), None
+        except json.JSONDecodeError as e2:
+            return None, str(e2)
+
+    def _repair_json_quotes(s: str) -> str:
+        """Escape unescaped double-quotes that appear inside JSON string values."""
+        out = []
+        in_string = False
+        i = 0
+        while i < len(s):
+            c = s[i]
+            if in_string:
+                if c == '\\':
+                    # escaped character — pass both chars through unchanged
+                    out.append(c)
+                    i += 1
+                    if i < len(s):
+                        out.append(s[i])
+                elif c == '"':
+                    # This quote closes the string (we assume the JSON key/value
+                    # structure is correct at the top level).  To decide whether
+                    # this is a legitimate string-end or an errant inner quote,
+                    # peek ahead: a valid string-end is followed by whitespace
+                    # then one of  : , } ]
+                    j = i + 1
+                    while j < len(s) and s[j] in ' \t\r\n':
+                        j += 1
+                    next_ch = s[j] if j < len(s) else ''
+                    if next_ch in (':', ',', '}', ']'):
+                        # Legitimate string end
+                        out.append(c)
+                        in_string = False
+                    else:
+                        # Errant inner quote — escape it
+                        out.append('\\"')
+                else:
+                    out.append(c)
+            else:
+                if c == '"':
+                    in_string = True
+                out.append(c)
+            i += 1
+        return ''.join(out)
+
+    # ── Call Claude (with one retry on parse failure) ──────────────────────────
     print("  Calling claude CLI to generate YouTube metadata…", file=sys.stderr)
     raw = _call_claude(prompt_text, PIPE_DIR)
-    try:
-        suggested = json.loads(raw)
-    except json.JSONDecodeError:
-        # Retry once
+    suggested, parse_err = _try_parse(raw)
+    if suggested is None:
         print("  Retrying after JSON parse failure…", file=sys.stderr)
         raw = _call_claude(prompt_text, PIPE_DIR)
-        try:
-            suggested = json.loads(raw)
-        except json.JSONDecodeError as e:
-            print(f"err: Claude returned invalid JSON: {e}\nraw: {raw[:300]}", file=sys.stderr)
-            print("fail"); sys.exit(1)
+        suggested, parse_err = _try_parse(raw)
+    if suggested is None:
+        print(f"err: Claude returned invalid JSON: {parse_err}\nraw: {raw[:300]}", file=sys.stderr)
+        print("fail"); sys.exit(1)
 
     missing = REQUIRED - set(suggested.keys())
     if missing:
