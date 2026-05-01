@@ -587,6 +587,7 @@ def build_voplan(
         "episode_id":      episode_id,
         "locale":          locale,
         "locale_scope":    "merged",
+        "story_format":    "simple_narration",
         "shared_ref":      "AssetManifest.shared.json",
         "shotlist_ref":    "ShotList.json",
         "character_packs": [],

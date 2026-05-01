@@ -893,6 +893,21 @@ def write_srt_from_voplan(
                     expected = (cum / total_c) * wav_dur
                     best_seg = min(internal, key=lambda t: abs(t - expected))
                     bounds.append(round(best_seg - _wav_item_start, 4))
+                # Guarantee strictly increasing bounds: when two consecutive
+                # boundaries pick the same Whisper segment (happens when no
+                # segment falls between two proportional split points), split
+                # the shared interval proportionally between the zero-duration
+                # sentence and its successor.
+                for j in range(1, len(bounds)):
+                    if bounds[j] <= bounds[j - 1]:
+                        next_b = bounds[j + 1] if j + 1 < len(bounds) else wav_dur
+                        c_j  = char_counts[j]
+                        c_j1 = char_counts[j + 1] if j + 1 < len(char_counts) else 1
+                        bounds[j] = round(
+                            bounds[j - 1]
+                            + c_j / (c_j + c_j1) * (next_b - bounds[j - 1]),
+                            4,
+                        )
             else:
                 total_c = sum(char_counts)
                 cum = 0
@@ -1249,38 +1264,41 @@ def _simple_narration_render(
     IMPORTANT: output.mp4 must already exist (built by simple_run.sh).
     This function never re-renders the video from scratch.
     """
-    import unicodedata as _ud, re as _re, shutil as _shutil
+    import unicodedata as _ud, re as _re
     final_mp4 = output_dir / "output.mp4"
-    nosub_mp4 = output_dir / "output_nosub.mp4"
     if not final_mp4.exists():
         print(f"[ERROR] simple_narration: {final_mp4} not found.", file=sys.stderr)
         print("  Run simple_run.sh first to generate output.mp4.", file=sys.stderr)
         sys.exit(1)
 
-    # ── Idempotency: output_nosub.mp4 is the permanent clean (no-subtitle) base.
-    # First run: save output.mp4 → output_nosub.mp4 before we burn anything.
-    # Re-runs: output_nosub.mp4 already exists — use it so we never burn on top
-    # of a previously-burned output.mp4.
-    if not nosub_mp4.exists():
-        _shutil.copy2(str(final_mp4), str(nosub_mp4))
-        print(f"  [simple_narration] Saved clean base → output_nosub.mp4")
-
-    srt_path = output_dir / f"output.{locale}.srt"
-
-    # ── Pass 1: Whisper transcription of output_nosub.mp4 (always clean) ────────
-    print("  [simple_narration] Transcribing output_nosub.mp4 with Whisper...")
-    tmp_wav = str(nosub_mp4) + ".tmp_w.wav"
-    _r = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(nosub_mp4), "-ar", "16000", "-ac", "1",
-         "-c:a", "pcm_s16le", tmp_wav, "-loglevel", "error"],
-        capture_output=True, text=True)
-    if _r.returncode != 0:
-        print(f"[ERROR] audio extract failed: {_r.stderr[-300:]}", file=sys.stderr)
+    # ── Burn-once guard ───────────────────────────────────────────────────────────
+    # output.mp4 is the ONLY copy of the assembled video — there is no separate
+    # output_nosub.mp4 clean base.  Once subtitles are burned in, burning again
+    # would stack subtitles on top of subtitles (double-burn).
+    #
+    # The sentinel file output.<locale>.sub_burned is written after a successful
+    # Pass 2 burn.  Its presence means output.mp4 already has subtitles and is
+    # no longer a clean base for re-burning.
+    #
+    # HOW TO RE-RUN legitimately:
+    #   1. Re-run simple_run.sh for this project — STEP 1 (xfade stitch)
+    #      reassembles a fresh, subtitle-free output.mp4.
+    #   2. simple_run.sh automatically calls run.sh Stage 9 at STEP 6, which
+    #      calls render_video.py and burns subtitles cleanly.
+    #   DO NOT run render_video.py (or run.sh Stage 9) standalone on an already-
+    #   burned output.mp4 — that is what this guard prevents.
+    _sentinel = output_dir / f"output.{locale}.sub_burned"
+    if _sentinel.exists():
+        print(f"[ERROR] simple_narration: subtitles already burned into output.mp4 "
+              f"for locale '{locale}'.", file=sys.stderr)
+        print(f"  Sentinel: {_sentinel}", file=sys.stderr)
+        print(f"  output.mp4 is no longer a clean (subtitle-free) base.", file=sys.stderr)
+        print(f"  To re-run: re-run simple_run.sh for this project from STEP 1.", file=sys.stderr)
+        print(f"  simple_run.sh STEP 1 reassembles a fresh output.mp4; STEP 6 then", file=sys.stderr)
+        print(f"  calls render_video.py to transcribe + burn subtitles cleanly.", file=sys.stderr)
         sys.exit(1)
 
-    # Build initial_prompt from story text to improve Whisper accuracy
-    _texts = [v.get("text", "") for v in voplan.get("vo_items", []) if v.get("text")]
-    _initial_prompt = " ".join(_texts[:20]) if _texts else None
+    srt_path = output_dir / f"output.{locale}.srt"
 
     # ── Card helpers (mirror of simple_run.sh SPLITEOF) ──────────────────────
     MAX_CARD_VW = 36   # 18 CJK chars max → 18×60px=1080px < 1198px usable on 1264×720
@@ -1338,109 +1356,114 @@ def _simple_narration_render(
         s, ms = divmod(ms, 1_000)
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-    def _snap_to_break(text: str, pos: int, window: int = 25) -> int:
-        ALL_BREAKS = set("。！？…，；、,;!?")
-        n = len(text)
-        for delta in range(window + 1):
-            if pos - delta >= 0 and text[pos - delta] in ALL_BREAKS: return pos - delta + 1
-            if pos + delta < n  and text[pos + delta] in ALL_BREAKS: return pos + delta + 1
-        return pos
+    # ── Generate SRT from output.subs.json (exact Azure TTS timestamps) ─────────
+    _subs_json_path = output_dir / "output.subs.json"
+    if not _subs_json_path.exists():
+        print(f"[ERROR] simple_narration: {_subs_json_path.name} not found.", file=sys.stderr)
+        print("  Re-run simple_run.sh to regenerate output.subs.json.", file=sys.stderr)
+        sys.exit(1)
 
-    def _map_story_to_segs(story_raw: str, segments: list) -> list:
-        """Distribute story_raw text across Whisper segment timings,
-        split into short cards, return list of (t_in_ms, t_out_ms, card_text)."""
-        total_chars = len(story_raw)
-        total_wc    = sum(len(wt) for _, _, wt in segments) or 1
-        out: list = []
-        story_cursor = 0
-        for seg_i, (t_in, t_out, wt) in enumerate(segments):
-            n_chars = round(len(wt) / total_wc * total_chars)
-            target  = story_cursor + n_chars
-            end_pos = (total_chars if seg_i == len(segments) - 1
-                       else max(_snap_to_break(story_raw, min(target, total_chars - 1)),
-                                story_cursor + 1))
-            text = story_raw[story_cursor:end_pos].strip()
-            story_cursor = end_pos
-            if not text: continue
-            cards = _natural_chunks(text)
-            if not cards: continue
-            seg_chars = sum(len(c) for c in cards) or 1
-            dur, cur = t_out - t_in, t_in
-            for i, card in enumerate(cards):
-                share = round(dur * len(card) / seg_chars)
-                end   = cur + max(share, 200)
-                if i == len(cards) - 1: end = t_out
-                out.append((cur, end, card))
-                cur = end
-        return out
+    import json as _sj
 
-    try:
-        from faster_whisper import WhisperModel
-        _wmodel = WhisperModel("small", compute_type="int8")
-        _kwargs: dict = {"language": "zh", "beam_size": 5}
-        if _initial_prompt:
-            _kwargs["initial_prompt"] = _initial_prompt
-        _segs_iter, _ = _wmodel.transcribe(tmp_wav, **_kwargs)
+    def _tc2ms(tc: str) -> int:
+        _h, _m, _sms = tc.split(":")
+        _s2, _ms2 = _sms.split(",")
+        return int(_h) * 3_600_000 + int(_m) * 60_000 + int(_s2) * 1_000 + int(_ms2)
 
-        # Collect raw Whisper segments (timestamps only — text will be replaced)
-        _raw_segs: list = []
-        for _seg in _segs_iter:
-            _wt = _seg.text.strip()
-            if not _wt: continue
-            _raw_segs.append((int(_seg.start * 1000), int(_seg.end * 1000), _wt))
+    _subs = _sj.loads(_subs_json_path.read_text(encoding="utf-8"))
+    _cards: list = []
+    for _entry in _subs:
+        _tc = _entry.get("timecode", "")
+        if " --> " not in _tc:
+            continue
+        _tc_in, _tc_out = _tc.split(" --> ")
+        _tin  = _tc2ms(_tc_in)
+        _tout = _tc2ms(_tc_out)
+        _txt  = _entry.get("text", "").strip()
+        if not _txt:
+            continue
+        _sub_cards = _natural_chunks(_txt)
+        if not _sub_cards:
+            continue
+        _total_vw = sum(_vw(c) for c in _sub_cards) or 1
+        _cur = _tin
+        for _si, _sc in enumerate(_sub_cards):
+            _share = round((_tout - _tin) * _vw(_sc) / _total_vw)
+            _end   = _cur + max(_share, 200)
+            if _si == len(_sub_cards) - 1:
+                _end = _tout
+            _cards.append((_cur, _end, _sc))
+            _cur = _end
 
-        # Build story text from voplan (canonical, correct Chinese characters)
-        _story_raw = " ".join(_texts)
-        _story_raw = _re.sub(r"(?<=[一-鿿])\s+(?=[一-鿿])", "", _story_raw)
-        _story_raw = _re.sub(r"(?<=[，。！？；：、—])\s+", "", _story_raw)
-        _story_raw = _re.sub(r"\s+", " ", _story_raw).strip()
-
-        if _story_raw and _raw_segs:
-            # Story text mode: use Whisper timestamps, story.txt text
-            _cards = _map_story_to_segs(_story_raw, _raw_segs)
-            print(f"  [simple_narration] story-text mode: {len(_cards)} cards from story")
-        else:
-            # Fallback: use Whisper text with card splitting (no story available)
-            _cards = []
-            for _t_in, _t_out, _wt in _raw_segs:
-                for _card in _natural_chunks(_wt):
-                    _cards.append((_t_in, _t_out, _card))
-            print(f"  [simple_narration] whisper-only mode: {len(_cards)} cards")
-
-        _lines: list = []
-        for _seq, (_t_in, _t_out, _card_text) in enumerate(_cards, 1):
-            _lines += [str(_seq),
-                       f"{_ms_to_srt(_t_in)} --> {_ms_to_srt(_t_out)}",
-                       _card_text, ""]
-        srt_path.write_text("\n".join(_lines), encoding="utf-8")
-        print(f"  [simple_narration] SRT: {srt_path}  ({len(_cards)} cards)")
-    except ImportError:
-        print("  [simple_narration] faster-whisper not available — skipping SRT",
-              file=sys.stderr)
-        do_subtitles = False
-    finally:
-        try:
-            os.unlink(tmp_wav)
-        except OSError:
-            pass
+    _lines: list = []
+    for _seq, (_t_in, _t_out, _card_text) in enumerate(_cards, 1):
+        _lines += [str(_seq),
+                   f"{_ms_to_srt(_t_in)} --> {_ms_to_srt(_t_out)}",
+                   _card_text, ""]
+    srt_path.write_text("\n".join(_lines), encoding="utf-8")
+    print(f"  [simple_narration] SRT: {len(_cards)} cards → {srt_path.name}")
 
     if not do_subtitles or not srt_path.exists():
         return
 
-    # ── Pass 2: Burn SRT into output.mp4 ─────────────────────────────────────
+    # ── Pass 2: Burn story-title overlay + SRT into output.mp4 ──────────────
     print("  [simple_narration] Burning subtitles into output.mp4...")
     _tmp_out = str(final_mp4) + ".sub_tmp.mp4"
+
+    # Build vf chain: story-title badges first, then subtitle captions.
+    _vf_chain: list = []
+
+    def _esc2(t: str) -> str:
+        return (t.replace("\\", "\\\\")
+                 .replace("'",  "’")
+                 .replace(":",  "\\:")
+                 .replace("[",  "\\[")
+                 .replace("]",  "\\]"))
+
+    _font_file_arg = (f":fontfile={NOTO_CJK_FONT}"
+                      if Path(NOTO_CJK_FONT).exists() else "")
+    _OVERLAY_DUR = 5.0
+    _story_segments = voplan.get("story_segments", [])
+    _item_start_sn: dict = {
+        v["item_id"]: float(v.get("start_sec", 0.0))
+        for v in voplan.get("vo_items", [])
+    }
+    for _seg in _story_segments:
+        _idx    = _seg["story_index"]
+        _total  = _seg["story_count"]
+        _stitle = _seg.get("title", "")
+        _fid    = _seg.get("first_item_id", "")
+        _t0     = _item_start_sn.get(_fid, 0.0)
+        _t1     = _t0 + _OVERLAY_DUR
+        _badge  = f"\\[{_idx:02d}/{_total:02d}\\] {_esc2(_stitle)}"
+        _enable = f"between(t,{_t0:.3f},{_t1:.3f})"
+        _vf_chain.append(
+            f"drawbox=x=0:y=0:w=iw:h=90"
+            f":color=black@0.65:t=fill:enable='{_enable}'"
+        )
+        _vf_chain.append(
+            f"drawtext=text='{_badge}'{_font_file_arg}"
+            f":fontsize=52:fontcolor=white"
+            f":borderw=2:bordercolor=black@0.6"
+            f":x=(w-tw)/2:y=20:enable='{_enable}'"
+        )
+    if _story_segments:
+        print(f"  [story-overlay] {len(_story_segments)} badge(s) queued")
+
     _srt_esc = str(srt_path).replace("\\", "/").replace(":", "\\:")
     _font_arg = (f":fontsdir={Path(NOTO_CJK_FONT).parent}"
                  if Path(NOTO_CJK_FONT).exists() else "")
-    _vf = (f"subtitles='{_srt_esc}'{_font_arg}"
-           f":force_style='FontName=Noto Sans CJK SC"
-           f",FontSize=24,Alignment=2,MarginV=40"
-           f",PrimaryColour=&H00FFFFFF"
-           f",OutlineColour=&H00000000"
-           f",Outline=2,Shadow=1'")
+    _vf_chain.append(
+        f"subtitles='{_srt_esc}'{_font_arg}"
+        f":force_style='FontName=Noto Sans CJK SC"
+        f",FontSize=24,Alignment=2,MarginV=40"
+        f",PrimaryColour=&H00FFFFFF"
+        f",OutlineColour=&H00000000"
+        f",Outline=2,Shadow=1'"
+    )
+    _vf = ",".join(_vf_chain)
     _r2 = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(nosub_mp4),   # always burn from clean base
+        ["ffmpeg", "-y", "-i", str(final_mp4),
          "-vf", _vf,
          "-c:v", "libx264", "-crf", "18", "-preset", "medium",
          "-pix_fmt", "yuv420p", "-c:a", "copy",
@@ -1454,6 +1477,9 @@ def _simple_narration_render(
             pass
         sys.exit(1)
     os.replace(_tmp_out, str(final_mp4))
+    # Write burn sentinel so re-runs are blocked until simple_run.sh regenerates
+    # a clean output.mp4 (see burn-once guard comment above).
+    _sentinel.write_text("burned\n", encoding="utf-8")
     print(f"  [simple_narration] Done → {final_mp4}")
 
 
@@ -1492,10 +1518,22 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── simple_narration: two-pass subtitle (transcribe → burn) ──────────────
-    # simple_narration videos are assembled by simple_run.sh.
-    # render_video step = Whisper on output.mp4 → SRT → burn subtitles.
-    # Never re-renders from scratch. output.mp4 must already exist.
-    if voplan.get("story_format") == "simple_narration":
+    # Two paths depending on whether output.mp4 already exists:
+    #
+    # PATH A — output.mp4 already exists (re-render or CLIPS-mode first call):
+    #   Skip MediaPlan-mode entirely. Call _simple_narration_render() directly
+    #   to transcribe the existing video with Whisper and re-burn subtitles.
+    #   Sentinel-guarded: once burned, re-runs are blocked until simple_run.sh
+    #   reassembles a fresh output.mp4.
+    #
+    # PATH B — output.mp4 does NOT exist (TTS-mode first run):
+    #   Fall through to MediaPlan-mode to assemble output.mp4 from TTS audio +
+    #   background image. Subtitle burn is SKIPPED in MediaPlan-mode (see below).
+    #   After assembly, _simple_narration_render() is called at the bottom of
+    #   main() to transcribe the freshly assembled video and burn subtitles.
+    #   This guarantees ground-truth Whisper timing even on the very first run.
+    _is_simple_narration = (voplan.get("story_format") == "simple_narration")
+    if _is_simple_narration and (output_dir / "output.mp4").exists():
         _simple_narration_render(
             output_dir  = output_dir,
             locale      = locale,
@@ -2036,7 +2074,10 @@ def main() -> None:
             print(f"  [story-overlay] {len(story_segments)} badge(s) queued")
 
         # Burned-in subtitles: white text + black outline at bottom.
-        if args.subtitles and srt_path.exists():
+        # For simple_narration PATH B (first run): subtitles are skipped here
+        # so the assembled output.mp4 stays clean. _simple_narration_render()
+        # called at the bottom of main() will transcribe + burn via Whisper.
+        if args.subtitles and srt_path.exists() and not _is_simple_narration:
             _srt_esc = str(srt_path).replace("\\", "/").replace(":", "\\:")
             _vf_chain.append(
                 f"subtitles='{_srt_esc}'"
@@ -2256,6 +2297,17 @@ def main() -> None:
     print(f"\n  [OK] {final_mp4}")
     print(f"  Duration : {total_dur:.3f}s")
     print(f"  Segments : {len(media_segments)}")
+
+    # ── simple_narration PATH B: transcribe + burn subtitles after assembly ──
+    # MediaPlan-mode just assembled a clean (subtitle-free) output.mp4.
+    # Now run the two-pass Whisper subtitle pipeline on it.
+    if _is_simple_narration:
+        _simple_narration_render(
+            output_dir  = output_dir,
+            locale      = locale,
+            voplan      = voplan,
+            do_subtitles= True,
+        )
 
 
 if __name__ == "__main__":

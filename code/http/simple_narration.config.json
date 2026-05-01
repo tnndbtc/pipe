@@ -30,6 +30,30 @@
     }
   },
   "narrator": {
+    "en-US": {
+      "Aria Narration": {
+        "enabled": false,
+        "gender": "female",
+        "notes": "Narration-professional style. Best for investigative documentary YouTube content.",
+        "azure_voice": "en-US-AriaNeural",
+        "azure_style": "narration-professional",
+        "azure_style_degree": 1.0,
+        "azure_rate": "0%",
+        "azure_pitch": "0%",
+        "azure_break_ms": 500
+      },
+      "Guy Newscast": {
+        "enabled": false,
+        "gender": "male",
+        "notes": "Newscast style. Conversational but authoritative; good for deep-dive storytelling.",
+        "azure_voice": "en-US-GuyNeural",
+        "azure_style": "newscast",
+        "azure_style_degree": 1.0,
+        "azure_rate": "0%",
+        "azure_pitch": "0%",
+        "azure_break_ms": 500
+      }
+    },
     "zh-Hans": {
       "Xiaoxiao DragonHD": {
         "enabled": false,

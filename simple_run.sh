@@ -228,6 +228,7 @@ while [[ $# -gt 0 ]]; do
     --skip-sections)    SKIP_SECTIONS="$2";  shift 2 ;;
     --no-default-skips) NO_DEFAULT_SKIPS="1"; shift ;;
     --alt)              ALT="$2";            shift 2 ;;
+    --slot)             SLOT="$2";           shift 2 ;;
     --title-card)       TITLE_CARD="1";      shift ;;
     --subtitles)        SUBTITLES="1";       shift ;;
     --input_folder)     INPUT_FOLDER="$2";   shift 2 ;;
@@ -2178,7 +2179,9 @@ elif isinstance(ve, str):
 
   # If narrator is embedded in config and --voice not given, extract to a temp file.
   # Narrator format: narrator[locale][voice_name] = {enabled, gender, notes, azure_*}
-  # Exactly one voice per locale must have "enabled": true; 0 or 2+ is a fatal error.
+  # Normal mode: exactly one voice per locale must have "enabled": true; 0 or 2+ is fatal.
+  # Rotation mode (--slot given): gender alternates per locale+slot using
+  #   projects/voice_rotation_state.json; "enabled" flags are ignored for that locale.
   if [[ -z "$VOICE" ]]; then
     _has_narrator="$(python3 -c "
 import json
@@ -2187,16 +2190,20 @@ print('1' if 'narrator' in d else '')
 " 2>/dev/null || true)"
     if [[ -n "$_has_narrator" ]]; then
       _VOICE_TMPFILE="$(mktemp /tmp/simple_narration_voice_XXXXXX.json)"
-      python3 - "$CONFIG" "$_VOICE_TMPFILE" << 'VOICE_EXTRACT_EOF'
-import json, sys
+      python3 - "$CONFIG" "$_VOICE_TMPFILE" "${LOCALE:-}" "${SLOT:-}" << 'VOICE_EXTRACT_EOF'
+import json, sys, os
 
-config_path = sys.argv[1]
-out_path    = sys.argv[2]
+config_path  = sys.argv[1]
+out_path     = sys.argv[2]
+locale_hint  = sys.argv[3] if len(sys.argv) > 3 else ''
+slot         = sys.argv[4] if len(sys.argv) > 4 else ''
 
 d            = json.load(open(config_path, encoding='utf-8'))
 narrator_raw = d.get('narrator', {})
 narrator_out = {}
 errors       = []
+
+STATE_FILE = os.path.join('projects', 'voice_rotation_state.json')
 
 for locale, locale_block in narrator_raw.items():
     # Detect new multi-voice format: locale block values are dicts (named voice blocks).
@@ -2207,24 +2214,53 @@ for locale, locale_block in narrator_raw.items():
         narrator_out[locale] = locale_block
         continue
 
-    enabled = {name: cfg for name, cfg in voice_entries.items()
-               if cfg.get('enabled', False)}
-    count = len(enabled)
-    if count == 0:
-        errors.append(
-            f"  locale '{locale}': no voice is enabled "
-            f"(set exactly one to \"enabled\": true)")
-    elif count >= 2:
-        names = ', '.join(f'"{n}"' for n in enabled)
-        errors.append(
-            f"  locale '{locale}': {count} voices are enabled ({names}) "
-            f"— enable exactly one")
-    else:
-        voice_name, cfg = next(iter(enabled.items()))
-        # Strip config-management fields; keep TTS params (including gender for VoiceCast)
+    # Rotation mode: --slot given and this locale matches --locale
+    if slot and locale == locale_hint:
+        try:
+            state = json.load(open(STATE_FILE, encoding='utf-8'))
+        except (FileNotFoundError, json.JSONDecodeError):
+            state = {}
+        last_gender = state.get(locale, {}).get(slot)
+        # Alternate: first run (None) → female, then male/female/...
+        next_gender = 'female' if last_gender != 'female' else 'male'
+        matching = {n: c for n, c in voice_entries.items()
+                    if c.get('gender') == next_gender}
+        if not matching:
+            print(f"[WARN] No {next_gender} voice found for locale '{locale}' "
+                  f"— using first available", file=sys.stderr)
+            matching = voice_entries
+        voice_name, cfg = next(iter(matching.items()))
         tts_params = {k: v for k, v in cfg.items() if k not in ('enabled', 'notes')}
         narrator_out[locale] = tts_params
-        print(f"  Voice selected for '{locale}': {voice_name!r}")
+        print(f"  Voice selected for '{locale}' slot '{slot}': "
+              f"{voice_name!r} ({next_gender})")
+        # Update state file atomically
+        state.setdefault(locale, {})[slot] = next_gender
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        tmp_state = STATE_FILE + '.tmp'
+        json.dump(state, open(tmp_state, 'w', encoding='utf-8'),
+                  indent=2, ensure_ascii=False)
+        os.replace(tmp_state, STATE_FILE)
+    else:
+        # Normal mode: exactly one enabled voice required
+        enabled = {name: cfg for name, cfg in voice_entries.items()
+                   if cfg.get('enabled', False)}
+        count = len(enabled)
+        if count == 0:
+            errors.append(
+                f"  locale '{locale}': no voice is enabled "
+                f"(set exactly one to \"enabled\": true)")
+        elif count >= 2:
+            names = ', '.join(f'"{n}"' for n in enabled)
+            errors.append(
+                f"  locale '{locale}': {count} voices are enabled ({names}) "
+                f"— enable exactly one")
+        else:
+            voice_name, cfg = next(iter(enabled.items()))
+            # Strip config-management fields; keep TTS params (including gender for VoiceCast)
+            tts_params = {k: v for k, v in cfg.items() if k not in ('enabled', 'notes')}
+            narrator_out[locale] = tts_params
+            print(f"  Voice selected for '{locale}': {voice_name!r}")
 
 if errors:
     print("[ERROR] Voice selection in config is invalid:", file=sys.stderr)
