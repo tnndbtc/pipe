@@ -11693,6 +11693,12 @@ placeholder="Enter your story here"></textarea>
       const locs = meta.locales_str.split(',').map(l => l.trim());
       document.getElementById('locale-en-ex').checked       = locs.includes('en');
       document.getElementById('locale-zh-Hans-ex').checked  = locs.includes('zh-Hans');
+      // Populate YouTube locale selector from episode locales so en-US etc. are available
+      const ytLocSel = document.getElementById('yt-locale-sel');
+      if (ytLocSel && locs.length) {
+        ytLocSel.innerHTML = locs.map(l => `<option value="${l}">${l}</option>`).join('');
+        ytLocSel.value = locs[0];
+      }
     }
     // Restore Music state — but MTV always needs music, so skip override
     if (meta.no_music !== undefined && _selectedFormat !== 'mtv') {

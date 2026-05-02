@@ -1616,7 +1616,10 @@ def _delete_step_output(step: str, slug: str, ep_id: str, locale: str) -> None:
     targets: dict[str, list[str]] = {
         "gen_render_plan": [],  # eliminated — nothing to delete
         "render_video":    [os.path.join(ep_dir, "renders", locale, "output.mp4"),
-                            os.path.join(ep_dir, "renders", locale, "render_output.json")],
+                            os.path.join(ep_dir, "renders", locale, "render_output.json"),
+                            # Also clear the simple_narration sub-burned sentinel so the
+                            # next render_video run can re-burn subtitles cleanly.
+                            os.path.join(ep_dir, "renders", locale, f"output.{locale}.sub_burned")],
         # gen_tts / post_tts: skip deletion — TTS files are expensive to redo
     }
     for path in targets.get(step, []):
@@ -5050,7 +5053,7 @@ class Handler(BaseHTTPRequestHandler):
             # Input validation
             if not slug or not ep_id or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id) \
-                    or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                    or locale not in ("en", "en-US", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                 body = json.dumps({"error": "invalid parameters"}).encode()
                 self.send_response(400)
             else:
@@ -5098,7 +5101,7 @@ class Handler(BaseHTTPRequestHandler):
             if not slug or not ep_id \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id) \
-                    or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                    or locale not in ("en", "en-US", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                 self.send_response(400); self.end_headers(); return
 
             thumb_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
@@ -5132,7 +5135,7 @@ class Handler(BaseHTTPRequestHandler):
             if not slug or not ep_id \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id) \
-                    or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                    or locale not in ("en", "en-US", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                 self.send_response(400); self.end_headers(); return
 
             mp4_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
@@ -5200,7 +5203,7 @@ class Handler(BaseHTTPRequestHandler):
             if not slug or not ep_id \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', slug) \
                     or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id) \
-                    or locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                    or locale not in ("en", "en-US", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                 self.send_response(400); self.end_headers(); return
 
             mp4_path = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,
@@ -9802,7 +9805,7 @@ class Handler(BaseHTTPRequestHandler):
                 # C26: validate path parameters
                 if not re.match(r'^[a-zA-Z0-9_\-]+$', slug) or not re.match(r'^[a-zA-Z0-9_\-]+$', ep_id):
                     raise ValueError("invalid slug or ep_id")
-                if locale not in ("en", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
+                if locale not in ("en", "en-US", "zh-Hans", "zh", "zh-CN", "ja", "ko", "fr", "de", "es", "pt"):
                     raise ValueError("invalid locale")
 
                 render_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id,

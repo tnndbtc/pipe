@@ -83,6 +83,29 @@ DEFAULT_PROFILE = "preview_local"
 SAMPLE_RATE = 44100
 CHANNELS    = 2
 
+# ── Story-badge font-size helper ──────────────────────────────────────────────
+def _badge_fontsize(badge_text: str, max_fontsize: int = 52) -> int:
+    """Return the largest fontsize ≤ max_fontsize that keeps badge_text within
+    (W - 40) pixels so the overlay never clips on either edge.
+
+    Width factors per character:
+      CJK / fullwidth  (east_asian_width W or F): 1.0 × fontsize
+      all other chars  (Latin, digits, symbols):  0.60 × fontsize
+
+    Returns at least 24 so the text is always legible.
+    """
+    import unicodedata as _ud
+    avail = W - 40   # 20 px margin each side
+    visual_w = sum(
+        1.0 if _ud.east_asian_width(c) in ("W", "F") else 0.60
+        for c in badge_text
+    )
+    if visual_w <= 0:
+        return max_fontsize
+    ideal = avail / visual_w
+    return max(24, min(max_fontsize, int(ideal)))
+
+
 # ── faster-whisper model cache (loaded lazily, reused across all VO items) ─────
 _faster_whisper_model: "object | None" = None
 _faster_whisper_model_size: str = ""
@@ -1312,7 +1335,19 @@ def _simple_narration_render(
         for c in text:
             cw = 2 if _ud.east_asian_width(c) in ("W", "F") else 1
             if w + cw > MAX_CARD_VW and buf:
-                chunks.append(buf); buf = c; w = cw
+                # Walk back to a word boundary if the cut falls mid-ASCII-word.
+                cut = len(buf)
+                if c.isascii() and c.isalpha() and buf[-1].isascii() and buf[-1].isalpha():
+                    while cut > 0 and buf[cut - 1].isascii() and buf[cut - 1].isalpha():
+                        cut -= 1
+                if 0 < cut < len(buf):
+                    word_tail = buf[cut:]
+                    head = buf[:cut].rstrip()
+                    if head:
+                        chunks.append(head)
+                    buf = word_tail + c; w = _vw(buf)
+                else:
+                    chunks.append(buf); buf = c; w = cw
             else:
                 buf += c; w += cw
         if buf: chunks.append(buf)
@@ -1414,6 +1449,8 @@ def _simple_narration_render(
     _vf_chain: list = []
 
     def _esc2(t: str) -> str:
+        # Note: do NOT escape % — use expansion=none on the drawtext filter instead.
+        # FFmpeg 6.1.1 drawtext with %% causes the entire text to silently not render.
         return (t.replace("\\", "\\\\")
                  .replace("'",  "’")
                  .replace(":",  "\\:")
@@ -1435,7 +1472,10 @@ def _simple_narration_render(
         _fid    = _seg.get("first_item_id", "")
         _t0     = _item_start_sn.get(_fid, 0.0)
         _t1     = _t0 + _OVERLAY_DUR
-        _badge  = f"\\[{_idx:02d}/{_total:02d}\\] {_esc2(_stitle)}"
+        _badge     = f"\\[{_idx:02d}/{_total:02d}\\] {_esc2(_stitle)}"
+        _badge_raw = f"[{_idx:02d}/{_total:02d}] {_stitle}"
+        _fontsize  = _badge_fontsize(_badge_raw)
+        _y         = (90 - _fontsize) // 2
         _enable = f"between(t,{_t0:.3f},{_t1:.3f})"
         _vf_chain.append(
             f"drawbox=x=0:y=0:w=iw:h=90"
@@ -1443,9 +1483,9 @@ def _simple_narration_render(
         )
         _vf_chain.append(
             f"drawtext=text='{_badge}'{_font_file_arg}"
-            f":fontsize=52:fontcolor=white"
+            f":fontsize={_fontsize}:fontcolor=white"
             f":borderw=2:bordercolor=black@0.6"
-            f":x=(w-tw)/2:y=20:enable='{_enable}'"
+            f":x=(w-tw)/2:y={_y}:enable='{_enable}':expansion=none"
         )
     if _story_segments:
         print(f"  [story-overlay] {len(_story_segments)} badge(s) queued")
@@ -1654,17 +1694,41 @@ def main() -> None:
             _bp = _tmp / "clip_0000_bg.mp4"
             _used_bg = False
             if _bg_resolved_path:
-                _bg_ext = Path(_bg_resolved_path).suffix.lower()
+                _bg_path_obj = Path(_bg_resolved_path)
+                _bg_ext = _bg_path_obj.suffix.lower()
                 _is_vid = _bg_ext in {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+                # Auto-prefer pre-rendered loop .mp4 alongside a static image.
+                # generate_bg_loops.py creates news_*_loop.mp4 (14s, one sine period)
+                # next to each news_*.png; stream-copying it is ~instant vs ~80 min geq.
+                if not _is_vid:
+                    _loop_candidate = _bg_path_obj.parent / (_bg_path_obj.stem + "_loop.mp4")
+                    if _loop_candidate.exists():
+                        print(f"  [clip] loop-mp4 → {_loop_candidate.name} (skipping geq render)")
+                        _bg_resolved_path = str(_loop_candidate)
+                        _bg_ext = ".mp4"
+                        _is_vid = True
                 if _is_vid:
-                    _bg_cmd = [
-                        "ffmpeg", "-y",
-                        "-stream_loop", "-1", "-i", _bg_resolved_path,
-                        "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
-                        "-vf", _scale_pad, "-r", str(FPS), "-pix_fmt", "yuv420p",
-                        "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
-                        "-shortest", str(_bp),
-                    ]
+                    if str(_bg_resolved_path).endswith("_loop.mp4"):
+                        # Pre-rendered 14s loop: stream-copy video to exact duration — near-instant
+                        _bg_cmd = [
+                            "ffmpeg", "-y",
+                            "-stream_loop", "-1", "-i", _bg_resolved_path,
+                            "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                            "-map", "0:v:0", "-map", "1:a:0",
+                            "-c:v", "copy", "-c:a", "aac",
+                            "-t", f"{total_dur:.3f}",
+                            str(_bp),
+                        ]
+                    else:
+                        # Generic video background — scale/pad + re-encode
+                        _bg_cmd = [
+                            "ffmpeg", "-y",
+                            "-stream_loop", "-1", "-i", _bg_resolved_path,
+                            "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
+                            "-vf", _scale_pad, "-r", str(FPS), "-pix_fmt", "yuv420p",
+                            "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
+                            "-shortest", str(_bp),
+                        ]
                 else:
                     # Static still image — plain hold, with optional light streak overlay
                     _bg_vf = _scale_pad
@@ -1680,7 +1744,8 @@ def main() -> None:
                         "-t", f"{total_dur:.3f}", "-c:v", "libx264", "-c:a", "aac",
                         "-shortest", str(_bp),
                     ]
-                    _r = subprocess.run(_bg_cmd, capture_output=True, text=True)
+                # Always run subprocess here (fixes bug: was inside else-only, crashing for _is_vid=True)
+                _r = subprocess.run(_bg_cmd, capture_output=True, text=True)
                 if _r.returncode == 0:
                     _clip_files.append(_bp)
                     _clip_durs.append(total_dur)
@@ -2039,6 +2104,8 @@ def main() -> None:
         # Per-story badge overlays: [01/05] Title, shown for 1.2s at story start.
         # drawbox gives a semi-transparent black pill behind the text.
         def _esc(t: str) -> str:
+            # Note: do NOT escape % \u2014 use expansion=none on the drawtext filter instead.
+            # FFmpeg 6.1.1 drawtext with %% causes the entire text to silently not render.
             return (t.replace("\\", "\\\\")
                      .replace("'",  "\u2019")
                      .replace(":",  "\\:")
@@ -2057,7 +2124,10 @@ def main() -> None:
                 _fid   = _seg.get("first_item_id", "")
                 _t0    = _item_start.get(_fid, 0.0)
                 _t1    = _t0 + _OVERLAY_DUR
-                _badge = f"\\[{_idx:02d}/{_total:02d}\\] {_esc(_stitle)}"
+                _badge     = f"\\[{_idx:02d}/{_total:02d}\\] {_esc(_stitle)}"
+                _badge_raw = f"[{_idx:02d}/{_total:02d}] {_stitle}"
+                _fontsize  = _badge_fontsize(_badge_raw)
+                _y         = (90 - _fontsize) // 2
                 _enable = f"between(t,{_t0:.3f},{_t1:.3f})"
                 # Full-width semi-transparent band at the top
                 _vf_chain.append(
@@ -2067,9 +2137,9 @@ def main() -> None:
                 # Title centered horizontally, sitting inside the top band
                 _vf_chain.append(
                     f"drawtext=text='{_badge}'{_font_arg}"
-                    f":fontsize=52:fontcolor=white"
+                    f":fontsize={_fontsize}:fontcolor=white"
                     f":borderw=2:bordercolor=black@0.6"
-                    f":x=(w-tw)/2:y=20:enable='{_enable}'"
+                    f":x=(w-tw)/2:y={_y}:enable='{_enable}':expansion=none"
                 )
             print(f"  [story-overlay] {len(story_segments)} badge(s) queued")
 

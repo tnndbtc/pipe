@@ -181,6 +181,184 @@ PYEOF
     echo
 }
 
+# ── Delete published project ──────────────────────────────────────────────────
+delete_published_project() {
+    local projects_dir="$PIPE_DIR/projects"
+
+    echo
+    echo -e "  ${BOLD}Published Projects — Select one to delete${RESET}"
+    echo
+
+    if [ ! -d "$projects_dir" ]; then
+        echo -e "  ${RED}Projects directory not found: $projects_dir${RESET}"
+        echo
+        return
+    fi
+
+    local tmp_list
+    tmp_list=$(mktemp)
+
+    python3 - "$projects_dir" "$tmp_list" <<'PYEOF'
+import sys, os, json
+
+projects_dir = sys.argv[1]
+tmp_list     = sys.argv[2]
+
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+CYAN   = "\033[0;36m"
+DIM    = "\033[2m"
+
+def find_file(base, name):
+    for root, _dirs, files in os.walk(base):
+        if name in files:
+            return os.path.join(root, name)
+    return None
+
+def load_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+published = []  # list of (proj_name, video_id)
+
+for proj_name in sorted(os.listdir(projects_dir)):
+    proj_path = os.path.join(projects_dir, proj_name)
+    if not os.path.isdir(proj_path):
+        continue
+
+    meta_path = find_file(proj_path, "meta.json")
+    if not meta_path:
+        continue
+    meta = load_json(meta_path)
+    if not meta or meta.get("story_format") != "simple_narration":
+        continue
+
+    upload_path  = find_file(proj_path, "upload_state.json")
+    youtube_path = find_file(proj_path, "youtube.json")
+    if not upload_path or not youtube_path:
+        continue
+
+    upload_data = load_json(upload_path)
+    yt_data     = load_json(youtube_path)
+    if not upload_data or not yt_data:
+        continue
+
+    video_uploaded = upload_data.get("video_uploaded") is True
+    privacy        = yt_data.get("privacy", "")
+    video_id       = upload_data.get("video_id", "")
+
+    if video_uploaded and privacy == "public":
+        published.append((proj_name, video_id))
+
+sep = f"  {CYAN}{'─'*65}{RESET}"
+print(sep)
+if published:
+    for i, (name, vid) in enumerate(published, 1):
+        vid_str = f"  {DIM}youtu.be/{vid}{RESET}" if vid else ""
+        print(f"  {BOLD}{i:>2}){RESET}  {name}{vid_str}")
+else:
+    print(f"    {DIM}(no published projects found){RESET}")
+print(sep)
+
+with open(tmp_list, "w") as f:
+    for name, _ in published:
+        f.write(name + "\n")
+PYEOF
+
+    local count
+    count=$(cat "$tmp_list" | wc -l)
+
+    if [[ "$count" -eq 0 ]]; then
+        echo
+        rm -f "$tmp_list"
+        return
+    fi
+
+    echo
+    read -rp "  Select number or range to delete (e.g. 3 or 1-8), or 0 to cancel: " sel
+    echo
+
+    if [[ -z "$sel" || "$sel" == "0" ]]; then
+        echo -e "  ${YELLOW}Cancelled.${RESET}"
+        rm -f "$tmp_list"
+        echo
+        return
+    fi
+
+    local lo hi
+    if [[ "$sel" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        # Range input: N-M
+        lo="${BASH_REMATCH[1]}"
+        hi="${BASH_REMATCH[2]}"
+    elif [[ "$sel" =~ ^[0-9]+$ ]]; then
+        # Single number
+        lo="$sel"
+        hi="$sel"
+    else
+        echo -e "  ${RED}Invalid input — enter a number (e.g. 3) or a range (e.g. 1-8).${RESET}"
+        rm -f "$tmp_list"
+        echo
+        return
+    fi
+
+    if [[ "$lo" -lt 1 || "$hi" -gt "$count" || "$lo" -gt "$hi" ]]; then
+        echo -e "  ${RED}Invalid range — values must be between 1 and ${count}, low ≤ high.${RESET}"
+        rm -f "$tmp_list"
+        echo
+        return
+    fi
+
+    # Collect the selected project names
+    local selected=()
+    local i
+    for (( i = lo; i <= hi; i++ )); do
+        selected+=("$(sed -n "${i}p" "$tmp_list")")
+    done
+    rm -f "$tmp_list"
+
+    if [[ "${#selected[@]}" -eq 1 ]]; then
+        # ── Single project: require typing the project name ────────────────────
+        local proj_name="${selected[0]}"
+        echo -e "  ${BOLD}Project to delete:${RESET}  $proj_name"
+        echo -e "  ${RED}This will permanently remove the entire project folder and all its files.${RESET}"
+        echo
+        read -rp "  Type the project name to confirm: " confirm
+        echo
+
+        if [[ "$confirm" == "$proj_name" ]]; then
+            rm -rf "$projects_dir/$proj_name"
+            echo -e "  ${GREEN}${BOLD}✓ Deleted:${RESET}  $proj_name"
+        else
+            echo -e "  ${YELLOW}Cancelled — name did not match.${RESET}"
+        fi
+    else
+        # ── Range: list all affected projects, require typing YES ──────────────
+        echo -e "  ${BOLD}Projects to delete (${#selected[@]}):${RESET}"
+        local p
+        for p in "${selected[@]}"; do
+            echo -e "    ${RED}•${RESET}  $p"
+        done
+        echo
+        echo -e "  ${RED}This will permanently remove all ${#selected[@]} project folders and their files.${RESET}"
+        echo
+        read -rp "  Type YES to confirm bulk deletion: " confirm
+        echo
+
+        if [[ "$confirm" == "YES" ]]; then
+            for p in "${selected[@]}"; do
+                rm -rf "$projects_dir/$p"
+                echo -e "  ${GREEN}${BOLD}✓ Deleted:${RESET}  $p"
+            done
+        else
+            echo -e "  ${YELLOW}Cancelled — 'YES' not entered.${RESET}"
+        fi
+    fi
+    echo
+}
+
 # ── Menu ──────────────────────────────────────────────────────────────────────
 main_menu() {
     while true; do
@@ -188,9 +366,10 @@ main_menu() {
         echo -e "  ${BOLD}1)${RESET}  Run tests"
         echo -e "  ${BOLD}2)${RESET}  Install dependencies"
         echo -e "  ${BOLD}3)${RESET}  Project status  (ready to review | uploaded, not published)"
+        echo -e "  ${BOLD}4)${RESET}  Delete a published project"
         echo -e "  ${BOLD}0)${RESET}  Exit"
         echo
-        read -rp "  Select an option [0-3]: " choice
+        read -rp "  Select an option [0-4]: " choice
         echo
 
         case "$choice" in
@@ -206,13 +385,17 @@ main_menu() {
                 show_project_status
                 read -rp "  Press Enter to return to menu…" _
                 ;;
+            4)
+                delete_published_project
+                read -rp "  Press Enter to return to menu…" _
+                ;;
             0)
                 echo -e "${YELLOW}Bye.${RESET}"
                 echo
                 exit 0
                 ;;
             *)
-                echo -e "${RED}Invalid option — enter 0, 1, 2, or 3.${RESET}"
+                echo -e "${RED}Invalid option — enter 0, 1, 2, 3, or 4.${RESET}"
                 sleep 1
                 ;;
         esac

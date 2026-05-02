@@ -212,6 +212,15 @@ def merge_manifests(
     if locale.get("vo_approval"):
         merged["vo_approval"] = locale["vo_approval"]
 
+    # Preserve simple_narration-specific fields from the locale manifest.
+    # simple_narration_setup.py writes story_format + story_segments directly
+    # into the VOPlan (bypassing the shared/locale manifest split).  When
+    # manifest_merge is re-run during a VO save (to recompute duck_intervals),
+    # these fields must survive so render_video.py can still identify the format.
+    for _k in ("story_format", "story_segments"):
+        if _k in locale:
+            merged[_k] = locale[_k]
+
     # Compute per-locale timing_lock_hash
     # Use background_overrides to get locale-adjusted durations.
     shot_durations: dict[str, float] = {}
