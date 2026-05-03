@@ -11029,6 +11029,12 @@ placeholder="Enter your story here"></textarea>
         const _genBtn = document.getElementById('yt-gen-btn');
         if (_genBtn) { _genBtn.disabled = false; _genBtn.textContent = '✨ Generate youtube.json'; }
         _ytLoadPlaylists(locale);
+        // Show the video player even without youtube.json — output.mp4 may already exist
+        // and the user needs to preview it to pick a thumbnail frame before generating.
+        const _vidEl = document.getElementById('yt-preview-video');
+        const _vidSrc = `/api/episode_video?slug=${encodeURIComponent(slug)}&ep_id=${encodeURIComponent(epId)}&locale=${encodeURIComponent(locale)}&t=${Date.now()}`;
+        _vidEl.src = _vidSrc;
+        _vidEl.style.display = 'block';
         return;
       }
 
@@ -11133,8 +11139,19 @@ placeholder="Enter your story here"></textarea>
         opt.textContent = p.title;
         sel.appendChild(opt);
       });
-      // Set the saved value and update Studio link
+      // Set the saved value; if null, try to auto-match by slug prefix
       sel.value = window._ytPendingPlaylistId || '';
+      if (!sel.value && currentSlug) {
+        const _pfxM = currentSlug.match(/^([a-zA-Z][a-zA-Z0-9]*)[\W_]/);
+        if (_pfxM) {
+          const _pfx = _pfxM[1].toLowerCase();
+          const _matched = (d.playlists || []).find(p =>
+            p.title.trim().toLowerCase() === _pfx ||
+            p.title.trim().toLowerCase().startsWith(_pfx)
+          );
+          if (_matched) sel.value = _matched.id;
+        }
+      }
       _ytUpdateStudioLink(sel.value);
       status.textContent = d.playlists.length ? '' : 'No playlists found';
     } catch(e) {

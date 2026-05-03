@@ -66,6 +66,17 @@
         "azure_pitch": "-5%",
         "azure_break_ms": 500
       },
+      "Yunyang Newscast-Casual": {
+        "enabled": false,
+        "gender": "male",
+        "notes": "Casual newscast style. Conversational; good for lifestyle/soft news.",
+        "azure_voice": "zh-CN-YunyangNeural",
+        "azure_style": "newscast-casual",
+        "azure_style_degree": 1.0,
+        "azure_rate": "0%",
+        "azure_pitch": "0%",
+        "azure_break_ms": 500
+      },
       "Yunjian": {
         "enabled": false,
         "gender": "male",
@@ -87,19 +98,28 @@
         "azure_rate": "0%",
         "azure_pitch": "0%",
         "azure_break_ms": 500
-      },
-      "Yunyang Newscast-Casual": {
-        "enabled": true,
-        "gender": "male",
-        "notes": "Casual newscast style. Conversational; good for lifestyle/soft news.",
-        "azure_voice": "zh-CN-YunyangNeural",
-        "azure_style": "newscast-casual",
-        "azure_style_degree": 1.0,
-        "azure_rate": "0%",
-        "azure_pitch": "0%",
-        "azure_break_ms": 500
       }
     }
   },
-  "skip_sections": ["Sources"]
+  "skip_sections": ["Sources"],
+  "tts_substitutions": {
+    "notes": "Per-locale text substitutions applied before Azure TTS to prevent false sentence-end pauses on dotted abbreviations. Longer patterns must appear before shorter overlapping ones (e.g. U.S.A. before U.S.). Currently applied via hardcoded table in gen_tts_cloud.py; this block is reserved for future project-specific overrides.",
+    "en-US": {
+      "U.S.A.": "USA",
+      "U.S.":   "US",
+      "U.K.":   "UK",
+      "U.N.":   "UN",
+      "E.U.":   "EU",
+      "D.C.":   "DC",
+      "N.Y.":   "NY",
+      "L.A.":   "LA",
+      "vs.":    "versus",
+      "Dr.":    "Dr",
+      "Mr.":    "Mr",
+      "Mrs.":   "Mrs",
+      "Prof.":  "Prof",
+      "Jr.":    "Jr",
+      "Sr.":    "Sr"
+    }
+  }
 }

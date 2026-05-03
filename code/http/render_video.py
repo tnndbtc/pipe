@@ -2370,8 +2370,16 @@ def main() -> None:
 
     # ── simple_narration PATH B: transcribe + burn subtitles after assembly ──
     # MediaPlan-mode just assembled a clean (subtitle-free) output.mp4.
-    # Now run the two-pass Whisper subtitle pipeline on it.
+    # Clear any stale sub_burned sentinel — PATH B always produces a clean base,
+    # so a sentinel left by a concurrent or prior run is never valid here.
+    # (Without this, a sentinel from a racing manual run causes sys.exit(1) inside
+    # _simple_narration_render, which kills the entire simple_run.sh session and
+    # prevents STEP 7 VO-approval and STEP 8 youtube.json from running.)
     if _is_simple_narration:
+        _stale_sentinel = output_dir / f"output.{locale}.sub_burned"
+        if _stale_sentinel.exists():
+            _stale_sentinel.unlink()
+            print(f"  [sub_burned] Cleared stale sentinel (PATH B fresh assembly) — {_stale_sentinel.name}")
         _simple_narration_render(
             output_dir  = output_dir,
             locale      = locale,

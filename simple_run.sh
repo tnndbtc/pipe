@@ -2316,6 +2316,7 @@ echo "  Voice   : $(basename "$VOICE")"
 echo "  Locale  : $LOCALE"
 echo "  Profile : $PROFILE"
 echo "  Episode : $EPISODE"
+echo "  Started : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
@@ -2390,7 +2391,7 @@ echo ""
 
 # ── Step 5: Run simple_narration_setup.py ────────────────────────────────────
 echo "════════════════════════════════════════════════════════════"
-echo "  STEP 5 — Generate contracts"
+echo "  STEP 5 — Generate contracts  [$(date -u '+%H:%M:%S UTC')]"
 echo "════════════════════════════════════════════════════════════"
 
 _setup_args=(
@@ -2414,7 +2415,7 @@ echo ""
 
 # ── Step 6: Run Stage 9 render (TTS + resolve + render) ──────────────────────
 echo "════════════════════════════════════════════════════════════"
-echo "  STEP 6 — Stage 9 render"
+echo "  STEP 6 — Stage 9 render  [$(date -u '+%H:%M:%S UTC')]"
 echo "════════════════════════════════════════════════════════════"
 
 # render_video.py reads these env vars when run.sh doesn't pass --title-card /
@@ -2425,6 +2426,7 @@ echo "════════════════════════�
 export SIMPLE_NARRATION_VIDEO_EFFECT="${VIDEO_EFFECT:-}"
 
 NO_MUSIC=1 ./run.sh "$EP_DIR" 10 10
+echo "  STEP 6 done  [$(date -u '+%H:%M:%S UTC')]"
 echo ""
 
 # ── Step 7: Verify output and optionally copy ────────────────────────────────
@@ -2464,7 +2466,7 @@ fi
 # Calls gen_youtube_json.py directly so youtube.json is generated even when
 # the HTTP server is not running (e.g. during unattended crontab execution).
 echo "════════════════════════════════════════════════════════════"
-echo "  STEP 8 — Pre-generate YouTube metadata"
+echo "  STEP 8 — Pre-generate YouTube metadata  [$(date -u '+%H:%M:%S UTC')]"
 echo "════════════════════════════════════════════════════════════"
 _yt_json_path="${RENDERS_DIR}/youtube.json"
 _yt_generated=""
@@ -2488,7 +2490,7 @@ fi
 echo ""
 
 echo "════════════════════════════════════════════════════════════"
-echo "  ✓ Done"
+echo "  ✓ Done  [$(date -u '+%Y-%m-%d %H:%M:%S UTC')]"
 echo "  Video     : $_abs_final"
 [[ -f "$_render_dir/chapters.txt"   ]] && echo "  Chapters  : $_render_dir/chapters.txt"
 [[ -f "$_render_dir/thumbnail.png"  ]] && echo "  Thumbnail : $_render_dir/thumbnail.png"

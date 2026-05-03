@@ -348,6 +348,58 @@ def _xml_escape(text: str) -> str:
                 .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
 
 
+# =============================================================================
+# TTS text normalisation — dotted-abbreviation substitutions
+# =============================================================================
+# Azure TTS sentence-boundary detection fires on a trailing period, so
+# "U.S." triggers a sentence-end pause after the "S."  Replacing dotted
+# abbreviations with period-free equivalents eliminates false boundaries while
+# preserving correct pronunciation (Azure pronounces "US" as "U-S").
+#
+# Rules:
+#   - Longer patterns MUST appear before shorter overlapping ones
+#     (e.g. "U.S.A." before "U.S.") to avoid partial replacement.
+#   - Substitutions are case-sensitive to avoid false positives.
+#   - Add project-specific entries to "tts_substitutions" in
+#     simple_narration.config.json (not yet wired; reserved for future use).
+# =============================================================================
+_TTS_SUBSTITUTIONS: dict[str, list[tuple[str, str]]] = {
+    "en": [
+        ("U.S.A.", "USA"),
+        ("U.S.",   "US"),
+        ("U.K.",   "UK"),
+        ("U.N.",   "UN"),
+        ("E.U.",   "EU"),
+        ("D.C.",   "DC"),
+        ("N.Y.",   "NY"),
+        ("L.A.",   "LA"),
+        ("vs.",    "versus"),
+        ("Dr.",    "Dr"),
+        ("Mr.",    "Mr"),
+        ("Mrs.",   "Mrs"),
+        ("Prof.",  "Prof"),
+        ("Jr.",    "Jr"),
+        ("Sr.",    "Sr"),
+    ],
+}
+
+
+def normalize_tts_text(text: str, azure_lang: str) -> str:
+    """Apply pre-TTS substitutions to prevent Azure sentence-boundary misdetection.
+
+    Dotted abbreviations like "U.S." cause Azure's end-of-sentence detector to
+    fire, inserting an unwanted long pause.  Replacing them with period-free
+    forms (e.g. "US") removes the false boundary while preserving pronunciation.
+
+    *azure_lang* is the full Azure lang string (e.g. "en-US", "zh-CN"); only
+    the primary language subtag is used for substitution lookup.
+    """
+    lang = azure_lang.split("-")[0].lower()   # "en-US" → "en"
+    for src, dst in _TTS_SUBSTITUTIONS.get(lang, []):
+        text = text.replace(src, dst)
+    return text
+
+
 def segment_zh_phonemes(text: str, azure_lang: str,
                         phoneme_overrides: dict | None = None) -> list[dict]:
     """Split *text* into plain-text and phoneme-correction segments.
@@ -428,6 +480,8 @@ def build_ssml(
     """
     # Normalise newlines → single space so Azure TTS doesn't insert pauses
     text = re.sub(r'\s*\n+\s*', ' ', text).strip()
+    # Normalise dotted abbreviations to prevent false sentence-end pauses
+    text = normalize_tts_text(text, azure_lang)
 
     # Prosody attrs
     prosody_parts: list[str] = []
@@ -544,6 +598,7 @@ def build_episode_ssml(items: list[dict], locale: str) -> str:
     parts: list[str] = []
     for item in items:
         text        = re.sub(r'\s*\n+\s*', ' ', item["text"]).strip()
+        text        = normalize_tts_text(text, azure_lang)
         voice       = item["voice"]
         rate        = item["rate"]
         style       = item["style"]
@@ -838,6 +893,8 @@ def build_ssml_minimal(
     """
     # Normalise newlines → single space so Azure TTS doesn't insert pauses
     text = re.sub(r'\s*\n+\s*', ' ', text).strip()
+    # Normalise dotted abbreviations to prevent false sentence-end pauses
+    text = normalize_tts_text(text, azure_lang)
     escaped = _xml_escape(text)
 
     # Explicit break injection — caller-controlled only, not default behaviour
@@ -1004,7 +1061,8 @@ def _build_chunk_ssml(chunk: dict) -> str:
 
     parts: list[str] = []
     for i, sent in enumerate(sentences):
-        escaped  = _xml_escape(re.sub(r'\s*\n+\s*', ' ', sent["text"]).strip())
+        _text    = normalize_tts_text(re.sub(r'\s*\n+\s*', ' ', sent["text"]).strip(), azure_lang)
+        escaped  = _xml_escape(_text)
         is_last  = (i == len(sentences) - 1)
         pause_ms = sent.get("pause_ms", 0) if not is_last else 0
         if pause_ms > 0:
@@ -1054,7 +1112,14 @@ def _pcm_duration_sec(pcm_bytes: bytes, sample_rate: int = AZURE_SAMPLE_RATE) ->
 def _align_proportional(chunk_wav_bytes: bytes, chunk: dict) -> list[dict]:
     """Align sentences within a chunk by proportional character ratio.
 
-    Divides chunk duration proportionally to each sentence's character count.
+    Divides the SPEECH portion of chunk duration proportionally to each
+    sentence's character count, then re-adds the explicit inter-sentence
+    <break> pause to each non-last sentence's allocation.
+
+    This avoids the old bug where all chunk duration (including silence breaks)
+    was divided proportionally, causing the cut to land inside the final syllable
+    of sentences whose speech runs longer than the char-ratio estimate.
+
     Simple, zero dependencies, always succeeds.
 
     Returns list of {"item_id": str, "start_sec": float, "end_sec": float}.
@@ -1073,11 +1138,20 @@ def _align_proportional(chunk_wav_bytes: bytes, chunk: dict) -> list[dict]:
             for i, s in enumerate(sentences)
         ]
 
+    # Subtract explicit inter-sentence breaks from the pool before proportional
+    # division so that each sentence's speech share is not diluted by the pauses.
+    total_pause_sec = sum(
+        s.get("pause_ms", 0) for s in sentences[:-1]
+    ) / 1000.0
+    speech_dur = max(total_dur - total_pause_sec, 0.0)
+
     offsets: list[dict] = []
     cursor = 0.0
-    for s in sentences:
-        frac = len(s["text"]) / total_chars
-        dur  = total_dur * frac
+    for i, s in enumerate(sentences):
+        is_last   = (i == len(sentences) - 1)
+        frac      = len(s["text"]) / total_chars
+        pause_sec = 0.0 if is_last else s.get("pause_ms", 0) / 1000.0
+        dur       = speech_dur * frac + pause_sec
         offsets.append({
             "item_id":   s["item_id"],
             "start_sec": round(cursor, 4),
@@ -1808,7 +1882,11 @@ def _select_synthesis_mode(
     ├─ ssml_narration                                  → chunk_alignment
     │    (DragonHD — typical — can't use bookmarks)
     ├─ all voices in BATCH_VOICES + count ≤ max        → batch_bookmark
-    ├─ any HD voice in unsupported set                 → chunk_alignment
+    ├─ any HDOmni voice in unsupported set             → chunk_alignment
+    │    (HDOmni emits word-boundary events; alignment is reliable)
+    ├─ any other HD voice (DragonHD, HDFlash)          → per_item_legacy
+    │    (no word-boundary events; <break> tags do not produce digital
+    │     silence → chunk slicing is unreliable → synthesise per-item)
     └─ other unsupported (custom endpoint, etc.)       → per_item_legacy
     """
     if asset_id is not None:
@@ -1823,8 +1901,15 @@ def _select_synthesis_mode(
     if not unsupported and len(items) <= BATCH_MAX_VOICE_ELEMENTS:
         return _MODE_BATCH_BOOKMARK
 
-    if any(_is_hd_voice(v) for v in unsupported):
+    # HDOmni: keep chunk_alignment — word-boundary events make slicing reliable.
+    if any(_is_hd_omni_voice(v) for v in unsupported):
         return _MODE_CHUNK_ALIGNMENT
+
+    # DragonHD / HDFlash: <break> tags do not produce real silence in multi-sentence
+    # Chinese SSML; silence-gap and proportional alignment both produce wrong cuts.
+    # Synthesise every item individually — no slicing, no bleed.
+    if any(_is_hd_voice(v) for v in unsupported):
+        return _MODE_PER_ITEM_LEGACY
 
     return _MODE_PER_ITEM_LEGACY
 
@@ -3613,7 +3698,8 @@ def run(
     ┌─ asset_id set                      → per_item_legacy
     ├─ ssml_narration                    → chunk_alignment
     ├─ all voices in whitelist + ≤ max   → batch_bookmark
-    ├─ any HD voice not in whitelist     → chunk_alignment
+    ├─ any HDOmni voice                  → chunk_alignment (word-boundary events)
+    ├─ any other HD voice (DragonHD/HDFlash) → per_item_legacy (no reliable silence)
     └─ other unsupported voices          → per_item_legacy
     """
     mode = _select_synthesis_mode(items, ssml_narration, asset_id)

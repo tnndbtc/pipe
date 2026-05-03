@@ -9671,6 +9671,43 @@ class Handler(BaseHTTPRequestHandler):
                     + credits_block
                 )
 
+                # ── Auto-match playlist from slug prefix if none provided ─────
+                # e.g. "business_story_2026-..." → prefix "business" → playlist "Business"
+                _resolved_playlist = req_playlist or profile_info.get("playlist_id")
+                if not _resolved_playlist and profile_info.get("token_path"):
+                    try:
+                        from google.oauth2.credentials import Credentials as _Creds
+                        from google.auth.transport.requests import Request as _GReq
+                        from googleapiclient.discovery import build as _yt_build2
+                        _pl_tok = profile_info["token_path"]
+                        _pl_creds = _Creds.from_authorized_user_file(_pl_tok)
+                        if _pl_creds.expired and _pl_creds.refresh_token:
+                            _pl_creds.refresh(_GReq())
+                            open(_pl_tok, "w", encoding="utf-8").write(_pl_creds.to_json())
+                        _yt2 = _yt_build2("youtube", "v3", credentials=_pl_creds)
+                        _all_pls = []
+                        _pl_req2 = _yt2.playlists().list(part="snippet", mine=True, maxResults=50)
+                        while _pl_req2:
+                            _pl_resp2 = _pl_req2.execute()
+                            for _pi in _pl_resp2.get("items", []):
+                                _all_pls.append({"id": _pi["id"],
+                                                 "title": _pi["snippet"]["title"]})
+                            _pl_req2 = _yt2.playlists().list_next(_pl_req2, _pl_resp2)
+                        _pfx_m = re.match(r'^([a-zA-Z][a-zA-Z0-9]*)[\W_]', slug)
+                        if _pfx_m:
+                            _pfx = _pfx_m.group(1).lower()
+                            for _exact in (True, False):
+                                for _pl in _all_pls:
+                                    _pt = _pl["title"].strip().lower()
+                                    if (_exact and _pt == _pfx) or \
+                                       (not _exact and _pt.startswith(_pfx)):
+                                        _resolved_playlist = _pl["id"]
+                                        break
+                                if _resolved_playlist:
+                                    break
+                    except Exception as _pl_exc:
+                        print(f"  [youtube] WARNING: playlist auto-match failed: {_pl_exc}")
+
                 # ── Assemble full draft ───────────────────────────────────────
                 # Prefer thumbnail.jpg; fall back to thumbnail.png if jpg not yet created
                 _thumb_jpg = os.path.join(render_dir, "thumbnail.jpg")
@@ -9688,7 +9725,7 @@ class Handler(BaseHTTPRequestHandler):
                     "description":         final_description,
                     "tags":                suggested.get("tags", []),
                     "category_id":         category_id,
-                    "playlist_id":         req_playlist or profile_info.get("playlist_id"),
+                    "playlist_id":         _resolved_playlist,
                     "channel_id":          profile_info.get("channel_id"),
                     "video_language":      locale if locale != "zh-Hans" else "zh-Hans",
                     "privacy":             "private",
