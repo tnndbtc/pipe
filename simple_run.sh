@@ -2115,7 +2115,7 @@ CONTRACTS_EOF
     --ep_id       "${EPISODE}" \
     --locale      "${LOCALE}" \
     --story_basename "${_story_bn}" \
-    2>/tmp/simple_run_yt_err.txt)"
+    2>/tmp/simple_run_yt_err.txt)" || true
   if [[ "$_yt_result" == "ok" ]]; then
     echo "  ✓ youtube.json generated → open the YouTube tab to review & edit"
     _yt_generated="${RENDERS_DIR}/youtube.json"
@@ -2478,7 +2478,7 @@ _yt_result="$(python3 "${SCRIPT_DIR}/code/http/gen_youtube_json.py" \
   --ep_id       "${EPISODE}" \
   --locale      "${LOCALE}" \
   --story_basename "${_story_bn}" \
-  2>/tmp/simple_run_yt_err.txt)"
+  2>/tmp/simple_run_yt_err.txt)" || true
 if [[ "$_yt_result" == "ok" ]]; then
   echo "  ✓ youtube.json generated → open the YouTube tab to review & edit"
   _yt_generated="$_yt_json_path"

@@ -1582,6 +1582,19 @@ def main() -> None:
         )
         sys.exit(0)
 
+    # ── PATH B: clear stale sub_burned sentinel at the very start ────────────
+    # PATH B always assembles a fresh, subtitle-free output.mp4.  Any existing
+    # sub_burned sentinel is stale (it belongs to a superseded run).  Clear it
+    # HERE so that even if PATH B is interrupted mid-run (e.g. between step 13
+    # render_output.json and step 15 _simple_narration_render), the next PATH A
+    # invocation can re-burn subtitles cleanly without hitting the "already
+    # burned" guard inside _simple_narration_render().
+    if _is_simple_narration:
+        _early_sentinel = output_dir / f"output.{locale}.sub_burned"
+        if _early_sentinel.exists():
+            _early_sentinel.unlink()
+            print(f"  [sub_burned] Cleared stale sentinel at PATH B start — {_early_sentinel.name}")
+
     profile_name = args.profile or DEFAULT_PROFILE
     profile      = PROFILES.get(profile_name, PROFILES[DEFAULT_PROFILE])
     crf          = profile["crf"]

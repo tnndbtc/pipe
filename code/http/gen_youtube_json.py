@@ -132,12 +132,12 @@ def _call_claude(prompt_text: str, pipe_dir: str) -> str:
         )
     finally:
         os.unlink(tmp_path)
-    if result.returncode != 0 and not result.stdout.strip():
-        raise RuntimeError(
-            f"claude CLI failed (rc={result.returncode}): "
-            f"{result.stderr.strip()[:300]}"
-        )
     raw = result.stdout.strip()
+    if not raw:
+        raise RuntimeError(
+            f"claude CLI returned empty output (rc={result.returncode}). "
+            f"stderr: {result.stderr.strip()[:300]}"
+        )
     # Strip markdown fences
     raw = re.sub(r"^```[a-z]*\n?", "", raw, flags=re.MULTILINE)
     raw = re.sub(r"\n?```$", "", raw, flags=re.MULTILINE)
