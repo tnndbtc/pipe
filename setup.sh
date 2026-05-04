@@ -8,7 +8,7 @@ PIPE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
 
 print_header() {
     echo
@@ -359,33 +359,84 @@ PYEOF
     echo
 }
 
+# ── Start / restart pipe server ───────────────────────────────────────────────
+start_pipe_server() {
+    local server_script="code/http/server.py"
+    local log_file="$PIPE_DIR/code/http/logs/server.log"
+
+    # Kill any existing instance
+    local existing_pid
+    existing_pid=$(pgrep -f "$server_script" 2>/dev/null || true)
+    if [[ -n "$existing_pid" ]]; then
+        echo -e "  ${YELLOW}Found running server (PID $existing_pid) — stopping…${RESET}"
+        kill "$existing_pid" 2>/dev/null || true
+        # Wait up to 5 s for it to die
+        local i
+        for (( i = 0; i < 10; i++ )); do
+            sleep 0.5
+            pgrep -f "$server_script" &>/dev/null || break
+        done
+        if pgrep -f "$server_script" &>/dev/null; then
+            echo -e "  ${RED}Process did not exit — sending SIGKILL…${RESET}"
+            pkill -9 -f "$server_script" 2>/dev/null || true
+            sleep 1
+        fi
+        echo -e "  ${GREEN}✓ Stopped${RESET}"
+    else
+        echo -e "  ${CYAN}No running server found.${RESET}"
+    fi
+
+    # Start fresh
+    mkdir -p "$(dirname "$log_file")"
+    echo -e "  ${BOLD}Starting pipe server…${RESET}"
+    echo -e "  ${DIM}Log: $log_file${RESET}"
+    nohup python3 "$PIPE_DIR/$server_script" \
+        > "$log_file" 2>&1 &
+    local new_pid=$!
+    sleep 1
+
+    if pgrep -f "$server_script" &>/dev/null; then
+        echo -e "  ${GREEN}${BOLD}✓ Server started (PID $new_pid)${RESET}"
+        echo -e "  ${CYAN}http://localhost:8000${RESET}"
+    else
+        echo -e "  ${RED}${BOLD}✗ Server failed to start — check log:${RESET}"
+        echo -e "  ${DIM}tail -20 $log_file${RESET}"
+    fi
+    echo
+}
+
 # ── Menu ──────────────────────────────────────────────────────────────────────
 main_menu() {
     while true; do
         print_header
-        echo -e "  ${BOLD}1)${RESET}  Run tests"
-        echo -e "  ${BOLD}2)${RESET}  Install dependencies"
-        echo -e "  ${BOLD}3)${RESET}  Project status  (ready to review | uploaded, not published)"
-        echo -e "  ${BOLD}4)${RESET}  Delete a published project"
+        echo -e "  ${BOLD}1)${RESET}  Start / restart pipe server  (code/http/server.py)"
+        echo -e "  ${BOLD}2)${RESET}  Run tests"
+        echo -e "  ${BOLD}3)${RESET}  Install dependencies"
+        echo -e "  ${BOLD}4)${RESET}  Project status  (ready to review | uploaded, not published)"
+        echo -e "  ${BOLD}5)${RESET}  Delete a published project"
         echo -e "  ${BOLD}0)${RESET}  Exit"
         echo
-        read -rp "  Select an option [0-4]: " choice
+        read -rp "  Select an option [0-5]: " choice
         echo
 
         case "$choice" in
             1)
-                run_tests
+                start_pipe_server
                 read -rp "  Press Enter to return to menu…" _
                 ;;
             2)
-                install_deps
+                run_tests
                 read -rp "  Press Enter to return to menu…" _
                 ;;
             3)
-                show_project_status
+                install_deps
                 read -rp "  Press Enter to return to menu…" _
                 ;;
             4)
+                show_project_status
+                read -rp "  Press Enter to return to menu…" _
+                ;;
+            5)
                 delete_published_project
                 read -rp "  Press Enter to return to menu…" _
                 ;;
@@ -395,7 +446,7 @@ main_menu() {
                 exit 0
                 ;;
             *)
-                echo -e "${RED}Invalid option — enter 0, 1, 2, 3, or 4.${RESET}"
+                echo -e "${RED}Invalid option — enter 0, 1, 2, 3, 4, or 5.${RESET}"
                 sleep 1
                 ;;
         esac

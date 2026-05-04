@@ -30,6 +30,7 @@ from googleapiclient.discovery import build
 SCOPES = [
     "https://www.googleapis.com/auth/youtube",
     "https://www.googleapis.com/auth/youtube.force-ssl",  # required for captions.insert
+    "https://www.googleapis.com/auth/yt-analytics.readonly",  # YouTube Analytics API
 ]
 
 PROJECT_ROOT  = Path(__file__).resolve().parent.parent.parent.parent

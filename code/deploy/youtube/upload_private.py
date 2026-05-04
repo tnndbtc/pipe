@@ -474,9 +474,14 @@ def main() -> None:
     with open(PROFILES_PATH, encoding="utf-8") as f:
         profiles = json.load(f)
 
+    # Resolve profile key: exact match, then base-language fallback (e.g. "en-US" → "en")
     if upload_profile not in profiles:
-        print(f"ERROR: profile '{upload_profile}' not in youtube_profiles.json", file=sys.stderr)
-        sys.exit(1)
+        _base = upload_profile.split("-")[0]
+        if _base in profiles:
+            upload_profile = _base
+        else:
+            print(f"ERROR: profile '{upload_profile}' not in youtube_profiles.json", file=sys.stderr)
+            sys.exit(1)
 
     profile_info = profiles[upload_profile]
     token_path   = Path(profile_info["token_path"]).expanduser()

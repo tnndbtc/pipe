@@ -53,6 +53,16 @@ except ImportError:
     print("ERROR: google-api-python-client not installed.", file=sys.stderr)
     sys.exit(1)
 
+# ── story_engine import (optional — best-effort, never blocks publish) ─────────
+_SE_SRC = Path(__file__).resolve().parent.parent.parent.parent.parent / "story_engine" / "src"
+if str(_SE_SRC) not in sys.path:
+    sys.path.insert(0, str(_SE_SRC))
+try:
+    from db.models import register_youtube_publish as _register_yt
+    _SE_AVAILABLE = True
+except ImportError:
+    _SE_AVAILABLE = False
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 SCOPES        = [
@@ -196,14 +206,68 @@ def main() -> None:
     with open(PROFILES_PATH, encoding="utf-8") as f:
         profiles = json.load(f)
 
+    # Resolve profile key: exact match, then base-language fallback (e.g. "en-US" → "en")
     if upload_profile not in profiles:
-        print(f"ERROR: profile '{upload_profile}' not in youtube_profiles.json", file=sys.stderr)
-        sys.exit(1)
+        _base = upload_profile.split("-")[0]
+        if _base in profiles:
+            upload_profile = _base
+        else:
+            print(f"ERROR: profile '{upload_profile}' not in youtube_profiles.json", file=sys.stderr)
+            sys.exit(1)
 
     token_path = Path(profiles[upload_profile]["token_path"]).expanduser()
     creds      = _load_credentials(token_path)
     youtube    = _build_youtube(creds)
     print(f"  Authenticated with profile: {upload_profile}\n")
+
+    # ── Publish registration helper ────────────────────────────────────────────
+    # Called before every _print_links(video_id) in all three exit paths.
+    # Wrapped in try/except — must never abort a publish that already succeeded.
+    # Uses INSERT OR IGNORE so multiple calls across paths A/B/C are idempotent.
+    def _do_register(video_id, publish_at_str=None):
+        if not _SE_AVAILABLE:
+            print("  ⚠  story_engine not importable — publish log skipped")
+            return
+        try:
+            meta_path = ep_dir / "meta.json"
+            _set_id, _story_id = None, None
+            if meta_path.is_file():
+                _m = json.load(open(meta_path, encoding="utf-8"))
+                _set_id   = _m.get("story_set_id")
+                _story_id = _m.get("story_id")
+            # Fallback: parse slug if story_set_id not in meta.json
+            # r'_(\d+)_[^_]*$' fails when ≥2 tokens follow set_id (e.g. _100_no_norm)
+            if _set_id is None:
+                _sm = re.search(r'_(\d+)_', slug)
+                if _sm:
+                    _set_id = int(_sm.group(1))
+
+            # published_at: use scheduled time if available, else now
+            if publish_at_str:
+                try:
+                    _pub_ts = int(_parse_rfc3339(publish_at_str).timestamp())
+                except Exception:
+                    _pub_ts = int(time.time())
+            else:
+                _pub_ts = int(time.time())
+
+            # lang from locale prefix (reads actual locale value from profile)
+            _locale = profiles[upload_profile].get("locale", upload_profile)
+            _lang   = "en" if _locale.startswith("en") else "zh"
+
+            _register_yt(
+                video_id       = video_id,
+                story_set_id   = _set_id,
+                story_id       = _story_id,
+                channel_id     = profiles[upload_profile].get("channel_id", ""),
+                upload_profile = upload_profile,
+                lang           = _lang,
+                locale         = _locale,
+                published_at   = _pub_ts,
+            )
+            print(f"  ✓ YouTube publish logged (story_set_id={_set_id})")
+        except Exception as _e:
+            print(f"  ⚠  YouTube publish log failed (non-fatal): {_e}")
 
     # ── Determine current video status ────────────────────────────────────────
     vid_resp = _api_with_retry(
@@ -238,6 +302,7 @@ def main() -> None:
                 if abs((dt_current - dt_new).total_seconds()) < 60:
                     print(f"\n  ✓ Already scheduled for {publish_at} — no action needed.")
                     print(f"    YouTube will auto-publish at that time.")
+                    _do_register(video_id, publish_at_str=publish_at)   # Path A
                     _print_links(video_id)
                     return
             except ValueError:
@@ -270,6 +335,7 @@ def main() -> None:
                 with open(yt_json_path, "w", encoding="utf-8") as _f:
                     json.dump(meta, _f, ensure_ascii=False, indent=2)
                 print(f"  ✓ Synced youtube.json privacy → public")
+            _do_register(video_id)                                       # Path B
             _print_links(video_id)
             return
 
@@ -291,6 +357,7 @@ def main() -> None:
             json.dump(meta, _f, ensure_ascii=False, indent=2)
         print(f"  ✓ Updated youtube.json privacy → public")
 
+    _do_register(video_id, publish_at_str=publish_at)                    # Path C
     _print_links(video_id)
 
 

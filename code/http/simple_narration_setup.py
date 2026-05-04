@@ -344,6 +344,7 @@ def build_meta(
     seed: int,
     profile: str,
     episode_id: str = "s01e01",
+    story_set_id: int | None = None,
 ) -> dict:
     return {
         "schema_id":       "EpisodeMeta",
@@ -358,6 +359,8 @@ def build_meta(
         "render_profile":  profile,
         "no_music":        True,
         "purge_cache":     False,
+        "story_set_id":    story_set_id,        # int or None; None = unknown (slug-parse fallback)
+        "story_id":        None,                # always None at creation time
         "created_at":      datetime.now(timezone.utc).isoformat(),
     }
 
@@ -641,6 +644,8 @@ def parse_args() -> argparse.Namespace:
                    help="Disable built-in default skip list")
     p.add_argument("--alt",             type=int, default=None,
                    help="Use alternatives[N] instead of primary voice (0-based)")
+    p.add_argument("--story_set_id",    type=int, default=None,
+                       help="story_engine story_set_id — written to meta.json for analytics tracking")
     p.add_argument("--subtitles",       action="store_true",
                    help="Burn subtitles into output (persisted to pipeline_vars.sh)")
     return p.parse_args()
@@ -739,7 +744,8 @@ def main() -> None:
     locale_str = args.locale
 
     # 4a. meta.json
-    meta = build_meta(slug, title, locale_str, seed, args.profile, episode_id)
+    meta = build_meta(slug, title, locale_str, seed, args.profile,
+                      episode_id, story_set_id=args.story_set_id)
     write_json(ep_dir / "meta.json", meta)
 
     # 4b. pipeline_vars.sh

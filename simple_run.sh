@@ -92,6 +92,7 @@ ALT=""
 TITLE_CARD=""
 SUBTITLES=""
 VIDEO_EFFECT=""
+STORY_SET_ID=""   # story_engine story_set_id; passed via --story_set_id; written to meta.json
 # clips mode
 INPUT_FOLDER=""
 SPEED=""          # playback speed multiplier (e.g. 0.8 for 80% speed; clips mode only)
@@ -231,6 +232,7 @@ while [[ $# -gt 0 ]]; do
     --slot)             SLOT="$2";           shift 2 ;;
     --title-card)       TITLE_CARD="1";      shift ;;
     --subtitles)        SUBTITLES="1";       shift ;;
+    --story_set_id)     STORY_SET_ID="$2";   shift 2 ;;
     --input_folder)     INPUT_FOLDER="$2";   shift 2 ;;
     --speed)            SPEED="$2";          shift 2 ;;
     --subtitle_shift_ms) SUBTITLE_SHIFT_MS="$2"; shift 2 ;;
@@ -2078,10 +2080,12 @@ print(f"  ✓ VOPlan.{locale}.json  ({len(vo_items)} clips)", flush=True)
 
 # 7. Write meta.json
 json.dump({
-    "story_title":  story_title,
-    "story_format": "simple_narration",
-    "locales":      locale,
-    "episode_id":   episode_id,
+    "story_title":   story_title,
+    "story_format":  "simple_narration",
+    "locales":       locale,
+    "episode_id":    episode_id,
+    "story_set_id":  None,   # clips mode: unknown; _do_register uses slug-parse fallback
+    "story_id":      None,
 }, open(os.path.join(ep_dir, "meta.json"), 'w', encoding='utf-8'),
    ensure_ascii=False, indent=2)
 print("  ✓ meta.json", flush=True)
@@ -2409,6 +2413,7 @@ _setup_args=(
 [[ -n "$NO_DEFAULT_SKIPS" ]] && _setup_args+=(--no-default-skips)
 [[ -n "$ALT"              ]] && _setup_args+=(--alt "$ALT")
 [[ -n "$SUBTITLES"        ]] && _setup_args+=(--subtitles)
+[[ -n "$STORY_SET_ID"     ]] && _setup_args+=(--story_set_id "$STORY_SET_ID")
 
 python3 code/http/simple_narration_setup.py "${_setup_args[@]}"
 echo ""

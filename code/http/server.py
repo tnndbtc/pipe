@@ -9481,7 +9481,17 @@ class Handler(BaseHTTPRequestHandler):
                     with open(profiles_path, encoding="utf-8") as f:
                         profiles = json.load(f)
                 locale_to_profile = {v.get("locale", k): k for k, v in profiles.items()}
-                upload_profile = locale_to_profile.get(locale, locale)
+                # Resolve locale → profile key.  Try in order:
+                #   1. exact match on the locale-field map  (e.g. "en" → "en", "zh-Hans" → "zh")
+                #   2. base-language prefix on locale-field map (e.g. "en-US" → "en")
+                #   3. direct key lookup on profiles dict   (e.g. key=="en")
+                #   4. base-language direct key lookup      (e.g. "en-US" key-prefix → "en")
+                _lbase = locale.split("-")[0]
+                upload_profile = (locale_to_profile.get(locale)
+                                  or locale_to_profile.get(_lbase)
+                                  or (locale if locale in profiles else None)
+                                  or (_lbase if _lbase in profiles else None)
+                                  or locale)
                 profile_info   = profiles.get(upload_profile, {})
 
                 # ── Build Claude prompt ───────────────────────────────────────
@@ -9996,8 +10006,14 @@ class Handler(BaseHTTPRequestHandler):
                         f'  {{"en": {{"locale": "en", "token_path": "{_cred_base}/token_en.json", ...}}}}'
                     )
                 _profiles = json.loads(open(_profiles_path, encoding="utf-8").read())
-                _prof = _profiles.get(locale) or next(
-                    (v for v in _profiles.values() if v.get("locale") == locale), None
+                _lbase2 = locale.split("-")[0]
+                # Resolve locale → profile.  Exact key, then base-language key (en-US→en),
+                # then exact locale-field match, then base-language locale-field match.
+                _prof = (
+                    _profiles.get(locale)
+                    or _profiles.get(_lbase2)
+                    or next((v for v in _profiles.values() if v.get("locale") == locale), None)
+                    or next((v for v in _profiles.values() if v.get("locale", "").split("-")[0] == _lbase2), None)
                 )
                 if not _prof:
                     raise ValueError(

@@ -243,9 +243,14 @@ def main() -> None:
     upload_profile = meta.get("upload_profile", "").strip()
     if not upload_profile:
         _fail("youtube.json missing 'upload_profile' field.")
+    # Resolve profile key: exact match, then base-language fallback (e.g. "en-US" → "en")
     if upload_profile not in profiles:
-        _fail(f"upload_profile '{upload_profile}' not found in youtube_profiles.json.\n"
-              f"    Available profiles: {list(profiles.keys())}")
+        _base = upload_profile.split("-")[0]
+        if _base in profiles:
+            upload_profile = _base
+        else:
+            _fail(f"upload_profile '{upload_profile}' not found in youtube_profiles.json.\n"
+                  f"    Available profiles: {list(profiles.keys())}")
 
     profile_info = profiles[upload_profile]
     token_path   = Path(profile_info["token_path"]).expanduser()
