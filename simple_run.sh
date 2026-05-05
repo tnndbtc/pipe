@@ -2130,6 +2130,37 @@ CONTRACTS_EOF
   fi
   echo ""
 
+  # ── Background upload to YouTube (private) ──────────────────────────────────
+  _upload_state="${RENDERS_DIR}/upload_state.json"
+  _upload_log="${RENDERS_DIR}/upload_private.log"
+  _upload_pid=""
+  if [[ -f "${RENDERS_DIR}/youtube.json" ]]; then
+    _already_uploaded="false"
+    if [[ -f "${_upload_state}" ]]; then
+      _already_uploaded="$(python3 -c "
+import json, sys
+try:
+    s = json.load(open('${_upload_state}'))
+    print('true' if s.get('video_uploaded') and s.get('video_id') else 'false')
+except Exception:
+    print('false')
+" 2>/dev/null || echo 'false')"
+    fi
+    if [[ "${_already_uploaded}" == "true" ]]; then
+      _vid_id="$(python3 -c "import json; print(json.load(open('${_upload_state}')).get('video_id',''))" 2>/dev/null || true)"
+      echo "  ✓ Already uploaded: https://www.youtube.com/watch?v=${_vid_id}"
+    else
+      nohup python3 "${SCRIPT_DIR}/code/deploy/youtube/upload_private.py" \
+        "${EP_DIR}" \
+        --locale "${LOCALE}" \
+        > "${_upload_log}" 2>&1 &
+      _upload_pid=$!
+      echo "  ▶ Upload started in background  PID=${_upload_pid}"
+      echo "  Log : ${_upload_log}"
+    fi
+  fi
+  echo ""
+
   echo "════════════════════════════════════════════════════════════"
   echo "  ✓ Done"
   echo "  Video   : $_out_video"
@@ -2137,6 +2168,7 @@ CONTRACTS_EOF
   [[ -n "$_out_srt" && -f "$_out_srt"    ]] && echo "  SRT     : $_out_srt"
   [[ -f "${INPUT_FOLDER}/thumbnail.png"   ]] && echo "  Thumb   : ${INPUT_FOLDER}/thumbnail.png"
   [[ -n "$_yt_generated"                  ]] && echo "  YouTube : $_yt_generated"
+  [[ -n "$_upload_pid"                    ]] && echo "  Upload  : PID=${_upload_pid}  log=${_upload_log}"
   echo "════════════════════════════════════════════════════════════"
   exit 0
 fi
@@ -2507,6 +2539,49 @@ else
 fi
 echo ""
 
+# ── Step 9: Background upload to YouTube (private) ────────────────────────────
+# Launches upload_private.py in the background so the pipeline is not blocked
+# by YouTube's video processing wait (can take 5-30 min).
+# The video is uploaded as PRIVATE; review in YouTube Studio, then publish.
+echo "════════════════════════════════════════════════════════════"
+echo "  STEP 9 — Upload to YouTube (private, background)  [$(date -u '+%H:%M:%S UTC')]"
+echo "════════════════════════════════════════════════════════════"
+_upload_state="${RENDERS_DIR}/upload_state.json"
+_upload_log="${RENDERS_DIR}/upload_private.log"
+_upload_pid=""
+if [[ -f "${_yt_json_path}" ]]; then
+  # Skip if video was already successfully uploaded
+  _already_uploaded="false"
+  if [[ -f "${_upload_state}" ]]; then
+    _already_uploaded="$(python3 -c "
+import json, sys
+try:
+    s = json.load(open('${_upload_state}'))
+    print('true' if s.get('video_uploaded') and s.get('video_id') else 'false')
+except Exception:
+    print('false')
+" 2>/dev/null || echo 'false')"
+  fi
+
+  if [[ "${_already_uploaded}" == "true" ]]; then
+    _vid_id="$(python3 -c "import json; print(json.load(open('${_upload_state}')).get('video_id',''))" 2>/dev/null || true)"
+    echo "  ✓ Already uploaded: https://www.youtube.com/watch?v=${_vid_id}"
+    echo "     Review in YouTube Studio, then publish manually."
+  else
+    nohup python3 "${SCRIPT_DIR}/code/deploy/youtube/upload_private.py" \
+      "projects/${_slug}/episodes/${EPISODE}" \
+      --locale "${LOCALE}" \
+      > "${_upload_log}" 2>&1 &
+    _upload_pid=$!
+    echo "  ▶ Upload started in background  PID=${_upload_pid}"
+    echo "  Log : ${_upload_log}"
+    echo "     When complete, review in YouTube Studio then publish."
+  fi
+else
+  echo "  ⚠  Skipped — youtube.json not present (generation failed above)"
+fi
+echo ""
+
 echo "════════════════════════════════════════════════════════════"
 echo "  ✓ Done  [$(date -u '+%Y-%m-%d %H:%M:%S UTC')]"
 echo "  Video     : $_abs_final"
@@ -2514,4 +2589,5 @@ echo "  Video     : $_abs_final"
 [[ -f "$_render_dir/thumbnail.png"  ]] && echo "  Thumbnail : $_render_dir/thumbnail.png"
 [[ -f "$_render_dir/output.${LOCALE}.srt" ]] && echo "  SRT       : $_render_dir/output.${LOCALE}.srt"
 [[ -n "$_yt_generated"              ]] && echo "  YouTube   : $_yt_generated"
+[[ -n "$_upload_pid"                ]] && echo "  Upload    : PID=${_upload_pid}  log=${_upload_log}"
 echo "════════════════════════════════════════════════════════════"

@@ -25,7 +25,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 
 # ── Genre → YouTube category_id mapping (mirror of server.py) ─────────────────
 _GENRE_TO_CATEGORY = {
@@ -115,24 +114,18 @@ def _call_claude(prompt_text: str, pipe_dir: str) -> str:
     )
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)  # prevent nested-session guard
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    ) as tf:
-        tf.write(prompt_text)
-        tmp_path = tf.name
-    try:
-        result = subprocess.run(
-            ["claude", "-p",
-             "--model", "sonnet",
-             "--dangerously-skip-permissions",
-             "--no-session-persistence",
-             "--tools", "",           # disable all tools — output must go to stdout
-             "--append-system-prompt", exec_directive,
-             tmp_path],
-            capture_output=True, text=True, cwd=pipe_dir, timeout=120, env=env,
-        )
-    finally:
-        os.unlink(tmp_path)
+    # Pass prompt via stdin (avoids 2.1.128 bug where file-path arg is sent as
+    # literal prompt text when --tools "" is also present)
+    result = subprocess.run(
+        ["claude", "-p",
+         "--model", "sonnet",
+         "--dangerously-skip-permissions",
+         "--no-session-persistence",
+         "--tools", "",           # disable all tools — output must go to stdout
+         "--append-system-prompt", exec_directive],
+        input=prompt_text,
+        capture_output=True, text=True, cwd=pipe_dir, timeout=120, env=env,
+    )
     raw = result.stdout.strip()
     if not raw:
         raise RuntimeError(
