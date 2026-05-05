@@ -126,6 +126,7 @@ def _call_claude(prompt_text: str, pipe_dir: str) -> str:
              "--model", "sonnet",
              "--dangerously-skip-permissions",
              "--no-session-persistence",
+             "--tools", "",           # disable all tools — output must go to stdout
              "--append-system-prompt", exec_directive,
              tmp_path],
             capture_output=True, text=True, cwd=pipe_dir, timeout=120, env=env,

@@ -2391,6 +2391,19 @@ COPIED_IMAGE="${ASSETS_DIR}/bg-provided.${_img_ext_lower}"
 find "$ASSETS_DIR" -maxdepth 1 -name "bg-provided.*" ! -name "bg-provided.${_img_ext_lower}" -delete 2>/dev/null || true
 cp "$IMAGE" "$COPIED_IMAGE"
 echo "  Background  : $COPIED_IMAGE"
+
+# ── Step 4b: Symlink loop MP4 alongside bg-provided if source has one ────────
+# render_video.py looks for bg-provided_loop.mp4 next to bg-provided.png;
+# if found it stream-copies (~instant) instead of re-encoding with geq (~80 min).
+_loop_src="${IMAGE%.*}_loop.mp4"
+_loop_dst="${ASSETS_DIR}/bg-provided_loop.mp4"
+rm -f "$_loop_dst"   # drop stale link from any previous run
+if [[ -f "$_loop_src" ]]; then
+  ln -sf "$_loop_src" "$_loop_dst"
+  echo "  Loop MP4    : bg-provided_loop.mp4 → $_loop_src"
+else
+  echo "  Loop MP4    : none (will use geq re-encode)"
+fi
 echo ""
 
 # ── Step 5: Run simple_narration_setup.py ────────────────────────────────────
