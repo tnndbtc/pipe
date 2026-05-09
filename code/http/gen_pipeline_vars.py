@@ -64,8 +64,12 @@ def build_pipeline_vars(meta: dict) -> str:
     if not primary:
         primary = locales.split(",")[0].strip()
 
+    def _sh_escape(value: str) -> str:
+        """Escape characters that are special inside double-quoted shell strings."""
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
     lines = [
-        f'export STORY_TITLE="{meta.get("story_title", "")}"',
+        f'export STORY_TITLE="{_sh_escape(meta.get("story_title", ""))}"',
         f'export EPISODE_NUMBER="{meta.get("episode_number", "")}"',
         f'export EPISODE_ID="{ep_id}"',
         f'export PRIMARY_LOCALE="{primary}"',

@@ -517,8 +517,12 @@ def build_pipeline_vars(meta: dict, detected_locale: str = "") -> str:
     ep_id = meta["episode_id"]
     primary = detected_locale or meta.get("primary_locale", "en")
 
+    def _sh_escape(value: str) -> str:
+        """Escape characters that are special inside double-quoted shell strings."""
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
     lines = [
-        f'export STORY_TITLE="{meta.get("story_title", "")}"',
+        f'export STORY_TITLE="{_sh_escape(meta.get("story_title", ""))}"',
         f'export EPISODE_NUMBER="{meta.get("episode_number", "")}"',
         f'export EPISODE_ID="{ep_id}"',
         f'export PRIMARY_LOCALE="{primary}"',

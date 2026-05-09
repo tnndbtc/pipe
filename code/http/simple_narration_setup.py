@@ -376,9 +376,13 @@ def build_pipeline_vars(
     subtitles: bool = False,
 ) -> str:
     """Return pipeline_vars.sh content, matching gen_pipeline_vars.py format."""
+    def _sh_escape(value: str) -> str:
+        """Escape characters that are special inside double-quoted shell strings."""
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
     primary = locale.split(",")[0].strip()
     lines = [
-        f'export STORY_TITLE="{title}"',
+        f'export STORY_TITLE="{_sh_escape(title)}"',
         f'export EPISODE_NUMBER="{episode_number}"',
         f'export EPISODE_ID="{episode_id}"',
         f'export PRIMARY_LOCALE="{primary}"',

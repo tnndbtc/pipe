@@ -6960,9 +6960,11 @@ class Handler(BaseHTTPRequestHandler):
                     json.dump(meta, _f, indent=2, ensure_ascii=False)
 
                 # Write pipeline_vars.sh stub (Stage 0 will overwrite with full version)
+                def _sh_escape(value: str) -> str:
+                    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
                 _locs_clean = ",".join(l.strip() for l in locales.split(",") if l.strip())
                 vars_content = (
-                    f'export STORY_TITLE="{title}"\n'
+                    f'export STORY_TITLE="{_sh_escape(title)}"\n'
                     f'export EPISODE_NUMBER="{episode_number}"\n'
                     f'export EPISODE_ID="{ep_id}"\n'
                     f'export LOCALES="{_locs_clean}"\n'
