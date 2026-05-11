@@ -10,20 +10,33 @@ Eligibility:
   - published_at IS NOT NULL      (video has a known publish timestamp)
   - published_at <= now - 72h     (data latency: impressions take 24–72h to appear)
 
+Data fetched per video:
+  Analytics API v2 (aggregate metrics):
+    views, averageViewDuration, averageViewPercentage
+    insightTrafficSourceType breakdown → traffic_sources JSON
+  Data API v3 (public statistics):
+    likeCount    → like_count
+    commentCount → comment_count
+
 Writes back to youtube_publish_log:
-  ctr_pct, avg_view_duration, avg_view_pct, views, analytics_pulled_at
+  avg_view_duration, avg_view_pct, views,
+  like_count, comment_count, traffic_sources,
+  analytics_pulled_at
 
 On no-data after GIVE_UP_AFTER_DAYS: sets analytics_pulled_at = -1.
 
-Cron entry:
-  0 */6 * * * cd /home/tnnd/data/code/pipe && \
-    python code/deploy/youtube/fetch_analytics.py \
-    >> /home/tnnd/data/code/http/logs/analytics.log 2>&1
-
 Usage:
-  python code/deploy/youtube/fetch_analytics.py
+  python code/deploy/youtube/fetch_analytics.py                  # pull analytics
+  python code/deploy/youtube/fetch_analytics.py --list           # print video table
+  python code/deploy/youtube/fetch_analytics.py --backfill-stats # fill likes/comments for old rows
+
+Cron entry:
+  0 */6 * * * cd /home/tnnd/data/code/pipe && \\
+    python code/deploy/youtube/fetch_analytics.py \\
+    >> /home/tnnd/data/code/http/logs/analytics.log 2>&1
 """
 
+import argparse
 import json
 import sys
 import time
@@ -49,45 +62,128 @@ except ImportError as _e:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-PROFILES_PATH     = Path.home() / ".config" / "pipe" / "youtube_profiles.json"
-FETCH_DELAY_H     = 72      # hours after publish before pulling analytics
+PROFILES_PATH      = Path.home() / ".config" / "pipe" / "youtube_profiles.json"
+FETCH_DELAY_H      = 72     # hours after publish before pulling analytics
 GIVE_UP_AFTER_DAYS = 14     # days: if still no data, mark as no-data (-1)
+
+# Analytics API v2 — aggregate metrics (no dimensions = one row per video)
+ANALYTICS_METRICS  = "views,averageViewDuration,averageViewPercentage"
 # impressionClickThroughRate requires YouTube Partner Program (monetization).
-# Omitted until the channel is monetized — ctr_pct column stays NULL meanwhile.
-# Query shape: filters=video==<id>, no dimensions (validated: works without dimensions).
-METRICS           = "views,averageViewDuration,averageViewPercentage"
-SCOPES            = [
+# Omitted until channel is monetized — ctr_pct column stays NULL meanwhile.
+
+SCOPES = [
     "https://www.googleapis.com/auth/youtube",
     "https://www.googleapis.com/auth/youtube.force-ssl",
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
 
 
-# ── Analytics pull for a single video ─────────────────────────────────────────
+# ── Data API v3: like_count + comment_count ────────────────────────────────────
 
-def _pull_one(yt_analytics, channel_id: str, row) -> None:
+def _pull_video_stats(yt_data, video_id: str) -> tuple[int | None, int | None]:
     """
-    Query YouTube Analytics for one video and update youtube_publish_log.
+    Fetch like_count and comment_count from YouTube Data API v3 videos.list.
 
-    Sets analytics_pulled_at = -1 if no data is available after GIVE_UP_AFTER_DAYS.
-    Leave analytics_pulled_at = NULL on transient API errors (retry next cron run).
+    Returns (like_count, comment_count).  Either may be None if the API does
+    not return the field (e.g. comments disabled, likes hidden).
+    Non-fatal: returns (None, None) on any error.
 
-    NOTE: API exceptions (e.g. HTTP 403 for deleted/private video) leave
-    analytics_pulled_at = NULL — the cron retries indefinitely for those rows.
-    See OPEN 5 in phase3_analytics.txt for the Phase 3b fix.
+    Note: dislikeCount was removed from the public API in Dec 2021 and is
+    not available through any supported endpoint.
     """
-    pub_dt   = datetime.fromtimestamp(row["published_at"], tz=timezone.utc)
-    end_dt   = datetime.now(timezone.utc)
-    start_dt = pub_dt - timedelta(days=1)   # start slightly before publish date
-    start_str = start_dt.strftime("%Y-%m-%d")
-    end_str   = end_dt.strftime("%Y-%m-%d")
+    try:
+        resp = yt_data.videos().list(
+            part="statistics",
+            id=video_id,
+        ).execute()
+        items = resp.get("items", [])
+        if not items:
+            return None, None
+        stats = items[0].get("statistics", {})
+        like_count    = int(stats["likeCount"])    if "likeCount"    in stats else None
+        comment_count = int(stats["commentCount"]) if "commentCount" in stats else None
+        return like_count, comment_count
+    except Exception as exc:
+        print(f"  ⚠  Data API stats failed for {video_id}: {exc}")
+        return None, None
 
+
+# ── Analytics API: traffic source breakdown ────────────────────────────────────
+
+def _pull_traffic_sources(
+    yt_analytics,
+    channel_id: str,
+    video_id: str,
+    start_str: str,
+    end_str: str,
+) -> dict | None:
+    """
+    Fetch traffic source breakdown from YouTube Analytics API.
+
+    Returns a dict mapping source type → view count, e.g.:
+      {"YT_SEARCH": 42, "SUGGESTED_VIDEOS": 31, "BROWSE_FEATURES": 18, ...}
+
+    Common source types:
+      YT_SEARCH          — YouTube search
+      SUGGESTED_VIDEOS   — suggested / up next
+      BROWSE_FEATURES    — YouTube home / browse
+      EXT_URL            — external websites / embeds
+      NOTIFICATION       — notifications
+      YT_CHANNEL         — channel page
+      NO_LINK_OTHER      — direct / unknown
+      PLAYLIST           — playlist
+      SHORTS             — YouTube Shorts feed
+
+    Returns None if no data or on any error (non-fatal).
+    """
     try:
         resp = yt_analytics.reports().query(
             ids       = f"channel=={channel_id}",
             startDate = start_str,
             endDate   = end_str,
-            metrics   = METRICS,
+            metrics   = "views",
+            dimensions = "insightTrafficSourceType",
+            filters   = f"video=={video_id}",
+        ).execute()
+        rows = resp.get("rows", [])
+        if not rows:
+            return None
+        return {r[0]: int(r[1]) for r in rows}
+    except Exception as exc:
+        print(f"  ⚠  Traffic sources failed for {video_id}: {exc}")
+        return None
+
+
+# ── Analytics pull for a single video ─────────────────────────────────────────
+
+def _pull_one(yt_analytics, yt_data, channel_id: str, row) -> None:
+    """
+    Query YouTube Analytics + Data API for one video and update youtube_publish_log.
+
+    Fetches:
+      - views, avg_view_duration, avg_view_pct   (Analytics API)
+      - traffic_sources breakdown                (Analytics API, dimensions query)
+      - like_count, comment_count               (Data API v3)
+
+    Sets analytics_pulled_at = -1 if no analytics data after GIVE_UP_AFTER_DAYS.
+    Leaves analytics_pulled_at = NULL on transient API errors (retry next cron run).
+
+    NOTE: API exceptions (e.g. HTTP 403 for deleted/private video) leave
+    analytics_pulled_at = NULL — the cron retries indefinitely for those rows.
+    """
+    pub_dt    = datetime.fromtimestamp(row["published_at"], tz=timezone.utc)
+    end_dt    = datetime.now(timezone.utc)
+    start_dt  = pub_dt - timedelta(days=1)   # start slightly before publish date
+    start_str = start_dt.strftime("%Y-%m-%d")
+    end_str   = end_dt.strftime("%Y-%m-%d")
+
+    # ── Step 1: aggregate metrics from Analytics API ───────────────────────────
+    try:
+        resp = yt_analytics.reports().query(
+            ids       = f"channel=={channel_id}",
+            startDate = start_str,
+            endDate   = end_str,
+            metrics   = ANALYTICS_METRICS,
             filters   = f"video=={row['video_id']}",
             # No dimensions= : filtering by video without a dimension returns the
             # video's aggregate metrics directly (validated working query shape).
@@ -96,10 +192,9 @@ def _pull_one(yt_analytics, channel_id: str, row) -> None:
         print(f"  ✗ Analytics query failed for {row['video_id']}: {e}")
         # ⚠ NOTE: API exceptions leave analytics_pulled_at = NULL → retried next run.
         # For permanent errors (HTTP 403/404), a future fix should set
-        # analytics_pulled_at = -1 to stop retries (see OPEN 5).
+        # analytics_pulled_at = -1 to stop retries.
         return
 
-    # Parse response — columnHeaders = [{"name": "video", ...}, {"name": metric, ...}, ...]
     col_headers = [h["name"] for h in resp.get("columnHeaders", [])]
     data_rows   = resp.get("rows", [])
 
@@ -126,29 +221,219 @@ def _pull_one(yt_analytics, channel_id: str, row) -> None:
     views   = values.get("views")                 # int or None
     # ctr_pct stays NULL — impressionClickThroughRate unavailable until channel is monetized
 
+    # ── Step 2: traffic source breakdown ──────────────────────────────────────
+    traffic = _pull_traffic_sources(
+        yt_analytics, channel_id, row["video_id"], start_str, end_str
+    )
+
+    # ── Step 3: like_count + comment_count from Data API v3 ───────────────────
+    like_count, comment_count = _pull_video_stats(yt_data, row["video_id"])
+
+    # ── Step 4: write all fields to DB ────────────────────────────────────────
     conn = get_connection()
     conn.execute(
         """UPDATE youtube_publish_log
            SET avg_view_duration   = ?,
                avg_view_pct        = ?,
                views               = ?,
+               like_count          = ?,
+               comment_count       = ?,
+               traffic_sources     = ?,
                analytics_pulled_at = ?
            WHERE id = ?""",
-        (avg_dur, avg_pct, views, int(time.time()), row["id"]),
+        (
+            avg_dur,
+            avg_pct,
+            views,
+            like_count,
+            comment_count,
+            json.dumps(traffic, ensure_ascii=False) if traffic else None,
+            int(time.time()),
+            row["id"],
+        ),
     )
     conn.commit()
     conn.close()
 
     # Guard format strings against None (API may return None for metrics with no data)
-    _dur  = f"{avg_dur:.0f}s" if avg_dur is not None else "n/a"
-    _pct  = f"{avg_pct:.1f}%" if avg_pct is not None else "n/a"
-    _views = str(int(views)) if views is not None else "n/a"
-    print(f"  ✓ {row['video_id']}  views={_views}  avg_dur={_dur}  avg_pct={_pct}")
+    _dur   = f"{avg_dur:.0f}s"     if avg_dur       is not None else "n/a"
+    _pct   = f"{avg_pct:.1f}%"     if avg_pct       is not None else "n/a"
+    _views = str(int(views))       if views          is not None else "n/a"
+    _likes = str(like_count)       if like_count     is not None else "n/a"
+    _cmts  = str(comment_count)    if comment_count  is not None else "n/a"
+    _top_src = (
+        max(traffic, key=traffic.get) if traffic else "n/a"
+    )
+    print(
+        f"  ✓ {row['video_id']}  views={_views}  avg_dur={_dur}  avg_pct={_pct}"
+        f"  likes={_likes}  cmts={_cmts}  top_src={_top_src}"
+    )
+
+
+# ── --backfill-stats: fill like_count/comment_count for already-pulled videos ──
+
+def _backfill_stats(profiles: dict) -> None:
+    """
+    Fetch like_count and comment_count (Data API v3) for videos that already
+    have analytics_pulled_at set but are missing like_count.
+
+    Makes NO Analytics API calls — only Data API v3 videos.list (cheap, public).
+    Processes all eligible videos in one pass, grouped by profile for auth reuse.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT id, video_id, upload_profile
+           FROM youtube_publish_log
+           WHERE analytics_pulled_at IS NOT NULL
+             AND analytics_pulled_at != -1
+             AND like_count IS NULL
+           ORDER BY published_at DESC"""
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        print("No videos need stats backfill.")
+        return
+
+    print(f"Backfilling stats for {len(rows)} video(s)...\n")
+
+    by_profile: dict[str, list] = defaultdict(list)
+    for row in rows:
+        by_profile[row["upload_profile"]].append(row)
+
+    total_ok = 0
+    for profile_key, profile_rows in by_profile.items():
+        if profile_key not in profiles:
+            print(f"  ⚠  Profile '{profile_key}' not in youtube_profiles.json — skip")
+            continue
+
+        token_path = Path(profiles[profile_key]["token_path"]).expanduser()
+        if not token_path.is_file():
+            print(f"  ⚠  Token file not found: {token_path} — skip")
+            continue
+
+        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            token_path.write_text(creds.to_json(), encoding="utf-8")
+
+        yt_data = build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+        print(f"Profile '{profile_key}': {len(profile_rows)} video(s)")
+        for row in profile_rows:
+            like_count, comment_count = _pull_video_stats(yt_data, row["video_id"])
+            conn = get_connection()
+            conn.execute(
+                """UPDATE youtube_publish_log
+                   SET like_count = ?, comment_count = ?
+                   WHERE id = ?""",
+                (like_count, comment_count, row["id"]),
+            )
+            conn.commit()
+            conn.close()
+            _lk = str(like_count)    if like_count    is not None else "n/a"
+            _cm = str(comment_count) if comment_count is not None else "n/a"
+            print(f"  ✓ {row['video_id']}  likes={_lk}  comments={_cm}")
+            total_ok += 1
+
+    print(f"\nBackfill done — {total_ok} video(s) updated.")
+
+
+# ── --list: print video performance table from DB ─────────────────────────────
+
+def _list_videos() -> None:
+    """Print a performance table of all published videos from the local DB."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT video_id, lang, upload_profile, views, like_count, comment_count,
+                  avg_view_pct, avg_view_duration, traffic_sources,
+                  published_at, analytics_pulled_at
+           FROM youtube_publish_log
+           ORDER BY published_at DESC"""
+    ).fetchall()
+    conn.close()
+
+    total = len(rows)
+    pulled = sum(1 for r in rows if r["analytics_pulled_at"] and r["analytics_pulled_at"] != -1)
+
+    print(f"\n{'='*100}")
+    print(f"  YouTube Video Performance  ({total} videos, {pulled} with analytics)")
+    print(f"{'='*100}")
+    print(
+        f"  {'video_id':<16} {'lang':<4} {'profile':<22} "
+        f"{'views':>6} {'likes':>6} {'cmts':>5} {'avp%':>6} {'top traffic source':<22}  published"
+    )
+    print(f"  {'-'*98}")
+
+    for row in rows:
+        pub = (
+            datetime.fromtimestamp(row["published_at"], tz=timezone.utc).strftime("%Y-%m-%d")
+            if row["published_at"] else "N/A"
+        )
+        views  = str(row["views"])          if row["views"]          is not None else "—"
+        likes  = str(row["like_count"])     if row["like_count"]     is not None else "—"
+        cmts   = str(row["comment_count"])  if row["comment_count"]  is not None else "—"
+        avp    = f"{row['avg_view_pct']:.1f}%" if row["avg_view_pct"] is not None else "—"
+
+        # Find top traffic source for display
+        top_src = "—"
+        if row["traffic_sources"]:
+            try:
+                ts = json.loads(row["traffic_sources"])
+                if ts:
+                    top_src = max(ts, key=ts.get)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+        status = ""
+        if row["analytics_pulled_at"] is None:
+            status = " (pending)"
+        elif row["analytics_pulled_at"] == -1:
+            status = " (no data)"
+
+        print(
+            f"  {row['video_id']:<16} {(row['lang'] or ''):<4} {(row['upload_profile'] or ''):<22} "
+            f"{views:>6} {likes:>6} {cmts:>5} {avp:>6} {top_src:<22}  {pub}{status}"
+        )
+
+    print()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Fetch YouTube analytics for published videos."
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="Print video performance table from DB and exit (no API calls).",
+    )
+    parser.add_argument(
+        "--backfill-stats",
+        action="store_true",
+        dest="backfill_stats",
+        help="Fetch like_count/comment_count for already-analyzed videos (Data API only).",
+    )
+    args = parser.parse_args()
+
+    if args.list:
+        _list_videos()
+        return
+
+    if args.backfill_stats:
+        start_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(f"\n{'='*60}")
+        print(f"  fetch_analytics --backfill-stats  [{start_ts}]")
+        print(f"{'='*60}\n")
+        if not PROFILES_PATH.is_file():
+            print(f"ERROR: youtube_profiles.json not found at {PROFILES_PATH}", file=sys.stderr)
+            sys.exit(1)
+        profiles = json.load(open(PROFILES_PATH, encoding="utf-8"))
+        _backfill_stats(profiles)
+        return
+
     start_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     print(f"\n{'='*60}")
     print(f"  fetch_analytics  [{start_ts}]")
@@ -204,13 +489,16 @@ def main() -> None:
             creds.refresh(Request())
             token_path.write_text(creds.to_json(), encoding="utf-8")
 
+        # Build both API clients once per profile (one auth, two services)
         yt_analytics = build("youtubeAnalytics", "v2", credentials=creds,
+                             cache_discovery=False)
+        yt_data      = build("youtube",           "v3", credentials=creds,
                              cache_discovery=False)
 
         print(f"Profile '{profile_key}': {len(profile_rows)} video(s)")
         for row in profile_rows:
             try:
-                _pull_one(yt_analytics, channel_id, row)
+                _pull_one(yt_analytics, yt_data, channel_id, row)
             except Exception as _e:
                 print(f"  ✗ Unexpected error for {row['video_id']}: {_e} — skipping")
 
