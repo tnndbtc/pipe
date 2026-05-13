@@ -64,8 +64,12 @@ def _fetch_playlists_direct(locale: str) -> list:
         return []
     try:
         profiles = json.load(open(profiles_path, encoding="utf-8"))
-        # Match profile by locale
-        locale_to_profile = {v.get("locale", k): k for k, v in profiles.items()}
+        # Match profile by locale — first-match wins (no collision on shared locales)
+        locale_to_profile = {}
+        for k, v in profiles.items():
+            loc = v.get("locale", k)
+            if loc not in locale_to_profile:
+                locale_to_profile[loc] = k
         profile_key = locale_to_profile.get(locale, locale)
         if profile_key not in profiles:
             profile_key = next(iter(profiles))
@@ -151,12 +155,16 @@ def main():
     parser.add_argument("--locale",          default="zh-Hans")
     parser.add_argument("--playlist_id",     default="")
     parser.add_argument("--story_basename",  default="")  # for playlist auto-match
+    parser.add_argument("--upload_profile",  default="",
+                        help="Override the profile key used for upload "
+                             "(e.g. 'games'). Bypasses locale→profile mapping.")
     args = parser.parse_args()
 
-    slug        = args.slug.strip()
-    ep_id       = args.ep_id.strip()
-    locale      = args.locale.strip()
-    playlist_id = args.playlist_id.strip() or None
+    slug           = args.slug.strip()
+    ep_id          = args.ep_id.strip()
+    locale         = args.locale.strip()
+    playlist_id    = args.playlist_id.strip() or None
+    profile_override = args.upload_profile.strip() or None
 
     ep_dir     = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
     render_dir = os.path.join(ep_dir, "renders", locale)
@@ -244,8 +252,18 @@ def main():
     if os.path.isfile(profiles_path):
         with open(profiles_path, encoding="utf-8") as f:
             profiles = json.load(f)
-    locale_to_profile = {v.get("locale", k): k for k, v in profiles.items()}
-    upload_profile = locale_to_profile.get(locale, locale)
+    # First-match wins: if two profiles share a locale (e.g. "en" and "games"
+    # both have locale="en"), the first one in the JSON keeps the mapping.
+    # Use --upload_profile to explicitly route to a non-default channel.
+    locale_to_profile = {}
+    for k, v in profiles.items():
+        loc = v.get("locale", k)
+        if loc not in locale_to_profile:
+            locale_to_profile[loc] = k
+    if profile_override and profile_override in profiles:
+        upload_profile = profile_override
+    else:
+        upload_profile = locale_to_profile.get(locale, locale)
     profile_info   = profiles.get(upload_profile, {})
 
     # ── Auto-match playlist if not provided ───────────────────────────────────

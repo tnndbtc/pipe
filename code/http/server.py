@@ -9482,18 +9482,32 @@ class Handler(BaseHTTPRequestHandler):
                 if os.path.isfile(profiles_path):
                     with open(profiles_path, encoding="utf-8") as f:
                         profiles = json.load(f)
-                locale_to_profile = {v.get("locale", k): k for k, v in profiles.items()}
+                # First-match wins: if two profiles share a locale (e.g. "en" and
+                # "games" both have locale="en"), the first one in the JSON keeps
+                # the mapping.  Use upload_profile_override in the request body
+                # to explicitly route to a non-default channel (e.g. "games").
+                locale_to_profile = {}
+                for _pk, _pv in profiles.items():
+                    _ploc = _pv.get("locale", _pk)
+                    if _ploc not in locale_to_profile:
+                        locale_to_profile[_ploc] = _pk
                 # Resolve locale → profile key.  Try in order:
-                #   1. exact match on the locale-field map  (e.g. "en" → "en", "zh-Hans" → "zh")
-                #   2. base-language prefix on locale-field map (e.g. "en-US" → "en")
-                #   3. direct key lookup on profiles dict   (e.g. key=="en")
-                #   4. base-language direct key lookup      (e.g. "en-US" key-prefix → "en")
+                #   1. explicit override from request body   (e.g. "games")
+                #   2. exact match on the locale-field map  (e.g. "en" → "en", "zh-Hans" → "zh")
+                #   3. base-language prefix on locale-field map (e.g. "en-US" → "en")
+                #   4. direct key lookup on profiles dict   (e.g. key=="en")
+                #   5. base-language direct key lookup      (e.g. "en-US" key-prefix → "en")
                 _lbase = locale.split("-")[0]
-                upload_profile = (locale_to_profile.get(locale)
-                                  or locale_to_profile.get(_lbase)
-                                  or (locale if locale in profiles else None)
-                                  or (_lbase if _lbase in profiles else None)
-                                  or locale)
+                _profile_override = body.get("upload_profile_override", "").strip() \
+                                    if isinstance(body, dict) else ""
+                upload_profile = (
+                    (_profile_override if _profile_override in profiles else None)
+                    or locale_to_profile.get(locale)
+                    or locale_to_profile.get(_lbase)
+                    or (locale if locale in profiles else None)
+                    or (_lbase if _lbase in profiles else None)
+                    or locale
+                )
                 profile_info   = profiles.get(upload_profile, {})
 
                 # ── Build Claude prompt ───────────────────────────────────────

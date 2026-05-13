@@ -5,17 +5,24 @@ gen_tokens.py — Generate and verify OAuth tokens for YouTube multi-channel upl
 Run once per environment to create per-channel token files.
 
 Usage:
+    # Generate tokens for ALL default profiles (en, zh):
     python code/deploy/youtube/gen_tokens.py
 
+    # Generate/add token for a SINGLE named profile (merges into existing profiles):
+    python code/deploy/youtube/gen_tokens.py --profile games
+
+    # Use a non-default client_secret file:
+    python code/deploy/youtube/gen_tokens.py --profile games --secret /path/to/client_secret.json
+
 Reads:
-    projects/client_secret.json
+    projects/client_secret.json          (default, or --secret path)
 
 Writes:
-    ~/.config/pipe/token_en.json
-    ~/.config/pipe/token_zh.json
-    ~/.config/pipe/youtube_profiles.json
+    ~/.config/pipe/token_<profile>.json  (one per profile)
+    ~/.config/pipe/youtube_profiles.json (merged — existing profiles are preserved)
 """
 
+import argparse
 import json
 import sys
 import urllib.parse
@@ -33,17 +40,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/yt-analytics.readonly",  # YouTube Analytics API
 ]
 
-PROJECT_ROOT  = Path(__file__).resolve().parent.parent.parent.parent
-CLIENT_SECRET = PROJECT_ROOT / "projects" / "client_secret.json"
-CONFIG_DIR    = Path.home() / ".config" / "pipe"
-PROFILES_PATH = CONFIG_DIR / "youtube_profiles.json"
+PROJECT_ROOT         = Path(__file__).resolve().parent.parent.parent.parent
+DEFAULT_CLIENT_SECRET = PROJECT_ROOT / "projects" / "client_secret.json"
+CONFIG_DIR           = Path.home() / ".config" / "pipe"
+PROFILES_PATH        = CONFIG_DIR / "youtube_profiles.json"
 
-# Profiles to generate in order
-PROFILES = ["en", "zh"]
+# Default profiles generated when --profile is not specified
+DEFAULT_PROFILES = ["en", "zh"]
 
 # ── OAuth helpers ─────────────────────────────────────────────────────────────
 
-def run_oauth(profile: str) -> Credentials:
+def run_oauth(profile: str, client_secret: Path) -> Credentials:
     """
     Headless OAuth flow — prints a URL for the operator to visit in any browser.
 
@@ -56,7 +63,7 @@ def run_oauth(profile: str) -> Credentials:
     Forces account/channel picker via prompt=select_account.
     """
     flow = InstalledAppFlow.from_client_secrets_file(
-        str(CLIENT_SECRET),
+        str(client_secret),
         scopes=SCOPES,
     )
     flow.redirect_uri = "http://localhost"
@@ -132,22 +139,58 @@ def pick_channel(channels: list[dict], profile: str) -> dict:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate OAuth tokens for YouTube multi-channel upload."
+    )
+    parser.add_argument(
+        "--profile", "-p",
+        metavar="KEY",
+        default=None,
+        help=(
+            "Generate/update a single named profile (e.g. --profile games). "
+            "Merges into existing youtube_profiles.json without touching other profiles. "
+            f"If omitted, generates for all default profiles: {DEFAULT_PROFILES}."
+        ),
+    )
+    parser.add_argument(
+        "--secret", "-s",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to the client_secret.json file. "
+            f"Defaults to {DEFAULT_CLIENT_SECRET}."
+        ),
+    )
+    args = parser.parse_args()
+
+    client_secret = Path(args.secret).expanduser() if args.secret else DEFAULT_CLIENT_SECRET
+    profiles_to_run = [args.profile] if args.profile else DEFAULT_PROFILES
+
     # Pre-flight checks
-    if not CLIENT_SECRET.exists():
-        print(f"ERROR: client_secret.json not found at {CLIENT_SECRET}", file=sys.stderr)
+    if not client_secret.exists():
+        print(f"ERROR: client_secret.json not found at {client_secret}", file=sys.stderr)
         sys.exit(1)
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Restrict config directory permissions to owner only
     CONFIG_DIR.chmod(0o700)
 
-    profiles: dict[str, dict] = {}
+    # ── Load existing profiles (merge mode — never wipe other channels) ───────
+    existing_profiles: dict[str, dict] = {}
+    if PROFILES_PATH.is_file():
+        with open(PROFILES_PATH, encoding="utf-8") as f:
+            existing_profiles = json.load(f)
+        if args.profile:
+            preserved = [k for k in existing_profiles if k != args.profile]
+            print(f"  Existing profiles preserved: {preserved}")
 
-    for profile in PROFILES:
+    profiles: dict[str, dict] = dict(existing_profiles)  # start from current state
+
+    for profile in profiles_to_run:
         token_path = CONFIG_DIR / f"token_{profile}.json"
 
         # ── OAuth flow ────────────────────────────────────────────────────
-        credentials = run_oauth(profile)
+        credentials = run_oauth(profile, client_secret)
         save_token(credentials, token_path)
         token_path.chmod(0o600)  # owner read/write only
         print(f"\n  Token saved: {token_path}")
@@ -194,26 +237,30 @@ def main() -> None:
 
     # ── Final summary ─────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
-    print("  SUMMARY")
+    print("  SUMMARY  (all profiles in youtube_profiles.json)")
     print(f"{'='*60}")
-    for profile, info in profiles.items():
+    for pkey, info in profiles.items():
         ch_id   = info.get("channel_id")   or "UNKNOWN"
         ch_name = info.get("channel_name") or "UNKNOWN"
-        print(f"  token_{profile}.json → {ch_name}  ({ch_id})")
+        tag = "  ← just generated" if pkey in profiles_to_run else ""
+        print(f"  token_{pkey}.json → {ch_name}  ({ch_id}){tag}")
 
-    resolved_ids = [
-        info["channel_id"]
-        for info in profiles.values()
-        if info.get("channel_id")
+    # Sanity check: newly generated profiles should all have distinct channel IDs
+    new_ids = [
+        profiles[p]["channel_id"]
+        for p in profiles_to_run
+        if profiles.get(p, {}).get("channel_id")
     ]
-    all_present  = len(resolved_ids) == len(PROFILES)
-    all_distinct = len(set(resolved_ids)) == len(resolved_ids)
+    all_present  = len(new_ids) == len(profiles_to_run)
+    all_distinct = len(set(new_ids)) == len(new_ids)
 
     if all_present and all_distinct:
-        print("\n  Channel IDs are different ✓")
+        print("\n  All new channel IDs are unique ✓")
         print("  Run prepare_upload.py when ready to upload an episode.")
+    elif not all_present:
+        print("\n  ⚠ Some profiles have no channel_id — check API access and re-run.")
     else:
-        print("\n  ⚠ Both tokens resolve to the same channel.")
+        print("\n  ⚠ Two or more new tokens resolved to the same channel.")
         print("    The OAuth flow did not select different Brand Account channels.")
         print("    Options:")
         print("      1. Re-run and switch to the correct channel before clicking Allow.")

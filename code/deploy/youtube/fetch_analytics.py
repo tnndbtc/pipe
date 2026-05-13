@@ -190,9 +190,19 @@ def _pull_one(yt_analytics, yt_data, channel_id: str, row) -> None:
         ).execute()
     except Exception as e:
         print(f"  ✗ Analytics query failed for {row['video_id']}: {e}")
-        # ⚠ NOTE: API exceptions leave analytics_pulled_at = NULL → retried next run.
-        # For permanent errors (HTTP 403/404), a future fix should set
-        # analytics_pulled_at = -1 to stop retries.
+        # Permanent errors (403 forbidden, 404 not found) → mark as no-data so
+        # we stop retrying on every run.  Transient errors (5xx, network) leave
+        # analytics_pulled_at = NULL so the next cron run retries them.
+        err_str = str(e)
+        if "403" in err_str or "404" in err_str:
+            conn = get_connection()
+            conn.execute(
+                "UPDATE youtube_publish_log SET analytics_pulled_at = -1 WHERE id = ?",
+                (row["id"],),
+            )
+            conn.commit()
+            conn.close()
+            print(f"  ⚠  Permanent error — marking {row['video_id']} as no-data (-1)")
         return
 
     col_headers = [h["name"] for h in resp.get("columnHeaders", [])]

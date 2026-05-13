@@ -276,6 +276,12 @@ if [[ -n "$INPUT_FOLDER" ]]; then
   fi
   [[ -z "$LOCALE"  ]] && LOCALE="en"
   [[ -z "$EPISODE" ]] && EPISODE="s01e01"
+  # Read optional upload_profile override from config (e.g. "games" for the
+  # games channel that shares the "en" locale with the main English channel).
+  UPLOAD_PROFILE=""
+  if [[ -n "$CONFIG" && -f "$CONFIG" ]]; then
+    UPLOAD_PROFILE="$(python3 -c "import json; d=json.load(open('$CONFIG',encoding='utf-8')); print(d.get('upload_profile',''))" 2>/dev/null || true)"
+  fi
 
   # Prefer the bare story filename stem as slug (stable, human-readable).
   # Fall back to content-derived slug (with random suffix) for non-slug filenames.
@@ -1903,6 +1909,10 @@ FINAL_EOF
   fi
   [[ -z "$LOCALE"  ]] && LOCALE="en"
   [[ -z "$EPISODE" ]] && EPISODE="s01e01"
+  UPLOAD_PROFILE=""
+  if [[ -n "$CONFIG" && -f "$CONFIG" ]]; then
+    UPLOAD_PROFILE="$(python3 -c "import json; d=json.load(open('$CONFIG',encoding='utf-8')); print(d.get('upload_profile',''))" 2>/dev/null || true)"
+  fi
 
   # Slug + EP_DIR already derived early (before STEP 0); skip re-derivation.
   # Only re-derive if somehow not set (e.g. no-story mode edge case).
@@ -2119,6 +2129,7 @@ CONTRACTS_EOF
     --ep_id       "${EPISODE}" \
     --locale      "${LOCALE}" \
     --story_basename "${_story_bn}" \
+    ${UPLOAD_PROFILE:+--upload_profile "${UPLOAD_PROFILE}"} \
     2>/tmp/simple_run_yt_err.txt)" || true
   if [[ "$_yt_result" == "ok" ]]; then
     echo "  ✓ youtube.json generated → open the YouTube tab to review & edit"
@@ -2528,6 +2539,7 @@ _yt_result="$(python3 "${SCRIPT_DIR}/code/http/gen_youtube_json.py" \
   --ep_id       "${EPISODE}" \
   --locale      "${LOCALE}" \
   --story_basename "${_story_bn}" \
+  ${UPLOAD_PROFILE:+--upload_profile "${UPLOAD_PROFILE}"} \
   2>/tmp/simple_run_yt_err.txt)" || true
 if [[ "$_yt_result" == "ok" ]]; then
   echo "  ✓ youtube.json generated → open the YouTube tab to review & edit"
