@@ -5011,17 +5011,22 @@ class Handler(BaseHTTPRequestHandler):
         # ── YouTube: list playlists for a profile (GET /api/youtube_playlists) ──
         elif parsed.path == "/api/youtube_playlists":
             params = parse_qs(parsed.query)
-            locale = unquote_plus(params.get("locale", ["en"])[0]).strip() or "en"
+            locale          = unquote_plus(params.get("locale",  ["en"])[0]).strip() or "en"
+            profile_override = unquote_plus(params.get("profile", [""])[0]).strip()
             try:
                 from google.oauth2.credentials import Credentials
                 from google.auth.transport.requests import Request as _GRequest
                 from googleapiclient.discovery import build as _yt_build
                 _profile_path = os.path.join(os.path.expanduser("~"), ".config", "pipe", "youtube_profiles.json")
                 _profiles = json.loads(open(_profile_path, encoding="utf-8").read())
-                # Match by locale or upload_profile key
-                _prof = _profiles.get(locale) or next(
-                    (v for v in _profiles.values() if v.get("locale") == locale), None
-                ) or next(iter(_profiles.values()))
+                # Prefer explicit profile key (e.g. "games") over locale-based lookup
+                if profile_override and profile_override in _profiles:
+                    _prof = _profiles[profile_override]
+                else:
+                    # Match by locale — first-match wins
+                    _prof = _profiles.get(locale) or next(
+                        (v for v in _profiles.values() if v.get("locale") == locale), None
+                    ) or next(iter(_profiles.values()))
                 _creds = Credentials.from_authorized_user_file(_prof["token_path"])
                 if _creds.expired and _creds.refresh_token:
                     _creds.refresh(_GRequest())

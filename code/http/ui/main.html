@@ -11028,7 +11028,7 @@ placeholder="Enter your story here"></textarea>
         // Reset generate button in case a previous generate run left it disabled
         const _genBtn = document.getElementById('yt-gen-btn');
         if (_genBtn) { _genBtn.disabled = false; _genBtn.textContent = '✨ Generate youtube.json'; }
-        _ytLoadPlaylists(locale);
+        _ytLoadPlaylists(locale, null);
         // Show the video player even without youtube.json — output.mp4 may already exist
         // and the user needs to preview it to pick a thumbnail frame before generating.
         const _vidEl = document.getElementById('yt-preview-video');
@@ -11043,7 +11043,7 @@ placeholder="Enter your story here"></textarea>
       _ytFillForm(yt);
       // Preserve all fields (including non-form ones) so ytSaveAll() doesn't lose them
       window._ytDraft = Object.assign({}, yt);
-      _ytLoadPlaylists(locale);   // async — populates playlist dropdown
+      _ytLoadPlaylists(locale, yt.upload_profile || null);   // async — populates playlist dropdown
       document.getElementById('yt-meta-form').style.display    = 'flex';
       document.getElementById('yt-thumb-section').style.display = 'block';
       document.getElementById('yt-subs-section').style.display  = 'block';
@@ -11122,13 +11122,18 @@ placeholder="Enter your story here"></textarea>
     window._ytPendingPlaylistId = yt.playlist_id || null;
   }
 
-  async function _ytLoadPlaylists(locale) {
+  async function _ytLoadPlaylists(locale, uploadProfile) {
     const sel    = document.getElementById('yt-playlist');
     const status = document.getElementById('yt-playlist-status');
     if (!sel) return;
     status.textContent = 'Loading…';
     try {
-      const r = await fetch(`/api/youtube_playlists?locale=${encodeURIComponent(locale)}`);
+      // Prefer upload_profile (e.g. "games") over locale for channel lookup
+      const _profileParam = uploadProfile || (window._ytDraft && window._ytDraft.upload_profile) || '';
+      const _url = _profileParam
+        ? `/api/youtube_playlists?profile=${encodeURIComponent(_profileParam)}`
+        : `/api/youtube_playlists?locale=${encodeURIComponent(locale)}`;
+      const r = await fetch(_url);
       const d = await r.json();
       if (!d.ok) { status.textContent = d.error || 'Failed to load'; return; }
       // Rebuild options

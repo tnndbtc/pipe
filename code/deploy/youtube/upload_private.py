@@ -196,6 +196,13 @@ def upload_video(youtube, meta: dict, mp4_path: Path,
                     time.sleep(wait)
                     continue
                 raise
+            except (TimeoutError, OSError, ConnectionError) as e:
+                if attempt < RETRY_MAX - 1:
+                    wait = 2 ** attempt
+                    print(f"\n  ⟳ Network error ({type(e).__name__}) — retry in {wait}s …")
+                    time.sleep(wait)
+                    continue
+                raise
 
     print()  # newline after progress
     video_id = response["id"]
