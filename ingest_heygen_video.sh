@@ -252,6 +252,19 @@ except Exception:
 import json; print(json.load(open('${_upload_state}')).get('video_id',''))
 " 2>/dev/null || true)"
         echo "  ✓ Already uploaded: https://www.youtube.com/watch?v=${_vid_id}"
+        # Ensure production_method is tagged (idempotent — no-op if already set)
+        if [[ -n "$_vid_id" ]]; then
+            python3 -c "
+import sqlite3
+conn = sqlite3.connect('/home/tnnd/data/code/story_engine/db.sqlite3')
+conn.execute(\"UPDATE youtube_publish_log SET production_method='heygen' WHERE video_id=? AND (production_method IS NULL OR production_method != 'heygen')\", ('$_vid_id',))
+conn.commit()
+rows = conn.execute('SELECT changes()').fetchone()[0]
+conn.close()
+if rows:
+    print('[heygen-tagger] Tagged existing upload: video_id=$_vid_id')
+" 2>/dev/null || true
+        fi
     else
         nohup python3 "${SCRIPT_DIR}/code/deploy/youtube/upload_private.py" \
             "$EP_DIR" \
@@ -260,6 +273,44 @@ import json; print(json.load(open('${_upload_state}')).get('video_id',''))
         _upload_pid=$!
         echo "  ▶ Upload started (PID=${_upload_pid})"
         echo "  Log : ${_upload_log}"
+
+        # ── Background tagger: once upload_state.json has video_id, mark as heygen
+        _DB_PATH="/home/tnnd/data/code/story_engine/db.sqlite3"
+        _state_file="${_upload_state}"
+        _tag_log="${_upload_log}"
+        (
+            _tagged=false
+            for _i in $(seq 1 60); do
+                sleep 10
+                _vid="$(python3 -c "
+import json, sys
+try:
+    s = json.load(open('${_state_file}'))
+    v = s.get('video_id', '')
+    if s.get('video_uploaded') and v:
+        print(v)
+except Exception:
+    pass
+" 2>/dev/null || true)"
+                if [[ -n "$_vid" ]]; then
+                    python3 -c "
+import sqlite3
+conn = sqlite3.connect('${_DB_PATH}')
+conn.execute(\"UPDATE youtube_publish_log SET production_method='heygen' WHERE video_id=?\", ('$_vid',))
+conn.commit()
+rows = conn.execute('SELECT changes()').fetchone()[0]
+conn.close()
+print(f'[heygen-tagger] SET production_method=heygen for video_id=$_vid ({rows} row updated)')
+" >> "${_tag_log}" 2>&1
+                    _tagged=true
+                    break
+                fi
+            done
+            if [[ "$_tagged" != "true" ]]; then
+                echo "[heygen-tagger] WARNING: video_id not found after 10 min — skipping DB tag" >> "${_tag_log}"
+            fi
+        ) &
+        echo "  ▶ HeyGen tagger started (will mark DB once upload completes)"
     fi
 fi
 echo ""
