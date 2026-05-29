@@ -299,6 +299,18 @@ def main():
         "sources":            sources,
     }, ensure_ascii=False)
 
+    _zh_niche_rules = (
+        "\n\nFor Chinese content — niche identity rules (CRITICAL for YouTube recommendation):\n"
+        "- tags: MUST include bilingual pairs — for every key Chinese entity/topic, add its "
+        "English equivalent (e.g. ['比特币', 'Bitcoin', '加密货币', 'cryptocurrency', 'AI人工智能', 'artificial intelligence'])\n"
+        "- tags: ALWAYS include at least 3 anchor tags from: 财经, AI人工智能, 加密货币, 比特币, 科技, 时事, 新闻\n"
+        "- tags: target 15-25 total items (YouTube uses tag volume for channel niche classification)\n"
+        "- description line 1: the single most surprising or counterintuitive FACT from the story — "
+        "a number, a name, or an event (NOT a generic intro sentence; YouTube shows this in search)\n"
+        "- description line 2: stakes — what changes for real people because of this story\n"
+        "- hashtags at end of description: exactly 3-5 from #财经 #AI人工智能 #加密货币 #比特币 #科技 #时事\n"
+    ) if output_lang.startswith("Chinese") else ""
+
     system_prompt = (
         "You are a YouTube metadata expert. Generate upload metadata "
         "for a short narrative video episode. "
@@ -318,6 +330,7 @@ def main():
         f"- thumbnail_source_sec: pick midpoint of shot with emotional_tag "
         f"'triumph', 'climax', or 'reveal'; must be within [0, {total_dur}]\n"
         "- Do NOT include category_id in the response"
+        f"{_zh_niche_rules}"
     ).format(output_lang=output_lang)
 
     prompt_text = system_prompt + "\n\n---\n\nEpisode data (JSON):\n\n" + user_msg
