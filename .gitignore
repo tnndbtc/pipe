@@ -84,3 +84,4 @@ tests/fixtures/**/MediaPreviewPack/
 *.tmp
 .env.*
 !.env.example
+db.sqlite3

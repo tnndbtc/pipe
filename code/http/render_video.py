@@ -2246,7 +2246,8 @@ def main() -> None:
         try:
             from PIL import Image, ImageDraw, ImageFont  # type: ignore
 
-            _thumb_title = story_segments[0]["title"]
+            # Use thumbnail_text (short punchy hook) if available; fall back to full title
+            _thumb_title = story_segments[0].get("thumbnail_text") or story_segments[0]["title"]
             _W, _H = 1280, 720
             _FONT_SIZE = 72
             _LINE_PAD  = 16   # px between lines

@@ -108,6 +108,100 @@ def _pull_video_stats(yt_data, video_id: str) -> tuple[int | None, int | None]:
         return None, None
 
 
+def _pull_data_api_stats_batch(yt_data, video_ids: list[str]) -> dict[str, dict]:
+    """
+    Fetch viewCount, likeCount, commentCount for up to 50 video IDs in one
+    Data API v3 call.  viewCount is available immediately (no 72h wait).
+
+    Returns dict: video_id -> {view_count, like_count, comment_count}
+    Any field may be None if not returned by the API.
+    Non-fatal: returns {} on any error.
+    """
+    results: dict[str, dict] = {}
+    try:
+        resp = yt_data.videos().list(
+            part="statistics",
+            id=",".join(video_ids),
+            maxResults=50,
+        ).execute()
+        for item in resp.get("items", []):
+            vid_id = item["id"]
+            stats  = item.get("statistics", {})
+            results[vid_id] = {
+                "view_count":    int(stats["viewCount"])    if "viewCount"    in stats else None,
+                "like_count":    int(stats["likeCount"])    if "likeCount"    in stats else None,
+                "comment_count": int(stats["commentCount"]) if "commentCount" in stats else None,
+            }
+    except Exception as exc:
+        print(f"  ⚠  Batch Data API stats failed: {exc}")
+    return results
+
+
+def _refresh_early_views(pending_rows: list, profiles: dict) -> None:
+    """
+    Pull viewCount / likeCount / commentCount from Data API v3 for ALL pending
+    videos — including those < 72h old that aren't yet eligible for the full
+    Analytics API pass.
+
+    Writes views, like_count, comment_count to youtube_publish_log but does NOT
+    touch analytics_pulled_at (those rows stay pending for the full analytics
+    pass once they reach the 72h threshold).
+
+    Uses batched videos.list calls (up to 50 IDs per request) — cheap quota.
+    """
+    if not pending_rows:
+        return
+
+    by_profile: dict[str, list] = defaultdict(list)
+    for row in pending_rows:
+        by_profile[row["upload_profile"]].append(row)
+
+    total_ok = 0
+    for profile_key, profile_rows in by_profile.items():
+        if profile_key not in profiles:
+            print(f"  ⚠  Early views: profile '{profile_key}' not found — skip")
+            continue
+
+        token_path = Path(profiles[profile_key]["token_path"]).expanduser()
+        if not token_path.is_file():
+            print(f"  ⚠  Early views: token not found for '{profile_key}' — skip")
+            continue
+
+        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            token_path.write_text(creds.to_json(), encoding="utf-8")
+
+        yt_data = build("youtube", "v3", credentials=creds, cache_discovery=False)
+        print(f"  '{profile_key}': {len(profile_rows)} pending video(s)")
+
+        for i in range(0, len(profile_rows), 50):
+            batch     = profile_rows[i : i + 50]
+            vid_ids   = [r["video_id"] for r in batch]
+            stats_map = _pull_data_api_stats_batch(yt_data, vid_ids)
+
+            conn = get_connection()
+            for row in batch:
+                s = stats_map.get(row["video_id"])
+                if not s:
+                    continue
+                # Always update views (latest real-time count from Data API).
+                # like_count/comment_count: only fill if not already set.
+                conn.execute(
+                    """UPDATE youtube_publish_log
+                       SET views         = %s,
+                           like_count    = COALESCE(like_count, %s),
+                           comment_count = COALESCE(comment_count, %s)
+                       WHERE id = %s""",
+                    (s["view_count"], s["like_count"], s["comment_count"], row["id"]),
+                )
+                total_ok += 1
+            conn.commit()
+            conn.close()
+
+    print(f"  Early views done — {total_ok} video(s) updated.\n")
+
+
 # ── Analytics API: traffic source breakdown ────────────────────────────────────
 
 def _pull_traffic_sources(
@@ -197,7 +291,7 @@ def _pull_one(yt_analytics, yt_data, channel_id: str, row) -> None:
         if "403" in err_str or "404" in err_str:
             conn = get_connection()
             conn.execute(
-                "UPDATE youtube_publish_log SET analytics_pulled_at = -1 WHERE id = ?",
+                "UPDATE youtube_publish_log SET analytics_pulled_at = -1 WHERE id = %s",
                 (row["id"],),
             )
             conn.commit()
@@ -214,7 +308,7 @@ def _pull_one(yt_analytics, yt_data, channel_id: str, row) -> None:
         if int(time.time()) > give_up_ts:
             conn = get_connection()
             conn.execute(
-                "UPDATE youtube_publish_log SET analytics_pulled_at = -1 WHERE id = ?",
+                "UPDATE youtube_publish_log SET analytics_pulled_at = -1 WHERE id = %s",
                 (row["id"],),
             )
             conn.commit()
@@ -243,14 +337,14 @@ def _pull_one(yt_analytics, yt_data, channel_id: str, row) -> None:
     conn = get_connection()
     conn.execute(
         """UPDATE youtube_publish_log
-           SET avg_view_duration   = ?,
-               avg_view_pct        = ?,
-               views               = ?,
-               like_count          = ?,
-               comment_count       = ?,
-               traffic_sources     = ?,
-               analytics_pulled_at = ?
-           WHERE id = ?""",
+           SET avg_view_duration   = %s,
+               avg_view_pct        = %s,
+               views               = %s,
+               like_count          = %s,
+               comment_count       = %s,
+               traffic_sources     = %s,
+               analytics_pulled_at = %s
+           WHERE id = %s""",
         (
             avg_dur,
             avg_pct,
@@ -335,8 +429,8 @@ def _backfill_stats(profiles: dict) -> None:
             conn = get_connection()
             conn.execute(
                 """UPDATE youtube_publish_log
-                   SET like_count = ?, comment_count = ?
-                   WHERE id = ?""",
+                   SET like_count = %s, comment_count = %s
+                   WHERE id = %s""",
                 (like_count, comment_count, row["id"]),
             )
             conn.commit()
@@ -449,28 +543,31 @@ def main() -> None:
     print(f"  fetch_analytics  [{start_ts}]")
     print(f"{'='*60}\n")
 
-    # ── Step 1: find eligible rows ─────────────────────────────────────────────
-    cutoff = int(time.time()) - FETCH_DELAY_H * 3600
+    # ── Step 1: find ALL pending videos ───────────────────────────────────────
     conn = get_connection()
-    rows = conn.execute(
+    all_pending = conn.execute(
         """SELECT id, video_id, upload_profile, published_at, lang
            FROM youtube_publish_log
            WHERE analytics_pulled_at IS NULL
              AND published_at IS NOT NULL
-             AND published_at <= ?
            ORDER BY published_at ASC""",
-        (cutoff,),
     ).fetchall()
     conn.close()
 
-    if not rows:
-        print("No videos ready for analytics pull.")
+    if not all_pending:
+        print("No pending videos found.")
         return
 
-    print(f"Found {len(rows)} video(s) eligible for analytics pull.\n")
+    # Videos >= 72h old are ready for the full Analytics API pass
+    cutoff = int(time.time()) - FETCH_DELAY_H * 3600
+    rows   = [r for r in all_pending if r["published_at"] <= cutoff]
 
-    # ── Step 2: group by upload_profile ───────────────────────────────────────
-    # Authenticate once per channel, not once per video
+    print(
+        f"Found {len(all_pending)} pending video(s) total, "
+        f"{len(rows)} ready for full analytics pull (>= {FETCH_DELAY_H}h old).\n"
+    )
+
+    # ── Step 2: group >= 72h rows by profile (for Analytics API pass) ──────────
     by_profile: dict[str, list] = defaultdict(list)
     for row in rows:
         by_profile[row["upload_profile"]].append(row)
@@ -481,7 +578,17 @@ def main() -> None:
         sys.exit(1)
     profiles = json.load(open(PROFILES_PATH, encoding="utf-8"))
 
-    # ── Step 4: for each profile, authenticate + pull ─────────────────────────
+    # ── Step 3b: Early views pass — Data API v3 for ALL pending ───────────────
+    # Populates views (and likes/comments) for new videos < 72h old so they
+    # show a real view count in the UI before full analytics are available.
+    print("Early views pass (Data API v3)...")
+    _refresh_early_views(all_pending, profiles)
+
+    if not rows:
+        print("No videos ready for full analytics pull yet (all < 72h old).")
+        return
+
+    # ── Step 4: for each profile, authenticate + pull Analytics API ────────────
     for profile_key, profile_rows in by_profile.items():
         if profile_key not in profiles:
             print(f"  ⚠  Profile '{profile_key}' not in youtube_profiles.json — skip")

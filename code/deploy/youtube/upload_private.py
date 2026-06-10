@@ -115,6 +115,7 @@ def _load_state(state_path: Path) -> dict:
         "captions_uploaded":   {},
         "thumbnail_uploaded":  False,
         "playlist_added":      False,
+        "verify_completed":    False,
     }
 
 
@@ -360,10 +361,15 @@ def upload_thumbnail(youtube, video_id: str, thumb_path: Path,
         print(f"      Raw response: {e.content[:400]}")
 
         # 403 "forbidden" means the channel isn't verified for custom thumbnails.
-        # Treat as a warning — don't block playlist or future steps.
+        # 429 "uploadRateLimitExceeded" means too many thumbnails uploaded recently.
+        # Both are treated as warnings — don't block playlist or future steps.
         if e.resp.status == 403 and reason == "forbidden":
             print(f"  ⚠  Thumbnail upload skipped: channel not verified for custom thumbnails.")
             print(f"      Verify your channel at https://www.youtube.com/verify then re-run upload.")
+            return
+        if e.resp.status == 429 and reason == "uploadRateLimitExceeded":
+            print(f"  ⚠  Thumbnail upload skipped: YouTube thumbnail rate limit reached.")
+            print(f"      Thumbnail can be set manually in YouTube Studio.")
             return
         raise
 
@@ -570,8 +576,13 @@ def main() -> None:
     # ── Step 5: Add to playlist ───────────────────────────────────────────────
     add_to_playlist(youtube, video_id, meta.get("playlist_id"), state, state_path)
 
-    # ── Step 6: Verify captions ───────────────────────────────────────────────
-    verify_captions(youtube, video_id, meta)
+    # ── Step 6: Verify captions (skip if already confirmed — saves quota on resume) ──
+    if state.get("verify_completed"):
+        print("  ✓ Caption verification already completed — skipping")
+    else:
+        verify_captions(youtube, video_id, meta)
+        state["verify_completed"] = True
+        _save_state(state_path, state)
 
     # ── Done ──────────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")

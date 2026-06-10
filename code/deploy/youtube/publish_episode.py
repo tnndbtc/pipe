@@ -231,13 +231,16 @@ def main() -> None:
         try:
             meta_path = ep_dir / "meta.json"
             _set_id, _story_id = None, None
+            _m = {}
             if meta_path.is_file():
                 _m = json.load(open(meta_path, encoding="utf-8"))
                 _set_id   = _m.get("story_set_id")
                 _story_id = _m.get("story_id")
-            # Fallback: parse slug if story_set_id not in meta.json
-            # r'_(\d+)_[^_]*$' fails when ≥2 tokens follow set_id (e.g. _100_no_norm)
-            if _set_id is None:
+            # Fallback: parse slug ONLY when story_set_id key is absent from meta.json.
+            # null (→ None) means "intentionally no story set" (e.g. famous games) —
+            # do NOT apply the regex fallback or we will extract a spurious year (e.g.
+            # _1998_ in LG_Cup_1998_…) and trigger a FOREIGN KEY constraint failure.
+            if _set_id is None and "story_set_id" not in _m:
                 _sm = re.search(r'_(\d+)_', slug)
                 if _sm:
                     _set_id = int(_sm.group(1))

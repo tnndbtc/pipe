@@ -83,6 +83,8 @@ def parse_story_txt(
     current_title: str | None = None
     current_chunk: list[str] = []
     current_paragraphs: list[str] = []
+    current_thumbnail_text: str = ""
+    current_hook_type: str = ""
 
     def _flush_chunk() -> None:
         nonlocal current_chunk
@@ -92,11 +94,18 @@ def parse_story_txt(
         current_chunk = []
 
     def _flush_story() -> None:
-        nonlocal current_title, current_paragraphs
+        nonlocal current_title, current_paragraphs, current_thumbnail_text, current_hook_type
         _flush_chunk()
         if current_title is not None and current_paragraphs:
-            stories.append({"title": current_title, "paragraphs": list(current_paragraphs)})
+            story: dict = {"title": current_title, "paragraphs": list(current_paragraphs)}
+            if current_thumbnail_text:
+                story["thumbnail_text"] = current_thumbnail_text
+            if current_hook_type:
+                story["hook_type"] = current_hook_type
+            stories.append(story)
         current_paragraphs = []
+        current_thumbnail_text = ""
+        current_hook_type = ""
 
     for line in lines:
         m = re.match(r"^##\s+(.+)", line)
@@ -104,6 +113,14 @@ def parse_story_txt(
             _flush_story()
             current_title = m.group(1).strip()
             current_chunk = []
+        elif re.match(r"^###\s*thumbnail:\s*(.+)", line):
+            mt = re.match(r"^###\s*thumbnail:\s*(.+)", line)
+            if mt:
+                current_thumbnail_text = mt.group(1).strip()
+        elif re.match(r"^###\s*hook_type:\s*(.+)", line):
+            mh = re.match(r"^###\s*hook_type:\s*(.+)", line)
+            if mh:
+                current_hook_type = mh.group(1).strip()
         elif re.match(r"^###", line):
             pass  # ### = sources/metadata marker — exclude from narration
         elif re.match(r"^\s*-\s*$", line):
@@ -579,12 +596,17 @@ def build_voplan(
                 "tts_prompt":   tts_prompt,
             })
 
-        story_segments.append({
+        seg: dict = {
             "story_index":   story_idx,
             "story_count":   story_count,
             "title":         story["title"],
             "first_item_id": first_item_id,
-        })
+        }
+        if story.get("thumbnail_text"):
+            seg["thumbnail_text"] = story["thumbnail_text"]
+        if story.get("hook_type"):
+            seg["hook_type"] = story["hook_type"]
+        story_segments.append(seg)
 
     return {
         "schema_id":       "VOPlan",
