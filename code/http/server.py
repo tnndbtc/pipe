@@ -4713,6 +4713,7 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/episode_file":
             _EPISODE_FILE_WHITELIST = {"ShotList.json", "MediaPlan.json",
                                        "meta.json",
+                                       "story_sources.json",
                                        "assets/media/bg_id_remap.json",
                                        "MusicPlan.json",
                                        "assets/music/user_cut_clips.json",
@@ -8558,6 +8559,92 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
 
+        # ── Media: auto-generate MediaPlan.json from story sources ────────────
+        # POST /api/media_plan_auto_generate
+        # Body: {slug, ep_id, sources_path?, force?}
+        #   slug         — project slug
+        #   ep_id        — episode id (e.g. s01e01)
+        #   sources_path — optional absolute path to _sources.json from exports/
+        #                  If omitted, looks for story_sources.json in episode dir.
+        #   force        — if true, overwrite existing MediaPlan.json
+        #
+        # The endpoint:
+        #  1. Resolves the episode dir
+        #  2. If sources_path provided, copies it as story_sources.json into ep dir
+        #  3. Calls media_plan_auto.generate_media_plan()
+        #  4. Returns {ok, message, segments?}
+        elif self.path == "/api/media_plan_auto_generate":
+            try:
+                length   = int(self.headers.get("Content-Length", 0))
+                raw_body = self.rfile.read(length)
+                payload  = json.loads(raw_body)
+
+                slug         = payload.get("slug", "").strip()
+                ep_id        = payload.get("ep_id", "").strip()
+                sources_path = payload.get("sources_path", "").strip() or None
+                force        = bool(payload.get("force", False))
+
+                if not slug or not ep_id:
+                    raise ValueError("slug and ep_id are required")
+                if ".." in slug or ".." in ep_id:
+                    raise ValueError("Invalid slug or ep_id")
+
+                ep_dir = os.path.join(PIPE_DIR, "projects", slug, "episodes", ep_id)
+                if not os.path.isdir(ep_dir):
+                    raise ValueError(f"Episode directory not found: {ep_dir}")
+
+                # Optional: copy an external sources JSON into the episode dir
+                src_json_path = None
+                if sources_path:
+                    if not os.path.isfile(sources_path):
+                        raise ValueError(f"sources_path not found: {sources_path}")
+                    import shutil as _shutil
+                    dest = os.path.join(ep_dir, "story_sources.json")
+                    _shutil.copy2(sources_path, dest)
+                    src_json_path = dest
+                    print(f"  [media_auto] copied sources → {dest}")
+
+                # Import and run the generator
+                import importlib.util as _ilu
+                _mpa_path = os.path.join(os.path.dirname(__file__), "media_plan_auto.py")
+                _spec = _ilu.spec_from_file_location("media_plan_auto", _mpa_path)
+                _mpa  = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_mpa)
+
+                from pathlib import Path as _Path2
+                _src_path = _Path2(src_json_path) if src_json_path else None
+                ok, msg = _mpa.generate_media_plan(_Path2(ep_dir), _src_path, force)
+
+                # Count segments if MediaPlan was written
+                segments = None
+                _mp_file = os.path.join(ep_dir, "MediaPlan.json")
+                if ok and os.path.isfile(_mp_file):
+                    try:
+                        with open(_mp_file, encoding="utf-8") as _mf:
+                            segments = len(json.load(_mf).get("shot_overrides", []))
+                    except Exception:
+                        pass
+
+                body = json.dumps({
+                    "ok":       ok,
+                    "message":  msg,
+                    "segments": segments,
+                }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                print(f"  media_plan_auto  slug={slug} ep={ep_id} ok={ok} msg={msg}")
+
+            except Exception as exc:
+                body = json.dumps({"ok": False, "error": str(exc)}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
         # ── AI Generate: submit single-shot inline generation job ──────────────
         elif self.path == "/api/ai_generate":
             try:
@@ -10161,6 +10248,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/media_health", "/api/media_ai_ask", "/api/media_ai_ask_error",
                   "/api/media_batch", "/api/media_batch_resume", "/api/media_batch_prune",
                   "/api/media_plan_save",
+                  "/api/media_plan_auto_generate",
                   "/api/media_preview",
                   "/api/sfx_search", "/api/sfx_save", "/api/sfx_results_save",
                   "/api/sfx_plan_save", "/api/sfx_preview", "/api/sfx_cut_clip", "/api/sfx_delete_clip",

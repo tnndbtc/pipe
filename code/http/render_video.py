@@ -1819,6 +1819,33 @@ def main() -> None:
                 if _stype == "image":
                     _zoompan = _anim_vf(_anim, _sdur)
                     _vf      = (_scale_pad + "," + _zoompan) if _zoompan else _scale_pad
+
+                    # Attribution overlay — shown for first 2.5 s of auto-sourced images.
+                    # Burned as white text on a semi-transparent dark pill in the
+                    # bottom-left corner.  Only added when the segment carries an
+                    # 'attribution' field (written by media_plan_auto.py).
+                    _attribution = (_seg.get("attribution") or "").strip()
+                    if _attribution and os.path.isfile(NOTO_CJK_FONT):
+                        # Escape characters that break FFmpeg drawtext parsing
+                        _attr_safe = (
+                            _attribution
+                            .replace("\\", "\\\\")
+                            .replace("'",  "’")   # curly apostrophe — avoids shell quoting issues
+                            .replace(":",  "\\:")
+                            .replace(",",  "\\,")
+                        )
+                        _attr_dur   = min(2.5, _sdur)
+                        _attr_filter = (
+                            f"drawtext=text='{_attr_safe}'"
+                            f":fontfile={NOTO_CJK_FONT}"
+                            f":fontsize=18:fontcolor=white"
+                            f":x=20:y=h-46"
+                            f":enable='between(t,0,{_attr_dur:.2f})'"
+                            f":box=1:boxcolor=black@0.55:boxborderw=8"
+                            f":expansion=none"
+                        )
+                        _vf = _vf + "," + _attr_filter
+
                     _cmd     = [
                         "ffmpeg", "-y",
                         "-loop", "1", "-framerate", str(FPS),
@@ -2249,35 +2276,103 @@ def main() -> None:
             # Use thumbnail_text (short punchy hook) if available; fall back to full title
             _thumb_title = story_segments[0].get("thumbnail_text") or story_segments[0]["title"]
             _W, _H = 1280, 720
-            _FONT_SIZE = 72
             _LINE_PAD  = 16   # px between lines
             _BOX_PAD   = 24   # px above/below text block
+            _SAFE_W    = 1180  # usable width, leaves a ~50px margin each side
+            _MAX_BLOCK_H = 470 # text band ceiling, so it cannot swallow the image
+            _MIN_FONT, _MAX_FONT = 56, 160
 
-            # Load bold font
+            # Wrap into exactly n balanced lines (word-aware for Latin,
+            # character-based for CJK, which has no spaces to break on).
+            def _wrap(text: str, n: int) -> list[str]:
+                text = text.strip()
+                if n <= 1:
+                    return [text]
+                words = text.split()
+                if len(words) >= n:
+                    target = len(text) / n
+                    out: list[str] = []
+                    cur = ""
+                    for _w in words:
+                        cand = (cur + " " + _w).strip()
+                        if cur and len(cand) > target and len(out) < n - 1:
+                            out.append(cur)
+                            cur = _w
+                        else:
+                            cur = cand
+                    if cur:
+                        out.append(cur)
+                    return out
+                # CJK: no spaces to break on, so wrap by character count — but
+                # never cut through an embedded Latin/number run, or brand names
+                # come out mangled ("AI" as "A" + "I", "Meta" as "Met" + "a").
+                def _alnum(ch: str) -> bool:
+                    return ch.isascii() and ch.isalnum()
+
+                # Punctuation that may never begin a line (kinsoku shori).
+                _NO_LINE_START = "，。、！？：；）」』》〉】…·,.!?:;)]}"
+
+                per = -(-len(text) // n)
+                out, start = [], 0
+                while start < len(text) and len(out) < n - 1:
+                    cut = min(start + per, len(text))
+                    if 0 < cut < len(text) and _alnum(text[cut - 1]) and _alnum(text[cut]):
+                        back = cut
+                        while back > start + 1 and _alnum(text[back - 1]):
+                            back -= 1
+                        fwd = cut
+                        while fwd < len(text) and _alnum(text[fwd]):
+                            fwd += 1
+                        # Prefer whichever boundary distorts the balance least.
+                        cut = back if (cut - back) <= (fwd - cut) else fwd
+                    # Never strand punctuation at the head of the next line —
+                    # pull it up so it closes the current one instead.
+                    while cut < len(text) and text[cut] in _NO_LINE_START:
+                        cut += 1
+                    out.append(text[start:cut])
+                    start = cut
+                if start < len(text):
+                    out.append(text[start:])
+                return [l for l in out if l]
+
+            # Choose the line count that lets the text render LARGEST.
+            #
+            # This replaces a hard 2-line split at a fixed 72px. Two lines is the
+            # wrong constraint: it is what forced thumbnail_text down to 3-6 words,
+            # because anything longer had to shrink to stay on two lines. Allowing
+            # a third line buys a lot of room almost for free — measured on this
+            # font, 10 English words render at 136px on 3 lines versus 90px on 2,
+            # and 16 Chinese characters stay at the 160px ceiling. The budget in
+            # the deep_dive prompts was raised to match.
+            def _layout(text: str):
+                best_size, best_lines = 0, [text]
+                for _n in (1, 2, 3):
+                    _ls = [l for l in _wrap(text, _n) if l]
+                    if len(_ls) != _n:
+                        continue
+                    for _sz in range(_MAX_FONT, _MIN_FONT - 1, -4):
+                        try:
+                            _f = ImageFont.truetype(_thumb_font, _sz)
+                        except Exception:
+                            return _MIN_FONT, _ls
+                        if any(_f.getbbox(l)[2] > _SAFE_W for l in _ls):
+                            continue
+                        # Keep the text band from swallowing the image. Rendered
+                        # glyph boxes run a little taller than the nominal point
+                        # size, so budget 1.15x or the band overshoots this cap.
+                        if _n * (_sz * 1.15 + _LINE_PAD) + _BOX_PAD * 2 > _MAX_BLOCK_H:
+                            continue
+                        if _sz > best_size:
+                            best_size, best_lines = _sz, _ls
+                        break
+                return (best_size or _MIN_FONT), best_lines
+
+            _font_size, _lines = _layout(_thumb_title)
             try:
-                _pil_font = ImageFont.truetype(_thumb_font, _FONT_SIZE)
+                _pil_font = ImageFont.truetype(_thumb_font, _font_size)
             except Exception:
                 _pil_font = ImageFont.load_default()
 
-            # Split title into 1-2 balanced lines for thumbnail.
-            # Finds punctuation nearest to the midpoint; hard-splits if none.
-            def _split(title: str) -> list[str]:
-                title = title.strip()
-                if len(title) <= 14:          # short enough for one line
-                    return [title]
-                mid = len(title) // 2
-                best = -1
-                for d in range(len(title)):   # search outward from midpoint
-                    for i in [mid - d, mid + d]:
-                        if 0 < i < len(title) and title[i] in "，,。！？ ：:":
-                            best = i
-                            break
-                    if best != -1:
-                        break
-                cut = (best + 1) if best != -1 else mid
-                return [title[:cut].strip(), title[cut:].strip()]
-
-            _lines   = _split(_thumb_title)
             _img     = Image.open(str(thumb_raw)).convert("RGB")
             _img     = _img.resize((_W, _H), Image.LANCZOS)
             _draw    = ImageDraw.Draw(_img, "RGBA")
