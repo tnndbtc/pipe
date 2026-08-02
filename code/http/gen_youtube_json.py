@@ -178,10 +178,28 @@ def main():
     shotlist     = _jload(os.path.join(ep_dir, "ShotList.json"))     or {}
     story_prompt = _jload(os.path.join(ep_dir, "StoryPrompt.json"))
 
+    # entity_texts primary source: an "### entities: A | B | C" line embedded
+    # directly in story.txt by export_story.py (parsed below). This line
+    # travels WITH the pasted story text — same channel already used for
+    # "### thumbnail: ..." / "### hook_type: ..." — so it survives the
+    # copy-paste-into-create-episode workflow with no extra ID/linking step.
+    #
+    # story_sources.json is a secondary fallback: written by story_engine's
+    # export_story.py and copied into the episode dir ONLY when someone
+    # explicitly calls /api/media_plan_auto_generate with sources_path. Kept
+    # as a fallback for episodes created through that path.
+    # (story_engine zero-play-rate diagnosis, 2026-07-31 — entities are real
+    # named entities pulled from the source news, i.e. exactly the terms a
+    # viewer would type into YouTube search; see entity-anchoring rule below.)
+    story_sources     = _jload(os.path.join(ep_dir, "story_sources.json")) or {}
+    _sidecar_entities = story_sources.get("entities") or []
+    entity_texts_sidecar = [e.get("text", "").strip() for e in _sidecar_entities if e.get("text")]
+
     # ── Parse story.txt ───────────────────────────────────────────────────────
     sources          = []
     story_txt_title  = ""
     story_txt_lines  = []
+    entity_texts     = []
     story_txt_path   = os.path.join(ep_dir, "story.txt")
     if os.path.isfile(story_txt_path):
         for sl in open(story_txt_path, encoding="utf-8"):
@@ -189,12 +207,24 @@ def main():
             hm = re.match(r'^##\s+(.+)', sl_s)
             if hm:
                 story_txt_title = hm.group(1).strip(); continue
+            # Must be checked BEFORE the generic "### ..." hashtag match below —
+            # otherwise "entities" would fall through the generic hashtag regex
+            # (which only extracts "#word" tokens and finds none here).
+            em = re.match(r'^###\s+entities:\s*(.+)', sl_s, re.IGNORECASE)
+            if em:
+                entity_texts = [t.strip() for t in em.group(1).split('|') if t.strip()]
+                continue
             sm = re.match(r'^###\s+(.+)', sl_s)
             if sm:
                 sources = re.findall(r'#([^\s#]+)', sm.group(1)); continue
             if sl_s.strip() in ("-", ""):
                 continue
             story_txt_lines.append(sl_s.strip())
+
+    # Fall back to the sidecar file only if story.txt had no inline entities line
+    # (e.g. older episodes exported before this feature existed).
+    if not entity_texts and entity_texts_sidecar:
+        entity_texts = entity_texts_sidecar
 
     # ── Collect narrator text (capped at 4000 chars) ──────────────────────────
     lines = []
@@ -307,13 +337,39 @@ def main():
         "narrator_text":      truncated,
         "shots":              shot_summaries,
         "sources":            sources,
+        "entities":           entity_texts,
     }, ensure_ascii=False)
+
+    # Entity-anchoring — applies to BOTH languages. Real named entities (from
+    # story_engine's Haiku extraction over the story title + source headlines)
+    # are exactly what a viewer types into YouTube search. Without this, tags/
+    # title/description are pure LLM guesswork with no guarantee of matching
+    # real search queries — this was previously true for 100% of EN videos and
+    # a majority of ZH videos (only bilingual-pair tags existed for ZH).
+    _entity_rules = (
+        "\n\nEntity-anchoring rules (CRITICAL for search discovery — apply "
+        "regardless of output language):\n"
+        f"- Real named entities extracted from this story: {entity_texts}\n"
+        "- If that list is non-empty: tags[0:3] (the first 3-5 tags) MUST be "
+        "taken verbatim from that list (no translation, no rewrite, no "
+        "paraphrase) — YouTube weights early tag positions higher for search "
+        "matching.\n"
+        "- If that list is non-empty: title OR the first line of description "
+        "MUST contain at least one entity from that list verbatim.\n"
+        "- These are ADDITIONAL constraints on top of the existing hook/style "
+        "rules below — do not remove the hook, just make sure the entity is "
+        "present somewhere in it.\n"
+        "- If the entities list is empty, ignore this section and proceed "
+        "with the constraints below as-is.\n"
+    ) if entity_texts else ""
 
     _zh_niche_rules = (
         "\n\nFor Chinese content — niche identity rules (CRITICAL for YouTube recommendation):\n"
         "- tags: MUST include bilingual pairs — for every key Chinese entity/topic, add its "
         "English equivalent (e.g. ['比特币', 'Bitcoin', '加密货币', 'cryptocurrency', 'AI人工智能', 'artificial intelligence'])\n"
-        "- tags: ALWAYS include at least 3 anchor tags from: 财经, AI人工智能, 加密货币, 比特币, 科技, 时事, 新闻\n"
+        "- tags: ALWAYS include at least 3 anchor tags from: 财经, AI人工智能, 加密货币, 比特币, 科技, 时事, 新闻 — "
+        "but these anchor tags come AFTER the entity-anchored tags from the rule above (YouTube weights "
+        "earlier tag positions higher; the entity list is per-story and more specific, so it goes first)\n"
         "- tags: target 15-25 total items (YouTube uses tag volume for channel niche classification)\n"
         "- description line 1: the single most surprising or counterintuitive FACT from the story — "
         "a number, a name, or an event (NOT a generic intro sentence; YouTube shows this in search)\n"
@@ -340,6 +396,7 @@ def main():
         f"- thumbnail_source_sec: pick midpoint of shot with emotional_tag "
         f"'triumph', 'climax', or 'reveal'; must be within [0, {total_dur}]\n"
         "- Do NOT include category_id in the response"
+        f"{_entity_rules}"
         f"{_zh_niche_rules}"
     ).format(output_lang=output_lang)
 

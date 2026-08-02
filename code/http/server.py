@@ -9496,6 +9496,10 @@ class Handler(BaseHTTPRequestHandler):
                 sources = []
                 story_txt_title = ""   # h2 heading from story.txt
                 story_txt_lines = []   # body paragraphs from story.txt
+                entity_texts    = []   # "### entities: A | B | C" — real named entities
+                                       # for SEO anchoring (story_engine zero-play-rate
+                                       # diagnosis, 2026-07-31); travels inline with the
+                                       # pasted story text, no separate file/ID needed.
                 story_txt_path = os.path.join(ep_dir, "story.txt")
                 if os.path.isfile(story_txt_path):
                     for _sl in open(story_txt_path, encoding="utf-8"):
@@ -9504,6 +9508,13 @@ class Handler(BaseHTTPRequestHandler):
                         _hm = re.match(r'^##\s+(.+)', _sl_s)
                         if _hm:
                             story_txt_title = _hm.group(1).strip()
+                            continue
+                        # ### entities — must be checked BEFORE the generic ### Sources
+                        # match below, or it falls through the hashtag-only regex there
+                        # (which finds nothing in an entities line and silently drops it).
+                        _em = re.match(r'^###\s+entities:\s*(.+)', _sl_s, re.IGNORECASE)
+                        if _em:
+                            entity_texts = [t.strip() for t in _em.group(1).split('|') if t.strip()]
                             continue
                         # ### Sources
                         _sm = re.match(r'^###\s+(.+)', _sl_s)
@@ -9514,6 +9525,16 @@ class Handler(BaseHTTPRequestHandler):
                         if _sl_s.strip() == '-' or _sl_s.strip() == '':
                             continue
                         story_txt_lines.append(_sl_s.strip())
+
+                # Fallback: story_sources.json sidecar (only present if someone
+                # explicitly ran /api/media_plan_auto_generate with sources_path).
+                if not entity_texts:
+                    _story_sources = _jload(os.path.join(ep_dir, "story_sources.json")) or {}
+                    entity_texts = [
+                        e.get("text", "").strip()
+                        for e in (_story_sources.get("entities") or [])
+                        if e.get("text")
+                    ]
 
                 # ── Collect narrator text (capped at 4000 chars) ──────────────
                 # Primary source: Script.json dialogue lines
@@ -9628,12 +9649,50 @@ class Handler(BaseHTTPRequestHandler):
                     "narrator_text":      truncated,
                     "shots":              shot_summaries,
                     "sources":            sources,
+                    "entities":           entity_texts,
                 }, ensure_ascii=False)
 
                 # NOTE: sources are appended server-side AFTER the Claude call
                 # (see sources_block below). LLMs do not reliably obey this rule,
                 # so we do NOT ask Claude to include sources — we append them
                 # deterministically to the final description ourselves.
+
+                # Entity-anchoring — applies to BOTH languages. See gen_youtube_json.py
+                # (the CLI twin of this endpoint) for the full rationale: real named
+                # entities are what a viewer actually types into YouTube search.
+                _entity_rules = (
+                    "\n\nEntity-anchoring rules (CRITICAL for search discovery — apply "
+                    "regardless of output language):\n"
+                    f"- Real named entities extracted from this story: {entity_texts}\n"
+                    "- If that list is non-empty: tags[0:3] (the first 3-5 tags) MUST be "
+                    "taken verbatim from that list (no translation, no rewrite, no "
+                    "paraphrase) — YouTube weights early tag positions higher for search "
+                    "matching.\n"
+                    "- If that list is non-empty: title OR the first line of description "
+                    "MUST contain at least one entity from that list verbatim.\n"
+                    "- These are ADDITIONAL constraints on top of the existing hook/style "
+                    "rules below — do not remove the hook, just make sure the entity is "
+                    "present somewhere in it.\n"
+                    "- If the entities list is empty, ignore this section and proceed "
+                    "with the constraints below as-is.\n"
+                ) if entity_texts else ""
+
+                # ZH niche-identity rules — this endpoint (the web-UI "Generate YouTube
+                # JSON" button) was previously missing this entirely; only the CLI twin
+                # (gen_youtube_json.py) had it. Brought to parity here, 2026-07-31.
+                _zh_niche_rules = (
+                    "\n\nFor Chinese content — niche identity rules (CRITICAL for YouTube recommendation):\n"
+                    "- tags: MUST include bilingual pairs — for every key Chinese entity/topic, add its "
+                    "English equivalent (e.g. ['比特币', 'Bitcoin', '加密货币', 'cryptocurrency', 'AI人工智能', 'artificial intelligence'])\n"
+                    "- tags: ALWAYS include at least 3 anchor tags from: 财经, AI人工智能, 加密货币, 比特币, 科技, 时事, 新闻 — "
+                    "but these anchor tags come AFTER the entity-anchored tags from the rule above (YouTube weights "
+                    "earlier tag positions higher; the entity list is per-story and more specific, so it goes first)\n"
+                    "- tags: target 15-25 total items (YouTube uses tag volume for channel niche classification)\n"
+                    "- description line 1: the single most surprising or counterintuitive FACT from the story — "
+                    "a number, a name, or an event (NOT a generic intro sentence; YouTube shows this in search)\n"
+                    "- description line 2: stakes — what changes for real people because of this story\n"
+                    "- hashtags at end of description: exactly 3-5 from #财经 #AI人工智能 #加密货币 #比特币 #科技 #时事\n"
+                ) if output_lang.startswith("Chinese") else ""
 
                 system_prompt = (
                     "You are a YouTube metadata expert. Generate upload metadata "
@@ -9654,6 +9713,8 @@ class Handler(BaseHTTPRequestHandler):
                     f"- thumbnail_source_sec: pick midpoint of shot with emotional_tag "
                     f"'triumph', 'climax', or 'reveal'; must be within [0, {total_dur}]\n"
                     "- Do NOT include category_id in the response"
+                    f"{_entity_rules}"
+                    f"{_zh_niche_rules}"
                 ).format(output_lang=output_lang)
 
                 # ── Call Claude via CLI (same mechanism as run.sh pipeline) ──────

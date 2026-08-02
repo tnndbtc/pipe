@@ -10,20 +10,41 @@ Eligibility:
   - published_at IS NOT NULL      (video has a known publish timestamp)
   - published_at <= now - 72h     (data latency: impressions take 24–72h to appear)
 
-Data fetched per video:
-  Analytics API v2 (aggregate metrics):
-    views, averageViewDuration, averageViewPercentage
-    insightTrafficSourceType breakdown → traffic_sources JSON
-  Data API v3 (public statistics):
+Data fetched, per PROFILE (not per video — see _pull_batch_video_metrics):
+  Analytics API v2, ONE call for the whole profile (dimensions=video, YouTube's
+  "Top videos" report):
+    views, averageViewDuration, averageViewPercentage, estimatedMinutesWatched,
+    likes, dislikes, shares, subscribersGained, comments
+  This replaced what used to be one Analytics API call per video. The only
+  Analytics call still made per-video is traffic source breakdown
+  (insightTrafficSourceType) — confirmed by live testing that YouTube does not
+  support combining it with dimensions=video (400 "query not supported").
+
+  Analytics API v2, ONCE per profile (channel-level Audience-tab snapshot):
+    country, ageGroup+gender, deviceType, operatingSystem,
+    insightPlaybackLocationType  →  youtube_channel_audience (full-replace)
+
+  Analytics API v2, once per video (only the first time it's fetched):
+    elapsedVideoTimeRatio audience retention curve (audienceWatchRatio,
+    relativeRetentionPerformance) → youtube_video_retention_curve
+
+  Data API v3 (public statistics, unchanged from before):
     likeCount    → like_count
     commentCount → comment_count
 
 Writes back to youtube_publish_log:
-  avg_view_duration, avg_view_pct, views,
-  like_count, comment_count, traffic_sources,
-  analytics_pulled_at
+  avg_view_duration, avg_view_pct, views, watch_time_hours, shares,
+  subscribers_gained, dislikes, like_count, comment_count, traffic_sources,
+  retention_curve_fetched_at, analytics_pulled_at
 
 On no-data after GIVE_UP_AFTER_DAYS: sets analytics_pulled_at = -1.
+
+NOTE on impressions/CTR: `impressionsClickThroughRate` and `impressions` are
+NOT exposed by the YouTube Analytics API at all — confirmed by live testing
+(`metrics=impressions` returns `400 Unknown identifier`). This is a permanent
+Studio-only feature, unrelated to monetization status — do not wait for the
+channel to be monetized expecting this to unlock; it won't. ctr_pct stays
+NULL forever under the current API.
 
 Usage:
   python code/deploy/youtube/fetch_analytics.py                  # pull analytics
@@ -66,10 +87,32 @@ PROFILES_PATH      = Path.home() / ".config" / "pipe" / "youtube_profiles.json"
 FETCH_DELAY_H      = 72     # hours after publish before pulling analytics
 GIVE_UP_AFTER_DAYS = 14     # days: if still no data, mark as no-data (-1)
 
-# Analytics API v2 — aggregate metrics (no dimensions = one row per video)
-ANALYTICS_METRICS  = "views,averageViewDuration,averageViewPercentage"
-# impressionClickThroughRate requires YouTube Partner Program (monetization).
-# Omitted until channel is monetized — ctr_pct column stays NULL meanwhile.
+# Analytics API v2 — batch aggregate metrics, ONE call per profile via dimensions=video
+# (YouTube's "Top videos" report). Column order in each result row matches this list.
+BATCH_METRICS = (
+    "views,averageViewDuration,averageViewPercentage,estimatedMinutesWatched,"
+    "likes,dislikes,shares,subscribersGained,comments"
+)
+# impressions / impressionsClickThroughRate are NOT available via the Analytics API at
+# all (confirmed: 400 "Unknown identifier"), regardless of monetization — omitted
+# permanently, not "until monetized". ctr_pct column stays NULL under the current API.
+
+# The dimensions=video ("Top videos") report 400s above this — undocumented, found by
+# binary search (200 works, 250 doesn't). If a profile's pending backlog ever exceeds
+# this, videos ranked outside the top 200 by views in the query window silently drop
+# out of the batch result and read as "no data yet" until they age into the top 200 or
+# GIVE_UP_AFTER_DAYS kicks in — see the warning at the call site in main().
+TOP_VIDEOS_MAX_RESULTS = 200
+
+# Channel-level Audience-tab queries — one call each, once per profile per run (not
+# per video). age_gender uses two dimensions joined as "ageGroup|gender" in dim_key.
+AUDIENCE_QUERIES = {
+    "country":           dict(dimensions="country",              metrics="views",             sort="-views"),
+    "age_gender":        dict(dimensions="ageGroup,gender",       metrics="viewerPercentage"),
+    "device":            dict(dimensions="deviceType",            metrics="views",             sort="-views"),
+    "os":                dict(dimensions="operatingSystem",       metrics="views",             sort="-views"),
+    "playback_location": dict(dimensions="insightPlaybackLocationType", metrics="views",        sort="-views"),
+}
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube",
@@ -248,62 +291,207 @@ def _pull_traffic_sources(
         return None
 
 
-# ── Analytics pull for a single video ─────────────────────────────────────────
+# ── Analytics API: batch metrics for a whole profile in one call ───────────────
 
-def _pull_one(yt_analytics, yt_data, channel_id: str, row) -> None:
+def _pull_batch_video_metrics(
+    yt_analytics,
+    channel_id: str,
+    start_str: str,
+    end_str: str,
+    max_results: int,
+) -> dict[str, dict]:
     """
-    Query YouTube Analytics + Data API for one video and update youtube_publish_log.
+    Fetch aggregate metrics for EVERY video on the channel within
+    [start_str, end_str] in ONE Analytics API call (dimensions=video —
+    YouTube's "Top videos" report; requires maxResults + sort or it 400s).
 
-    Fetches:
-      - views, avg_view_duration, avg_view_pct   (Analytics API)
-      - traffic_sources breakdown                (Analytics API, dimensions query)
-      - like_count, comment_count               (Data API v3)
+    This is what used to cost one API call per video. The only Analytics call
+    still made per-video is traffic source breakdown — insightTrafficSourceType
+    cannot be combined with dimensions=video (confirmed live: YouTube returns
+    400 "query not supported" for that pairing), so it stays per-video.
 
-    Sets analytics_pulled_at = -1 if no analytics data after GIVE_UP_AFTER_DAYS.
-    Leaves analytics_pulled_at = NULL on transient API errors (retry next cron run).
+    Returns {video_id: {views, avg_view_duration, avg_view_pct, watch_time_hours,
+                         likes, dislikes, shares, subscribers_gained, comments}}.
+    A video absent from the result has no data in this window at all (too new,
+    or genuinely zero traffic ever) — a video WITH zero views still gets a row.
 
-    NOTE: API exceptions (e.g. HTTP 403 for deleted/private video) leave
-    analytics_pulled_at = NULL — the cron retries indefinitely for those rows.
+    Raises on error (e.g. 403 if the channel's GCP project has the Analytics
+    API disabled) — the caller marks the whole profile's pending rows -1 in
+    that case rather than retrying forever, since this failure mode showed up
+    for real (katago3: 78 identical 403s in one run, one per video, before
+    this batch rewrite made it a single error instead).
+
+    maxResults is silently clamped to TOP_VIDEOS_MAX_RESULTS (confirmed live:
+    the "Top videos" report 400s above 200 regardless of the value requested —
+    it is NOT documented anywhere, discovered by binary search). If the caller
+    asked for more than that, some pending videos ranked outside the top 200
+    by views in this date window will be absent from the result and look like
+    "no data yet" to _apply_batch_result — see the caller's warning.
     """
-    pub_dt    = datetime.fromtimestamp(row["published_at"], tz=timezone.utc)
-    end_dt    = datetime.now(timezone.utc)
-    start_dt  = pub_dt - timedelta(days=1)   # start slightly before publish date
-    start_str = start_dt.strftime("%Y-%m-%d")
-    end_str   = end_dt.strftime("%Y-%m-%d")
+    if max_results > TOP_VIDEOS_MAX_RESULTS:
+        max_results = TOP_VIDEOS_MAX_RESULTS
+    resp = yt_analytics.reports().query(
+        ids        = f"channel=={channel_id}",
+        startDate  = start_str,
+        endDate    = end_str,
+        dimensions = "video",
+        metrics    = BATCH_METRICS,
+        sort       = "-views",
+        maxResults = max_results,
+    ).execute()
+    out: dict[str, dict] = {}
+    for r in resp.get("rows", []):
+        vid, views, avg_dur, avg_pct, est_mins, likes, dislikes, shares, subs_gained, comments = r
+        out[vid] = {
+            "views":              int(views)   if views   is not None else None,
+            "avg_view_duration":  float(avg_dur) if avg_dur is not None else None,
+            "avg_view_pct":       float(avg_pct) if avg_pct is not None else None,
+            "watch_time_hours":   round(float(est_mins) / 60.0, 4) if est_mins is not None else None,
+            "likes":              int(likes)       if likes       is not None else None,
+            "dislikes":           int(dislikes)    if dislikes    is not None else None,
+            "shares":             int(shares)      if shares      is not None else None,
+            "subscribers_gained": int(subs_gained) if subs_gained is not None else None,
+            "comments":           int(comments)    if comments    is not None else None,
+        }
+    return out
 
-    # ── Step 1: aggregate metrics from Analytics API ───────────────────────────
+
+# ── Analytics API: per-video audience retention curve (fetched once per video) ─
+
+def _pull_retention_curve(
+    yt_analytics, channel_id: str, video_id: str, start_str: str, end_str: str,
+) -> list[dict] | None:
+    """
+    Fetch the per-video audience retention curve — Studio's Content-tab
+    "Audience retention" graph: for ~100 points along the video's timeline,
+    what fraction of viewers were still watching, and how that compares to
+    similar-length videos on YouTube (relativeRetentionPerformance).
+
+    Returns a list of {elapsed_video_time_pct, audience_watch_ratio,
+    relative_performance} dicts (elapsed_video_time_pct is 0.00-1.00), or None
+    on error / no data. Non-fatal — a failed curve pull never blocks the rest
+    of the video's data from being written.
+    """
     try:
         resp = yt_analytics.reports().query(
-            ids       = f"channel=={channel_id}",
-            startDate = start_str,
-            endDate   = end_str,
-            metrics   = ANALYTICS_METRICS,
-            filters   = f"video=={row['video_id']}",
-            # No dimensions= : filtering by video without a dimension returns the
-            # video's aggregate metrics directly (validated working query shape).
+            ids        = f"channel=={channel_id}",
+            startDate  = start_str,
+            endDate    = end_str,
+            dimensions = "elapsedVideoTimeRatio",
+            metrics    = "audienceWatchRatio,relativeRetentionPerformance",
+            filters    = f"video=={video_id}",
         ).execute()
-    except Exception as e:
-        print(f"  ✗ Analytics query failed for {row['video_id']}: {e}")
-        # Permanent errors (403 forbidden, 404 not found) → mark as no-data so
-        # we stop retrying on every run.  Transient errors (5xx, network) leave
-        # analytics_pulled_at = NULL so the next cron run retries them.
-        err_str = str(e)
-        if "403" in err_str or "404" in err_str:
-            conn = get_connection()
-            conn.execute(
-                "UPDATE youtube_publish_log SET analytics_pulled_at = -1 WHERE id = %s",
-                (row["id"],),
-            )
-            conn.commit()
-            conn.close()
-            print(f"  ⚠  Permanent error — marking {row['video_id']} as no-data (-1)")
+        rows = resp.get("rows", [])
+        if not rows:
+            return None
+        return [
+            {
+                "elapsed_video_time_pct": float(r[0]),
+                "audience_watch_ratio":   float(r[1]) if r[1] is not None else None,
+                "relative_performance":   float(r[2]) if r[2] is not None else None,
+            }
+            for r in rows
+        ]
+    except Exception as exc:
+        print(f"  ⚠  Retention curve failed for {video_id}: {exc}")
+        return None
+
+
+def _write_retention_curve(video_id: str, curve: list[dict]) -> None:
+    """Replace the stored retention curve for one video and stamp the fetch gate."""
+    if not curve:
         return
+    now = int(time.time())
+    conn = get_connection()
+    conn.execute("DELETE FROM youtube_video_retention_curve WHERE video_id = %s", (video_id,))
+    for point in curve:
+        conn.execute(
+            """INSERT INTO youtube_video_retention_curve
+               (video_id, elapsed_video_time_pct, audience_watch_ratio, relative_performance, fetched_at)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (video_id, point["elapsed_video_time_pct"], point["audience_watch_ratio"],
+             point["relative_performance"], now),
+        )
+    conn.execute(
+        "UPDATE youtube_publish_log SET retention_curve_fetched_at = %s WHERE video_id = %s",
+        (now, video_id),
+    )
+    conn.commit()
+    conn.close()
 
-    col_headers = [h["name"] for h in resp.get("columnHeaders", [])]
-    data_rows   = resp.get("rows", [])
 
-    if not data_rows:
-        # No impressions data yet — decide whether to retry or give up
+# ── Analytics API: channel-level Audience-tab snapshot (once per profile) ──────
+
+def _pull_channel_audience(
+    yt_analytics, channel_id: str, start_str: str, end_str: str,
+) -> dict[str, list[tuple[str, float]]]:
+    """
+    Fetch channel-level Audience-tab breakdowns: viewer country, age+gender,
+    device type, OS, and playback location. Five cheap calls, once per profile
+    per fetch run (not per video) — this is Studio's "Audience" tab data,
+    which neither this pipeline nor the games pipeline fetched before (games
+    only fetched country).
+
+    Returns {dimension_name: [(dim_key, value), ...]}. A dimension missing
+    from the result means its query failed — logged and skipped so one bad
+    dimension (e.g. YouTube withholding a low-volume breakdown) doesn't block
+    the others.
+    """
+    out: dict[str, list[tuple[str, float]]] = {}
+    for name, q in AUDIENCE_QUERIES.items():
+        try:
+            resp = yt_analytics.reports().query(
+                ids=f"channel=={channel_id}", startDate=start_str, endDate=end_str, **q,
+            ).execute()
+            rows = resp.get("rows", []) or []
+            if name == "age_gender":
+                out[name] = [(f"{r[0]}|{r[1]}", float(r[2])) for r in rows]
+            else:
+                out[name] = [(str(r[0]), float(r[1])) for r in rows]
+        except Exception as exc:
+            print(f"  ⚠  Audience dimension '{name}' failed: {exc}")
+    return out
+
+
+def _write_channel_audience(upload_profile: str, channel_id: str, audience: dict) -> None:
+    """Full-replace youtube_channel_audience rows for this profile (channel-level snapshot,
+    same replace-on-fetch pattern as the games pipeline's channel_country_views)."""
+    if not audience:
+        return
+    now = int(time.time())
+    conn = get_connection()
+    conn.execute("DELETE FROM youtube_channel_audience WHERE upload_profile = %s", (upload_profile,))
+    for dimension, pairs in audience.items():
+        for dim_key, value in pairs:
+            conn.execute(
+                """INSERT INTO youtube_channel_audience
+                   (channel_id, upload_profile, dimension, dim_key, metric_value, fetched_at)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (channel_id, upload_profile, dimension, dim_key, value, now),
+            )
+    conn.commit()
+    conn.close()
+
+
+# ── Apply one video's slice of the batch result + the per-video calls ──────────
+
+def _apply_batch_result(
+    yt_analytics, yt_data, channel_id: str, row, batch_metrics: dict,
+    start_str: str, end_str: str,
+) -> None:
+    """
+    Apply one video's slice of _pull_batch_video_metrics to the DB, then do the
+    two things that still require a per-video call: traffic source breakdown
+    (every run) and the retention curve (once, gated on retention_curve_fetched_at).
+
+    Sets analytics_pulled_at = -1 if the video is absent from the batch AND
+    past GIVE_UP_AFTER_DAYS. Leaves it NULL otherwise (retried next cron run).
+    like_count/comment_count are NOT touched here — they come from the Data
+    API v3 early-views pass (_refresh_early_views), which already ran for
+    every pending video before this function is called.
+    """
+    metrics = batch_metrics.get(row["video_id"])
+    if metrics is None:
         give_up_ts = row["published_at"] + GIVE_UP_AFTER_DAYS * 86400
         if int(time.time()) > give_up_ts:
             conn = get_connection()
@@ -316,41 +504,37 @@ def _pull_one(yt_analytics, yt_data, channel_id: str, row) -> None:
             print(f"  ⚠  {row['video_id']} — no data after {GIVE_UP_AFTER_DAYS}d, marking as no-data")
         else:
             print(f"  ⚠  {row['video_id']} — no data yet, will retry next run")
-        return   # analytics_pulled_at stays NULL → retried next cron (unless gave up)
+        return
 
-    # Map column names → values from the first (only) data row
-    values  = dict(zip(col_headers, data_rows[0]))
-    avg_dur = values.get("averageViewDuration")   # float or None (seconds)
-    avg_pct = values.get("averageViewPercentage") # float or None (%)
-    views   = values.get("views")                 # int or None
-    # ctr_pct stays NULL — impressionClickThroughRate unavailable until channel is monetized
+    # ── traffic source breakdown (still per-video — no supported batch combo) ──
+    traffic = _pull_traffic_sources(yt_analytics, channel_id, row["video_id"], start_str, end_str)
 
-    # ── Step 2: traffic source breakdown ──────────────────────────────────────
-    traffic = _pull_traffic_sources(
-        yt_analytics, channel_id, row["video_id"], start_str, end_str
-    )
+    # ── retention curve — fetch once per video, not every run ─────────────────
+    curve = None
+    if not row.get("retention_curve_fetched_at"):
+        curve = _pull_retention_curve(yt_analytics, channel_id, row["video_id"], start_str, end_str)
 
-    # ── Step 3: like_count + comment_count from Data API v3 ───────────────────
-    like_count, comment_count = _pull_video_stats(yt_data, row["video_id"])
-
-    # ── Step 4: write all fields to DB ────────────────────────────────────────
     conn = get_connection()
     conn.execute(
         """UPDATE youtube_publish_log
            SET avg_view_duration   = %s,
                avg_view_pct        = %s,
                views               = %s,
-               like_count          = %s,
-               comment_count       = %s,
+               watch_time_hours    = %s,
+               shares              = %s,
+               subscribers_gained  = %s,
+               dislikes            = %s,
                traffic_sources     = %s,
                analytics_pulled_at = %s
            WHERE id = %s""",
         (
-            avg_dur,
-            avg_pct,
-            views,
-            like_count,
-            comment_count,
+            metrics["avg_view_duration"],
+            metrics["avg_view_pct"],
+            metrics["views"],
+            metrics["watch_time_hours"],
+            metrics["shares"],
+            metrics["subscribers_gained"],
+            metrics["dislikes"],
             json.dumps(traffic, ensure_ascii=False) if traffic else None,
             int(time.time()),
             row["id"],
@@ -359,18 +543,17 @@ def _pull_one(yt_analytics, yt_data, channel_id: str, row) -> None:
     conn.commit()
     conn.close()
 
-    # Guard format strings against None (API may return None for metrics with no data)
-    _dur   = f"{avg_dur:.0f}s"     if avg_dur       is not None else "n/a"
-    _pct   = f"{avg_pct:.1f}%"     if avg_pct       is not None else "n/a"
-    _views = str(int(views))       if views          is not None else "n/a"
-    _likes = str(like_count)       if like_count     is not None else "n/a"
-    _cmts  = str(comment_count)    if comment_count  is not None else "n/a"
-    _top_src = (
-        max(traffic, key=traffic.get) if traffic else "n/a"
-    )
+    if curve:
+        _write_retention_curve(row["video_id"], curve)
+
+    _dur   = f"{metrics['avg_view_duration']:.0f}s" if metrics['avg_view_duration'] is not None else "n/a"
+    _pct   = f"{metrics['avg_view_pct']:.1f}%"       if metrics['avg_view_pct']      is not None else "n/a"
+    _views = str(int(metrics['views']))              if metrics['views']            is not None else "n/a"
+    _top_src = max(traffic, key=traffic.get) if traffic else "n/a"
     print(
         f"  ✓ {row['video_id']}  views={_views}  avg_dur={_dur}  avg_pct={_pct}"
-        f"  likes={_likes}  cmts={_cmts}  top_src={_top_src}"
+        f"  shares={metrics['shares']}  subs+={metrics['subscribers_gained']}"
+        f"  top_src={_top_src}" + ("  [+retention curve]" if curve else "")
     )
 
 
@@ -546,7 +729,7 @@ def main() -> None:
     # ── Step 1: find ALL pending videos ───────────────────────────────────────
     conn = get_connection()
     all_pending = conn.execute(
-        """SELECT id, video_id, upload_profile, published_at, lang
+        """SELECT id, video_id, upload_profile, published_at, lang, retention_curve_fetched_at
            FROM youtube_publish_log
            WHERE analytics_pulled_at IS NULL
              AND published_at IS NOT NULL
@@ -613,11 +796,55 @@ def main() -> None:
                              cache_discovery=False)
 
         print(f"Profile '{profile_key}': {len(profile_rows)} video(s)")
+
+        # ── batch metrics pull: ONE Analytics API call replaces what used to be
+        # one call per video (see _pull_batch_video_metrics docstring). ─────────
+        if len(profile_rows) > TOP_VIDEOS_MAX_RESULTS:
+            print(f"  ⚠  '{profile_key}' has {len(profile_rows)} pending video(s), above the "
+                  f"{TOP_VIDEOS_MAX_RESULTS}-row API cap for this query — the lowest-view "
+                  f"videos in this batch will not get data this run and will retry next time.")
+        earliest_pub = min(r["published_at"] for r in profile_rows)
+        start_str = (datetime.fromtimestamp(earliest_pub, tz=timezone.utc)
+                     - timedelta(days=1)).strftime("%Y-%m-%d")
+        end_str   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            batch_metrics = _pull_batch_video_metrics(
+                yt_analytics, channel_id, start_str, end_str,
+                max_results=TOP_VIDEOS_MAX_RESULTS,
+            )
+        except Exception as e:
+            print(f"  ✗ Batch metrics query failed for profile '{profile_key}': {e}")
+            err_str = str(e)
+            if "403" in err_str or "404" in err_str:
+                # Permanent, whole-profile error (e.g. the channel's GCP project has
+                # the Analytics API disabled) — mark every pending row -1 instead of
+                # spending N identical failing calls every run forever.
+                conn = get_connection()
+                for row in profile_rows:
+                    conn.execute(
+                        "UPDATE youtube_publish_log SET analytics_pulled_at = -1 WHERE id = %s",
+                        (row["id"],),
+                    )
+                conn.commit()
+                conn.close()
+                print(f"  ⚠  Permanent error — marking all {len(profile_rows)} video(s) in "
+                      f"'{profile_key}' as no-data (-1)")
+            continue  # nothing else to do for this profile without metrics
+
         for row in profile_rows:
             try:
-                _pull_one(yt_analytics, yt_data, channel_id, row)
+                _apply_batch_result(yt_analytics, yt_data, channel_id, row,
+                                    batch_metrics, start_str, end_str)
             except Exception as _e:
                 print(f"  ✗ Unexpected error for {row['video_id']}: {_e} — skipping")
+
+        # ── channel-level Audience-tab snapshot: 5 cheap calls, once per profile ──
+        print(f"  Fetching Audience tab data for '{profile_key}' …")
+        audience = _pull_channel_audience(yt_analytics, channel_id, start_str, end_str)
+        _write_channel_audience(profile_key, channel_id, audience)
+        if audience:
+            print("  ✓ Audience snapshot: " +
+                  ", ".join(f"{k}={len(v)} rows" for k, v in audience.items()))
 
     print(f"\nDone.")
 
