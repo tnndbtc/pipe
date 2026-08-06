@@ -815,9 +815,21 @@ def main() -> None:
         except Exception as e:
             print(f"  ✗ Batch metrics query failed for profile '{profile_key}': {e}")
             err_str = str(e)
-            if "403" in err_str or "404" in err_str:
-                # Permanent, whole-profile error (e.g. the channel's GCP project has
-                # the Analytics API disabled) — mark every pending row -1 instead of
+            if "accessNotConfigured" in err_str:
+                # API not enabled for this GCP project — recoverable by the user
+                # (enable it in Cloud Console), not a fact about the videos. Do
+                # NOT mark -1: that's a per-video "we looked, there's nothing"
+                # signal, and this is a per-profile "we couldn't even ask" signal.
+                # Leaving analytics_pulled_at NULL costs one wasted API call per
+                # run until fixed, but means it self-heals the moment the API is
+                # enabled instead of requiring a manual DB reset. (Found live
+                # 2026-08-02: katago3 hit this and was wrongly marked -1 before
+                # this fix — see backfill note in the caller.)
+                print(f"  ⚠  '{profile_key}': API not enabled for this GCP project — "
+                      f"leaving {len(profile_rows)} video(s) pending, will retry next run")
+            elif "403" in err_str or "404" in err_str:
+                # Permanent, whole-profile error (e.g. channel deleted, real
+                # permission denial) — mark every pending row -1 instead of
                 # spending N identical failing calls every run forever.
                 conn = get_connection()
                 for row in profile_rows:

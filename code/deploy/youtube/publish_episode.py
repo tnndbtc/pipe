@@ -236,6 +236,12 @@ def main() -> None:
                 _m = json.load(open(meta_path, encoding="utf-8"))
                 _set_id   = _m.get("story_set_id")
                 _story_id = _m.get("story_id")
+            # hook_type/thumbnail_text: only present for story_format="simple_narration"
+            # episodes (see simple_narration_setup.py build_meta()); absent/None for
+            # other formats (e.g. katago) — register_youtube_publish() defaults both
+            # to None, so .get() with no default is correct here.
+            _hook_type      = _m.get("hook_type")
+            _thumbnail_text = _m.get("thumbnail_text")
             # Fallback: parse slug ONLY when story_set_id key is absent from meta.json.
             # null (→ None) means "intentionally no story set" (e.g. famous games) —
             # do NOT apply the regex fallback or we will extract a spurious year (e.g.
@@ -267,6 +273,8 @@ def main() -> None:
                 lang           = _lang,
                 locale         = _locale,
                 published_at   = _pub_ts,
+                hook_type      = _hook_type,
+                thumbnail_text = _thumbnail_text,
             )
             print(f"  ✓ YouTube publish logged (story_set_id={_set_id})")
         except Exception as _e:

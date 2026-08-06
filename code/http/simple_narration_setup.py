@@ -362,7 +362,16 @@ def build_meta(
     profile: str,
     episode_id: str = "s01e01",
     story_set_id: int | None = None,
+    hook_type: str | None = None,
+    thumbnail_text: str | None = None,
 ) -> dict:
+    # hook_type / thumbnail_text: carried from the story's "### hook_type: " /
+    # "### thumbnail: " lines (parsed in parse_story_txt) so publish_episode.py
+    # can pass them on to register_youtube_publish() and hook_type performance
+    # becomes analyzable in youtube_publish_log (previously these columns
+    # existed but were never populated by any write path — added 2026-08).
+    # For multi-story episodes, caller passes the PRIMARY (first) story's
+    # values — one episode = one youtube_publish_log row.
     return {
         "schema_id":       "EpisodeMeta",
         "story_title":     title,
@@ -378,6 +387,8 @@ def build_meta(
         "purge_cache":     False,
         "story_set_id":    story_set_id,        # int or None; None = unknown (slug-parse fallback)
         "story_id":        None,                # always None at creation time
+        "hook_type":       hook_type,           # None if story had no "### hook_type:" line
+        "thumbnail_text":  thumbnail_text,      # None if story had no "### thumbnail:" line
         "created_at":      datetime.now(timezone.utc).isoformat(),
     }
 
@@ -771,7 +782,9 @@ def main() -> None:
 
     # 4a. meta.json
     meta = build_meta(slug, title, locale_str, seed, args.profile,
-                      episode_id, story_set_id=args.story_set_id)
+                      episode_id, story_set_id=args.story_set_id,
+                      hook_type=(stories[0].get("hook_type") if stories else None),
+                      thumbnail_text=(stories[0].get("thumbnail_text") if stories else None))
     write_json(ep_dir / "meta.json", meta)
 
     # 4b. pipeline_vars.sh
