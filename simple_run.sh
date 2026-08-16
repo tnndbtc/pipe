@@ -2551,12 +2551,13 @@ else
 fi
 echo ""
 
-# ── Step 9: Background upload to YouTube (private) ────────────────────────────
+# ── Step 9: Background upload to YouTube, then auto-publish ───────────────────
 # Launches upload_private.py in the background so the pipeline is not blocked
-# by YouTube's video processing wait (can take 5-30 min).
-# The video is uploaded as PRIVATE; review in YouTube Studio, then publish.
+# by YouTube's video processing wait (can take 5-30 min). Once the upload
+# succeeds, publish_episode.py is chained in the same background job to flip
+# the video from private → public automatically (no manual step required).
 echo "════════════════════════════════════════════════════════════"
-echo "  STEP 9 — Upload to YouTube (private, background)  [$(date -u '+%H:%M:%S UTC')]"
+echo "  STEP 9 — Upload to YouTube + auto-publish (background)  [$(date -u '+%H:%M:%S UTC')]"
 echo "════════════════════════════════════════════════════════════"
 _upload_state="${RENDERS_DIR}/upload_state.json"
 _upload_log="${RENDERS_DIR}/upload_private.log"
@@ -2578,16 +2579,47 @@ except Exception:
   if [[ "${_already_uploaded}" == "true" ]]; then
     _vid_id="$(python3 -c "import json; print(json.load(open('${_upload_state}')).get('video_id',''))" 2>/dev/null || true)"
     echo "  ✓ Already uploaded: https://www.youtube.com/watch?v=${_vid_id}"
-    echo "     Review in YouTube Studio, then publish manually."
+    echo "  ▶ Auto-publishing …"
+    if python3 "${SCRIPT_DIR}/code/deploy/youtube/publish_episode.py" \
+        "projects/${_slug}/episodes/${EPISODE}" \
+        --locale "${LOCALE}" >> "${_upload_log}" 2>&1; then
+      echo "  ✓ Published: https://www.youtube.com/watch?v=${_vid_id}"
+    else
+      echo "  ✗ Auto-publish failed — see ${_upload_log}. Publish manually from the YouTube tab."
+    fi
   else
-    nohup python3 "${SCRIPT_DIR}/code/deploy/youtube/upload_private.py" \
-      "projects/${_slug}/episodes/${EPISODE}" \
-      --locale "${LOCALE}" \
-      > "${_upload_log}" 2>&1 &
+    # Chain upload → publish inside a standalone script (not an inline subshell)
+    # so nohup genuinely detaches it from this shell's session — matches the
+    # original nohup-backed upload so the job survives if run_generate.sh's
+    # parent (cron) sends SIGHUP on exit.
+    _upload_publish_script="$(mktemp /tmp/simple_run_upload_publish.XXXXXX.sh)"
+    cat > "${_upload_publish_script}" <<EOF
+#!/usr/bin/env bash
+python3 "${SCRIPT_DIR}/code/deploy/youtube/upload_private.py" \\
+  "projects/${_slug}/episodes/${EPISODE}" \\
+  --locale "${LOCALE}"
+_upload_rc=\$?
+if [[ \${_upload_rc} -eq 0 ]]; then
+  echo ""
+  echo "  ▶ Upload succeeded — auto-publishing …"
+  if python3 "${SCRIPT_DIR}/code/deploy/youtube/publish_episode.py" \\
+      "projects/${_slug}/episodes/${EPISODE}" \\
+      --locale "${LOCALE}"; then
+    echo "  ✓ Auto-publish complete."
+  else
+    echo "  ✗ Auto-publish failed — video remains private. Publish manually from the YouTube tab."
+  fi
+else
+  echo "  ✗ Upload failed (exit \${_upload_rc}) — skipping auto-publish."
+fi
+rm -f "${_upload_publish_script}"
+EOF
+    chmod +x "${_upload_publish_script}"
+    nohup bash "${_upload_publish_script}" > "${_upload_log}" 2>&1 &
     _upload_pid=$!
-    echo "  ▶ Upload started in background  PID=${_upload_pid}"
+    echo "  ▶ Upload + auto-publish started in background  PID=${_upload_pid}"
     echo "  Log : ${_upload_log}"
-    echo "     When complete, review in YouTube Studio then publish."
+    echo "     Video will go public automatically once upload + publish finish."
   fi
 else
   echo "  ⚠  Skipped — youtube.json not present (generation failed above)"
