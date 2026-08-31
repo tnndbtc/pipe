@@ -93,6 +93,12 @@ TITLE_CARD=""
 SUBTITLES=""
 VIDEO_EFFECT=""
 STORY_SET_ID=""   # story_engine story_set_id; passed via --story_set_id; written to meta.json
+SOURCES_JSON=""   # optional: path to story_engine's <base>_sources.json (real source
+                   # URLs + entities for this story). When present, copied into
+                   # EP_DIR/story_sources.json so run.sh's Stage 9 can auto-generate
+                   # a MediaPlan.json from each source's own og:image (see
+                   # media_plan_from_sources.py). Absent/missing file → no-op,
+                   # pipeline behaves exactly as before (single background image).
 # clips mode
 INPUT_FOLDER=""
 SPEED=""          # playback speed multiplier (e.g. 0.8 for 80% speed; clips mode only)
@@ -233,6 +239,7 @@ while [[ $# -gt 0 ]]; do
     --title-card)       TITLE_CARD="1";      shift ;;
     --subtitles)        SUBTITLES="1";       shift ;;
     --story_set_id)     STORY_SET_ID="$2";   shift 2 ;;
+    --sources-json)     SOURCES_JSON="$2";   shift 2 ;;
     --input_folder)     INPUT_FOLDER="$2";   shift 2 ;;
     --speed)            SPEED="$2";          shift 2 ;;
     --subtitle_shift_ms) SUBTITLE_SHIFT_MS="$2"; shift 2 ;;
@@ -2446,6 +2453,17 @@ if [[ -f "$_loop_src" ]]; then
   echo "  Loop MP4    : bg-provided_loop.mp4 → $_loop_src"
 else
   echo "  Loop MP4    : none (will use geq re-encode)"
+fi
+
+# ── Step 4c: Copy story_sources.json (if provided) for MediaPlan auto-gen ────
+# Optional — absence is a normal no-op, not an error. When present, run.sh's
+# Stage 9 (post-TTS, pre-render) uses it to try building a MediaPlan.json from
+# each source's own og:image. See media_plan_from_sources.py.
+if [[ -n "$SOURCES_JSON" && -f "$SOURCES_JSON" ]]; then
+  cp "$SOURCES_JSON" "${EP_DIR}/story_sources.json"
+  echo "  Sources     : ${EP_DIR}/story_sources.json  (from $SOURCES_JSON)"
+else
+  echo "  Sources     : none provided — MediaPlan auto-gen will be skipped"
 fi
 echo ""
 

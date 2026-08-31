@@ -253,6 +253,17 @@ run_stage_10() {
     python3 "${code_dir}/post_tts_analysis.py" \
       --manifest "${EP_DIR}/VOPlan.${locale}.json"
 
+    # ── [7b] Auto-generate MediaPlan.json from each source's own og:image ──
+    # Opt-in: only runs when EP_DIR/story_sources.json exists (written by
+    # simple_run.sh's --sources-json flag, story_engine deep-dive pipeline
+    # only — every other project type is unaffected). No-ops safely if a
+    # MediaPlan.json already exists, if no source yields a usable image, or
+    # on any unexpected error — the existing single-background render is the
+    # fallback in every case. Must run after [7] so real per-paragraph timing
+    # is available, and before [9] which is where MediaPlan.json gets read.
+    python3 "${code_dir}/media_plan_from_sources.py" \
+      --ep-dir "${EP_DIR}" --locale "${locale}" || true
+
     # ── Stage 8.5: Non-primary locale VO approval gate ──────────────────
     # After TTS + convergence loop + timing analysis, pause for user VO review
     # of each non-primary locale before generating the render plan.
